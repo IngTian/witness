@@ -81,8 +81,9 @@ Claude Code auth via `claude -p`.
 ./install.sh        # builds the binary, fetches the model (~448MB, once), wires hooks + MCP
 ```
 
-That's the whole thing — idempotent, safe to re-run after a `git pull`. Equivalent `make`
-targets exist (`make install`, `make build`, `make doctor`, `make uninstall`, `make clean`).
+That's the whole thing — idempotent, safe to re-run after a `git pull`. It also offers to add a
+`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `cleanup`). Equivalent
+`make` targets exist (`make install`, `make build`, `make doctor`, `make uninstall`, `make clean`).
 To remove it: `make uninstall` (strips the hooks + MCP server; your data is untouched).
 
 ## Configuration
@@ -111,12 +112,6 @@ them with `witness cleanup` (which never touches your observations or profile).
 Everything lives under `~/.local/share/claude-witness/` (override with `WITNESS_HOME`), is `0700`
 (the DB and profile files `0600`), and never leaves your machine. The repo ships the framework,
 schema, and prompts — **never anyone's archive.**
-
-## Status
-
-🌱 v0. Capture, single-binary embedder, MCP server, and the distillation pipeline are built and the
-plumbing is verified end-to-end. The distillation *prompts* (the quality-critical part) are first
-drafts meant to be tuned against real logs.
 
 ## License
 

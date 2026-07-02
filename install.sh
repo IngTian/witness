@@ -19,6 +19,38 @@ echo "==> ensuring embedding model (~448MB, fetched once)"
 echo "==> wiring hooks + MCP server"
 "$BIN" install
 
+# Optionally expose a `witness` command on PATH for the human subcommands
+# (profile, doctor, lens, cleanup). Hooks + MCP don't need this — they invoke the
+# shim directly — but it makes `witness <cmd>` work as the docs show. The launcher
+# execs the shim by its real path so GOMLX_BACKEND + CLAUDE_PLUGIN_ROOT resolve.
+ROOT="$PWD"
+if command -v witness >/dev/null 2>&1; then
+  echo "==> 'witness' already on PATH ($(command -v witness)) — leaving it"
+else
+  reply=n
+  if [ -t 0 ]; then
+    printf "==> add a 'witness' command to your PATH (~/.local/bin)? [Y/n] "
+    read -r reply || reply=n
+  fi
+  case "${reply:-Y}" in
+    [Nn]*) echo "    skipped — run the CLI via ./hooks/witness.sh <cmd>" ;;
+    *)
+      mkdir -p "$HOME/.local/bin"
+      cat > "$HOME/.local/bin/witness" <<EOF
+#!/usr/bin/env bash
+# Launcher for the claude-witness CLI — execs the plugin shim by its real path.
+exec "$ROOT/hooks/witness.sh" "\$@"
+EOF
+      chmod +x "$HOME/.local/bin/witness"
+      echo "    installed $HOME/.local/bin/witness"
+      case ":$PATH:" in
+        *":$HOME/.local/bin:"*) : ;;
+        *) echo "    note: ~/.local/bin is not on your PATH — add: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+      esac
+      ;;
+  esac
+fi
+
 echo
-echo "Installed. Verify with:  GOMLX_BACKEND=go $BIN doctor"
+echo "Installed. Verify with:  witness doctor   (or: GOMLX_BACKEND=go $BIN doctor)"
 echo "Then restart Claude Code (or open /hooks) so the hooks load."
