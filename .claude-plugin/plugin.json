@@ -3,7 +3,8 @@
   "description": "A quiet observer that tracks how you grow and change as you work — your thinking, workstyle, habits, and the patterns you climb out of. Coach-oriented, not clone. Person-centric growth archive with pluggable per-repo lenses.",
   "version": "0.1.0",
   "author": {
-    "name": "claude-witness contributors"
+    "name": "Zeying Tian",
+    "url": "https://github.com/IngTian"
   },
   "homepage": "https://github.com/IngTian/claude-witness",
   "repository": "https://github.com/IngTian/claude-witness",

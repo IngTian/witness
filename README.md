@@ -2,6 +2,11 @@
 
 > Let Claude Code witness your growth.
 
+> *"Aah, you were at my side, all along.*  
+> *My true mentor...*  
+> *My guiding moonlight..."*  
+> — Ludwig, the Holy Blade
+
 A Claude Code plugin that quietly keeps a **person-centric archive of how you grow and change**
 as you work — your thinking, workstyle, habits, the cognitive traps you fall into and climb out
 of, and how all of it shifts over time. Not a record of *what your code did* (other tools do
@@ -117,4 +122,4 @@ drafts meant to be tuned against real logs.
 
 ## License
 
-MIT (intended).
+MIT — see [LICENSE](LICENSE).

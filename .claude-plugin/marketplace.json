@@ -1,12 +1,14 @@
 {
   "name": "claude-witness",
   "owner": {
-    "name": "claude-witness contributors"
+    "name": "Zeying Tian",
+    "url": "https://github.com/IngTian"
   },
   "plugins": [
     {
       "name": "claude-witness",
       "source": "./",
+      "version": "0.1.0",
       "description": "Quietly tracks how you grow and change as you work — a person-centric growth archive with an MCP read API and pluggable per-repo lenses."
     }
   ]
