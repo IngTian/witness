@@ -1,0 +1,13 @@
+{
+  "name": "claude-witness",
+  "owner": {
+    "name": "claude-witness contributors"
+  },
+  "plugins": [
+    {
+      "name": "claude-witness",
+      "source": "./",
+      "description": "Quietly tracks how you grow and change as you work — a person-centric growth archive with an MCP read API and pluggable per-repo lenses."
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs / temp
+*.log
+tmp/
+.tmp/
+*.local
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.key
+
+# Personal archive data — NEVER commit a user's actual cognitive archive.
+# The repo ships the framework/schema, not anyone's private growth data.
+*.archive.md
+archive-data/
+my-archive/
+
+# Internal working notes — design docs and any superpowers scaffolding.
+# These are our process artifacts, irrelevant to people installing the plugin.
+docs/design/
+docs/superpowers/
+
+# Embedding model assets — fetched via scripts/fetch-model.sh, never committed
+# (the .onnx is ~470MB). The repo ships code; users fetch the model once.
+assets/e5-small/*.onnx
+assets/e5-small/*.json
+assets/e5-small/*.onnx_data
+
+# Compiled binaries (anchor to root so cmd/witness/ source is NOT ignored)
+/bin/
+/witness
+*.test
