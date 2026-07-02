@@ -1,18 +1,22 @@
 # name: math
 # dimensions: speed, independence, proof_rigor, abstraction, confusion_tolerance
 
-# A complete, ready-to-register example lens (a "math learner" lens).
-#
-# Copy it, rewrite the dimensions and the two prompts for your domain, then:
-#     witness lens register math ./this-file.md
-#     witness lens enable  math
-#
-# The two sections below are passed VERBATIM as the system prompt for their pass
-# (they fully replace the built-in `default` prompts — they do NOT extend them),
-# so each one must be self-contained, INCLUDING the exact output JSON schema. The
-# tool appends the transcript (EXTRACT) or the accumulated observations (REVIEW)
-# as the user message; it injects no schema for you. Lines above `## EXTRACT`
-# that aren't `# name:` / `# dimensions:` (like this comment) are ignored.
+<!--
+  A complete, ready-to-register example lens (a "math learner" lens).
+
+  Copy it, rewrite the dimensions and the two prompts for your domain, then:
+      witness lens register math ./this-file.md
+      witness lens enable  math
+
+  The `# name:` / `# dimensions:` lines above are real lens directives (the loader
+  parses them). The two sections below are passed VERBATIM as the system prompt for
+  their pass — they fully REPLACE the built-in `default` prompts, they don't extend
+  them — so each must be self-contained, INCLUDING its output JSON schema. The tool
+  appends the transcript (EXTRACT) or the accumulated observations (REVIEW) as the
+  user message; it injects no schema for you. Anything outside the two `##` sections
+  (like this comment) is ignored by the loader.
+-->
+
 
 ## EXTRACT
 You are observing one study/work session between a person and an AI, through a
