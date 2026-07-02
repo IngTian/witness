@@ -1,14 +1,14 @@
-# claude-witness — Let Claude Code witness your growth.
+# claude-witness — Let Claude Code and OpenCode witness your growth.
 
 > *"Aah, you were at my side, all along.*  
 > *My true mentor...*  
 > *My guiding moonlight..."*  
 > — Ludwig, the Holy Blade
 
-A Claude Code plugin that quietly keeps a **person-centric archive of how you grow and change**
-as you work — your thinking, workstyle, habits, the cognitive traps you fall into and climb out
-of, and how all of it shifts over time. Not a record of *what your code did* (other tools do
-project memory) — a record of **who you are becoming**.
+A Claude Code / OpenCode plugin that quietly keeps a **person-centric archive of how you grow
+and change** as you work — your thinking, workstyle, habits, the cognitive traps you fall into
+and climb out of, and how all of it shifts over time. Not a record of *what your code did*
+(other tools do project memory) — a record of **who you are becoming**.
 
 It is **coach-oriented, not clone-oriented**: the point is to let Claude understand you and reflect
 you back to yourself, and to leave you a re-readable record of how you thought and grew. It is a
@@ -20,9 +20,9 @@ is left to other projects that read its output.
 
 Four layers — one ground-truth, three derived and **regenerable** from it:
 
-- **raw (L0) — ground truth.** Every turn is captured verbatim from stable hook fields
-  (`UserPromptSubmit.prompt`, `Stop.last_assistant_message`) — no fragile transcript parsing.
-  Append-only, never LLM-touched.
+- **raw (L0) — ground truth.** Every turn is captured verbatim: from stable Claude Code hook
+  fields (`UserPromptSubmit.prompt`, `Stop.last_assistant_message`) or from OpenCode's local
+  SQLite session database (`message`/`part` text records). Append-only, never LLM-touched.
 - **observations (L1) — derived.** A cheap per-session worker mines atomic, evidence-anchored
   observations about *you*, tagged by lens. Append-only.
 - **facets (L2) — derived, bi-temporal.** A periodic reviewer synthesizes observations into
@@ -46,6 +46,9 @@ Every observation/facet carries a **lens** tag:
   globally**. `witness lens register math ./math-lens.md` adds the definition to a central registry;
   `witness lens enable math` makes it run on every session (alongside `default`). Lenses are shared,
   not tied to any repo, so the same `math` lens covers all your math work.
+- **`opencode` example lens** — [`prompts/lens/opencode.md`](prompts/lens/opencode.md) observes
+  agent-collaboration workflow: tool discipline, verification, context management, and autonomy
+  calibration.
 
 #### Writing a lens
 
@@ -149,11 +152,15 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 
 ## Commands
 
-`witness <doctor | profile | lens | cleanup | install | uninstall>` (capture, the worker, and the
-MCP server are internal entry points invoked by Claude Code, not typed by hand):
+`witness <doctor | profile | review | lens | opencode | cleanup | install | uninstall>` (capture,
+the worker, and the MCP server are internal entry points invoked by Claude Code/OpenCode, not typed
+by hand):
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
+- `witness review` — force an L2 review and regenerate L4 profiles from existing observations.
 - `witness lens register|enable|disable|list` — manage lenses.
+- `witness opencode sync [--wait] [session_id...]` — import OpenCode's local session DB into L0;
+  `--wait` runs the worker before returning, useful for verification.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
 
@@ -161,30 +168,62 @@ MCP server are internal entry points invoked by Claude Code, not typed by hand):
 
 The whole thing is **one self-contained Go binary** — no Python, no external services, no vector
 DB, no cloud key. Local multilingual (English **and** Chinese) embeddings run pure-Go via GoMLX
-(`CGO_ENABLED=0`, verified: matches ONNX Runtime exactly). Distillation reuses your existing
-Claude Code auth via `claude -p`.
+(`CGO_ENABLED=0`, verified: matches ONNX Runtime exactly). Distillation defaults to your existing
+Claude Code auth via `claude -p`; set `runner = opencode` to use `opencode run` instead.
 
 ## Install
 
 ```sh
-./install.sh        # builds the binary, fetches the model (~448MB, once), wires hooks + MCP
+./install.sh             # Claude Code: build, fetch model (~448MB once), wire hooks + MCP
+./install.sh opencode    # OpenCode: build, fetch model, install plugin + MCP
+./install.sh all         # install both integrations
 ```
 
 That's the whole thing — idempotent, safe to re-run after a `git pull`. It also offers to add a
-`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `cleanup`). Equivalent
-`make` targets exist (`make install`, `make build`, `make doctor`, `make uninstall`, `make clean`).
-To remove it: `make uninstall` (strips the hooks + MCP server; your data is untouched).
+`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `opencode`, `cleanup`).
+Equivalent `make` targets exist (`make install`, `make install-opencode`, `make install-all`,
+`make build`, `make doctor`, `make uninstall`, `make uninstall-opencode`, `make clean`). To remove
+it: `make uninstall` or `make uninstall-opencode` (strips integration wiring; your data is
+untouched).
+
+### OpenCode support
+
+OpenCode support has two pieces:
+
+- A plugin (`~/.config/opencode/plugins/claude-witness.js`, or this repo's
+  [`.opencode/plugins/claude-witness.js`](.opencode/plugins/claude-witness.js) for local testing)
+  listens for completed assistant messages and calls `witness opencode sync` in the background.
+- An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
+  `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
+  `delete_observation`.
+
+Manual verification path:
+
+```sh
+witness lens register opencode prompts/lens/opencode.md
+witness lens enable opencode
+witness opencode sync --wait       # imports ~/.local/share/opencode/opencode.db and mines L1
+witness review                     # forces L2 facets + L4 markdown profiles
+witness profile opencode           # per-lens L4 report
+witness profile                    # unified L4 report
+```
 
 ## Configuration
 
 `~/.local/share/claude-witness/config.toml` (all optional; sensible defaults):
 
 ```toml
+runner           = "claude"            # "claude" (default) or "opencode"
 triage_model     = "claude-haiku-4-5"   # cheap per-session mining ("" = claude -p default)
 distill_model    = "claude-opus-4-8"    # the reviewer ("" = claude -p default)
 review_every     = 5                    # run the reviewer every N distilled sessions...
 review_poignancy = 30                   # ...or sooner once accumulated salience crosses this (0 = off)
 ```
+
+When `runner = opencode`, `triage_model` and `distill_model` should use OpenCode model names such
+as `openai/gpt-5.5`; empty values use your OpenCode defaults. Non-empty OpenCode model names are
+validated against `opencode models <provider>` before distillation, and `witness doctor` reports the
+same check as `opencode models: OK` or an explicit invalid-model error.
 
 Enabled lenses are managed for you (`witness lens enable/disable <name>`) and appear as simple
 lines, each naming a registered lens that runs on every session:

@@ -21,6 +21,7 @@ import (
 	"github.com/IngTian/claude-witness/internal/embed"
 	"github.com/IngTian/claude-witness/internal/lens"
 	"github.com/IngTian/claude-witness/internal/mcp"
+	opencodeimport "github.com/IngTian/claude-witness/internal/opencode"
 	"github.com/IngTian/claude-witness/internal/store"
 )
 
@@ -30,7 +31,7 @@ func main() {
 		// points invoked by Claude Code, never typed: capture/session-start/session-end
 		// (hooks), worker (self-spawned via spawnDetached), and mcp (the server process
 		// Claude Code launches from the registered shim command).
-		fmt.Fprintln(os.Stderr, "usage: witness <doctor|profile|lens|cleanup|install|uninstall> [args]")
+		fmt.Fprintln(os.Stderr, "usage: witness <doctor|profile|review|lens|opencode|cleanup|install|uninstall> [args]")
 		os.Exit(2)
 	}
 	// Belt-and-suspenders recursion guard (the shim also checks): never act when
@@ -53,15 +54,21 @@ func main() {
 		err = cmdWorker(os.Args[2:])
 	case "mcp":
 		err = cmdMCP()
+	case "opencode-sync":
+		err = cmdOpenCodeSync(os.Args[2:], true)
 	// Human commands.
 	case "profile":
 		err = cmdProfile(os.Args[2:])
+	case "review":
+		err = cmdReview()
 	case "lens":
 		err = cmdLens(os.Args[2:])
+	case "opencode":
+		err = cmdOpenCode(os.Args[2:])
 	case "install":
-		err = cmdInstall()
+		err = cmdInstall(os.Args[2:])
 	case "uninstall":
-		err = cmdUninstall()
+		err = cmdUninstall(os.Args[2:])
 	case "cleanup":
 		err = cmdCleanup()
 	case "doctor":
@@ -75,7 +82,7 @@ func main() {
 		// paths. Only doctor/mcp surface failures.
 		fmt.Fprintln(os.Stderr, "witness:", err)
 		switch os.Args[1] {
-		case "doctor", "mcp", "worker", "lens", "profile", "install", "uninstall", "cleanup":
+		case "doctor", "mcp", "worker", "lens", "profile", "review", "opencode", "install", "uninstall", "cleanup":
 			os.Exit(1)
 		}
 	}
@@ -445,6 +452,88 @@ func cmdProfile(args []string) error {
 	return nil
 }
 
+func cmdReview() error {
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	defer setupLogging(st)()
+	cfg := st.LoadConfig()
+	lenses, err := activeLenses(st)
+	if err != nil {
+		return err
+	}
+	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg}
+	if err := r.Run(context.Background(), time.Now()); err != nil {
+		return err
+	}
+	regenerateProfile(context.Background(), st, cfg)
+	fmt.Println("review complete; profile regenerated")
+	return nil
+}
+
+func cmdOpenCode(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: witness opencode <sync> [--wait] [session_id...]")
+	}
+	switch args[0] {
+	case "sync":
+		return cmdOpenCodeSync(args[1:], false)
+	default:
+		return fmt.Errorf("unknown opencode subcommand %q (want sync)", args[0])
+	}
+}
+
+func cmdOpenCodeSync(args []string, quiet bool) error {
+	wait := false
+	var sessionIDs []string
+	for _, arg := range args {
+		switch arg {
+		case "--wait":
+			wait = true
+		default:
+			sessionIDs = append(sessionIDs, arg)
+		}
+	}
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	defer setupLogging(st)()
+
+	unlock, ok := st.OpenCodeSyncLock()
+	if !ok {
+		return nil
+	}
+
+	stats, err := (&opencodeimport.Importer{Store: st}).Import(context.Background(), sessionIDs)
+	unlock()
+	if err != nil {
+		return err
+	}
+	cfg := st.LoadConfig()
+	pending, _ := st.PendingSessions()
+	shouldRunWorker := stats.Records > 0 || len(pending) > 0 || st.ReviewDue(cfg)
+	if shouldRunWorker && wait {
+		if err := cmdWorker(nil); err != nil {
+			return err
+		}
+	} else if shouldRunWorker {
+		spawnDetached("worker")
+	}
+	if !quiet {
+		fmt.Printf("opencode sync: imported %d raw record(s) from %d session(s)\n", stats.Records, stats.Sessions)
+		if wait {
+			fmt.Println("worker finished; run `witness review` to force L4 regeneration or `witness profile` to read existing summaries")
+		} else {
+			fmt.Println("worker kicked; run `witness doctor` or `witness profile` after distillation finishes")
+		}
+	}
+	return nil
+}
+
 // cmdCleanup interactively reclaims bulky raw transcripts (L0) for sessions with
 // no activity since a user-chosen cutoff (default 90 days). The derived archive —
 // observations (L1) and the profile (facets, L2) — is KEPT; it's small and is the
@@ -505,8 +594,16 @@ func cmdDoctor() error {
 	defer st.Close()
 	fmt.Printf("  data root: %s\n", st.Root)
 	cfg := st.LoadConfig()
-	fmt.Printf("  models: triage=%s distill=%s | review_every=%d poignancy=%d\n",
-		cfg.TriageModel, cfg.DistillModel, cfg.ReviewEvery, cfg.ReviewPoignancy)
+	fmt.Printf("  runner: %s | models: triage=%s distill=%s | review_every=%d poignancy=%d\n",
+		cfg.Runner, cfg.TriageModel, cfg.DistillModel, cfg.ReviewEvery, cfg.ReviewPoignancy)
+	if strings.EqualFold(cfg.Runner, "opencode") {
+		fmt.Print("  opencode models: ")
+		if err := distill.ValidateOpenCodeModels(context.Background(), cfg.TriageModel, cfg.DistillModel); err != nil {
+			fmt.Printf("INVALID (%v)\n", err)
+			return err
+		}
+		fmt.Println("OK")
+	}
 
 	stat := st.Stats()
 	lastReview := stat.LastReview

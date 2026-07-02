@@ -143,3 +143,46 @@ func TestRemoveWitnessHooks(t *testing.T) {
 		t.Errorf("foreign hook must remain, got %v", cmds)
 	}
 }
+
+func TestMergeOpenCodeMCP(t *testing.T) {
+	in := []byte(`{"mcp":{"other":{"type":"local","command":["x"]}},"plugin":["p"]}`)
+	out, err := mergeOpenCodeMCP(in, "/repo/hooks/witness.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root["plugin"] == nil {
+		t.Fatalf("foreign config was not preserved: %s", out)
+	}
+	mcp := root["mcp"].(map[string]any)
+	if mcp["other"] == nil {
+		t.Fatalf("foreign MCP server was not preserved: %s", out)
+	}
+	witness := mcp["witness"].(map[string]any)
+	if witness["type"] != "local" || witness["enabled"] != true {
+		t.Fatalf("bad witness MCP config: %#v", witness)
+	}
+	cmd := witness["command"].([]any)
+	if len(cmd) != 2 || cmd[0] != "/repo/hooks/witness.sh" || cmd[1] != "mcp" {
+		t.Fatalf("bad witness command: %#v", cmd)
+	}
+}
+
+func TestRemoveOpenCodeMCP(t *testing.T) {
+	in := []byte(`{"mcp":{"witness":{"type":"local"},"other":{"type":"local"}},"autoupdate":false}`)
+	out, err := removeOpenCodeMCP(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatal(err)
+	}
+	mcp := root["mcp"].(map[string]any)
+	if mcp["witness"] != nil || mcp["other"] == nil || root["autoupdate"] != false {
+		t.Fatalf("unexpected cleaned config: %s", out)
+	}
+}

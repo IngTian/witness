@@ -1,5 +1,5 @@
-// Package distill invokes `claude -p` for the mining and review passes, and
-// holds the prompt-assembly + response-parsing logic.
+// Package distill invokes a configured headless agent for the mining and review
+// passes, and holds the prompt-assembly + response-parsing logic.
 package distill
 
 import (
@@ -33,14 +33,33 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 	return cmd
 }
 
-// Run invokes `claude -p` headlessly and returns the model's text reply. It sets
+// Run invokes the default Claude runner headlessly and returns the model's text
+// reply. Kept as the package default for existing callers and tests.
+func Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
+	return RunWith(ctx, "claude", model, systemPrompt, input)
+}
+
+// RunWith invokes the selected headless runner and returns the model's text
+// reply. runner is "claude" (default) or "opencode".
+func RunWith(ctx context.Context, runner, model, systemPrompt, input string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(runner)) {
+	case "", "claude":
+		return runClaude(ctx, model, systemPrompt, input)
+	case "opencode":
+		return runOpenCode(ctx, model, systemPrompt, input)
+	default:
+		return "", fmt.Errorf("unknown distillation runner %q (want claude or opencode)", runner)
+	}
+}
+
+// runClaude invokes `claude -p` headlessly and returns the model's text reply. It sets
 // WITNESS_WORKER=1 so the witness hooks short-circuit inside this nested run (the
 // recursion guard). systemPrompt is the trusted witness instruction (a lens
 // extract/review prompt); input is the UNTRUSTED corpus (transcript or prior
 // observations). They are kept in separate turns — see buildRunCmd — so corpus
 // text can't impersonate instructions. Output is the final assistant message
 // (plain text); callers parse JSON out of it.
-func Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
+func runClaude(ctx context.Context, model, systemPrompt, input string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 

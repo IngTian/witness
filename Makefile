@@ -1,7 +1,7 @@
 # claude-witness — build & install. Pure-Go, CGO disabled (single static binary).
 BIN := bin/witness-$(shell go env GOOS)-$(shell go env GOARCH)
 
-.PHONY: build build-all fetch-model install uninstall doctor test vet fmt clean
+.PHONY: build build-all fetch-model install install-opencode install-all uninstall uninstall-opencode doctor test vet fmt clean
 
 ## build: compile the binary for this OS/arch into bin/
 build:
@@ -22,9 +22,21 @@ fetch-model:
 install: build fetch-model
 	$(BIN) install
 
+## install-opencode: build + fetch model + wire OpenCode plugin/MCP (idempotent)
+install-opencode: build fetch-model
+	$(BIN) install opencode
+
+## install-all: install both Claude Code and OpenCode integrations
+install-all: build fetch-model
+	$(BIN) install all
+
 ## uninstall: remove the hooks + MCP server
 uninstall: build
 	$(BIN) uninstall
+
+## uninstall-opencode: remove the OpenCode plugin + MCP server
+uninstall-opencode: build
+	$(BIN) uninstall opencode
 
 ## doctor: verify the embedder + model + config
 doctor: build

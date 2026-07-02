@@ -134,6 +134,30 @@ func claudeDir() string {
 	return filepath.Join(home, ".claude")
 }
 
+func opencodeDir() string {
+	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "opencode")
+}
+
+func opencodeConfigPath() string {
+	if p := os.Getenv("OPENCODE_CONFIG"); strings.TrimSpace(p) != "" {
+		return p
+	}
+	dir := opencodeDir()
+	jsonPath := filepath.Join(dir, "opencode.json")
+	if _, err := os.Stat(jsonPath); err == nil {
+		return jsonPath
+	}
+	jsoncPath := filepath.Join(dir, "opencode.jsonc")
+	if _, err := os.Stat(jsoncPath); err == nil {
+		return jsoncPath
+	}
+	return jsonPath
+}
+
 // repoShim resolves <repo>/hooks/witness.sh from the running binary at <repo>/bin/.
 func repoShim() (string, error) {
 	exe, err := os.Executable()
@@ -148,10 +172,35 @@ func repoShim() (string, error) {
 	return shim, nil
 }
 
-// cmdInstall wires the witness hooks into the user's settings.json and registers
-// the MCP server, both idempotently. Pairs with the Makefile/install.sh which
-// build the binary and fetch the model first.
-func cmdInstall() error {
+// cmdInstall wires witness into Claude Code or OpenCode. No args preserves the
+// original Claude-only behavior; pass "opencode" or "all" explicitly for OpenCode.
+func cmdInstall(args []string) error {
+	target := installTarget(args)
+	switch target {
+	case "claude":
+		return cmdInstallClaude()
+	case "opencode":
+		return cmdInstallOpenCode()
+	case "all":
+		if err := cmdInstallClaude(); err != nil {
+			return err
+		}
+		return cmdInstallOpenCode()
+	default:
+		return fmt.Errorf("usage: witness install [claude|opencode|all]")
+	}
+}
+
+func installTarget(args []string) string {
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return "claude"
+	}
+	return strings.ToLower(strings.TrimSpace(args[0]))
+}
+
+// cmdInstallClaude wires the witness hooks into the user's Claude settings.json
+// and registers the MCP server, both idempotently.
+func cmdInstallClaude() error {
 	shim, err := repoShim()
 	if err != nil {
 		return err
@@ -190,8 +239,61 @@ func cmdInstall() error {
 	return nil
 }
 
-// cmdUninstall removes the witness hooks and MCP server (idempotent).
-func cmdUninstall() error {
+// cmdInstallOpenCode installs a global OpenCode plugin that mirrors completed
+// OpenCode sessions into witness, and registers the same MCP server OpenCode-side.
+func cmdInstallOpenCode() error {
+	shim, err := repoShim()
+	if err != nil {
+		return err
+	}
+	dir := opencodeDir()
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(plugins, 0o755); err != nil {
+		return err
+	}
+	pluginPath := filepath.Join(plugins, "claude-witness.js")
+	if err := writeFileAtomic(pluginPath, []byte(openCodePluginSource(shim))); err != nil {
+		return err
+	}
+	fmt.Printf("OpenCode plugin installed at %s\n", pluginPath)
+
+	config := opencodeConfigPath()
+	data, err := os.ReadFile(config)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	merged, err := mergeOpenCodeMCP(data, shim)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(config, merged); err != nil {
+		return err
+	}
+	fmt.Printf("OpenCode MCP server 'witness' registered in %s\n", config)
+	fmt.Println("done — restart OpenCode so the plugin and MCP server load.")
+	fmt.Println("note: set `runner = opencode` in witness config.toml if you want distillation to use OpenCode instead of Claude.")
+	return nil
+}
+
+// cmdUninstall removes the witness hooks/plugin and MCP server (idempotent).
+func cmdUninstall(args []string) error {
+	target := installTarget(args)
+	switch target {
+	case "claude":
+		return cmdUninstallClaude()
+	case "opencode":
+		return cmdUninstallOpenCode()
+	case "all":
+		if err := cmdUninstallClaude(); err != nil {
+			return err
+		}
+		return cmdUninstallOpenCode()
+	default:
+		return fmt.Errorf("usage: witness uninstall [claude|opencode|all]")
+	}
+}
+
+func cmdUninstallClaude() error {
 	settings := filepath.Join(claudeDir(), "settings.json")
 	if data, err := os.ReadFile(settings); err == nil {
 		if cleaned, err := removeWitnessHooks(data); err == nil {
@@ -202,6 +304,119 @@ func cmdUninstall() error {
 	_ = exec.Command("claude", "mcp", "remove", "witness").Run()
 	fmt.Println("MCP server 'witness' removed (if it was present)")
 	return nil
+}
+
+func cmdUninstallOpenCode() error {
+	dir := opencodeDir()
+	pluginPath := filepath.Join(dir, "plugins", "claude-witness.js")
+	_ = os.Remove(pluginPath)
+	config := opencodeConfigPath()
+	if data, err := os.ReadFile(config); err == nil {
+		if cleaned, err := removeOpenCodeMCP(data); err == nil {
+			_ = writeFileAtomic(config, cleaned)
+		}
+	}
+	fmt.Printf("OpenCode plugin removed from %s (if it was present)\n", pluginPath)
+	fmt.Println("OpenCode MCP server 'witness' removed from OpenCode config (if it was present)")
+	return nil
+}
+
+func mergeOpenCodeMCP(data []byte, shim string) ([]byte, error) {
+	root := map[string]any{}
+	if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &root); err != nil {
+			return nil, fmt.Errorf("parse opencode.json: %w", err)
+		}
+	}
+	if root["$schema"] == nil {
+		root["$schema"] = "https://opencode.ai/config.json"
+	}
+	mcp, _ := root["mcp"].(map[string]any)
+	if mcp == nil {
+		mcp = map[string]any{}
+	}
+	mcp["witness"] = map[string]any{
+		"type":    "local",
+		"command": []any{shim, "mcp"},
+		"enabled": true,
+	}
+	root["mcp"] = mcp
+	return json.MarshalIndent(root, "", "  ")
+}
+
+func removeOpenCodeMCP(data []byte) ([]byte, error) {
+	root := map[string]any{}
+	if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &root); err != nil {
+			return nil, fmt.Errorf("parse opencode.json: %w", err)
+		}
+	}
+	mcp, _ := root["mcp"].(map[string]any)
+	delete(mcp, "witness")
+	if len(mcp) == 0 {
+		delete(root, "mcp")
+	} else {
+		root["mcp"] = mcp
+	}
+	return json.MarshalIndent(root, "", "  ")
+}
+
+func openCodePluginSource(shim string) string {
+	shimJSON, _ := json.Marshal(shim)
+	return `const SHIM = ` + string(shimJSON) + `
+
+function eventType(event) {
+  return String(event?.type || "")
+}
+
+function eventInfo(event) {
+  return event?.info || event?.properties?.info || event?.message || event?.properties?.message || {}
+}
+
+function sessionID(event) {
+  return event?.sessionID || event?.properties?.sessionID || eventInfo(event)?.sessionID || event?.part?.sessionID || event?.properties?.part?.sessionID || ""
+}
+
+function completedAssistantMessage(event) {
+  const info = eventInfo(event)
+  return info?.role === "assistant" && Boolean(info?.time?.completed || info?.completed || info?.finish)
+}
+
+function sync(args) {
+  if (process.env.WITNESS_WORKER === "1") return
+  try {
+    const proc = Bun.spawn([SHIM, "opencode-sync", ...args], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: { ...process.env, WITNESS_OPENCODE_PLUGIN: "1" },
+    })
+    proc.unref?.()
+  } catch {
+    // Plugins must never break an OpenCode session.
+  }
+}
+
+export const ClaudeWitness = async () => ({
+  event: async ({ event }) => {
+    if (process.env.WITNESS_WORKER === "1") return
+    const type = eventType(event)
+    if (type.startsWith("server.connected")) {
+      sync([])
+      return
+    }
+    if (type.startsWith("message.updated") && completedAssistantMessage(event)) {
+      const id = sessionID(event)
+      if (id) sync([id])
+      return
+    }
+    if (type.startsWith("session.idle")) {
+      const id = sessionID(event)
+      if (id) sync([id])
+    }
+  },
+})
+`
 }
 
 // writeFileAtomic writes via temp + rename so a crash can't leave a half-written

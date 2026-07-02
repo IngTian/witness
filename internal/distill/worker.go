@@ -215,7 +215,9 @@ type minedObs struct {
 func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript string) ([]store.Observation, error) {
 	runFn := w.Run
 	if runFn == nil {
-		runFn = Run // real `claude -p`
+		runFn = func(ctx context.Context, model, prompt, input string) (string, error) {
+			return RunWith(ctx, w.Config.Runner, model, prompt, input)
+		}
 	}
 	reply, err := runFn(ctx, w.Config.TriageModel, ln.Extract, transcript)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
 // keys are ignored; missing file = all defaults.
 type Config struct {
+	Runner          string // "claude" (default) or "opencode" for headless distillation calls
 	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
 	DistillModel    string // model for the reviewer ("" = claude -p default)
 	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
@@ -25,6 +26,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
+		Runner:          "claude",
 		TriageModel:     "", // empty => let `claude -p` use the environment default model
 		DistillModel:    "",
 		ReviewEvery:     5,
@@ -51,6 +53,10 @@ func (s *Store) LoadConfig() Config {
 		k = strings.TrimSpace(k)
 		v = strings.Trim(strings.TrimSpace(v), `"`)
 		switch k {
+		case "runner":
+			if v != "" {
+				c.Runner = v
+			}
 		case "triage_model":
 			c.TriageModel = v
 		case "distill_model":
@@ -135,6 +141,18 @@ func (s *Store) metaStr(key string) string {
 	var v string
 	_ = s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
 	return v
+}
+
+// MetaString exposes small scalar bookkeeping to importers that need their own
+// durable watermarks without owning schema migrations.
+func (s *Store) MetaString(key string) string { return s.metaStr(key) }
+
+// SetMetaString stores a small scalar watermark under key.
+func (s *Store) SetMetaString(key, value string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO meta(key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
 }
 
 func (s *Store) metaInt(key string) int64 {

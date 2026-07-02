@@ -112,7 +112,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]reviewedFacet, error) {
 	input := "OBSERVATIONS (L1):\n" + mustJSON(slimObs(obs)) +
 		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name))
-	reply, err := Run(ctx, r.Config.DistillModel, ln.Review, input)
+	reply, err := RunWith(ctx, r.Config.Runner, r.Config.DistillModel, ln.Review, input)
 	if err != nil {
 		return nil, err
 	}

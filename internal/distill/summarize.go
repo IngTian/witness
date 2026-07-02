@@ -53,7 +53,9 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 	runFn := sm.Run
 	if runFn == nil {
-		runFn = Run
+		runFn = func(ctx context.Context, model, prompt, input string) (string, error) {
+			return RunWith(ctx, sm.Config.Runner, model, prompt, input)
+		}
 	}
 
 	var portrait strings.Builder

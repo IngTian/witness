@@ -264,7 +264,18 @@ func (s *Store) Stats() Stats {
 // worker is already draining the queue. Kept as a filesystem flock (independent
 // of the DB) so it works the same regardless of storage backend.
 func (s *Store) WorkerLock() (unlock func(), ok bool) {
-	path := filepath.Join(s.Root, ".worker.lock")
+	return s.lockFile(".worker.lock")
+}
+
+// OpenCodeSyncLock serializes imports from OpenCode's session database. The
+// importer is watermark-based, but concurrent importers can otherwise read the
+// same count and append the same text rows twice.
+func (s *Store) OpenCodeSyncLock() (unlock func(), ok bool) {
+	return s.lockFile(".opencode-sync.lock")
+}
+
+func (s *Store) lockFile(name string) (unlock func(), ok bool) {
+	path := filepath.Join(s.Root, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return func() {}, false
