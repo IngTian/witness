@@ -1,6 +1,4 @@
-# claude-witness
-
-> Let Claude Code witness your growth.
+# claude-witness — Let Claude Code witness your growth.
 
 > *"Aah, you were at my side, all along.*  
 > *My true mentor...*  
