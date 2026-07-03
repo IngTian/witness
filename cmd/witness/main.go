@@ -505,6 +505,13 @@ func cmdOpenCodeSync(args []string, quiet bool) error {
 
 	unlock, ok := st.OpenCodeSyncLock()
 	if !ok {
+		// Couldn't take the sync lock — another importer holds it, or the lock
+		// file itself couldn't be opened (perms, fd/space exhaustion). Either way
+		// we imported nothing; say so instead of exiting 0 as if it succeeded, so
+		// a `--wait` verification run isn't misled into thinking sync is healthy.
+		if !quiet {
+			fmt.Println("opencode sync: skipped — another sync is already running (or the sync lock is unavailable); nothing imported")
+		}
 		return nil
 	}
 
