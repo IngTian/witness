@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,16 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// openCodePluginBody is the runtime-agnostic body of the OpenCode plugin (every
+// line AFTER the `const SHIM = …` declaration). It is the single source of truth:
+// the installed plugin (openCodePluginSource) prepends a baked-in SHIM path, while
+// the repo's local-test copy at .opencode/plugins/claude-witness.js prepends a
+// dynamically-resolved SHIM. A guard test (TestOpenCodePluginBodyInSync) fails if
+// the local-test copy's body drifts from this one, so the two can't silently diverge.
+//
+//go:embed opencode_plugin.js
+var openCodePluginBody string
 
 // hookCmd / hookEntry mirror the settings.json hooks schema for the entries we own.
 type hookCmd struct {
@@ -361,62 +372,11 @@ func removeOpenCodeMCP(data []byte) ([]byte, error) {
 	return json.MarshalIndent(root, "", "  ")
 }
 
+// openCodePluginSource builds the installed plugin: a SHIM constant baked to the
+// absolute shim path, followed by the shared body. See openCodePluginBody.
 func openCodePluginSource(shim string) string {
 	shimJSON, _ := json.Marshal(shim)
-	return `const SHIM = ` + string(shimJSON) + `
-
-function eventType(event) {
-  return String(event?.type || "")
-}
-
-function eventInfo(event) {
-  return event?.info || event?.properties?.info || event?.message || event?.properties?.message || {}
-}
-
-function sessionID(event) {
-  return event?.sessionID || event?.properties?.sessionID || eventInfo(event)?.sessionID || event?.part?.sessionID || event?.properties?.part?.sessionID || ""
-}
-
-function completedAssistantMessage(event) {
-  const info = eventInfo(event)
-  return info?.role === "assistant" && Boolean(info?.time?.completed || info?.completed || info?.finish)
-}
-
-function sync(args) {
-  if (process.env.WITNESS_WORKER === "1") return
-  try {
-    const proc = Bun.spawn([SHIM, "opencode-sync", ...args], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      env: { ...process.env, WITNESS_OPENCODE_PLUGIN: "1" },
-    })
-    proc.unref?.()
-  } catch {
-    // Plugins must never break an OpenCode session.
-  }
-}
-
-export const ClaudeWitness = async () => ({
-  event: async ({ event }) => {
-    if (process.env.WITNESS_WORKER === "1") return
-    const type = eventType(event)
-    if (type.startsWith("server.connected")) {
-      sync([])
-      return
-    }
-    if (type.startsWith("message.updated") && completedAssistantMessage(event)) {
-      const id = sessionID(event)
-      if (id) sync([id])
-      return
-    }
-    if (type.startsWith("session.idle")) {
-      const id = sessionID(event)
-      if (id) sync([id])
-    }
-  },
-})
-`
+	return "const SHIM = " + string(shimJSON) + "\n\n" + openCodePluginBody
 }
 
 // writeFileAtomic writes via temp + rename so a crash can't leave a half-written

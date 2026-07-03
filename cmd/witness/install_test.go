@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -168,6 +170,31 @@ func TestMergeOpenCodeMCP(t *testing.T) {
 	cmd := witness["command"].([]any)
 	if len(cmd) != 2 || cmd[0] != "/repo/hooks/witness.sh" || cmd[1] != "mcp" {
 		t.Fatalf("bad witness command: %#v", cmd)
+	}
+}
+
+// TestOpenCodePluginBodyInSync guards against the two copies of the OpenCode
+// plugin drifting: the installed source (built from the embedded openCodePluginBody)
+// and the repo's local-test copy at .opencode/plugins/claude-witness.js. They
+// legitimately differ only in how the SHIM constant is resolved; everything from
+// the first `function ` onward must be byte-identical.
+func TestOpenCodePluginBodyInSync(t *testing.T) {
+	body := func(src, where string) string {
+		i := strings.Index(src, "function ")
+		if i < 0 {
+			t.Fatalf("%s: no plugin body found (missing `function `)", where)
+		}
+		return strings.TrimSpace(src[i:])
+	}
+
+	installed := openCodePluginSource("/repo/hooks/witness.sh")
+	committed, err := os.ReadFile(filepath.Join("..", "..", ".opencode", "plugins", "claude-witness.js"))
+	if err != nil {
+		t.Fatalf("read local-test plugin: %v", err)
+	}
+	if got, want := body(string(committed), "local-test copy"), body(installed, "installed source"); got != want {
+		t.Fatalf(".opencode/plugins/claude-witness.js body has drifted from the embedded openCodePluginBody.\n"+
+			"Edit cmd/witness/opencode_plugin.js and sync the local-test copy's body to match.\n\nlocal-test:\n%s\n\ninstalled:\n%s", got, want)
 	}
 }
 
