@@ -41,4 +41,6 @@ assets/e5-small/*.onnx_data
 # Compiled binaries (anchor to root so cmd/witness/ source is NOT ignored)
 /bin/
 /witness
+/witness.exe
 *.test
+*.exe
