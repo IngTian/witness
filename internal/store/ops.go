@@ -269,17 +269,25 @@ func (s *Store) SetNextAttempt(session string, at time.Time) error {
 }
 
 // PendingSessions returns sessions whose L0 has grown past the distillation
-// watermark — i.e. there are undistilled records. Keying on the watermark (not a
-// mere marker) means a RESUMED session whose log gains new turns is picked up again.
+// watermark, or that have staged active observations waiting to be drained.
+// Keying on the watermark (not a mere marker) means a RESUMED session whose log
+// gains new turns is picked up again.
 func (s *Store) PendingSessions() ([]string, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.db.Query(
-		`SELECT l.session
-		   FROM (SELECT session, COUNT(*) AS c FROM raw GROUP BY session) l
-		   LEFT JOIN progress p ON p.session = l.session
-		  WHERE l.c > COALESCE(p.distilled, 0)
-		    AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
-		  ORDER BY l.session`, now)
+		`SELECT session FROM (
+		   SELECT l.session
+		     FROM (SELECT session, COUNT(*) AS c FROM raw GROUP BY session) l
+		     LEFT JOIN progress p ON p.session = l.session
+		    WHERE l.c > COALESCE(p.distilled, 0)
+		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
+		   UNION
+		   SELECT st.session
+		     FROM staged st
+		     LEFT JOIN progress p ON p.session = st.session
+		    WHERE COALESCE(st.session, '') != ''
+		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
+		  ) ORDER BY session`, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -316,11 +324,18 @@ func (s *Store) Stats() Stats {
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&st.Observations)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM facets`).Scan(&st.Facets)
 	_ = s.db.QueryRow(
-		`SELECT COUNT(*) FROM (SELECT l.session
-		   FROM (SELECT session, COUNT(*) c FROM raw GROUP BY session) l
-		   LEFT JOIN progress p ON p.session = l.session
-		  WHERE l.c > COALESCE(p.distilled,0)
-		    AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, now).Scan(&st.Pending)
+		`SELECT COUNT(*) FROM (
+		   SELECT l.session
+		     FROM (SELECT session, COUNT(*) c FROM raw GROUP BY session) l
+		     LEFT JOIN progress p ON p.session = l.session
+		    WHERE l.c > COALESCE(p.distilled,0)
+		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?)
+		   UNION
+		   SELECT st.session
+		     FROM staged st
+		     LEFT JOIN progress p ON p.session = st.session
+		    WHERE COALESCE(st.session, '') != ''
+		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, now, now).Scan(&st.Pending)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM progress WHERE next_attempt != '' AND next_attempt > ?`, now).Scan(&st.BackedOff)
 	st.LastReview = s.metaStr("review_ts")
 	return st

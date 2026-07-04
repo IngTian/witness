@@ -56,6 +56,16 @@ func TestPendingSessionsUsesWatermark(t *testing.T) {
 	}
 }
 
+func TestPendingSessionsIncludesStagedObservations(t *testing.T) {
+	s := tempStore(t)
+	if err := s.StageObservation(Observation{ID: "obs_a", Session: "a", Observation: "noticed a pattern"}); err != nil {
+		t.Fatalf("StageObservation: %v", err)
+	}
+	if p, _ := s.PendingSessions(); !slices.Contains(p, "a") {
+		t.Fatalf("session with staged observations should be pending, got %v", p)
+	}
+}
+
 func tempStore(t *testing.T) *Store {
 	t.Helper()
 	t.Setenv("WITNESS_HOME", t.TempDir())
