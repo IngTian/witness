@@ -207,6 +207,9 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `"capture", "--agent", "opencode"`) {
 		t.Fatalf("installed plugin should capture OpenCode events directly: %s", src)
 	}
+	if !strings.Contains(src, `"import", "--agent", "opencode", "--quiet"`) {
+		t.Fatalf("installed plugin should reconcile OpenCode DB before distillation: %s", src)
+	}
 }
 
 func TestRemoveOpenCodeMCP(t *testing.T) {

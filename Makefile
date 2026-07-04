@@ -24,7 +24,7 @@ fetch-model:
 
 ## install: build + fetch model + wire hooks/MCP into Claude Code (idempotent)
 install: build fetch-model
-	$(BIN) install
+	$(BIN) install claude
 
 ## install-opencode: build + fetch model + wire OpenCode plugin/MCP (idempotent)
 install-opencode: build fetch-model
@@ -32,7 +32,7 @@ install-opencode: build fetch-model
 
 ## uninstall: remove the hooks + MCP server
 uninstall: build
-	$(BIN) uninstall
+	$(BIN) uninstall claude
 
 ## uninstall-opencode: remove the OpenCode plugin + MCP server
 uninstall-opencode: build

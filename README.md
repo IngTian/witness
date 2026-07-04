@@ -175,7 +175,7 @@ by hand):
 The whole thing is **one self-contained Go binary** — no Python, no external services, no vector
 DB, no cloud key. Local multilingual (English **and** Chinese) embeddings run pure-Go via GoMLX
 (`CGO_ENABLED=0`, verified: matches ONNX Runtime exactly). Distillation defaults to your existing
-Claude Code auth via `claude -p`; set `runner = opencode` to use `opencode run` instead.
+Claude Code auth via `claude -p`; set `runner = opencode` to use a private `opencode serve` runner instead.
 
 ## Install
 
@@ -199,7 +199,8 @@ OpenCode support has two pieces:
 
 - A plugin (`~/.config/opencode/plugins/claude-witness.js`, generated from
   [`internal/runtimes/opencode/plugin/claude-witness.js`](internal/runtimes/opencode/plugin/claude-witness.js))
-  captures OpenCode message events into witness L0 and kicks background distillation without waiting.
+  captures OpenCode message events into witness L0, reconciles OpenCode's SQLite DB on idle, and kicks
+  background distillation through that import path without waiting.
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.

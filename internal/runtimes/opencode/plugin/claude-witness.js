@@ -21,8 +21,8 @@ function capture(event) {
   spawnWitness(["capture", "--agent", "opencode"], event)
 }
 
-function kickWorker() {
-  spawnWitness(["distill", "start", "--quiet"])
+function syncOpenCode() {
+  spawnWitness(["import", "--agent", "opencode", "--quiet"])
 }
 
 export const ClaudeWitness = async () => ({
@@ -35,7 +35,7 @@ export const ClaudeWitness = async () => ({
     }
     if (type.startsWith("session.idle")) {
       capture(event)
-      kickWorker()
+      syncOpenCode()
     }
   },
 })
