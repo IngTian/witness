@@ -1,24 +1,15 @@
 package main
 
 import (
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-)
 
-// openCodePluginBody is the runtime-agnostic body of the OpenCode plugin (every
-// line AFTER the `const SHIM = …` declaration). It is the single source of truth:
-// the installed plugin (openCodePluginSource) prepends a baked-in SHIM path, while
-// the repo's local-test copy at .opencode/plugins/claude-witness.js prepends a
-// dynamically-resolved SHIM. A guard test (TestOpenCodePluginBodyInSync) fails if
-// the local-test copy's body drifts from this one, so the two can't silently diverge.
-//
-//go:embed opencode_plugin.js
-var openCodePluginBody string
+	opencodeplugin "github.com/IngTian/claude-witness/internal/runtimes/opencode/plugin"
+)
 
 // hookCmd / hookEntry mirror the settings.json hooks schema for the entries we own.
 type hookCmd struct {
@@ -258,16 +249,9 @@ func cmdInstallOpenCode() error {
 		return err
 	}
 	dir := opencodeDir()
-	plugins := filepath.Join(dir, "plugins")
-	if err := os.MkdirAll(plugins, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	pluginPath := filepath.Join(plugins, "claude-witness.js")
-	if err := writeFileAtomic(pluginPath, []byte(openCodePluginSource(shim))); err != nil {
-		return err
-	}
-	fmt.Printf("OpenCode plugin installed at %s\n", pluginPath)
-
 	config := opencodeConfigPath()
 	data, err := os.ReadFile(config)
 	if err != nil && !os.IsNotExist(err) {
@@ -277,6 +261,20 @@ func cmdInstallOpenCode() error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+		return err
+	}
+
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(plugins, 0o755); err != nil {
+		return err
+	}
+	pluginPath := filepath.Join(plugins, "claude-witness.js")
+	if err := writeFileAtomic(pluginPath, []byte(opencodeplugin.Source(shim))); err != nil {
+		return err
+	}
+	fmt.Printf("OpenCode plugin installed at %s\n", pluginPath)
+
 	if err := writeFileAtomic(config, merged); err != nil {
 		return err
 	}
@@ -320,24 +318,34 @@ func cmdUninstallClaude() error {
 func cmdUninstallOpenCode() error {
 	dir := opencodeDir()
 	pluginPath := filepath.Join(dir, "plugins", "claude-witness.js")
-	_ = os.Remove(pluginPath)
 	config := opencodeConfigPath()
+	configUpdated := false
 	if data, err := os.ReadFile(config); err == nil {
-		if cleaned, err := removeOpenCodeMCP(data); err == nil {
-			_ = writeFileAtomic(config, cleaned)
+		cleaned, err := removeOpenCodeMCP(data)
+		if err != nil {
+			return err
 		}
+		if err := writeFileAtomic(config, cleaned); err != nil {
+			return err
+		}
+		configUpdated = true
+	} else if !os.IsNotExist(err) {
+		return err
 	}
+	_ = os.Remove(pluginPath)
 	fmt.Printf("OpenCode plugin removed from %s (if it was present)\n", pluginPath)
-	fmt.Println("OpenCode MCP server 'witness' removed from OpenCode config (if it was present)")
+	if configUpdated {
+		fmt.Println("OpenCode MCP server 'witness' removed from OpenCode config (if it was present)")
+	} else {
+		fmt.Println("OpenCode config not found; no MCP entry removed")
+	}
 	return nil
 }
 
 func mergeOpenCodeMCP(data []byte, shim string) ([]byte, error) {
-	root := map[string]any{}
-	if len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, &root); err != nil {
-			return nil, fmt.Errorf("parse opencode.json: %w", err)
-		}
+	root, err := parseOpenCodeConfig(data)
+	if err != nil {
+		return nil, err
 	}
 	if root["$schema"] == nil {
 		root["$schema"] = "https://opencode.ai/config.json"
@@ -356,11 +364,9 @@ func mergeOpenCodeMCP(data []byte, shim string) ([]byte, error) {
 }
 
 func removeOpenCodeMCP(data []byte) ([]byte, error) {
-	root := map[string]any{}
-	if len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, &root); err != nil {
-			return nil, fmt.Errorf("parse opencode.json: %w", err)
-		}
+	root, err := parseOpenCodeConfig(data)
+	if err != nil {
+		return nil, err
 	}
 	mcp, _ := root["mcp"].(map[string]any)
 	delete(mcp, "witness")
@@ -372,11 +378,106 @@ func removeOpenCodeMCP(data []byte) ([]byte, error) {
 	return json.MarshalIndent(root, "", "  ")
 }
 
-// openCodePluginSource builds the installed plugin: a SHIM constant baked to the
-// absolute shim path, followed by the shared body. See openCodePluginBody.
-func openCodePluginSource(shim string) string {
-	shimJSON, _ := json.Marshal(shim)
-	return "const SHIM = " + string(shimJSON) + "\n\n" + openCodePluginBody
+func parseOpenCodeConfig(data []byte) (map[string]any, error) {
+	root := map[string]any{}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return root, nil
+	}
+	if err := json.Unmarshal(normalizeJSONC(data), &root); err != nil {
+		return nil, fmt.Errorf("parse opencode config: %w", err)
+	}
+	return root, nil
+}
+
+func normalizeJSONC(data []byte) []byte {
+	return removeTrailingCommas(stripJSONComments(data))
+}
+
+func stripJSONComments(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			out = append(out, c)
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == '/' && i+1 < len(data) && data[i+1] == '/' {
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			if i < len(data) {
+				out = append(out, data[i])
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(data) && data[i+1] == '*' {
+			i += 2
+			for i < len(data)-1 && !(data[i] == '*' && data[i+1] == '/') {
+				if data[i] == '\n' {
+					out = append(out, '\n')
+				}
+				i++
+			}
+			i++
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func removeTrailingCommas(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if inString {
+			out = append(out, c)
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == ',' {
+			j := i + 1
+			for j < len(data) && isJSONWhitespace(data[j]) {
+				j++
+			}
+			if j < len(data) && (data[j] == '}' || data[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func isJSONWhitespace(c byte) bool {
+	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
 }
 
 // writeFileAtomic writes via temp + rename so a crash can't leave a half-written

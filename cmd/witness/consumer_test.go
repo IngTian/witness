@@ -42,3 +42,27 @@ func TestDrainQueueProcessesArrivalsOnceAndTerminates(t *testing.T) {
 		}
 	}
 }
+
+func TestDrainQueueLimitStopsAfterBudget(t *testing.T) {
+	pendingSet := map[string]bool{"A": true, "B": true, "C": true}
+	var order []string
+	pending := func() []string {
+		out := []string{}
+		for k := range pendingSet {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	processed := drainQueueLimit(pending, func(s string) {
+		order = append(order, s)
+		delete(pendingSet, s)
+	}, 1)
+
+	if processed != 1 || len(order) != 1 || order[0] != "A" {
+		t.Fatalf("processed=%d order=%v, want one first job", processed, order)
+	}
+	if !pendingSet["B"] || !pendingSet["C"] {
+		t.Fatalf("budgeted drain should leave remaining jobs queued: %#v", pendingSet)
+	}
+}

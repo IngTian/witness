@@ -152,15 +152,18 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 
 ## Commands
 
-`witness <doctor | profile | review | lens | opencode | cleanup | install | uninstall>` (capture,
+`witness <doctor | profile | review | lens | import | distill | opencode | cleanup | install | uninstall>` (capture,
 the worker, and the MCP server are internal entry points invoked by Claude Code/OpenCode, not typed
 by hand):
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
 - `witness review` — force an L2 review and regenerate L4 profiles from existing observations.
 - `witness lens register|enable|disable|list` — manage lenses.
-- `witness opencode sync [--wait] [session_id...]` — import OpenCode's local session DB into L0;
-  `--wait` runs the worker before returning, useful for verification.
+- `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
+  and kick background distillation without waiting.
+- `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
+- `witness distill start|status|stop` — manage the background distillation worker.
+- `witness opencode sync [--wait]` — legacy/debug OpenCode import path; avoid `--wait` for daily use.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
 
@@ -180,7 +183,7 @@ Claude Code auth via `claude -p`; set `runner = opencode` to use `opencode run` 
 ```
 
 That's the whole thing — idempotent, safe to re-run after a `git pull`. It also offers to add a
-`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `opencode`, `cleanup`).
+`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `import`, `distill`, `cleanup`).
 Equivalent `make` targets exist (`make install`, `make install-opencode`, `make install-all`,
 `make build`, `make doctor`, `make uninstall`, `make uninstall-opencode`, `make clean`). To remove
 it: `make uninstall` or `make uninstall-opencode` (strips integration wiring; your data is
@@ -190,9 +193,9 @@ untouched).
 
 OpenCode support has two pieces:
 
-- A plugin (`~/.config/opencode/plugins/claude-witness.js`, or this repo's
-  [`.opencode/plugins/claude-witness.js`](.opencode/plugins/claude-witness.js) for local testing)
-  listens for completed assistant messages and calls `witness opencode sync` in the background.
+- A plugin (`~/.config/opencode/plugins/claude-witness.js`, generated from
+  [`internal/runtimes/opencode/plugin/claude-witness.js`](internal/runtimes/opencode/plugin/claude-witness.js))
+  captures OpenCode message events into witness L0 and kicks background distillation without waiting.
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.
@@ -202,7 +205,8 @@ Manual verification path:
 ```sh
 witness lens register opencode prompts/lens/opencode.md
 witness lens enable opencode
-witness opencode sync --wait       # imports ~/.local/share/opencode/opencode.db and mines L1
+witness import --agent opencode    # reconciles ~/.local/share/opencode/opencode.db and returns
+witness distill status             # watch non-blocking distillation progress
 witness review                     # forces L2 facets + L4 markdown profiles
 witness profile opencode           # per-lens L4 report
 witness profile                    # unified L4 report

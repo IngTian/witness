@@ -20,6 +20,57 @@ func (s *Store) AppendRaw(r RawRecord) error {
 	return err
 }
 
+// ApplyRawImport atomically commits a raw import batch and its importer-owned
+// watermark. replace=true rebuilds the session's L0 and resets the distillation
+// progress, which is required for mutable sources that can insert or edit prior
+// turns after an earlier import.
+func (s *Store) ApplyRawImport(meta SessionMeta, records []RawRecord, stateKey, stateValue string, replace bool) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if replace {
+		if _, err = tx.Exec(`DELETE FROM raw WHERE session = ?`, meta.Session); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM progress WHERE session = ?`, meta.Session); err != nil {
+			return err
+		}
+	}
+	if meta.Session != "" {
+		if _, err = tx.Exec(
+			`INSERT INTO session_meta(session, cwd, started) VALUES (?, ?, ?)
+			 ON CONFLICT(session) DO UPDATE SET cwd = excluded.cwd, started = excluded.started`,
+			meta.Session, meta.Cwd, meta.Started); err != nil {
+			return err
+		}
+	}
+	stmt, err := tx.Prepare(`INSERT INTO raw(session, seq, ts, role, effort, text) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, r := range records {
+		if _, err = stmt.Exec(r.Session, r.Seq, r.TS, r.Role, r.Effort, r.Text); err != nil {
+			return err
+		}
+	}
+	if stateKey != "" {
+		if _, err = tx.Exec(
+			`INSERT INTO meta(key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, stateKey, stateValue); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ReadRaw returns a session's full raw log in capture order.
 func (s *Store) ReadRaw(session string) ([]RawRecord, error) {
 	rows, err := s.db.Query(
@@ -46,6 +97,22 @@ func (s *Store) RawCount(session string) int {
 	var n int
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM raw WHERE session = ?`, session).Scan(&n)
 	return n
+}
+
+func (s *Store) LastRawTS() string {
+	var ts string
+	_ = s.db.QueryRow(`SELECT COALESCE(MAX(ts), '') FROM raw`).Scan(&ts)
+	return ts
+}
+
+func (s *Store) LastDistilledRawTS() string {
+	var ts string
+	_ = s.db.QueryRow(`
+		SELECT COALESCE(MAX(r.ts), '')
+		  FROM raw r
+		  JOIN progress p ON p.session = r.session
+		 WHERE r.seq < p.distilled`).Scan(&ts)
+	return ts
 }
 
 // NextSeq returns the next per-session ordinal (== current record count).

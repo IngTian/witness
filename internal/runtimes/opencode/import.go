@@ -3,6 +3,7 @@ package opencode
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -17,13 +18,16 @@ import (
 )
 
 const (
-	SessionPrefix = "opencode:"
-	syncMetaKey   = "opencode_sync_time_updated_ms"
+	SessionPrefix        = "opencode:"
+	syncMetaKey          = "opencode_sync_time_updated_ms"
+	importKeysMetaPrefix = "opencode_import_keys:"
+	witnessDistillTitle  = "witness-distill"
 )
 
 // Importer mirrors OpenCode text messages into witness raw records. It treats
-// OpenCode as the source of truth and uses witness's raw count as the import
-// watermark per session.
+// OpenCode as the source of truth and uses a message-id/content key list as the
+// import watermark per session because OpenCode rows can be completed or edited
+// after an earlier sync.
 type Importer struct {
 	Store  *store.Store
 	DBPath string
@@ -38,11 +42,13 @@ type ImportStats struct {
 type sessionRow struct {
 	ID          string
 	Directory   string
+	Title       string
 	TimeCreated int64
 	TimeUpdated int64
 }
 
 type turn struct {
+	Key  string
 	TS   int64
 	Role string
 	Text string
@@ -128,19 +134,20 @@ func sqliteURI(path string) string {
 func (im *Importer) sessions(ctx context.Context, db *sql.DB, ids []string) ([]sessionRow, error) {
 	if len(ids) > 0 {
 		placeholders := make([]string, len(ids))
-		args := make([]any, len(ids))
+		args := make([]any, 0, len(ids)+1)
 		for i, id := range ids {
 			placeholders[i] = "?"
-			args[i] = strings.TrimPrefix(id, SessionPrefix)
+			args = append(args, strings.TrimPrefix(id, SessionPrefix))
 		}
-		q := `SELECT id, directory, time_created, time_updated FROM session WHERE id IN (` + strings.Join(placeholders, ",") + `) ORDER BY time_updated`
+		args = append(args, witnessDistillTitle)
+		q := `SELECT id, directory, title, time_created, time_updated FROM session WHERE id IN (` + strings.Join(placeholders, ",") + `) AND title != ? ORDER BY time_updated`
 		return scanSessions(ctx, db, q, args...)
 	}
 	last, _ := strconv.ParseInt(strings.TrimSpace(im.Store.MetaString(syncMetaKey)), 10, 64)
 	if last > 0 {
-		return scanSessions(ctx, db, `SELECT id, directory, time_created, time_updated FROM session WHERE time_updated >= ? ORDER BY time_updated`, last)
+		return scanSessions(ctx, db, `SELECT id, directory, title, time_created, time_updated FROM session WHERE time_updated >= ? AND title != ? ORDER BY time_updated`, last, witnessDistillTitle)
 	}
-	return scanSessions(ctx, db, `SELECT id, directory, time_created, time_updated FROM session ORDER BY time_updated`)
+	return scanSessions(ctx, db, `SELECT id, directory, title, time_created, time_updated FROM session WHERE title != ? ORDER BY time_updated`, witnessDistillTitle)
 }
 
 func scanSessions(ctx context.Context, db *sql.DB, q string, args ...any) ([]sessionRow, error) {
@@ -152,7 +159,7 @@ func scanSessions(ctx context.Context, db *sql.DB, q string, args ...any) ([]ses
 	var out []sessionRow
 	for rows.Next() {
 		var s sessionRow
-		if err := rows.Scan(&s.ID, &s.Directory, &s.TimeCreated, &s.TimeUpdated); err != nil {
+		if err := rows.Scan(&s.ID, &s.Directory, &s.Title, &s.TimeCreated, &s.TimeUpdated); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -169,25 +176,86 @@ func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow)
 		return 0, nil
 	}
 	session := SessionPrefix + s.ID
-	done := im.Store.RawCount(session)
-	if done >= len(turns) {
+	keys := turnKeys(turns)
+	stateKey := importKeysMetaPrefix + session
+	oldKeys := parseImportKeys(im.Store.MetaString(stateKey))
+	rawCount := im.Store.RawCount(session)
+	if sameKeys(oldKeys, keys) && rawCount == len(keys) {
 		return 0, nil
 	}
-	if done == 0 {
-		im.Store.RecordMeta(store.SessionMeta{Session: session, Cwd: s.Directory, Started: msRFC3339(s.TimeCreated)})
+
+	replace := true
+	start := 0
+	if len(oldKeys) == 0 && rawCount == 0 {
+		replace = false
+	} else if len(oldKeys) > 0 && keysHavePrefix(keys, oldKeys) && rawCount == len(oldKeys) {
+		replace = false
+		start = len(oldKeys)
 	}
-	for i, t := range turns[done:] {
-		if err := im.Store.AppendRaw(store.RawRecord{
-			TS:      msRFC3339(t.TS),
-			Session: session,
-			Seq:     done + i,
-			Role:    t.Role,
-			Text:    t.Text,
-		}); err != nil {
-			return i, err
+	records := rawRecords(session, turns[start:], start)
+	stateValue, err := json.Marshal(keys)
+	if err != nil {
+		return 0, err
+	}
+	meta := store.SessionMeta{Session: session, Cwd: s.Directory, Started: msRFC3339(s.TimeCreated)}
+	if err := im.Store.ApplyRawImport(meta, records, stateKey, string(stateValue), replace); err != nil {
+		return 0, err
+	}
+	return len(records), nil
+}
+
+func turnKeys(turns []turn) []string {
+	keys := make([]string, len(turns))
+	for i, t := range turns {
+		keys[i] = t.Key
+	}
+	return keys
+}
+
+func parseImportKeys(data string) []string {
+	var keys []string
+	if err := json.Unmarshal([]byte(data), &keys); err != nil {
+		return nil
+	}
+	return keys
+}
+
+func sameKeys(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
 		}
 	}
-	return len(turns) - done, nil
+	return true
+}
+
+func keysHavePrefix(keys, prefix []string) bool {
+	if len(prefix) > len(keys) {
+		return false
+	}
+	for i := range prefix {
+		if keys[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func rawRecords(session string, turns []turn, seqOffset int) []store.RawRecord {
+	records := make([]store.RawRecord, len(turns))
+	for i, t := range turns {
+		records[i] = store.RawRecord{
+			TS:      msRFC3339(t.TS),
+			Session: session,
+			Seq:     seqOffset + i,
+			Role:    t.Role,
+			Text:    t.Text,
+		}
+	}
+	return records
 }
 
 func readTurns(ctx context.Context, db *sql.DB, sessionID string) ([]turn, error) {
@@ -209,7 +277,7 @@ func readTurns(ctx context.Context, db *sql.DB, sessionID string) ([]turn, error
 	flush := func() {
 		text := strings.TrimSpace(cur.String())
 		if curID != "" && text != "" {
-			out = append(out, turn{TS: curTS, Role: curRole, Text: text})
+			out = append(out, turn{Key: messageKey(curID, curRole, text), TS: curTS, Role: curRole, Text: text})
 		}
 		curID, curRole, curTS = "", "", 0
 		cur.Reset()
@@ -247,6 +315,11 @@ func readTurns(ctx context.Context, db *sql.DB, sessionID string) ([]turn, error
 	}
 	flush()
 	return out, rows.Err()
+}
+
+func messageKey(id, role, text string) string {
+	h := sha256.Sum256([]byte(role + "\x00" + text))
+	return id + ":" + fmt.Sprintf("%x", h[:8])
 }
 
 type messageInfo struct {

@@ -35,8 +35,8 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",   // concurrent readers + one writer across processes
 		"PRAGMA busy_timeout=5000",  // wait on a contended write rather than erroring
+		"PRAGMA journal_mode=WAL",   // concurrent readers + one writer across processes
 		"PRAGMA foreign_keys=ON",    // enforce facet_versions -> facets ON DELETE CASCADE
 		"PRAGMA synchronous=NORMAL", // safe under WAL; far less fsync cost than FULL
 	} {

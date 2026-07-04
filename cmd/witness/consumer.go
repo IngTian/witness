@@ -10,7 +10,15 @@ package main
 // runs at a time across the whole machine; extra triggers no-op instead of piling
 // up as blocked processes.
 func drainQueue(pending func() []string, process func(string)) {
+	_ = drainQueueLimit(pending, process, 0)
+}
+
+// drainQueueLimit is drainQueue with an optional process budget. max <= 0 means
+// unbounded. It is used for runners that cannot safely create many nested agent
+// sessions in one background pass.
+func drainQueueLimit(pending func() []string, process func(string), max int) int {
 	attempted := map[string]bool{}
+	processed := 0
 	for {
 		var next []string
 		for _, job := range pending() {
@@ -19,11 +27,15 @@ func drainQueue(pending func() []string, process func(string)) {
 			}
 		}
 		if len(next) == 0 {
-			return
+			return processed
 		}
 		for _, job := range next {
+			if max > 0 && processed >= max {
+				return processed
+			}
 			attempted[job] = true
 			process(job)
+			processed++
 		}
 	}
 }

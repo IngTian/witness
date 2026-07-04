@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	opencodeplugin "github.com/IngTian/claude-witness/internal/runtimes/opencode/plugin"
 )
 
 // helper: how many witness entries does event have, and is `other` preserved?
@@ -173,28 +173,39 @@ func TestMergeOpenCodeMCP(t *testing.T) {
 	}
 }
 
-// TestOpenCodePluginBodyInSync guards against the two copies of the OpenCode
-// plugin drifting: the installed source (built from the embedded openCodePluginBody)
-// and the repo's local-test copy at .opencode/plugins/claude-witness.js. They
-// legitimately differ only in how the SHIM constant is resolved; everything from
-// the first `function ` onward must be byte-identical.
-func TestOpenCodePluginBodyInSync(t *testing.T) {
-	body := func(src, where string) string {
-		i := strings.Index(src, "function ")
-		if i < 0 {
-			t.Fatalf("%s: no plugin body found (missing `function `)", where)
-		}
-		return strings.TrimSpace(src[i:])
-	}
-
-	installed := openCodePluginSource("/repo/hooks/witness.sh")
-	committed, err := os.ReadFile(filepath.Join("..", "..", ".opencode", "plugins", "claude-witness.js"))
+func TestMergeOpenCodeMCPAcceptsJSONC(t *testing.T) {
+	in := []byte(`{
+		// comments and trailing commas are valid OpenCode config JSONC
+		"$schema": "https://opencode.ai/config.json",
+		"plugin": ["https://example.test/plugin.js"],
+		"mcp": {
+			"other": {"type":"local", "command":["x",],},
+		},
+	}`)
+	out, err := mergeOpenCodeMCP(in, "/repo/hooks/witness.sh")
 	if err != nil {
-		t.Fatalf("read local-test plugin: %v", err)
+		t.Fatal(err)
 	}
-	if got, want := body(string(committed), "local-test copy"), body(installed, "installed source"); got != want {
-		t.Fatalf(".opencode/plugins/claude-witness.js body has drifted from the embedded openCodePluginBody.\n"+
-			"Edit cmd/witness/opencode_plugin.js and sync the local-test copy's body to match.\n\nlocal-test:\n%s\n\ninstalled:\n%s", got, want)
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root["plugin"] == nil {
+		t.Fatalf("foreign JSONC config was not preserved: %s", out)
+	}
+	mcp := root["mcp"].(map[string]any)
+	if mcp["other"] == nil || mcp["witness"] == nil {
+		t.Fatalf("expected other and witness MCP servers: %s", out)
+	}
+}
+
+func TestOpenCodePluginSourceBakesShim(t *testing.T) {
+	src := opencodeplugin.Source("/repo/hooks/witness.sh")
+	if !strings.Contains(src, `const SHIM = "/repo/hooks/witness.sh"`) {
+		t.Fatalf("installed plugin does not bake the shim path: %s", src)
+	}
+	if !strings.Contains(src, `"capture", "--agent", "opencode"`) {
+		t.Fatalf("installed plugin should capture OpenCode events directly: %s", src)
 	}
 }
 
@@ -210,6 +221,27 @@ func TestRemoveOpenCodeMCP(t *testing.T) {
 	}
 	mcp := root["mcp"].(map[string]any)
 	if mcp["witness"] != nil || mcp["other"] == nil || root["autoupdate"] != false {
+		t.Fatalf("unexpected cleaned config: %s", out)
+	}
+}
+
+func TestRemoveOpenCodeMCPAcceptsJSONC(t *testing.T) {
+	in := []byte(`{
+		"mcp": {
+			"witness": {"type":"local",},
+			"other": {"type":"local"}, // keep this one
+		},
+	}`)
+	out, err := removeOpenCodeMCP(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(out, &root); err != nil {
+		t.Fatal(err)
+	}
+	mcp := root["mcp"].(map[string]any)
+	if mcp["witness"] != nil || mcp["other"] == nil {
 		t.Fatalf("unexpected cleaned config: %s", out)
 	}
 }

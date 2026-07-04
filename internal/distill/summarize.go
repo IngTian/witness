@@ -9,9 +9,10 @@ import (
 	"github.com/IngTian/claude-witness/internal/store"
 )
 
-// SummarizeFunc runs one summarization pass (a `claude -p` call). Injectable so
-// tests drive the summarizer without a model. Same shape as Run; nil => Run.
-type SummarizeFunc func(ctx context.Context, model, prompt, input string) (string, error)
+// SummarizeFunc runs one summarization pass. Same shape as MineFunc so a shared
+// runner (for example one OpenCode serve process) can cover mining, review, and
+// profile regeneration.
+type SummarizeFunc = MineFunc
 
 // Summarizer distills the L2 facets into the L4 narrative profile: one markdown
 // summary per lens (profile/<lens>.md) plus a cross-lens portrait

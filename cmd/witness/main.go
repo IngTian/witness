@@ -15,13 +15,16 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/IngTian/claude-witness/internal/distill"
 	"github.com/IngTian/claude-witness/internal/embed"
 	"github.com/IngTian/claude-witness/internal/lens"
 	"github.com/IngTian/claude-witness/internal/mcp"
-	opencodeimport "github.com/IngTian/claude-witness/internal/opencode"
+	"github.com/IngTian/claude-witness/internal/runtimes"
+	runtimeclaude "github.com/IngTian/claude-witness/internal/runtimes/claude"
+	opencodeimport "github.com/IngTian/claude-witness/internal/runtimes/opencode"
 	"github.com/IngTian/claude-witness/internal/store"
 )
 
@@ -31,7 +34,7 @@ func main() {
 		// points invoked by Claude Code, never typed: capture/session-start/session-end
 		// (hooks), worker (self-spawned via spawnDetached), and mcp (the server process
 		// Claude Code launches from the registered shim command).
-		fmt.Fprintln(os.Stderr, "usage: witness <doctor|profile|review|lens|opencode|cleanup|install|uninstall> [args]")
+		fmt.Fprintln(os.Stderr, "usage: witness <doctor|profile|review|lens|import|distill|opencode|cleanup|install|uninstall> [args]")
 		os.Exit(2)
 	}
 	// Belt-and-suspenders recursion guard (the shim also checks): never act when
@@ -45,7 +48,7 @@ func main() {
 	switch os.Args[1] {
 	// Internal entry points (Claude Code / hooks / self-spawn) — not in usage.
 	case "capture":
-		err = cmdCapture()
+		err = cmdCapture(os.Args[2:])
 	case "session-start":
 		err = cmdSessionStart()
 	case "session-end":
@@ -63,6 +66,10 @@ func main() {
 		err = cmdReview()
 	case "lens":
 		err = cmdLens(os.Args[2:])
+	case "import":
+		err = cmdImport(os.Args[2:])
+	case "distill":
+		err = cmdDistill(os.Args[2:])
 	case "opencode":
 		err = cmdOpenCode(os.Args[2:])
 	case "install":
@@ -82,38 +89,20 @@ func main() {
 		// paths. Only doctor/mcp surface failures.
 		fmt.Fprintln(os.Stderr, "witness:", err)
 		switch os.Args[1] {
-		case "doctor", "mcp", "worker", "lens", "profile", "review", "opencode", "install", "uninstall", "cleanup":
+		case "doctor", "mcp", "worker", "lens", "profile", "review", "import", "distill", "opencode", "install", "uninstall", "cleanup":
 			os.Exit(1)
 		}
 	}
 }
 
-// hookEvent is the subset of the hook JSON payload we read from stdin.
-type hookEvent struct {
-	HookEventName        string         `json:"hook_event_name"`
-	SessionID            string         `json:"session_id"`
-	Prompt               string         `json:"prompt"`                 // UserPromptSubmit
-	LastAssistantMessage string         `json:"last_assistant_message"` // Stop
-	Effort               map[string]any `json:"effort"`                 // Stop
-	Cwd                  string         `json:"cwd"`
-}
-
-func readEvent() (hookEvent, error) {
-	var e hookEvent
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return e, err
-	}
-	if err := json.Unmarshal(data, &e); err != nil {
-		return e, err // surfaced to the caller so it can be logged, not swallowed
-	}
-	return e, nil
-}
-
 // cmdCapture writes one raw record from the hook event. Pure plumbing; no LLM.
 // Best-effort: it logs failures (so they're diagnosable) but always returns nil
 // so a capture problem never breaks the user's session.
-func cmdCapture() error {
+func cmdCapture(args []string) error {
+	agent, err := agentFlag(args, runtimes.AgentClaude)
+	if err != nil {
+		return err
+	}
 	st, err := store.Open()
 	if err != nil {
 		return nil
@@ -121,35 +110,46 @@ func cmdCapture() error {
 	defer st.Close()
 	defer setupLogging(st)()
 
-	e, err := readEvent()
+	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		slog.Warn("capture: unreadable hook event", "err", err)
 		return nil
 	}
-	if e.SessionID == "" {
-		return nil
-	}
-	var rec store.RawRecord
-	switch {
-	case e.Prompt != "": // UserPromptSubmit
-		rec = store.RawRecord{Role: "user", Text: e.Prompt}
-	case e.LastAssistantMessage != "": // Stop
-		rec = store.RawRecord{Role: "assistant", Text: e.LastAssistantMessage}
-		if e.Effort != nil {
-			if lvl, ok := e.Effort["level"].(string); ok {
-				rec.Effort = lvl
-			}
+	switch agent {
+	case runtimes.AgentClaude:
+		var e runtimeclaude.HookEvent
+		if err := json.Unmarshal(data, &e); err != nil {
+			slog.Warn("capture: unreadable claude hook event", "err", err)
+			return nil
+		}
+		if err := runtimeclaude.Capture(st, e, time.Now()); err != nil {
+			slog.Error("capture: append raw failed", "agent", agent, "session", e.SessionID, "err", err)
+		}
+	case runtimes.AgentOpenCode:
+		if _, err := opencodeimport.Capture(st, data, time.Now()); err != nil {
+			slog.Error("capture: opencode event failed", "err", err)
 		}
 	default:
-		return nil
-	}
-	rec.TS = time.Now().UTC().Format(time.RFC3339)
-	rec.Session = e.SessionID
-	rec.Seq = st.NextSeq(e.SessionID)
-	if err := st.AppendRaw(rec); err != nil {
-		slog.Error("capture: append raw failed", "session", e.SessionID, "err", err)
+		return fmt.Errorf("unknown capture agent %q", agent)
 	}
 	return nil
+}
+
+func agentFlag(args []string, def string) (string, error) {
+	agent := def
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--agent":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return "", fmt.Errorf("--agent requires a value")
+			}
+			agent = strings.ToLower(strings.TrimSpace(args[i+1]))
+			i++
+		default:
+			return "", fmt.Errorf("unknown argument %q", args[i])
+		}
+	}
+	return agent, nil
 }
 
 // cmdSessionStart kicks the backlog sweep (self-healing for crashed/missed
@@ -228,24 +228,41 @@ func spawnDetached(args ...string) {
 // blocked-process pile-up, no daemon. The filesystem is the durable job queue;
 // this lock elects the single consumer that drains it.
 func cmdWorker(_ []string) error {
+	_, err := runWorker()
+	return err
+}
+
+func runWorker() (bool, error) {
 	st, err := store.Open()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer st.Close()
 	defer setupLogging(st)()
 
 	unlock, ok := st.WorkerLock()
 	if !ok {
-		return nil // a consumer already holds the lock; our jobs are on disk for it
+		return false, nil // a consumer already holds the lock; our jobs are on disk for it
 	}
 	defer unlock()
+	started := time.Now().UTC().Format(time.RFC3339)
+	_ = st.SetMetaString("worker_status", "running")
+	_ = st.SetMetaString("worker_pid", strconv.Itoa(os.Getpid()))
+	_ = st.SetMetaString("worker_started_at", started)
+	_ = st.SetMetaString("worker_heartbeat", started)
+	_ = st.SetMetaString("worker_stop_requested", "")
+	defer func() {
+		_ = st.SetMetaString("worker_status", "idle")
+		_ = st.SetMetaString("worker_pid", "")
+		_ = st.SetMetaString("worker_current", "")
+		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+	}()
 
 	cfg := st.LoadConfig()
 	lenses, err := activeLenses(st)
 	if err != nil {
 		slog.Error("load lenses", "err", err)
-		return err
+		return true, err
 	}
 	ctx := context.Background()
 
@@ -261,17 +278,37 @@ func cmdWorker(_ []string) error {
 	}
 
 	pending := func() []string { p, _ := st.PendingSessions(); return p }
-	drainQueue(pending, func(session string) {
+	var runFn distill.MineFunc
+	if (len(pending()) > 0 || st.ReviewDue(cfg)) && strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
+		opencodeServer, err := distill.StartOpenCodeServer(ctx, cfg.TriageModel, cfg.DistillModel)
+		if err != nil {
+			slog.Error("opencode serve", "err", err)
+			return true, err
+		}
+		defer opencodeServer.Close()
+		runFn = opencodeServer.Run
+	}
+	sessionBudget := workerSessionBudget(cfg)
+	processedSessions := drainQueueLimit(pending, func(session string) {
+		if st.MetaString("worker_stop_requested") == "1" {
+			return
+		}
+		_ = st.SetMetaString("worker_current", session)
+		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
 		e, err := getEmb()
 		if err != nil {
 			slog.Error("embedder", "err", err)
 			return
 		}
-		w := &distill.Worker{Store: st, Embedder: e, Lenses: lenses, Config: cfg}
+		w := &distill.Worker{Store: st, Embedder: e, Lenses: lenses, Config: cfg, Run: runFn}
 		if err := w.Process(ctx, session); err != nil {
 			slog.Error("process session", "session", session, "err", err)
 		}
-	})
+	}, sessionBudget)
+	if sessionBudget > 0 && processedSessions >= sessionBudget {
+		slog.Info("distill: runner background budget reached; leaving remaining work queued", "runner", cfg.Runner, "processed", processedSessions)
+		return true, nil
+	}
 
 	// Review folded into the same single-flight pass (serialized under the lock,
 	// so concurrent reviews can't clobber the facets). Due on the session-count
@@ -279,29 +316,34 @@ func cmdWorker(_ []string) error {
 	// the facets, so we regenerate the L4 narrative profile right after ("on
 	// profile change"). The profile is purely derived: summarizing is best-effort
 	// (log and move on), never failing the worker or blocking distillation.
-	if st.ReviewDue(cfg) {
-		r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg}
+	if st.MetaString("worker_stop_requested") != "1" && st.ReviewDue(cfg) {
+		r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
 		if err := r.Run(ctx, time.Now()); err != nil {
 			slog.Error("review", "err", err)
 		} else {
 			slog.Info("review complete")
-			regenerateProfile(ctx, st, cfg)
+			regenerateProfile(ctx, st, cfg, runFn)
 		}
 	}
-	return nil
+	return true, nil
+}
+
+func workerSessionBudget(cfg store.Config) int {
+	_ = cfg
+	return 0
 }
 
 // regenerateProfile refreshes the L4 narrative summaries from the current facets.
 // Best-effort: any failure (missing prompts, a claude -p hiccup) is logged and
 // swallowed, leaving the prior summaries in place — the profile is derived and
 // non-critical, and must never break the worker.
-func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config) {
+func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, runFn distill.MineFunc) {
 	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts()
 	if err != nil {
 		slog.Warn("profile: summarizer prompts unavailable; skipping", "err", err)
 		return
 	}
-	sm := &distill.Summarizer{Store: st, Config: cfg, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt}
+	sm := &distill.Summarizer{Store: st, Config: cfg, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn}
 	if err := sm.Summarize(ctx); err != nil {
 		slog.Warn("profile: summary regeneration failed; keeping prior", "err", err)
 		return
@@ -448,6 +490,11 @@ func cmdProfile(args []string) error {
 		fmt.Printf("no profile summary for %q yet — it's generated after the next background review.\n", lensName)
 		return nil
 	}
+	stat := st.Stats()
+	fmt.Println("Profile freshness:")
+	fmt.Printf("  based on distilled data through: %s\n", valueOrNever(st.LastDistilledRawTS()))
+	fmt.Printf("  archive has raw data through: %s\n", valueOrNever(st.LastRawTS()))
+	fmt.Printf("  pending: %d sessions\n\n", stat.Pending)
 	fmt.Println(md)
 	return nil
 }
@@ -464,11 +511,21 @@ func cmdReview() error {
 	if err != nil {
 		return err
 	}
-	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg}
-	if err := r.Run(context.Background(), time.Now()); err != nil {
+	ctx := context.Background()
+	var runFn distill.MineFunc
+	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
+		opencodeServer, err := distill.StartOpenCodeServer(ctx, cfg.TriageModel, cfg.DistillModel)
+		if err != nil {
+			return err
+		}
+		defer opencodeServer.Close()
+		runFn = opencodeServer.Run
+	}
+	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
+	if err := r.Run(ctx, time.Now()); err != nil {
 		return err
 	}
-	regenerateProfile(context.Background(), st, cfg)
+	regenerateProfile(ctx, st, cfg, runFn)
 	fmt.Println("review complete; profile regenerated")
 	return nil
 }
@@ -483,6 +540,212 @@ func cmdOpenCode(args []string) error {
 	default:
 		return fmt.Errorf("unknown opencode subcommand %q (want sync)", args[0])
 	}
+}
+
+func cmdImport(args []string) error {
+	agent := ""
+	quiet := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--agent":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return fmt.Errorf("--agent requires a value")
+			}
+			agent = strings.ToLower(strings.TrimSpace(args[i+1]))
+			i++
+		case "--quiet":
+			quiet = true
+		default:
+			return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet]")
+		}
+	}
+	if agent == "" {
+		return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet]")
+	}
+	stats, kicked, err := runImport(agent, true)
+	if err != nil {
+		return err
+	}
+	if !quiet {
+		fmt.Printf("import %s: imported %d raw record(s) from %d session(s)\n", stats.Agent, stats.Records, stats.Sessions)
+		if kicked {
+			fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
+		} else {
+			fmt.Println("no distill work pending")
+		}
+	}
+	return nil
+}
+
+func runImport(agent string, kickWorker bool) (runtimes.ImportStats, bool, error) {
+	st, err := store.Open()
+	if err != nil {
+		return runtimes.ImportStats{}, false, err
+	}
+	defer st.Close()
+	defer setupLogging(st)()
+
+	var stats runtimes.ImportStats
+	switch agent {
+	case runtimes.AgentOpenCode:
+		unlock, ok := st.OpenCodeSyncLock()
+		if !ok {
+			return runtimes.ImportStats{Agent: agent}, false, nil
+		}
+		opencodeStats, err := (&opencodeimport.Importer{Store: st}).Import(context.Background(), nil)
+		unlock()
+		if err != nil {
+			return stats, false, err
+		}
+		stats = runtimes.ImportStats{Agent: agent, Sessions: opencodeStats.Sessions, Records: opencodeStats.Records, MaxUpdated: opencodeStats.MaxUpdated}
+	case runtimes.AgentClaude:
+		stats = runtimes.ImportStats{Agent: agent}
+	default:
+		return stats, false, fmt.Errorf("unknown import agent %q (want claude or opencode)", agent)
+	}
+
+	cfg := st.LoadConfig()
+	pending, _ := st.PendingSessions()
+	shouldRunWorker := len(pending) > 0 || st.ReviewDue(cfg)
+	if kickWorker && shouldRunWorker {
+		spawnDetached("worker")
+		return stats, true, nil
+	}
+	return stats, false, nil
+}
+
+func cmdDistill(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: witness distill <start|status|stop> [--quiet]")
+	}
+	switch args[0] {
+	case "start":
+		quiet := len(args) > 1 && args[1] == "--quiet"
+		if len(args) > 2 || (len(args) == 2 && !quiet) {
+			return fmt.Errorf("usage: witness distill start [--quiet]")
+		}
+		spawnDetached("worker")
+		if !quiet {
+			fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
+		}
+		return nil
+	case "status":
+		return cmdDistillStatus()
+	case "stop":
+		return cmdDistillStop()
+	default:
+		return fmt.Errorf("unknown distill subcommand %q (want start|status|stop)", args[0])
+	}
+}
+
+func cmdDistillStatus() error {
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	stat := st.Stats()
+	status := st.MetaString("worker_status")
+	if status == "" {
+		status = "idle"
+	}
+	pid := st.MetaString("worker_pid")
+	heartbeat := st.MetaString("worker_heartbeat")
+	current := st.MetaString("worker_current")
+	if (status == "running" || status == "stopping") && !workerPIDAlive(pid) {
+		status = "idle"
+		pid = ""
+		current = ""
+		_ = st.SetMetaString("worker_status", "idle")
+		_ = st.SetMetaString("worker_pid", "")
+		_ = st.SetMetaString("worker_current", "")
+	}
+	if status == "idle" {
+		pid = ""
+		current = ""
+	}
+	lastRaw := st.LastRawTS()
+	lastDistilled := st.LastDistilledRawTS()
+	fmt.Printf("worker: %s", status)
+	if pid != "" {
+		fmt.Printf(" pid=%s", pid)
+	}
+	if heartbeat != "" {
+		fmt.Printf(" heartbeat=%s", heartbeat)
+	}
+	fmt.Println()
+	if current != "" {
+		fmt.Printf("current: %s\n", current)
+	}
+	fmt.Printf("raw: %d sessions / %d messages\n", stat.Sessions, stat.RawRecords)
+	fmt.Printf("distilled: %d observations / %d facets\n", stat.Observations, stat.Facets)
+	fmt.Printf("queue: %d pending, %d backing off\n", stat.Pending, stat.BackedOff)
+	fmt.Printf("raw data through: %s\n", valueOrNever(lastRaw))
+	fmt.Printf("distilled data through: %s\n", valueOrNever(lastDistilled))
+	return nil
+}
+
+func cmdDistillStop() error {
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
+		return err
+	}
+	pid := st.MetaString("worker_pid")
+	if !workerPIDAlive(pid) {
+		_ = st.SetMetaString("worker_status", "idle")
+		_ = st.SetMetaString("worker_pid", "")
+		_ = st.SetMetaString("worker_current", "")
+		fmt.Println("distill worker is not running")
+		return nil
+	}
+	if err := terminateWorker(pid); err != nil {
+		return err
+	}
+	_ = st.SetMetaString("worker_status", "stopping")
+	fmt.Printf("distill stop requested; sent TERM to worker pid=%s\n", pid)
+	return nil
+}
+
+func workerPIDAlive(pid string) bool {
+	n, err := strconv.Atoi(strings.TrimSpace(pid))
+	if err != nil || n <= 0 {
+		return false
+	}
+	return isWitnessWorkerProcess(n)
+}
+
+func isWitnessWorkerProcess(pid int) bool {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	cmd := strings.TrimSpace(string(out))
+	return strings.Contains(cmd, "witness") && strings.Contains(cmd, " worker")
+}
+
+func terminateWorker(pid string) error {
+	n, err := strconv.Atoi(strings.TrimSpace(pid))
+	if err != nil || n <= 0 {
+		return fmt.Errorf("invalid worker pid %q", pid)
+	}
+	if err := syscall.Kill(-n, syscall.SIGTERM); err == nil {
+		return nil
+	}
+	if err := syscall.Kill(n, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("terminate worker pid=%d: %w", n, err)
+	}
+	return nil
+}
+
+func valueOrNever(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "never"
+	}
+	return v
 }
 
 func cmdOpenCodeSync(args []string, quiet bool) error {
@@ -523,8 +786,11 @@ func cmdOpenCodeSync(args []string, quiet bool) error {
 	cfg := st.LoadConfig()
 	pending, _ := st.PendingSessions()
 	shouldRunWorker := stats.Records > 0 || len(pending) > 0 || st.ReviewDue(cfg)
+	workerRan := false
 	if shouldRunWorker && wait {
-		if err := cmdWorker(nil); err != nil {
+		ran, err := runWorker()
+		workerRan = ran
+		if err != nil {
 			return err
 		}
 	} else if shouldRunWorker {
@@ -533,7 +799,13 @@ func cmdOpenCodeSync(args []string, quiet bool) error {
 	if !quiet {
 		fmt.Printf("opencode sync: imported %d raw record(s) from %d session(s)\n", stats.Records, stats.Sessions)
 		if wait {
-			fmt.Println("worker finished; run `witness review` to force L4 regeneration or `witness profile` to read existing summaries")
+			if !shouldRunWorker {
+				fmt.Println("no worker run needed; no pending distillation or review work")
+			} else if workerRan {
+				fmt.Println("worker finished; run `witness review` to force L4 regeneration or `witness profile` to read existing summaries")
+			} else {
+				fmt.Println("worker already running; work remains queued for that worker")
+			}
 		} else {
 			fmt.Println("worker kicked; run `witness doctor` or `witness profile` after distillation finishes")
 		}
