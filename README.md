@@ -185,7 +185,7 @@ Claude Code auth via `claude -p`; set `runner = opencode` to use a private `open
 
 ```sh
 ./install.sh claude    # Claude Code: build, fetch model (~448MB once), wire hooks + MCP
-./install.sh opencode  # OpenCode: build, fetch model, install plugin + MCP
+./install.sh opencode  # OpenCode: build, fetch model, install local plugin + MCP
 ```
 
 That's the whole thing — idempotent, safe to re-run after a `git pull`. The target
@@ -220,13 +220,37 @@ are left in place for now.
 
 OpenCode support has two pieces:
 
-- A plugin (`~/.config/opencode/plugins/claude-witness.js`, generated from
-  [`internal/runtimes/opencode/plugin/claude-witness.js`](internal/runtimes/opencode/plugin/claude-witness.js))
-  captures OpenCode message events into witness L0, reconciles OpenCode's SQLite DB on idle, and kicks
-  background distillation through that import path without waiting.
+- A plugin captures OpenCode message events into witness L0, reconciles OpenCode's SQLite DB on idle,
+  and kicks background distillation through that import path without waiting. From-source installs write
+  a local plugin to `~/.config/opencode/plugins/claude-witness.js`; published installs can use the npm
+  plugin `@witness-ai/opencode`.
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.
+
+If you install the OpenCode plugin from npm, make sure `witness` is on `PATH` (or set `WITNESS_BIN` before
+starting OpenCode), then add the plugin and MCP server to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@witness-ai/opencode"],
+  "mcp": {
+    "witness": {
+      "type": "local",
+      "command": ["witness", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+The npm package lives in [`npm/opencode`](npm/opencode):
+
+```sh
+cd npm/opencode
+npm publish --access public
+```
 
 Manual verification path:
 

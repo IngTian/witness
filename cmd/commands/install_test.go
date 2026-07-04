@@ -434,8 +434,11 @@ func TestMergeOpenCodeMCPAcceptsJSONC(t *testing.T) {
 
 func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	src := opencodeplugin.Source("/repo/hooks/witness.sh")
-	if !strings.Contains(src, `const SHIM = "/repo/hooks/witness.sh"`) {
+	if !strings.Contains(src, `globalThis.WITNESS_SHIM = "/repo/hooks/witness.sh"`) {
 		t.Fatalf("installed plugin does not bake the shim path: %s", src)
+	}
+	if !strings.Contains(src, `process.env.WITNESS_BIN || "witness"`) {
+		t.Fatalf("npm plugin should fall back to witness on PATH: %s", src)
 	}
 	if !strings.Contains(src, `"capture", "--agent", "opencode"`) {
 		t.Fatalf("installed plugin should capture OpenCode events directly: %s", src)

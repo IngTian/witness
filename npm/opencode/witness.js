@@ -27,7 +27,7 @@ function syncOpenCode() {
   spawnWitness(["import", "--agent", "opencode", "--quiet"])
 }
 
-export const ClaudeWitness = async () => ({
+export const Witness = async () => ({
   event: async ({ event }) => {
     if (process.env.WITNESS_WORKER === "1") return
     const type = eventType(event)
