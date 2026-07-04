@@ -1,5 +1,10 @@
 # claude-witness — Let Claude Code and OpenCode witness your growth.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
+![Single binary](https://img.shields.io/badge/single%20binary-CGO__ENABLED%3D0-informational)
+![Runtimes](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20OpenCode-8A2BE2)
+
 > *"Aah, you were at my side, all along.*  
 > *My true mentor...*  
 > *My guiding moonlight..."*  
@@ -16,20 +21,18 @@ you back to yourself, and to leave you a re-readable record of how you thought a
 files). Building a *coach* on top of it (proactive reflections, "you've done this three times…")
 is left to other projects that read its output.
 
+**Contents:** [How it works](#how-it-works) · [Lenses](#lenses) · [Example](#example-one-moment-end-to-end) · [Reading the archive](#reading-the-archive) · [Commands](#commands) · [Install](#install) · [Configuration](#configuration) · [Your data](#your-data-is-yours)
+
 ## How it works
 
 Four layers — one ground-truth, three derived and **regenerable** from it:
 
-- **raw (L0) — ground truth.** Every turn is captured verbatim: from stable Claude Code hook
-  fields (`UserPromptSubmit.prompt`, `Stop.last_assistant_message`) or from OpenCode's local
-  SQLite session database (`message`/`part` text records). Append-only, never LLM-touched.
-- **observations (L1) — derived.** A cheap per-session worker mines atomic, evidence-anchored
-  observations about *you*, tagged by lens. Append-only.
-- **facets (L2) — derived, bi-temporal.** A periodic reviewer synthesizes observations into
-  evolving *facets*, each keeping its **change history** (`valid_from`/`valid_to`) — so the archive
-  answers "how did I change," not just "who am I now." Old values are never deleted.
-- **profile (L4) — derived narrative.** A short, human-readable markdown summary distilled from the
-  facets, regenerated after each review: one per lens plus a cross-lens `unified` portrait.
+| Layer | Kind | What it is |
+|-------|------|------------|
+| **raw (L0)** | ground truth | Every turn captured verbatim — from stable Claude Code hook fields (`UserPromptSubmit.prompt`, `Stop.last_assistant_message`) or OpenCode's local SQLite session DB (`message`/`part` text). Append-only, never LLM-touched. |
+| **observations (L1)** | derived | A cheap per-session worker mines atomic, evidence-anchored observations about *you*, tagged by lens. Append-only. |
+| **facets (L2)** | derived, bi-temporal | A periodic reviewer synthesizes observations into evolving *facets*, each keeping its **change history** (`valid_from`/`valid_to`) — so the archive answers "how did I change," not just "who am I now." Old values are never deleted. |
+| **profile (L4)** | derived narrative | A short, human-readable markdown summary distilled from the facets, regenerated after each review: one per lens plus a cross-lens `unified` portrait. |
 
 The archive is **collect-only / pull-only**: witness captures and distills everywhere, but never
 injects anything into a session. Nothing is pushed — you (or an agent) read the profile on demand.
