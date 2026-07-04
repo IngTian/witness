@@ -108,8 +108,18 @@ func cmdDoctor(asJSON bool) error {
 		return emitJSON(out)
 	}
 
-	fmt.Println("claude-witness doctor")
-	fmt.Printf("  data root: %s\n", st.Root)
+	// --- human-readable report (decorative; --json is handled above) ----------
+	// Overall status glyph: bad if the embedder is down (doctor's core check
+	// failed), warn if distillation is stuck (sessions backing off) or an
+	// opencode model is misconfigured, else ok.
+	overall := okGlyph()
+	if embErr != nil {
+		overall = badGlyph()
+	} else if stat.BackedOff > 0 || deferredErr != nil {
+		overall = warnGlyph()
+	}
+	fmt.Printf("%s  %s\n", overall, bold("claude-witness doctor"))
+	fmt.Printf("   %s %s\n", dim("data root:"), st.Root)
 
 	// Runner block. The runner is GLOBAL: one process distills every session
 	// regardless of source (Claude Code and OpenCode both feed the same L0), so
@@ -120,30 +130,52 @@ func cmdDoctor(asJSON bool) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
 		runnerCmd = "opencode serve"
 	}
-	fmt.Printf("  runner: %s  (via `%s`; distills ALL sessions — Claude Code + OpenCode)\n", cfg.Runner, runnerCmd)
-	fmt.Printf("  models: triage=%s  distill=%s  (review_every=%d poignancy=%d)\n",
-		modelOrDefault(cfg.TriageModel, runnerCmd), modelOrDefault(cfg.DistillModel, runnerCmd),
-		cfg.ReviewEvery, cfg.ReviewPoignancy)
-	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
-		fmt.Printf("  opencode models: %s\n", opencodeModels)
-	}
-	fmt.Println("  → switch runner:  witness install <claude|opencode>  (re-binds the runner)")
-	fmt.Printf("  → set models:     edit %s  (triage_model, distill_model)\n", st.ConfigPath())
-	fmt.Printf("  archive: %d sessions, %d raw messages, %d observations, %d facets\n",
-		stat.Sessions, stat.RawRecords, stat.Observations, stat.Facets)
-	fmt.Printf("  queue: %d pending, %d backing off | last review: %s\n",
-		stat.Pending, stat.BackedOff, lastReview)
-	if stat.BackedOff > 0 {
-		fmt.Println("  ⚠ sessions are backing off — mining is failing; check witness.log")
-	}
-	fmt.Println("  profile: collect-only (never injected); read via `witness profile`, MCP get_profile/get_facets, or query witness.db")
-	fmt.Printf("  embedder: %s", embedderStatus)
-	if embedDim > 0 {
-		fmt.Printf(" (dim=%d)", embedDim)
-	}
 	fmt.Println()
-	if embedDim > 0 {
-		fmt.Printf("  EN<->ZH cosine: %.4f | EN<->unrelated: %.4f (want first > second)\n", enZh, enUnrelated)
+	fmt.Println("  " + bold("Distillation"))
+	fmt.Printf("    %s %s  %s\n", label("runner"), cyan(cfg.Runner),
+		dim(fmt.Sprintf("(via `%s`; distills ALL sessions — Claude Code + OpenCode)", runnerCmd)))
+	fmt.Printf("    %s triage=%s  distill=%s\n", label("models"),
+		modelOrDefault(cfg.TriageModel, runnerCmd), modelOrDefault(cfg.DistillModel, runnerCmd))
+	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
+		fmt.Printf("    %s %s\n", label("oc models"), opencodeModels)
+	}
+	fmt.Printf("    %s review_every=%d  poignancy=%d\n", label("review"), cfg.ReviewEvery, cfg.ReviewPoignancy)
+	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
+	fmt.Printf("    %s edit %s  %s\n", dim("↳ set models:  "), st.ConfigPath(), dim("(triage_model, distill_model)"))
+
+	fmt.Println()
+	fmt.Println("  " + bold("Archive"))
+	fmt.Printf("    %s %d sessions · %d raw messages · %d observations · %d facets\n",
+		label("layers"), stat.Sessions, stat.RawRecords, stat.Observations, stat.Facets)
+	queueLine := fmt.Sprintf("%d pending · %d backing off · last review: %s", stat.Pending, stat.BackedOff, lastReview)
+	if stat.BackedOff > 0 {
+		fmt.Printf("    %s %s\n", label("queue"), yellow(queueLine))
+		fmt.Printf("    %s %s\n", warnGlyph(), yellow("sessions are backing off — mining is failing; check witness.log"))
+	} else {
+		fmt.Printf("    %s %s\n", label("queue"), queueLine)
+	}
+	fmt.Printf("    %s %s\n", label("profile"),
+		dim("collect-only (never injected); read via `witness profile`, MCP get_profile/get_facets, or witness.db"))
+
+	fmt.Println()
+	fmt.Println("  " + bold("Embedder"))
+	if embErr != nil {
+		fmt.Printf("    %s %s %s\n", label("status"), badGlyph(), red(embedderStatus))
+	} else {
+		status := embedderStatus
+		if embedDim > 0 {
+			status = fmt.Sprintf("%s (dim=%d)", embedderStatus, embedDim)
+		}
+		fmt.Printf("    %s %s %s\n", label("status"), okGlyph(), green(status))
+		if embedDim > 0 {
+			retrieval := fmt.Sprintf("EN↔ZH %.4f  >  EN↔unrelated %.4f", enZh, enUnrelated)
+			mark := okGlyph()
+			if enZh <= enUnrelated {
+				mark = warnGlyph()
+				retrieval = yellow(retrieval + "  (expected EN↔ZH higher!)")
+			}
+			fmt.Printf("    %s %s %s\n", label("retrieval"), mark, retrieval)
+		}
 	}
 	return deferredErr
 }
