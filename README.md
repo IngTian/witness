@@ -1,4 +1,4 @@
-# claude-witness — Let Claude Code and OpenCode witness your growth.
+# witness — Let Claude Code and OpenCode witness your growth.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
