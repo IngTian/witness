@@ -12,7 +12,11 @@ type HookEvent struct {
 	Prompt               string         `json:"prompt"`
 	LastAssistantMessage string         `json:"last_assistant_message"`
 	Effort               map[string]any `json:"effort"`
-	Cwd                  string         `json:"cwd"`
+	// Cwd is parsed from the hook payload but intentionally NOT persisted: Capture
+	// never calls store.RecordMeta, so session_meta.cwd stays empty for CC sessions.
+	// It was meant for repo-scoped lenses, an idea dropped for security (lenses are
+	// global; nothing is read from a repo). Retained in case a future feature needs it.
+	Cwd string `json:"cwd"`
 }
 
 func Capture(st *store.Store, e HookEvent, now time.Time) error {

@@ -119,13 +119,24 @@ func (s *Store) LastDistilledRawTS() string {
 func (s *Store) NextSeq(session string) int { return s.RawCount(session) }
 
 // RecordMeta writes session meta once (idempotent: only on first sight).
+//
+// NOTE: retained-but-currently-unused on the Claude Code path — CC capture never
+// calls this, so session_meta.cwd stays empty for CC sessions (only the OpenCode
+// import/capture path, via ApplyRawImport, populates it). The `cwd` column was
+// introduced for repo-scoped lenses ("which repo is this session in → apply that
+// repo's lens"), but that idea was deliberately dropped: lenses are global and
+// nothing is read from a repo, so a cloned repo can't inject a prompt (see
+// internal/lens/lens.go). Kept for the OpenCode writer + a possible future
+// consumer; nothing reads cwd downstream today (ReadMeta has no callers).
 func (s *Store) RecordMeta(m SessionMeta) {
 	_, _ = s.db.Exec(
 		`INSERT OR IGNORE INTO session_meta(session, cwd, started) VALUES (?, ?, ?)`,
 		m.Session, m.Cwd, m.Started)
 }
 
-// ReadMeta returns a session's meta (zero value if absent).
+// ReadMeta returns a session's meta (zero value if absent). Currently has no
+// callers — see the RecordMeta note above (cwd/session_meta is retained for the
+// OpenCode writer and possible future use, not read on any live path).
 func (s *Store) ReadMeta(session string) SessionMeta {
 	m := SessionMeta{Session: session}
 	_ = s.db.QueryRow(`SELECT cwd, started FROM session_meta WHERE session = ?`, session).
