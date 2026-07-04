@@ -35,9 +35,19 @@ type OpenCodeServer struct {
 	baseURL    string
 	authHeader string
 	cmd        *exec.Cmd
-	waitCh     chan error
 	client     *http.Client
 	logs       *safeBuffer
+
+	// waitDone is CLOSED (never sent to) once cmd.Wait() returns, with the exit
+	// error stored in waitErr just before the close. A closed channel is
+	// receivable any number of times, so both waitHealthy's early-exit probe and
+	// Close's post-signal wait can observe it. (A single-send buffered channel
+	// would let whichever read first consume the only value, leaving the other
+	// blocked forever — the deadlock this replaces.) waitErr is written before the
+	// close and only read after receiving from waitDone, so the close's
+	// happens-before edge makes that read race-free without a lock.
+	waitDone chan struct{}
+	waitErr  error
 
 	mu     sync.Mutex
 	closed bool
@@ -70,11 +80,14 @@ func StartOpenCodeServer(ctx context.Context, models ...string) (*OpenCodeServer
 		baseURL:    fmt.Sprintf("http://127.0.0.1:%d", port),
 		authHeader: "Basic " + basicAuthToken("opencode", password),
 		cmd:        cmd,
-		waitCh:     make(chan error, 1),
+		waitDone:   make(chan struct{}),
 		client:     &http.Client{},
 		logs:       logs,
 	}
-	go func() { srv.waitCh <- cmd.Wait() }()
+	go func() {
+		srv.waitErr = cmd.Wait()
+		close(srv.waitDone)
+	}()
 	if err := srv.waitHealthy(ctx); err != nil {
 		srv.Close()
 		return nil, err
@@ -144,7 +157,7 @@ func (s *OpenCodeServer) Close() error {
 	}
 	s.closed = true
 	cmd := s.cmd
-	waitCh := s.waitCh
+	waitDone := s.waitDone
 	s.mu.Unlock()
 
 	if cmd == nil || cmd.Process == nil {
@@ -152,12 +165,12 @@ func (s *OpenCodeServer) Close() error {
 	}
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 	select {
-	case err := <-waitCh:
-		return err
+	case <-waitDone:
+		return s.waitErr
 	case <-time.After(5 * time.Second):
 		_ = cmd.Process.Kill()
-		<-waitCh
-		return nil
+		<-waitDone // waitDone is closed, so this always returns (no deadlock)
+		return s.waitErr
 	}
 }
 
@@ -200,8 +213,8 @@ func (s *OpenCodeServer) waitHealthy(ctx context.Context) error {
 	var lastErr error
 	for time.Now().Before(deadline) {
 		select {
-		case err := <-s.waitCh:
-			return fmt.Errorf("opencode serve exited before health check: %w (logs: %s)", err, s.logs.String())
+		case <-s.waitDone:
+			return fmt.Errorf("opencode serve exited before health check: %w (logs: %s)", s.waitErr, s.logs.String())
 		default:
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/global/health", nil)
