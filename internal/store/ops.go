@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -373,14 +372,10 @@ func (s *Store) lockFile(name string) (unlock func(), ok bool) {
 	if err != nil {
 		return func() {}, false
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return func() {}, false
-	}
-	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, true
+	// flockFile takes the OS-specific exclusive, non-blocking lock (flock(2) on
+	// Unix, LockFileEx on Windows) and owns closing f. Split by GOOS so the binary
+	// builds on both — see flock_unix.go / flock_windows.go.
+	return flockFile(f)
 }
 
 // --- observations ---------------------------------------------------------
