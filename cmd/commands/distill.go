@@ -5,7 +5,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/IngTian/claude-witness/internal/store"
 	"github.com/spf13/cobra"
@@ -238,11 +237,9 @@ func terminateWorker(pid string) error {
 	if err != nil || n <= 0 {
 		return fmt.Errorf("invalid worker pid %q", pid)
 	}
-	if err := syscall.Kill(-n, syscall.SIGTERM); err == nil {
-		return nil
-	}
-	if err := syscall.Kill(n, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("terminate worker pid=%d: %w", n, err)
-	}
-	return nil
+	// terminateWorkerPID is GOOS-split: on Unix it signals the worker's process
+	// GROUP first (SIGTERM to -n, matching the setsid detach) then the pid; on
+	// Windows there are no process-group signals, so it opens the process and
+	// terminates it. See procsignal_unix.go / procsignal_windows.go.
+	return terminateWorkerPID(n)
 }

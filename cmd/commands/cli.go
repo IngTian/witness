@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/IngTian/claude-witness/internal/store"
 )
@@ -58,21 +57,15 @@ func spawnDetached(args ...string) {
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	// Put the worker in its own session so a SessionEnd-on-tab-close doesn't
-	// SIGHUP it mid-distillation (the terminal signals only its own group).
+	// Put the worker in its own session/process group so a SessionEnd-on-tab-close
+	// doesn't kill it mid-distillation. detachSysProcAttr is GOOS-split (setsid on
+	// Unix; DETACHED_PROCESS|NEW_PROCESS_GROUP on Windows) — see detach_unix.go /
+	// detach_windows.go.
 	cmd.SysProcAttr = detachSysProcAttr()
 	_ = cmd.Start() // fire and forget
 	if cmd.Process != nil {
 		_ = cmd.Process.Release()
 	}
-}
-
-// detachSysProcAttr starts a child in its own session (setsid), detaching it from
-// the controlling terminal's process group. Without this, closing the tab/terminal
-// SIGHUPs the detached worker mid-distillation; the SessionStart backlog sweep
-// would still recover it next launch, but this keeps the fast path reliable.
-func detachSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setsid: true}
 }
 
 // reportError prints err in the format matching the caller's output mode: a JSON
