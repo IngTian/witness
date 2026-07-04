@@ -152,18 +152,21 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 
 ## Commands
 
-`witness <doctor | profile | review | lens | import | distill | opencode | cleanup | install | uninstall>` (capture,
+`witness <doctor | profile | facets | observations | review | lens | import | distill | cleanup | install | uninstall>` (capture,
 the worker, and the MCP server are internal entry points invoked by Claude Code/OpenCode, not typed
 by hand):
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
+- `witness facets [lens]` — print current structured facets (CLI equivalent of MCP `get_facets`).
+- `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
+- `witness observations record --session <id> --dimension <name> --observation <text>` — stage an active observation and kick the worker.
+- `witness observations delete <obs_id>` — prune a wrong observation.
 - `witness review` — force an L2 review and regenerate L4 profiles from existing observations.
 - `witness lens register|enable|disable|list` — manage lenses.
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
 - `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
 - `witness distill start|status|stop` — manage the background distillation worker.
-- `witness opencode sync [--wait]` — legacy/debug OpenCode import path; avoid `--wait` for daily use.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
 
@@ -177,17 +180,18 @@ Claude Code auth via `claude -p`; set `runner = opencode` to use `opencode run` 
 ## Install
 
 ```sh
-./install.sh             # Claude Code: build, fetch model (~448MB once), wire hooks + MCP
-./install.sh opencode    # OpenCode: build, fetch model, install plugin + MCP
-./install.sh all         # install both integrations
+./install.sh claude    # Claude Code: build, fetch model (~448MB once), wire hooks + MCP
+./install.sh opencode  # OpenCode: build, fetch model, install plugin + MCP
 ```
 
-That's the whole thing — idempotent, safe to re-run after a `git pull`. It also offers to add a
-`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `import`, `distill`, `cleanup`).
-Equivalent `make` targets exist (`make install`, `make install-opencode`, `make install-all`,
-`make build`, `make doctor`, `make uninstall`, `make uninstall-opencode`, `make clean`). To remove
-it: `make uninstall` or `make uninstall-opencode` (strips integration wiring; your data is
-untouched).
+That's the whole thing — idempotent, safe to re-run after a `git pull`. The target
+is required: install always binds the matching distillation runtime into
+`config.toml` (`runner = claude` or `runner = opencode`). It also offers to add a
+`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `import`,
+`distill`, `cleanup`). Equivalent `make` targets exist (`make install`,
+`make install-opencode`, `make build`, `make doctor`, `make uninstall`,
+`make uninstall-opencode`, `make clean`). To remove it: `make uninstall` or
+`make uninstall-opencode` (strips integration wiring; your data is untouched).
 
 ### OpenCode support
 

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # One-command install for claude-witness (working-copy / from-source).
-# Builds the binary, fetches the embedding model once, and wires the Claude Code
-# hooks + MCP server. Idempotent — safe to re-run after a `git pull`.
+# Builds the binary, fetches the embedding model once, and wires the selected
+# agent integration (Claude Code or OpenCode). Idempotent — safe to re-run after
+# a `git pull`.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
-TARGET="${1:-claude}"
+TARGET="${1:-}"
+if [[ "$TARGET" != "claude" && "$TARGET" != "opencode" ]]; then
+  echo "usage: ./install.sh <claude|opencode>" >&2
+  exit 1
+fi
 
 # --- pretty output (decorative only; degrades to plain text when not a TTY) ----
 if [ -t 1 ]; then
@@ -46,8 +51,6 @@ ok "model ready"
 case "$TARGET" in
   claude)   LABEL="Claude Code hooks + MCP server" ;;
   opencode) LABEL="OpenCode plugin + MCP server" ;;
-  all)      LABEL="Claude Code + OpenCode integrations" ;;
-  *) die "unknown install target '$TARGET' (want claude, opencode, or all)" ;;
 esac
 step 4 "Wiring $LABEL"
 "$BIN" install "$TARGET"
@@ -91,5 +94,4 @@ printf '  %switness doctor%s   %s# verify (or: GOMLX_BACKEND=go %s doctor)%s\n' 
 case "$TARGET" in
   claude)   printf '  %sthen restart Claude Code (or open /hooks) so the hooks load%s\n\n' "$D" "$X" ;;
   opencode) printf '  %sthen restart OpenCode so the plugin and MCP server load%s\n\n' "$D" "$X" ;;
-  all)      printf '  %sthen restart Claude Code and OpenCode so integrations load%s\n\n' "$D" "$X" ;;
 esac

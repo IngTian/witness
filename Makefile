@@ -1,17 +1,21 @@
 # claude-witness — build & install. Pure-Go, CGO disabled (single static binary).
 BIN := bin/witness-$(shell go env GOOS)-$(shell go env GOARCH)
+VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+BUILDTIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS    := -X github.com/IngTian/claude-witness/cmd/commands.version=$(VERSION) -X github.com/IngTian/claude-witness/cmd/commands.commit=$(COMMIT) -X github.com/IngTian/claude-witness/cmd/commands.buildTime=$(BUILDTIME)
 
-.PHONY: build build-all fetch-model install install-opencode install-all uninstall uninstall-opencode doctor test vet fmt clean
+.PHONY: build build-all fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
 
 ## build: compile the binary for this OS/arch into bin/
 build:
-	CGO_ENABLED=0 go build -o $(BIN) ./cmd/witness
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/witness
 
 ## build-all: cross-compile for mac+linux, amd64+arm64
 build-all:
 	@for os in darwin linux; do for arch in amd64 arm64; do \
 	  echo "building $$os/$$arch"; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o bin/witness-$$os-$$arch ./cmd/witness; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o bin/witness-$$os-$$arch ./cmd/witness; \
 	done; done
 
 ## fetch-model: download the embedding model (~448MB, once; idempotent)
@@ -25,10 +29,6 @@ install: build fetch-model
 ## install-opencode: build + fetch model + wire OpenCode plugin/MCP (idempotent)
 install-opencode: build fetch-model
 	$(BIN) install opencode
-
-## install-all: install both Claude Code and OpenCode integrations
-install-all: build fetch-model
-	$(BIN) install all
 
 ## uninstall: remove the hooks + MCP server
 uninstall: build

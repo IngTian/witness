@@ -42,6 +42,12 @@ func Open() (*Store, error) {
 		return nil, fmt.Errorf("mkdir %s: %w", root, err)
 	}
 	s := &Store{Root: root}
+	// Lay down a fully-commented config template on first contact so any command a
+	// user runs (doctor, profile, lens...) exposes every tunable — not just the
+	// fields install writes. Existing configs are never touched (forward-compatible).
+	// Best-effort: a write failure is ignored because config is optional and a
+	// command must not fail just because it couldn't write a template.
+	_ = s.EnsureConfigFile()
 	db, err := openDB(s.dbPath())
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)

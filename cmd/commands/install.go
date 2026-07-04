@@ -1,4 +1,4 @@
-package main
+package commands
 
 import (
 	"encoding/json"
@@ -8,8 +8,34 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/IngTian/claude-witness/internal/store"
 	opencodeplugin "github.com/IngTian/claude-witness/internal/runtimes/opencode/plugin"
+	"github.com/spf13/cobra"
 )
+
+func newInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install <claude|opencode>",
+		Short: "Install witness integrations.",
+		Long:  "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cmdInstall(args)
+		},
+	}
+}
+
+func newUninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall <claude|opencode>",
+		Short: "Remove witness integrations without deleting data.",
+		Long:  "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cmdUninstall(args)
+		},
+	}
+}
 
 // hookCmd / hookEntry mirror the settings.json hooks schema for the entries we own.
 type hookCmd struct {
@@ -174,29 +200,46 @@ func repoShim() (string, error) {
 	return shim, nil
 }
 
-// cmdInstall wires witness into Claude Code or OpenCode. No args preserves the
-// original Claude-only behavior; pass "opencode" or "all" explicitly for OpenCode.
+// cmdInstall wires witness into Claude Code or OpenCode. The target is required
+// (enforced by cobra ExactArgs) so install always binds the matching distillation
+// runtime into config.toml.
 func cmdInstall(args []string) error {
 	target := installTarget(args)
 	switch target {
 	case "claude":
-		return cmdInstallClaude()
-	case "opencode":
-		return cmdInstallOpenCode()
-	case "all":
 		if err := cmdInstallClaude(); err != nil {
 			return err
 		}
-		return cmdInstallOpenCode()
+	case "opencode":
+		if err := cmdInstallOpenCode(); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("usage: witness install [claude|opencode|all]")
+		return fmt.Errorf("unknown install target %q (want claude or opencode)", target)
 	}
+	return bindRunner(target)
+}
+
+// bindRunner pins config.toml's runner field to the integration that was just
+// wired, so distillation uses the same agent runtime the user installed for.
+// store.Open() already laid down the full template if config was missing; here
+// we only flip runner. Best-effort: a store open failure (rare; Open mkdirs) is
+// logged but does not fail install, since hooks/plugin are already in place.
+func bindRunner(target string) error {
+	st, err := store.Open()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "witness: could not open store to set runner: %v\n", err)
+		return nil
+	}
+	defer st.Close()
+	if err := st.SetRunner(target); err != nil {
+		return fmt.Errorf("write runner to config: %w", err)
+	}
+	fmt.Printf("runner set to %s in witness config.toml\n", target)
+	return nil
 }
 
 func installTarget(args []string) string {
-	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
-		return "claude"
-	}
 	return strings.ToLower(strings.TrimSpace(args[0]))
 }
 
@@ -280,11 +323,11 @@ func cmdInstallOpenCode() error {
 	}
 	fmt.Printf("OpenCode MCP server 'witness' registered in %s\n", config)
 	fmt.Println("done — restart OpenCode so the plugin and MCP server load.")
-	fmt.Println("note: set `runner = opencode` in witness config.toml if you want distillation to use OpenCode instead of Claude.")
 	return nil
 }
 
 // cmdUninstall removes the witness hooks/plugin and MCP server (idempotent).
+// Data, config, and the runner setting are left untouched.
 func cmdUninstall(args []string) error {
 	target := installTarget(args)
 	switch target {
@@ -292,13 +335,8 @@ func cmdUninstall(args []string) error {
 		return cmdUninstallClaude()
 	case "opencode":
 		return cmdUninstallOpenCode()
-	case "all":
-		if err := cmdUninstallClaude(); err != nil {
-			return err
-		}
-		return cmdUninstallOpenCode()
 	default:
-		return fmt.Errorf("usage: witness uninstall [claude|opencode|all]")
+		return fmt.Errorf("unknown uninstall target %q (want claude or opencode)", target)
 	}
 }
 
