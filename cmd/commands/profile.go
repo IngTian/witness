@@ -59,10 +59,17 @@ func cmdProfile(args []string, asJSON bool) error {
 		fmt.Printf("no profile summary for %q yet — it's generated after the next background review.\n", lensName)
 		return nil
 	}
-	fmt.Println("Profile freshness:")
-	fmt.Printf("  based on distilled data through: %s\n", fresh.DistilledThrough)
-	fmt.Printf("  archive has raw data through: %s\n", fresh.RawThrough)
-	fmt.Printf("  pending: %d sessions\n\n", fresh.Pending)
+	// Decorative freshness header only; the profile body (md) is LLM-authored
+	// markdown and printed verbatim.
+	fmt.Printf("%s %s\n", dim("profile:"), cyan(lensName))
+	fmt.Printf("  %s %s\n", label("distilled"), fresh.DistilledThrough)
+	fmt.Printf("  %s %s\n", label("raw"), fresh.RawThrough)
+	pendingText := fmt.Sprintf("%d sessions", fresh.Pending)
+	if fresh.Pending > 0 {
+		pendingText = yellow(pendingText + " awaiting distillation")
+	}
+	fmt.Printf("  %s %s\n", label("pending"), pendingText)
+	fmt.Println(dim(strings.Repeat("─", 60)))
 	fmt.Println(md)
 	return nil
 }

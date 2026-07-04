@@ -108,16 +108,19 @@ func cmdLens(args []string) error {
 	case "list":
 		enabled := st.LoadConfig().EnabledLenses
 		reg := st.RegisteredLenses()
+		// The default lens always runs and isn't in the registry; show it first so
+		// `lens list` reflects what actually runs, not just the registered extras.
+		fmt.Printf("  %s %s  %s\n", green("✓"), "default", dim("(built-in, always on)"))
 		if len(reg) == 0 {
-			fmt.Println("no lenses registered")
+			fmt.Println(dim("  no additional lenses registered"))
 			return nil
 		}
 		for _, name := range reg {
-			state := "disabled"
 			if slices.Contains(enabled, name) {
-				state = "enabled"
+				fmt.Printf("  %s %s  %s\n", green("✓"), name, dim("(enabled — runs on every session)"))
+			} else {
+				fmt.Printf("  %s %s  %s\n", dim("·"), name, dim("(registered, disabled)"))
 			}
-			fmt.Printf("%s\t%s\n", name, state)
 		}
 	default:
 		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list)", args[0])

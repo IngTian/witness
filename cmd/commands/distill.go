@@ -128,22 +128,39 @@ func cmdDistillStatus(asJSON bool) error {
 		}
 		return emitJSON(out)
 	}
-	fmt.Printf("worker: %s", status)
+	// Decorative rendering (same fields as --json above). Glyph reflects worker
+	// liveness: running/stopping = active, idle = neutral.
+	workerGlyph := dim("○")
+	statusText := status
+	switch status {
+	case "running":
+		workerGlyph = green("●")
+		statusText = green(status)
+	case "stopping":
+		workerGlyph = yellow("●")
+		statusText = yellow(status)
+	}
+	fmt.Printf("%s %s %s", workerGlyph, bold("worker:"), statusText)
 	if pid != "" {
-		fmt.Printf(" pid=%s", pid)
+		fmt.Printf("  %s", dim("pid="+pid))
 	}
 	if heartbeat != "" {
-		fmt.Printf(" heartbeat=%s", heartbeat)
+		fmt.Printf("  %s", dim("♥ "+heartbeat))
 	}
 	fmt.Println()
 	if current != "" {
-		fmt.Printf("current: %s\n", current)
+		fmt.Printf("  %s %s\n", label("current"), current)
 	}
-	fmt.Printf("raw: %d sessions / %d messages\n", stat.Sessions, stat.RawRecords)
-	fmt.Printf("distilled: %d observations / %d facets\n", stat.Observations, stat.Facets)
-	fmt.Printf("queue: %d pending, %d backing off\n", stat.Pending, stat.BackedOff)
-	fmt.Printf("raw data through: %s\n", valueOrNever(lastRaw))
-	fmt.Printf("distilled data through: %s\n", valueOrNever(lastDistilled))
+	fmt.Printf("  %s %d sessions · %d messages\n", label("raw"), stat.Sessions, stat.RawRecords)
+	fmt.Printf("  %s %d observations · %d facets\n", label("distilled"), stat.Observations, stat.Facets)
+	queueLine := fmt.Sprintf("%d pending · %d backing off", stat.Pending, stat.BackedOff)
+	if stat.BackedOff > 0 {
+		fmt.Printf("  %s %s\n", label("queue"), yellow(queueLine))
+	} else {
+		fmt.Printf("  %s %s\n", label("queue"), queueLine)
+	}
+	fmt.Printf("  %s raw %s  ·  distilled %s\n", label("through"),
+		valueOrNever(lastRaw), valueOrNever(lastDistilled))
 	return nil
 }
 
