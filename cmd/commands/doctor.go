@@ -110,11 +110,25 @@ func cmdDoctor(asJSON bool) error {
 
 	fmt.Println("claude-witness doctor")
 	fmt.Printf("  data root: %s\n", st.Root)
-	fmt.Printf("  runner: %s | models: triage=%s distill=%s | review_every=%d poignancy=%d\n",
-		cfg.Runner, cfg.TriageModel, cfg.DistillModel, cfg.ReviewEvery, cfg.ReviewPoignancy)
-	if strings.EqualFold(cfg.Runner, "opencode") {
+
+	// Runner block. The runner is GLOBAL: one process distills every session
+	// regardless of source (Claude Code and OpenCode both feed the same L0), so
+	// make the active backend, its models, and how to change them explicit —
+	// otherwise a user who installed both is left guessing which LLM mines their
+	// sessions. Empty models mean "let the runner pick its environment default".
+	runnerCmd := "claude -p"
+	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
+		runnerCmd = "opencode serve"
+	}
+	fmt.Printf("  runner: %s  (via `%s`; distills ALL sessions — Claude Code + OpenCode)\n", cfg.Runner, runnerCmd)
+	fmt.Printf("  models: triage=%s  distill=%s  (review_every=%d poignancy=%d)\n",
+		modelOrDefault(cfg.TriageModel, runnerCmd), modelOrDefault(cfg.DistillModel, runnerCmd),
+		cfg.ReviewEvery, cfg.ReviewPoignancy)
+	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
 		fmt.Printf("  opencode models: %s\n", opencodeModels)
 	}
+	fmt.Println("  → switch runner:  witness install <claude|opencode>  (re-binds the runner)")
+	fmt.Printf("  → set models:     edit %s  (triage_model, distill_model)\n", st.ConfigPath())
 	fmt.Printf("  archive: %d sessions, %d raw messages, %d observations, %d facets\n",
 		stat.Sessions, stat.RawRecords, stat.Observations, stat.Facets)
 	fmt.Printf("  queue: %d pending, %d backing off | last review: %s\n",
@@ -132,6 +146,16 @@ func cmdDoctor(asJSON bool) error {
 		fmt.Printf("  EN<->ZH cosine: %.4f | EN<->unrelated: %.4f (want first > second)\n", enZh, enUnrelated)
 	}
 	return deferredErr
+}
+
+// modelOrDefault renders an empty model setting as an explicit "(<runner>
+// default)" so the user sees WHY a model column is blank (it's not broken —
+// the runner picks its environment default) rather than an empty field.
+func modelOrDefault(model, runnerCmd string) string {
+	if strings.TrimSpace(model) == "" {
+		return "(" + runnerCmd + " default)"
+	}
+	return model
 }
 
 type doctorJSON struct {

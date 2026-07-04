@@ -58,7 +58,7 @@ const dedupThreshold = 0.93
 type Worker struct {
 	Store    *store.Store
 	Embedder Embedder
-	Lenses   []*lens.Lens // default (always) + any active repo lenses
+	Lenses   []*lens.Lens // default (always) + any config-enabled lenses; all global, applied to every session regardless of source (CC or OpenCode)
 	Config   store.Config
 	Run      MineFunc // nil => the package Run (real `claude -p`)
 }
