@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildOpenCodeServeCmdIsolation(t *testing.T) {
@@ -49,7 +50,7 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 				t.Fatalf("bad session model: %#v", model)
 			}
 			_, _ = w.Write([]byte(`{"id":"ses_test"}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_test/message":
+		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_test/prompt_async":
 			prompted = true
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -73,7 +74,12 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			if model["providerID"] != "openai" || model["modelID"] != "gpt-5.5" {
 				t.Fatalf("bad message model: %#v", model)
 			}
-			_, _ = w.Write([]byte(`{"info":{"id":"msg_reply"},"parts":[{"id":"prt_1","type":"text","text":"RESULT"}]}`))
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_test/message":
+			_, _ = w.Write([]byte(`[
+				{"info":{"id":"msg_request","role":"user"},"parts":[{"id":"prt_u","type":"text","text":"DATA"}]},
+				{"info":{"id":"msg_reply","role":"assistant"},"parts":[{"id":"prt_1","type":"text","text":"RESULT"}]}
+			]`))
 		case r.Method == http.MethodDelete && r.URL.Path == "/session/ses_test":
 			deleted = true
 			_, _ = w.Write([]byte(`{}`))
@@ -97,9 +103,57 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 	}
 }
 
+func TestOpenCodeServerRunAbortsOnAsyncTimeout(t *testing.T) {
+	oldPoll := openCodeAsyncPollInterval
+	openCodeAsyncPollInterval = time.Millisecond
+	defer func() { openCodeAsyncPollInterval = oldPoll }()
+
+	var aborted, deleted bool
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			_, _ = w.Write([]byte(`{"id":"ses_timeout"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_timeout/prompt_async":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_timeout/message":
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_timeout/abort":
+			aborted = true
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/session/ses_timeout":
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	if _, err := srv.Run(ctx, "", "EXTRACT", "DATA"); err == nil {
+		t.Fatal("Run should time out")
+	}
+	if !aborted || !deleted {
+		t.Fatalf("aborted=%v deleted=%v", aborted, deleted)
+	}
+}
+
 func TestParseOpenCodeMessageResponse(t *testing.T) {
 	data := []byte(`{"parts":[{"id":"p1","type":"text","text":"first"},{"id":"p2","type":"reasoning","text":"hidden"},{"id":"p2","type":"text","text":"second"}]}`)
 	if got := parseOpenCodeMessageResponse(data); got != "first\n\nsecond" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestParseOpenCodeAsyncReplySkipsRequestMessage(t *testing.T) {
+	data := []byte(`[
+		{"info":{"id":"msg_request","role":"user"},"parts":[{"id":"p1","type":"text","text":"input"}]},
+		{"info":{"id":"msg_reply","role":"assistant"},"parts":[{"id":"p2","type":"text","text":"output"}]}
+	]`)
+	if got := parseOpenCodeAsyncReply(data, "msg_request"); got != "output" {
 		t.Fatalf("got %q", got)
 	}
 }

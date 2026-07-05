@@ -110,19 +110,20 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 	var mined []store.Observation
 	mineFailed := false
 	if len(newRecs) > 0 {
-		transcript := renderTranscript(newRecs)
-		for _, ln := range w.Lenses {
-			obs, err := w.mine(ctx, ln, session, transcript)
-			if err != nil {
-				// A claude -p transport failure (rate limit, network). Treat the whole
-				// delta as not-yet-distilled so it's retried, rather than silently
-				// advancing past it (which would lose those turns). (A mere parse-miss
-				// is NOT an error — mine() returns it as a quiet session.)
-				slog.Error("mine failed", "session", session, "lens", ln.Name, "err", err)
-				mineFailed = true
-				continue
+		for _, transcript := range distillInputs(session, newRecs) {
+			for _, ln := range w.Lenses {
+				obs, err := w.mine(ctx, ln, session, transcript)
+				if err != nil {
+					// A claude -p transport failure (rate limit, network). Treat the whole
+					// delta as not-yet-distilled so it's retried, rather than silently
+					// advancing past it (which would lose those turns). (A mere parse-miss
+					// is NOT an error — mine() returns it as a quiet session.)
+					slog.Error("mine failed", "session", session, "lens", ln.Name, "err", err)
+					mineFailed = true
+					continue
+				}
+				mined = append(mined, obs...)
 			}
-			mined = append(mined, obs...)
 		}
 	}
 

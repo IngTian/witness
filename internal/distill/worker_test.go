@@ -67,6 +67,48 @@ func testWorker(s *store.Store, m *fakeMiner) *Worker {
 	}
 }
 
+func TestOpenCodeSessionsAreChunked(t *testing.T) {
+	s := newStore(t)
+	m := &fakeMiner{}
+	w := testWorker(s, m)
+	oldMax := openCodeChunkMaxChars
+	oldOverlap := openCodeChunkOverlapRecords
+	openCodeChunkMaxChars = 18
+	defer func() {
+		openCodeChunkMaxChars = oldMax
+		_ = oldOverlap
+	}()
+
+	capture(t, s, "opencode:s", "user", "alpha alpha alpha")
+	capture(t, s, "opencode:s", "assistant", "beta beta beta")
+	capture(t, s, "opencode:s", "user", "gamma gamma gamma")
+	if err := w.Process(context.Background(), "opencode:s"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.inputs) <= 1 {
+		t.Fatalf("OpenCode long transcript should be chunked, got %d input(s): %#v", len(m.inputs), m.inputs)
+	}
+}
+
+func TestNonOpenCodeSessionsUseSingleLegacyTranscript(t *testing.T) {
+	s := newStore(t)
+	m := &fakeMiner{}
+	w := testWorker(s, m)
+	oldMax := openCodeChunkMaxChars
+	openCodeChunkMaxChars = 18
+	defer func() { openCodeChunkMaxChars = oldMax }()
+
+	capture(t, s, "claude:s", "user", "alpha alpha alpha")
+	capture(t, s, "claude:s", "assistant", "beta beta beta")
+	capture(t, s, "claude:s", "user", "gamma gamma gamma")
+	if err := w.Process(context.Background(), "claude:s"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.inputs) != 1 {
+		t.Fatalf("non-OpenCode transcript should preserve legacy single input, got %d", len(m.inputs))
+	}
+}
+
 func newStore(t *testing.T) *store.Store {
 	t.Helper()
 	t.Setenv("WITNESS_HOME", t.TempDir())

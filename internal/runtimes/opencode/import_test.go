@@ -184,6 +184,8 @@ func seedOpenCodeDB(t *testing.T) string {
 		INSERT INTO message VALUES ('msg_assistant', 'ses_test', 2000, 4000, '{"role":"assistant","time":{"completed":4000}}');
 		INSERT INTO part VALUES ('prt_a1', 'msg_assistant', 'ses_test', 2100, 2100, '{"type":"text","text":"first note"}');
 		INSERT INTO part VALUES ('prt_tool', 'msg_assistant', 'ses_test', 2200, 2200, '{"type":"tool","tool":"bash"}');
+		INSERT INTO part VALUES ('prt_patch', 'msg_assistant', 'ses_test', 2300, 2300, '{"type":"patch","files":[{"path":"main.go"}],"text":"patch body must stay out"}');
+		INSERT INTO part VALUES ('prt_file', 'msg_assistant', 'ses_test', 2400, 2400, '{"type":"file","path":"main.go","content":"file content must stay out"}');
 		INSERT INTO part VALUES ('prt_a2', 'msg_assistant', 'ses_test', 3000, 3000, '{"type":"text","text":"final answer"}');
 		INSERT INTO message VALUES ('msg_partial', 'ses_test', 6000, 6000, '{"role":"assistant","time":{"created":6000}}');
 		INSERT INTO part VALUES ('prt_partial', 'msg_partial', 'ses_test', 6000, 6000, '{"type":"text","text":"partial stream"}');

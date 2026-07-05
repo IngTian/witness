@@ -23,6 +23,8 @@ const openCodeAgentName = "witness-distill"
 
 var openCodeModelsCache sync.Map // provider -> openCodeModelList
 
+var openCodeAsyncPollInterval = time.Second
+
 type openCodeModelList struct {
 	set  map[string]bool
 	list []string
@@ -107,7 +109,10 @@ func runOpenCode(ctx context.Context, model, systemPrompt, input string) (string
 }
 
 // Run sends one isolated distillation request through the shared OpenCode serve
-// process. It creates and deletes an OpenCode session for this request only.
+// process. It uses OpenCode's async prompt endpoint so the HTTP request that
+// starts generation never has to stay open for the full model latency; completion
+// is observed by polling the short message-list endpoint. It creates and deletes
+// an OpenCode session for this request only.
 func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
@@ -123,8 +128,9 @@ func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input str
 	}
 	defer s.deleteSessionBestEffort(sessionID)
 
+	messageID := "msg_" + mustRandomHex(12)
 	body := map[string]any{
-		"messageID": "msg_" + mustRandomHex(12),
+		"messageID": messageID,
 		"agent":     openCodeAgentName,
 		"system":    systemPrompt + "\n\n" + untrustedNotice,
 		"parts": []map[string]any{{
@@ -137,15 +143,53 @@ func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input str
 	} else if ok {
 		body["model"] = map[string]string{"providerID": provider, "modelID": modelID}
 	}
-	data, err := s.doJSON(ctx, http.MethodPost, "/session/"+sessionID+"/message", body, http.StatusOK)
+	_, err = s.doJSON(ctx, http.MethodPost, "/session/"+sessionID+"/prompt_async", body, http.StatusOK, http.StatusNoContent)
 	if err != nil {
 		return "", err
 	}
-	reply := parseOpenCodeMessageResponse(data)
+	reply, err := s.waitForAsyncReply(ctx, sessionID, messageID)
+	if err != nil {
+		_ = s.abortSessionBestEffort(sessionID)
+		return "", err
+	}
 	if strings.TrimSpace(reply) == "" {
 		return "", fmt.Errorf("opencode message produced no text output")
 	}
 	return reply, nil
+}
+
+func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, requestMessageID string) (string, error) {
+	ticker := time.NewTicker(openCodeAsyncPollInterval)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		data, err := s.doJSON(ctx, http.MethodGet, "/session/"+sessionID+"/message?limit=20", nil, http.StatusOK)
+		if err == nil {
+			if reply := parseOpenCodeAsyncReply(data, requestMessageID); strings.TrimSpace(reply) != "" {
+				return reply, nil
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return "", fmt.Errorf("wait for opencode async reply: %w (last poll: %v)", ctx.Err(), lastErr)
+			}
+			return "", fmt.Errorf("wait for opencode async reply: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *OpenCodeServer) abortSessionBestEffort(sessionID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := s.doJSON(ctx, http.MethodPost, "/session/"+sessionID+"/abort", nil, http.StatusOK, http.StatusNoContent, http.StatusNotFound); err != nil {
+		slog.Warn("opencode: could not abort witness distill session", "session", sessionID, "err", err)
+		return err
+	}
+	return nil
 }
 
 // Close stops the private OpenCode serve process.
@@ -399,6 +443,72 @@ func parseOpenCodeMessageResponse(data []byte) string {
 		return strings.TrimSpace(string(data))
 	}
 	return joinOpenCodeTextParts(findOpenCodeTextParts(v))
+}
+
+func parseOpenCodeAsyncReply(data []byte, requestMessageID string) string {
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err == nil {
+		for i := len(list) - 1; i >= 0; i-- {
+			if isOpenCodeRequestMessage(list[i], requestMessageID) {
+				continue
+			}
+			role := openCodeMessageRole(list[i])
+			if role != "" && role != "assistant" {
+				continue
+			}
+			if reply := parseOpenCodeMessageResponse(list[i]); strings.TrimSpace(reply) != "" {
+				return reply
+			}
+		}
+		return ""
+	}
+	if isOpenCodeRequestMessage(data, requestMessageID) {
+		return ""
+	}
+	role := openCodeMessageRole(data)
+	if role != "" && role != "assistant" {
+		return ""
+	}
+	return parseOpenCodeMessageResponse(data)
+}
+
+func isOpenCodeRequestMessage(data []byte, requestMessageID string) bool {
+	if requestMessageID == "" {
+		return false
+	}
+	return openCodeMessageID(data) == requestMessageID
+}
+
+func openCodeMessageID(data []byte) string {
+	var msg struct {
+		ID   string `json:"id"`
+		Info struct {
+			ID string `json:"id"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(msg.Info.ID) != "" {
+		return strings.TrimSpace(msg.Info.ID)
+	}
+	return strings.TrimSpace(msg.ID)
+}
+
+func openCodeMessageRole(data []byte) string {
+	var msg struct {
+		Role string `json:"role"`
+		Info struct {
+			Role string `json:"role"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(msg.Info.Role) != "" {
+		return strings.TrimSpace(msg.Info.Role)
+	}
+	return strings.TrimSpace(msg.Role)
 }
 
 func joinOpenCodeTextParts(parts []openCodeTextPart) string {

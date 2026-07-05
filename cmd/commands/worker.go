@@ -11,6 +11,7 @@ import (
 	"github.com/IngTian/claude-witness/internal/distill"
 	"github.com/IngTian/claude-witness/internal/embed"
 	"github.com/IngTian/claude-witness/internal/lens"
+	opencodeimport "github.com/IngTian/claude-witness/internal/runtimes/opencode"
 	"github.com/IngTian/claude-witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -55,6 +56,7 @@ func runWorker() (bool, error) {
 		_ = st.SetMetaString("worker_current", "")
 		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
 	}()
+	defer scheduleRetryWakeup(st)
 
 	cfg := st.LoadConfig()
 	lenses, err := activeLenses(st)
@@ -78,12 +80,16 @@ func runWorker() (bool, error) {
 	pending := func() []string { p, _ := st.PendingSessions(); return p }
 	var runFn distill.MineFunc
 	if (len(pending()) > 0 || st.ReviewDue(cfg)) && strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
+		cleanupOpenCodeDistillSessions(ctx, time.Now().Add(-1*time.Hour))
 		opencodeServer, err := distill.StartOpenCodeServer(ctx, cfg.TriageModel, cfg.DistillModel)
 		if err != nil {
 			slog.Error("opencode serve", "err", err)
 			return true, err
 		}
-		defer opencodeServer.Close()
+		defer func() {
+			_ = opencodeServer.Close()
+			cleanupOpenCodeDistillSessions(context.Background(), time.Now().Add(time.Second))
+		}()
 		runFn = opencodeServer.Run
 	}
 	sessionBudget := workerSessionBudget(cfg)
@@ -129,6 +135,22 @@ func runWorker() (bool, error) {
 func workerSessionBudget(cfg store.Config) int {
 	_ = cfg
 	return 0
+}
+
+func cleanupOpenCodeDistillSessions(ctx context.Context, before time.Time) {
+	dbPath, err := opencodeimport.DefaultDBPath()
+	if err != nil {
+		slog.Warn("opencode cleanup: locate db", "err", err)
+		return
+	}
+	deleted, err := opencodeimport.CleanupWitnessDistillSessions(ctx, dbPath, before)
+	if err != nil {
+		slog.Warn("opencode cleanup: witness-distill sessions", "err", err)
+		return
+	}
+	if deleted > 0 {
+		slog.Info("opencode cleanup: removed witness-distill sessions", "count", deleted)
+	}
 }
 
 // regenerateProfile refreshes the L4 narrative summaries from the current facets.

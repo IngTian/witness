@@ -3,6 +3,7 @@ package store
 import (
 	"slices"
 	"testing"
+	"time"
 )
 
 func appendN(t *testing.T, s *Store, session string, n int) {
@@ -63,6 +64,18 @@ func TestPendingSessionsIncludesStagedObservations(t *testing.T) {
 	}
 	if p, _ := s.PendingSessions(); !slices.Contains(p, "a") {
 		t.Fatalf("session with staged observations should be pending, got %v", p)
+	}
+}
+
+func TestNextBackoffAttempt(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
+	_ = s.SetNextAttempt("later", now.Add(10*time.Minute))
+	_ = s.SetNextAttempt("sooner", now.Add(2*time.Minute))
+	_ = s.SetNextAttempt("past", now.Add(-time.Minute))
+	at, ok := s.NextBackoffAttempt(now)
+	if !ok || !at.Equal(now.Add(2*time.Minute)) {
+		t.Fatalf("NextBackoffAttempt = %s, %v; want sooner", at, ok)
 	}
 }
 

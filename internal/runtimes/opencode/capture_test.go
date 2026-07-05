@@ -71,6 +71,30 @@ func TestCaptureSkipsIncompleteAssistant(t *testing.T) {
 	}
 }
 
+func TestCaptureDoesNotImportToolOutputText(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	event := []byte(`{
+		"type":"message.updated",
+		"properties":{
+			"sessionID":"ses_plugin",
+			"info":{"id":"msg_a","role":"assistant","time":{"completed":2}},
+			"part":{"type":"tool","tool":"bash","state":{"status":"completed","output":"expensive command output","parts":[{"type":"text","text":"nested output"}]}}
+		}
+	}`)
+	wrote, err := Capture(st, event, time.Unix(10, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrote {
+		t.Fatal("tool output must not be captured as dialogue")
+	}
+}
+
 func TestCaptureSkipsMessageAlreadyImportedFromDB(t *testing.T) {
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()

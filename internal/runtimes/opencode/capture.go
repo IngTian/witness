@@ -110,9 +110,19 @@ func findTextParts(v any) []string {
 		}
 		return out
 	case map[string]any:
-		if typ, _ := x["type"].(string); typ == "text" {
-			if text, ok := x["text"].(string); ok && strings.TrimSpace(text) != "" {
-				return []string{text}
+		if typ, hasType := x["type"].(string); hasType {
+			// Only OpenCode text parts are natural-language dialogue. Tool results,
+			// patches, files, reasoning, and step metadata are structured execution
+			// artifacts; do not recurse into their payloads and accidentally import
+			// command output or file diffs as user/assistant dialogue.
+			if typ == "text" {
+				if text, ok := x["text"].(string); ok && strings.TrimSpace(text) != "" {
+					return []string{text}
+				}
+				return nil
+			}
+			if isNonDialoguePartType(typ) {
+				return nil
 			}
 		}
 		var out []string
@@ -124,6 +134,15 @@ func findTextParts(v any) []string {
 		return out
 	default:
 		return nil
+	}
+}
+
+func isNonDialoguePartType(typ string) bool {
+	switch typ {
+	case "tool", "patch", "file", "reasoning", "step-start", "step-finish", "compaction", "subtask", "agent":
+		return true
+	default:
+		return false
 	}
 }
 

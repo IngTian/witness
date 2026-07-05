@@ -279,6 +279,21 @@ func (s *Store) SetNextAttempt(session string, at time.Time) error {
 	return err
 }
 
+// NextBackoffAttempt returns the earliest future retry time, if any session is
+// currently sleeping due to a mining failure.
+func (s *Store) NextBackoffAttempt(now time.Time) (time.Time, bool) {
+	var v string
+	_ = s.db.QueryRow(`SELECT COALESCE(MIN(next_attempt), '') FROM progress WHERE next_attempt != '' AND next_attempt > ?`, now.UTC().Format(time.RFC3339)).Scan(&v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
 // PendingSessions returns sessions whose L0 has grown past the distillation
 // watermark, or that have staged active observations waiting to be drained.
 // Keying on the watermark (not a mere marker) means a RESUMED session whose log
