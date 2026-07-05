@@ -75,13 +75,21 @@ func installBundle(root string) (string, error) {
 		return "", fmt.Errorf("copy binary: %w", err)
 	}
 
-	// Prompts are EMBEDDED in the binary (internal/lens reads them from the embed
-	// FS when no on-disk prompts/ exists), so a standalone downloaded witness.exe
-	// is self-contained — nothing to copy. Only the 448MB embedding model is
-	// external. Copy it if it happens to sit beside the source exe (a built
-	// checkout); otherwise capture still works and distillation waits until the
-	// model is fetched into %WITNESS_ASSETS% or beside the installed exe.
+	// Copy the bundled prompts/ and assets/ (the model) that ship beside the exe
+	// in the release zip. The binary resolves both at runtime via bundle.Dir's
+	// exe-relative probe, so copying them next to the installed exe is what makes
+	// the install self-contained. prompts/ is required (distillation reads it); a
+	// missing model is only a warning (capture works without it, and it can be
+	// dropped in later). Source layout: siblings of the exe (zip layout) or one
+	// level up (a build checkout).
 	srcDir := filepath.Dir(srcExe)
+	if src, ok := probeSrcTree(srcDir, "prompts"); ok {
+		if err := copyTree(src, filepath.Join(root, "prompts")); err != nil {
+			return "", fmt.Errorf("copy prompts: %w", err)
+		}
+	} else {
+		return "", fmt.Errorf("prompts/ not found near %s; run from the unzipped release folder (or a built checkout)", srcExe)
+	}
 	if src, ok := probeSrcTree(srcDir, filepath.Join("assets", "e5-small")); ok {
 		if err := copyTree(src, filepath.Join(root, "assets", "e5-small")); err != nil {
 			return "", fmt.Errorf("copy model: %w", err)

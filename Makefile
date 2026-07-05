@@ -19,11 +19,11 @@ build-all:
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o bin/witness-$$os-$$arch$$ext ./cmd/witness; \
 	done; done
 
-## package-windows: build self-contained Windows zips (exe + model) for each arch.
-## Needs the model present (make fetch-model). Each zip unpacks to a witness/
-## folder holding witness.exe + assets/e5-small, exactly the layout `witness
-## install claude` expects — so the user unzips, runs witness.exe install, done.
-## Prompts are embedded in the binary, so they are NOT in the zip.
+## package-windows: build self-contained Windows zips (exe + prompts + model) for
+## each arch. Needs the model present (make fetch-model). Each zip unpacks to a
+## witness/ folder holding witness.exe + prompts/ + assets/e5-small, exactly the
+## layout `witness install claude` expects — so the user unzips, runs witness.exe
+## install, done. The binary finds prompts/ and the model relative to itself.
 package-windows: build-all fetch-model
 	@command -v zip >/dev/null || { echo "zip not found; install it (apt/brew install zip)"; exit 1; }
 	@test -f assets/e5-small/model.onnx || { echo "model missing; run: make fetch-model"; exit 1; }
@@ -32,6 +32,7 @@ package-windows: build-all fetch-model
 	  echo "packaging windows/$$arch"; \
 	  rm -rf bin/pkg && mkdir -p "$$stage/assets/e5-small"; \
 	  cp "bin/witness-windows-$$arch.exe" "$$stage/witness.exe"; \
+	  cp -R prompts "$$stage/prompts"; \
 	  cp assets/e5-small/model.onnx assets/e5-small/tokenizer.json "$$stage/assets/e5-small/"; \
 	  cp README.md "$$stage/"; \
 	  ( cd bin/pkg && zip -qr "../witness-windows-$$arch.zip" witness ); \

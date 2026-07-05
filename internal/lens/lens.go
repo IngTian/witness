@@ -8,11 +8,9 @@ package lens
 
 import (
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
-	witness "github.com/IngTian/claude-witness"
 	"github.com/IngTian/claude-witness/internal/bundle"
 )
 
@@ -25,55 +23,22 @@ type Lens struct {
 	Review     string // prompt for the reviewer -> facets
 }
 
-// promptsDirOverride resolves an ON-DISK prompts directory if one is configured
-// or discoverable: WITNESS_PROMPTS, else $CLAUDE_PLUGIN_ROOT/prompts, else
-// exe-relative (Unix plugin/checkout layout). It returns "" when none exists, in
-// which case callers fall back to the prompts embedded in the binary. Unlike the
-// old promptsDir(), it does NOT return a cwd-relative guess — that path silently
-// resolved to a nonexistent ./prompts for a standalone binary; the embedded FS is
-// the correct, always-available default now.
-func promptsDirOverride() string {
-	// An explicit env var always wins, even if we can't stat it (surfaces a real
-	// misconfiguration as a read error rather than silently using the embed).
-	if d := os.Getenv("WITNESS_PROMPTS"); d != "" {
-		return d
-	}
-	if root := os.Getenv("CLAUDE_PLUGIN_ROOT"); root != "" {
-		return filepath.Join(root, "prompts")
-	}
-	// A prompts/ dir sitting beside (or one level up from) the binary — the Unix
-	// checkout/plugin layout. bundle.Dir also returns a cwd-relative last resort,
-	// so only accept the result if it actually exists on disk.
-	if d := bundle.Dir("prompts", ""); dirExists(d) {
-		return d
-	}
-	return ""
-}
-
-func dirExists(p string) bool {
-	info, err := os.Stat(p)
-	return err == nil && info.IsDir()
-}
-
-// readPrompt returns the contents of a prompt template at rel (a slash-separated
-// path under prompts/, e.g. "default/extract.md"). It prefers an on-disk override
-// directory when configured, and otherwise reads from the prompts embedded in the
-// binary — so a standalone executable with no sibling prompts/ still works.
-func readPrompt(rel string) ([]byte, error) {
-	if dir := promptsDirOverride(); dir != "" {
-		return os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
-	}
-	// embed.FS paths are always slash-separated and rooted at the embed arg.
-	return witness.Prompts.ReadFile(path.Join("prompts", rel))
+// promptsDir resolves the bundled prompts directory. Resolution (bundle.Dir):
+// WITNESS_PROMPTS, else $CLAUDE_PLUGIN_ROOT/prompts, else exe-relative (so a
+// Windows exec-form hook, with no shell to export CLAUDE_PLUGIN_ROOT, still finds
+// the prompts beside the installed binary), else the cwd-relative dev fallback.
+func promptsDir() string {
+	return bundle.Dir("prompts", "WITNESS_PROMPTS")
 }
 
 // LoadDefault loads the always-on global lens from prompts/default/.
 func LoadDefault() (*Lens, error) {
-	extract, err := readPrompt("default/extract.md")
+	dir := filepath.Join(promptsDir(), "default")
+	extract, err := os.ReadFile(filepath.Join(dir, "extract.md"))
 	if err != nil {
 		return nil, err
 	}
-	review, err := readPrompt("default/review.md")
+	review, err := os.ReadFile(filepath.Join(dir, "review.md"))
 	if err != nil {
 		return nil, err
 	}
@@ -88,13 +53,14 @@ func LoadDefault() (*Lens, error) {
 
 // LoadSummarizePrompts loads the L4 summarizer prompts from prompts/summarize/:
 // lens.md (per-lens narrative) and unified.md (cross-lens portrait). Same
-// on-disk-override-then-embedded resolution as the lens prompts.
+// on-disk resolution as the lens prompts.
 func LoadSummarizePrompts() (lensPrompt, unifiedPrompt string, err error) {
-	l, err := readPrompt("summarize/lens.md")
+	dir := filepath.Join(promptsDir(), "summarize")
+	l, err := os.ReadFile(filepath.Join(dir, "lens.md"))
 	if err != nil {
 		return "", "", err
 	}
-	u, err := readPrompt("summarize/unified.md")
+	u, err := os.ReadFile(filepath.Join(dir, "unified.md"))
 	if err != nil {
 		return "", "", err
 	}

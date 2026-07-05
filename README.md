@@ -210,9 +210,10 @@ inside that folder in PowerShell:
 
 This copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user PATH,
 and wires Claude Code with **exec-form hooks** pointing at `witness.exe` (no shell,
-no Git Bash needed). Prompt templates are embedded in the binary; only the ~448MB
-model rides along in the zip. Uninstall strips the hooks + MCP (`witness.exe
-uninstall claude`); the copied files and PATH entry are left in place for now.
+no Git Bash needed). The zip carries the prompt templates and the ~448MB model
+alongside the exe; the binary resolves both relative to itself. Uninstall strips
+the hooks + MCP (`witness.exe uninstall claude`); the copied files and PATH entry
+are left in place for now.
 
 ### OpenCode support
 
