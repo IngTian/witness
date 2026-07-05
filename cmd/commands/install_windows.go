@@ -75,23 +75,21 @@ func installBundle(root string) (string, error) {
 		return "", fmt.Errorf("copy binary: %w", err)
 	}
 
-	// Copy prompts/ (required) and assets/ (optional — capture works without the
-	// model). Resolve each from where it lives relative to the SOURCE exe.
+	// Prompts are EMBEDDED in the binary (internal/lens reads them from the embed
+	// FS when no on-disk prompts/ exists), so a standalone downloaded witness.exe
+	// is self-contained — nothing to copy. Only the 448MB embedding model is
+	// external. Copy it if it happens to sit beside the source exe (a built
+	// checkout); otherwise capture still works and distillation waits until the
+	// model is fetched into %WITNESS_ASSETS% or beside the installed exe.
 	srcDir := filepath.Dir(srcExe)
-	if src, ok := probeSrcTree(srcDir, "prompts"); ok {
-		if err := copyTree(src, filepath.Join(root, "prompts")); err != nil {
-			return "", fmt.Errorf("copy prompts: %w", err)
-		}
-	} else {
-		return "", fmt.Errorf("prompts/ not found near %s; run from a built working copy", srcExe)
-	}
 	if src, ok := probeSrcTree(srcDir, filepath.Join("assets", "e5-small")); ok {
 		if err := copyTree(src, filepath.Join(root, "assets", "e5-small")); err != nil {
-			return "", fmt.Errorf("copy assets: %w", err)
+			return "", fmt.Errorf("copy model: %w", err)
 		}
 	} else {
 		fmt.Fprintf(os.Stderr, "witness: embedding model not found near %s; "+
-			"capture will work but distillation needs the model — copy assets/e5-small into %s later\n",
+			"capture will work, but distillation needs the model — "+
+			"place it in %s\\assets\\e5-small (or set WITNESS_ASSETS) later\n",
 			srcExe, root)
 	}
 	return dstExe, nil
