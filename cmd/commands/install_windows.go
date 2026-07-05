@@ -72,7 +72,11 @@ func installBundle(root string) (string, error) {
 
 	dstExe := filepath.Join(root, "witness.exe")
 	if err := copyFile(srcExe, dstExe); err != nil {
-		return "", fmt.Errorf("copy binary: %w", err)
+		// The most likely cause on a re-install is that the installed witness.exe
+		// is a running image (the MCP server or a background worker holds Claude
+		// Code's session), so Windows denies replacing it. Point the user at the
+		// fix rather than surfacing a raw sharing-violation error.
+		return "", fmt.Errorf("could not update %s (close Claude Code, then re-run install): %w", dstExe, err)
 	}
 
 	// Copy the bundled prompts/ and assets/ (the model) that ship beside the exe
@@ -118,9 +122,18 @@ func probeSrcTree(exeDir, subdir string) (string, bool) {
 	return "", false
 }
 
-// copyFile copies src to dst (0o755 so the binary stays executable), truncating
-// an existing dst so re-install overwrites cleanly.
+// copyFile copies src to dst (0o755 so the binary stays executable), atomically:
+// it streams to a temp file on the same directory and renames it over dst, so an
+// interrupted copy can never replace a good file with a truncated one (mirrors
+// writeFileAtomic for settings.json). If src and dst are the SAME file (e.g. a
+// re-install run from the already-installed exe now that install put its dir on
+// PATH), it is a no-op — Windows would otherwise deny writing a running image.
 func copyFile(src, dst string) error {
+	if si, err := os.Stat(src); err == nil {
+		if di, err := os.Stat(dst); err == nil && os.SameFile(si, di) {
+			return nil // src IS dst; nothing to copy (and can't overwrite a live exe)
+		}
+	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -129,15 +142,27 @@ func copyFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
+		os.Remove(tmp)
 		return err
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// Rename is atomic on the same volume. On Windows, os.Rename fails if dst is a
+	// running image; surface that as a clear "close Claude Code" hint upstream.
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // copyTree recursively copies the directory src to dst. Used for the small

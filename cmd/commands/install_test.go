@@ -256,26 +256,69 @@ func TestAppendToPathValue(t *testing.T) {
 	}
 }
 
-func TestIsWitnessBinaryPath(t *testing.T) {
+func TestIsWitnessBinary(t *testing.T) {
 	yes := []string{
 		`C:\Users\me\AppData\Local\witness\witness.exe`,
 		"/home/me/.local/share/witness/witness",
-		"bin/witness-windows-amd64.exe",
-		"/repo/bin/witness-darwin-arm64",
+		"witness.exe",
+		"witness",
+		`C:\Users\me\WITNESS.EXE`, // case-insensitive (Windows)
 	}
 	no := []string{
 		"prettier", "/usr/bin/node", `C:\tools\notwitness.exe`,
-		"witnessing.exe", // must not match a prefix that isn't witness- or witness
+		"witnessing.exe",
+		// A DIFFERENT tool named witness-<x>: the installer never writes these
+		// (it always copies to a bare witness.exe), so matching them would only
+		// risk clobbering a foreign hook. Must NOT match.
+		"bin/witness-windows-amd64.exe",
+		"/usr/local/bin/witness-cli",
 	}
 	for _, p := range yes {
-		if !isWitnessBinaryPath(p) {
-			t.Errorf("isWitnessBinaryPath(%q) = false, want true", p)
+		if !isWitnessBinary(p) {
+			t.Errorf("isWitnessBinary(%q) = false, want true", p)
 		}
 	}
 	for _, p := range no {
-		if isWitnessBinaryPath(p) {
-			t.Errorf("isWitnessBinaryPath(%q) = true, want false", p)
+		if isWitnessBinary(p) {
+			t.Errorf("isWitnessBinary(%q) = true, want false", p)
 		}
+	}
+}
+
+// TestExecFormDoesNotStripForeignWitnessHook is the regression guard for the
+// review-confirmed bug: a user's UNRELATED hook that invokes a different tool
+// named "witness" (e.g. the testifysec supply-chain CLI) with args must be
+// preserved verbatim by both merge and remove — not misclassified as ours.
+// This runs on every platform (isWitnessEntry has no build tags), so it also
+// protects the "Unix byte-identical" claim.
+func TestExecFormDoesNotStripForeignWitnessHook(t *testing.T) {
+	// A foreign hook: bare "witness" binary, but its arg is NOT one of our tokens.
+	foreign := `{"model":"opus","hooks":{"Stop":[{"hooks":[` +
+		`{"type":"command","command":"/usr/local/bin/witness","args":["run","--step","build"]}` +
+		`]}]}}`
+
+	// remove must leave it untouched.
+	out, err := removeWitnessHooks([]byte(foreign))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmds := execCommands(t, out, "Stop"); len(cmds) != 1 || cmds[0].Command != "/usr/local/bin/witness" {
+		t.Errorf("foreign witness hook was stripped by removeWitnessHooks: %+v", cmds)
+	}
+
+	// merge (shell form, Unix) must also preserve it while adding ours.
+	merged, err := mergeWitnessHooks([]byte(foreign), shellInvocation("/repo/hooks/witness.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundForeign := false
+	for _, c := range execCommands(t, merged, "Stop") {
+		if c.Command == "/usr/local/bin/witness" {
+			foundForeign = true
+		}
+	}
+	if !foundForeign {
+		t.Errorf("foreign witness hook clobbered by mergeWitnessHooks; Stop = %+v", execCommands(t, merged, "Stop"))
 	}
 }
 

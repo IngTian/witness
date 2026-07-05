@@ -111,13 +111,24 @@ func witnessHookSpecs(inv hookInvocation) []struct {
 	}
 }
 
+// witnessHookTokens is the exact set of subcommand tokens our installed hooks
+// emit (see witnessHookSpecs). isWitnessEntry keys exec-form detection on these
+// so we only ever match hooks WE wrote, never a foreign tool.
+var witnessHookTokens = map[string]bool{"session-start": true, "capture": true, "session-end": true}
+
 // isWitnessEntry reports whether a parsed hook entry is one of ours — so
 // re-install/uninstall can find and replace them idempotently. It must recognize
-// BOTH invocation forms, else a re-install on the other platform (or after a
-// shell->exec migration) would fail to dedupe and orphan duplicate hooks:
+// BOTH invocation forms, else a re-install (or a shell<->exec migration) would
+// fail to dedupe and orphan duplicate hooks:
 //   - shell form (Unix): command contains the shim basename "witness.sh".
-//   - exec form (Windows): command basename is the witness binary (witness/
-//     witness.exe or a per-arch witness-<os>-<arch>[.exe]) and args are present.
+//   - exec form (Windows): command basename is the witness binary AND the first
+//     arg is one of our own subcommand tokens.
+//
+// The exec-form match is intentionally narrow: matching a bare "witness" basename
+// alone would strip a user's UNRELATED hook that happens to invoke a different
+// tool named witness (e.g. the testifysec supply-chain CLI) with args — a foreign
+// hook we are contractually required to preserve. Requiring args[0] to be one of
+// OUR tokens keys the match to what witnessHookSpecs actually writes.
 func isWitnessEntry(e any) bool {
 	m, ok := e.(map[string]any)
 	if !ok {
@@ -130,24 +141,37 @@ func isWitnessEntry(e any) bool {
 		if strings.Contains(c, "witness.sh") {
 			return true // shell-form shim
 		}
-		if _, hasArgs := hm["args"]; hasArgs && isWitnessBinaryPath(c) {
-			return true // exec-form binary
+		if isWitnessBinary(c) && firstArgIsWitnessToken(hm["args"]) {
+			return true // exec-form binary invoking one of our subcommands
 		}
 	}
 	return false
 }
 
-// isWitnessBinaryPath reports whether an exec-form command path points at the
-// witness binary, by basename so it matches whether installed as witness.exe or
-// run from a per-arch build (witness-windows-amd64.exe). Uses both path
-// separators because a Windows path may be inspected on any OS (and vice versa).
-func isWitnessBinaryPath(cmd string) bool {
+// isWitnessBinary reports whether an exec-form command path's basename is the
+// witness binary (witness or witness.exe), matched by basename so it works
+// whether the installer wrote a plain "witness.exe" or the path is absolute.
+// Uses both path separators because a Windows path may be inspected on any OS.
+// Note: this is deliberately EXACT ("witness"), not a "witness-" prefix — the
+// installer always copies to a bare witness.exe, so the prefix form matched
+// nothing we write while risking foreign "witness-*" false positives.
+func isWitnessBinary(cmd string) bool {
 	base := cmd
 	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
 		base = base[i+1:]
 	}
-	base = strings.ToLower(strings.TrimSuffix(base, ".exe"))
-	return base == "witness" || strings.HasPrefix(base, "witness-")
+	return strings.EqualFold(base, "witness") || strings.EqualFold(base, "witness.exe")
+}
+
+// firstArgIsWitnessToken reports whether the exec-form args list begins with one
+// of our own subcommand tokens (session-start/capture/session-end).
+func firstArgIsWitnessToken(args any) bool {
+	list, ok := args.([]any)
+	if !ok || len(list) == 0 {
+		return false
+	}
+	tok, _ := list[0].(string)
+	return witnessHookTokens[tok]
 }
 
 // appendToPathValue returns the PATH-style, ';'-separated string with dir added,
