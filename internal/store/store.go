@@ -8,9 +8,21 @@ import (
 	"strings"
 )
 
-// Store is the per-user data root. Data lives under $XDG_DATA_HOME/claude-witness
-// (default ~/.local/share/claude-witness) — the app owns its own namespace rather
-// than nesting in Claude Code's ~/.claude config home. Override with WITNESS_HOME.
+// dataDirNames lists the app's per-user data directory names in PREFERENCE order:
+// the current name first, then any legacy names, newest to oldest. When no data
+// dir yet exists, the first entry ("witness") is created; when one already exists
+// under a legacy name, it is adopted IN PLACE (no move) so the repo rename never
+// orphans an existing archive. A future rename just prepends to this list.
+//
+// The rename history: the tool shipped as "claude-witness" and the repo/command
+// later became "witness"; the data dir lagged. Rather than force a risky move of
+// live SQLite data, resolution adopts whichever name is already present.
+var dataDirNames = []string{"witness", "claude-witness"}
+
+// Store is the per-user data root. Data lives under $XDG_DATA_HOME/<name> (default
+// ~/.local/share/<name>), where <name> is resolved from dataDirNames — the app
+// owns its own namespace rather than nesting in Claude Code's ~/.claude config
+// home. Override the whole root with WITNESS_HOME.
 //
 // The data layers (raw turns, observations, bi-temporal facets) plus the
 // distillation queue live in a single SQLite database (witness.db). The derived
@@ -22,21 +34,13 @@ type Store struct {
 	db   *sql.DB
 }
 
-// Open returns the Store rooted at WITNESS_HOME, else $XDG_DATA_HOME/claude-witness,
-// else ~/.local/share/claude-witness, creating the root and opening (migrating)
+// Open returns the Store rooted at WITNESS_HOME, else the resolved default under
+// $XDG_DATA_HOME (or ~/.local/share), creating the root and opening (migrating)
 // the database. Callers should Close when done so WAL state is flushed cleanly.
 func Open() (*Store, error) {
-	root := os.Getenv("WITNESS_HOME")
-	if root == "" {
-		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-			root = filepath.Join(xdg, "claude-witness")
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return nil, fmt.Errorf("resolve home: %w", err)
-			}
-			root = filepath.Join(home, ".local", "share", "claude-witness")
-		}
+	root, err := resolveRoot()
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil { // 0700: private growth data
 		return nil, fmt.Errorf("mkdir %s: %w", root, err)
@@ -54,6 +58,34 @@ func Open() (*Store, error) {
 	}
 	s.db = db
 	return s, nil
+}
+
+// resolveRoot picks the data-root directory. WITNESS_HOME, if set, wins verbatim
+// (explicit user intent — used by tests and power users). Otherwise the root is
+// <base>/<name>, where base is $XDG_DATA_HOME or ~/.local/share and <name> is
+// resolved from dataDirNames: adopt the FIRST name whose directory already exists
+// (so an archive created under a legacy name keeps being used IN PLACE — nothing
+// is moved), else fall back to dataDirNames[0] (the current preferred name) for a
+// fresh install. This is why the rename can never orphan data.
+func resolveRoot() (string, error) {
+	if home := os.Getenv("WITNESS_HOME"); home != "" {
+		return home, nil
+	}
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home: %w", err)
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	for _, name := range dataDirNames {
+		cand := filepath.Join(base, name)
+		if info, err := os.Stat(cand); err == nil && info.IsDir() {
+			return cand, nil // adopt an existing dir in place (current or legacy)
+		}
+	}
+	return filepath.Join(base, dataDirNames[0]), nil // fresh install: preferred name
 }
 
 // Close releases the database handle (and flushes the WAL).
