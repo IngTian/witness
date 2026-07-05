@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	opencodeplugin "github.com/IngTian/claude-witness/internal/runtimes/opencode/plugin"
+	opencodeplugin "github.com/IngTian/witness/internal/runtimes/opencode/plugin"
 )
 
 // helper: how many witness entries does event have, and is `other` preserved?

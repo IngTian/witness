@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/IngTian/claude-witness/internal/distill"
-	"github.com/IngTian/claude-witness/internal/embed"
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -118,7 +118,7 @@ func cmdDoctor(asJSON bool) error {
 	} else if stat.BackedOff > 0 || deferredErr != nil {
 		overall = warnGlyph()
 	}
-	fmt.Printf("%s  %s\n", overall, bold("claude-witness doctor"))
+	fmt.Printf("%s  %s\n", overall, bold("witness doctor"))
 	fmt.Printf("   %s %s\n", dim("data root:"), st.Root)
 
 	// Runner block. The runner is GLOBAL: one process distills every session

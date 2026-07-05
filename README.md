@@ -270,7 +270,7 @@ witness profile                    # unified L4 report
 
 ## Configuration
 
-`~/.local/share/claude-witness/config.toml` (all optional; sensible defaults):
+`~/.local/share/witness/config.toml` (all optional; sensible defaults):
 
 ```toml
 runner           = "claude"            # "claude" (default) or "opencode"
@@ -297,7 +297,8 @@ them with `witness cleanup` (which never touches your observations or profile).
 
 ## Your data is yours
 
-Everything lives under `~/.local/share/claude-witness/` (override with `WITNESS_HOME`), is `0700`
+Everything lives under `~/.local/share/witness/` (override with `WITNESS_HOME`; installs
+predating the rename keep using `~/.local/share/claude-witness/`, adopted automatically), is `0700`
 (the DB and profile files `0600`), and never leaves your machine. The repo ships the framework,
 schema, and prompts — **never anyone's archive.**
 

@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/store"
 )
 
 func TestRunWorkerReportsSkippedWhenLockHeld(t *testing.T) {

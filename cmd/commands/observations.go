@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/IngTian/claude-witness/internal/embed"
-	"github.com/IngTian/claude-witness/internal/store"
-	"github.com/IngTian/claude-witness/internal/vector"
+	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/store"
+	"github.com/IngTian/witness/internal/vector"
 	"github.com/spf13/cobra"
 )
 

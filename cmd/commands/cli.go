@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // emitJSON marshals v as indented JSON to stdout. Used by read commands in --json

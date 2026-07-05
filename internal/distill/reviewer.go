@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/IngTian/claude-witness/internal/lens"
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // Reviewer is the slow path: synthesize L1 observations into L2 facets, detecting

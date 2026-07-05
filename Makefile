@@ -1,9 +1,9 @@
-# claude-witness — build & install. Pure-Go, CGO disabled (single static binary).
+# witness — build & install. Pure-Go, CGO disabled (single static binary).
 BIN := bin/witness-$(shell go env GOOS)-$(shell go env GOARCH)
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILDTIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS    := -X github.com/IngTian/claude-witness/cmd/commands.version=$(VERSION) -X github.com/IngTian/claude-witness/cmd/commands.commit=$(COMMIT) -X github.com/IngTian/claude-witness/cmd/commands.buildTime=$(BUILDTIME)
+LDFLAGS    := -X github.com/IngTian/witness/cmd/commands.version=$(VERSION) -X github.com/IngTian/witness/cmd/commands.commit=$(COMMIT) -X github.com/IngTian/witness/cmd/commands.buildTime=$(BUILDTIME)
 
 .PHONY: build build-all package-windows npm-opencode-package fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
 

@@ -7,8 +7,8 @@ package vector
 import (
 	"sort"
 
-	"github.com/IngTian/claude-witness/internal/embed"
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // Hit is one ranked observation.

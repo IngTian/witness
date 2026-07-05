@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/IngTian/claude-witness/internal/bundle"
+	"github.com/IngTian/witness/internal/bundle"
 )
 
 // Lens carries the two prompts the distiller needs plus identity.
