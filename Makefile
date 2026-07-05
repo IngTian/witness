@@ -11,11 +11,12 @@ LDFLAGS    := -X github.com/IngTian/claude-witness/cmd/commands.version=$(VERSIO
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/witness
 
-## build-all: cross-compile for mac+linux, amd64+arm64
+## build-all: cross-compile for mac+linux+windows, amd64+arm64
 build-all:
-	@for os in darwin linux; do for arch in amd64 arm64; do \
+	@for os in darwin linux windows; do for arch in amd64 arm64; do \
+	  ext=; [ "$$os" = "windows" ] && ext=.exe; \
 	  echo "building $$os/$$arch"; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o bin/witness-$$os-$$arch ./cmd/witness; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o bin/witness-$$os-$$arch$$ext ./cmd/witness; \
 	done; done
 
 ## fetch-model: download the embedding model (~448MB, once; idempotent)
