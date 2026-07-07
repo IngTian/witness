@@ -172,6 +172,59 @@ func TestInstallSequenceMatchesBindRunner(t *testing.T) {
 	}
 }
 
+// --- ResolveRunner: the WITNESS_RUNNER env fallback for the npm OpenCode user,
+// which must never override an explicit `install` (SetRunner) choice. ----------
+
+// The npm user never ran install (no runner_bound), config carries the default
+// "claude", and the plugin passes WITNESS_RUNNER=opencode → OpenCode wins.
+func TestResolveRunnerEnvFallbackWhenUnbound(t *testing.T) {
+	s := tempStore(t)
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	cfg := s.LoadConfig() // default runner = "claude"
+	if got := s.ResolveRunner(cfg); got != "opencode" {
+		t.Errorf("unbound + WITNESS_RUNNER=opencode: got %q, want opencode", got)
+	}
+}
+
+// A user who explicitly ran `witness install claude` (SetRunner stamps
+// runner_bound) must NOT be hijacked by a stray WITNESS_RUNNER — the persisted
+// choice wins. This is the dual CC+OpenCode safety property.
+func TestResolveRunnerBoundBeatsEnv(t *testing.T) {
+	s := tempStore(t)
+	if err := s.SetRunner("claude"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	cfg := s.LoadConfig()
+	if got := s.ResolveRunner(cfg); got != "claude" {
+		t.Errorf("bound=claude must beat WITNESS_RUNNER=opencode: got %q", got)
+	}
+}
+
+// With neither a bound choice nor the env, ResolveRunner returns the config value.
+func TestResolveRunnerDefaultsToConfig(t *testing.T) {
+	s := tempStore(t)
+	os.Unsetenv("WITNESS_RUNNER")
+	cfg := s.LoadConfig()
+	if got := s.ResolveRunner(cfg); got != "claude" {
+		t.Errorf("no bind, no env: got %q, want claude (config default)", got)
+	}
+}
+
+// SetRunner must stamp runner_bound so the very next ResolveRunner honors it.
+func TestSetRunnerStampsBound(t *testing.T) {
+	s := tempStore(t)
+	if s.MetaString("runner_bound") == "1" {
+		t.Fatal("runner_bound should be unset before install")
+	}
+	if err := s.SetRunner("opencode"); err != nil {
+		t.Fatal(err)
+	}
+	if s.MetaString("runner_bound") != "1" {
+		t.Error("SetRunner did not stamp runner_bound")
+	}
+}
+
 // TestEnabledLensesSurviveSetRunner: a user who already enabled lenses must not
 // lose them when install refreshes runner.
 func TestEnabledLensesSurviveSetRunner(t *testing.T) {

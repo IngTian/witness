@@ -21,9 +21,18 @@ if (!bin || !existsSync(bin)) {
   process.exit(1)
 }
 
+// Default the model dir and the distillation runner for this OpenCode package, so
+// a manual `witness doctor` / `distill start` from the npm install behaves the
+// same as the plugin-kicked worker (OpenCode, not the template default claude).
+// Both are non-clobbering fallbacks; an explicit `witness install` still wins
+// (runner_bound), and an already-set env is respected.
+const env = { ...process.env }
+env.WITNESS_ASSETS ||= modelDir()
+env.WITNESS_RUNNER ||= "opencode"
+
 const result = spawnSync(bin, process.argv.slice(2), {
   stdio: "inherit",
-  env: { ...process.env, WITNESS_ASSETS: process.env.WITNESS_ASSETS || modelDir() },
+  env,
 })
 
 if (result.error) {

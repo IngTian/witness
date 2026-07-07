@@ -101,6 +101,39 @@ func (s *Store) LoadConfig() Config {
 	return c
 }
 
+// runnerBoundKey marks that the user explicitly bound a runner via `witness
+// install` (SetRunner). Its presence is what distinguishes a deliberate runner
+// choice from the template default, so a WITNESS_RUNNER env fallback never
+// overrides a real choice. See ResolveRunner.
+const runnerBoundKey = "runner_bound"
+
+// ResolveRunner returns the distillation runner to actually use, layering a
+// non-persistent WITNESS_RUNNER env fallback UNDER any explicit config choice.
+//
+// Why this exists: the npm OpenCode plugin user never runs `witness install`, so
+// their config.toml carries the template default runner="claude" — but they have
+// no `claude` CLI, and distillation would silently fail. The plugin passes
+// WITNESS_RUNNER=opencode so the worker it kicks distills via OpenCode instead.
+//
+// Precedence (safety-first, so a dual CC+OpenCode user is never hijacked):
+//  1. If the user bound a runner via `witness install` (runner_bound stamped),
+//     the config value ALWAYS wins — WITNESS_RUNNER is ignored.
+//  2. Else, if WITNESS_RUNNER is set, use it (the plugin fallback).
+//  3. Else, the config/default value.
+//
+// Non-persistent: this never writes config.toml, so it can't corrupt a real
+// choice. (A hand-edited runner without `install` isn't marked bound; document
+// that WITNESS_RUNNER is honored only until you run `witness install`.)
+func (s *Store) ResolveRunner(cfg Config) string {
+	if s.MetaString(runnerBoundKey) == "1" {
+		return cfg.Runner
+	}
+	if env := strings.TrimSpace(os.Getenv("WITNESS_RUNNER")); env != "" {
+		return env
+	}
+	return cfg.Runner
+}
+
 func parseBool(v string) (bool, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes", "on":
@@ -144,7 +177,13 @@ func (s *Store) SetRunner(runner string) error {
 		kept = append(kept, fmt.Sprintf("runner = %q", runner))
 	}
 	out := strings.Join(kept, "\n") + "\n"
-	return writeAtomic(s.ConfigPath(), []byte(out))
+	if err := writeAtomic(s.ConfigPath(), []byte(out)); err != nil {
+		return err
+	}
+	// Mark that a runner was explicitly chosen via install, so ResolveRunner lets
+	// this persisted value win over any WITNESS_RUNNER env fallback (a dual
+	// CC+OpenCode user who ran `install` is never hijacked by the plugin env).
+	return s.SetMetaString(runnerBoundKey, "1")
 }
 
 // EnsureConfigFile creates config.toml with a full commented template if it does

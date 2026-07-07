@@ -93,6 +93,13 @@ func runWorker(auto bool) (bool, error) {
 	}
 
 	cfg := st.LoadConfig()
+	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so every
+	// downstream consumer (the opencode-serve branch below, Worker/Reviewer/
+	// Summarizer's RunWith) inherits it with no per-site change. This is what lets
+	// an npm OpenCode user — who never ran `install`, so config says the default
+	// "claude" — distill via OpenCode: their plugin passes WITNESS_RUNNER=opencode.
+	// An explicit `install` choice (runner_bound) still wins (see ResolveRunner).
+	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
 		slog.Error("load lenses", "err", err)

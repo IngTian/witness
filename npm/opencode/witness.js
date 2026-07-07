@@ -25,6 +25,11 @@ function spawnWitness(args, payload) {
   try {
     const env = { ...process.env, WITNESS_OPENCODE_PLUGIN: "1" }
     env.WITNESS_ASSETS ||= modelDir(PACKAGE_ROOT)
+    // Bind distillation to OpenCode for the npm user, who never runs `witness
+    // install` (so their config carries the default runner="claude" but they have
+    // no `claude` CLI). Non-persistent fallback: an explicit `install` choice
+    // still wins (see ResolveRunner). Don't clobber a value the user already set.
+    env.WITNESS_RUNNER ||= "opencode"
     const proc = Bun.spawn([WITNESS_BIN, ...args], {
       stdin: payload ? new Blob([JSON.stringify(payload)]) : "ignore",
       stdout: "ignore",

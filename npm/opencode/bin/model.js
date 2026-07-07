@@ -1,15 +1,27 @@
 import { spawn } from "node:child_process"
 import { createWriteStream, existsSync, mkdirSync, openSync, statSync, unlinkSync, closeSync } from "node:fs"
 import { rename } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { get as httpGet } from "node:http"
 import { get as httpsGet } from "node:https"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
+// Pin the exact HuggingFace revision (not a floating `main`): the SHA-256s below
+// are that revision's git-LFS oids, verified against the pointers. A floating ref
+// would silently drift the day upstream republishes the model — then every hash
+// check fails. Keep this commit + hashes in lockstep with internal/model
+// (fetch.go pinnedRevision) and scripts/fetch-model.sh.
+const MODEL_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
 const MODEL_MIN_BYTES = 400_000_000
 const TOKENIZER_MIN_BYTES = 1_000_000
-const DEFAULT_BASE_URL = "https://huggingface.co/intfloat/multilingual-e5-small/resolve/main"
+// Per-file integrity anchors (lowercase hex SHA-256). Verified on freshly
+// downloaded bytes before the atomic rename — closes the MITM/corruption hole a
+// size-only check leaves open (a tampered blob of the right length would pass).
+const MODEL_SHA256 = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
+const TOKENIZER_SHA256 = "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
+const DEFAULT_BASE_URL = "https://huggingface.co/intfloat/multilingual-e5-small/resolve/" + MODEL_REVISION
 const LOCK_STALE_MS = 12 * 60 * 60 * 1000
 const DATA_DIR_NAMES = ["witness", "claude-witness"]
 
@@ -127,7 +139,7 @@ function request(url, redirectLimit = 5) {
   })
 }
 
-async function downloadFile(baseURL, remotePath, outName, minBytes, dir) {
+async function downloadFile(baseURL, remotePath, outName, minBytes, sha256, dir) {
   const dst = path.join(dir, outName)
   if (fileSize(dst) >= minBytes) return
   const tmp = `${dst}.part`
@@ -136,8 +148,10 @@ async function downloadFile(baseURL, remotePath, outName, minBytes, dir) {
   } catch {}
   const url = `${baseURL.replace(/\/+$/, "")}/${remotePath}`
   const res = await request(url)
+  const hash = createHash("sha256")
   await new Promise((resolve, reject) => {
     const out = createWriteStream(tmp, { mode: 0o644 })
+    res.on("data", (chunk) => hash.update(chunk))
     res.pipe(out)
     res.on("error", reject)
     out.on("error", reject)
@@ -150,13 +164,31 @@ async function downloadFile(baseURL, remotePath, outName, minBytes, dir) {
     } catch {}
     throw new Error(`${outName} is only ${got} bytes; download incomplete or not the real file`)
   }
+  // Verify the content hash before publishing the file. Skipped only when a
+  // custom mirror is in use (WITNESS_MODEL_BASE_URL) since a mirror legitimately
+  // serves the same bytes but we cannot assume the caller pinned OUR revision —
+  // the size guard still applies there.
+  if (sha256) {
+    const digest = hash.digest("hex")
+    if (digest !== sha256) {
+      try {
+        unlinkSync(tmp)
+      } catch {}
+      throw new Error(`${outName} sha256 mismatch: got ${digest}, want ${sha256} (corrupted or tampered download)`)
+    }
+  }
   await rename(tmp, dst)
 }
 
 export async function downloadModel(packageRoot) {
   const dir = modelDir(packageRoot)
   mkdirSync(dir, { recursive: true })
-  const baseURL = process.env.WITNESS_MODEL_BASE_URL || DEFAULT_BASE_URL
-  await downloadFile(baseURL, "onnx/model.onnx", "model.onnx", MODEL_MIN_BYTES, dir)
-  await downloadFile(baseURL, "tokenizer.json", "tokenizer.json", TOKENIZER_MIN_BYTES, dir)
+  // A custom mirror may pin a different revision, so only enforce the pinned
+  // SHA-256 against the default (revision-pinned) host.
+  const mirror = process.env.WITNESS_MODEL_BASE_URL
+  const baseURL = mirror || DEFAULT_BASE_URL
+  const modelHash = mirror ? "" : MODEL_SHA256
+  const tokHash = mirror ? "" : TOKENIZER_SHA256
+  await downloadFile(baseURL, "onnx/model.onnx", "model.onnx", MODEL_MIN_BYTES, modelHash, dir)
+  await downloadFile(baseURL, "tokenizer.json", "tokenizer.json", TOKENIZER_MIN_BYTES, tokHash, dir)
 }

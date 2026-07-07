@@ -33,6 +33,10 @@ func cmdDoctor(asJSON bool) error {
 	}
 	defer st.Close()
 	cfg := st.LoadConfig()
+	// Report the EFFECTIVE runner, resolving the WITNESS_RUNNER env fallback so an
+	// npm OpenCode user (who never bound a runner via install) sees "opencode",
+	// not the misleading template default "claude". Matches what the worker uses.
+	cfg.Runner = st.ResolveRunner(cfg)
 	stat := st.Stats()
 
 	// Don't short-circuit on a bad OpenCode model: the embedder check below is
