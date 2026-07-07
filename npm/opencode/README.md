@@ -17,7 +17,7 @@ npm install -g @witness-ai/opencode
 }
 ```
 
-The package includes the `witness` CLI and bundled platform binaries. The plugin uses the bundled binary first, then falls back to `WITNESS_BIN` or `witness` from `PATH`.
+The package includes the `witness` CLI, bundled platform binaries, and prompts. The plugin uses the bundled binary first, then falls back to `WITNESS_BIN` or `witness` from `PATH`.
 
 If you want to force a different binary, set `WITNESS_BIN` before starting OpenCode:
 

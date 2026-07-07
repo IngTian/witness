@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PKG="$ROOT/npm/opencode"
 
 if [ "${1:-}" = "--build" ]; then
-  make -C "$ROOT" build-all fetch-model
+  make -C "$ROOT" build-all
 fi
 
 rm -rf "$PKG/dist" "$PKG/prompts" "$PKG/assets"
@@ -25,11 +25,6 @@ for os in darwin linux windows; do
 done
 
 cp -R "$ROOT/prompts" "$PKG/prompts"
-
-if [ -d "$ROOT/assets/e5-small" ]; then
-  mkdir -p "$PKG/assets"
-  cp -R "$ROOT/assets/e5-small" "$PKG/assets/e5-small"
-fi
 
 chmod +x "$PKG/bin/witness.js"
 chmod +x "$PKG/dist"/witness-* 2>/dev/null || true

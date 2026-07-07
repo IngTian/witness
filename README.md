@@ -228,8 +228,8 @@ OpenCode support has two pieces:
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.
 
-The npm package ships the OpenCode plugin, a `witness` CLI shim, and prebuilt witness binaries. Install
-it, then add the plugin and MCP server to `~/.config/opencode/opencode.json`:
+The npm package ships the OpenCode plugin, a `witness` CLI shim, prebuilt witness binaries, and prompts.
+Install it, then add the plugin and MCP server to `~/.config/opencode/opencode.json`:
 
 ```sh
 npm install -g @witness-ai/opencode
@@ -249,7 +249,7 @@ npm install -g @witness-ai/opencode
 }
 ```
 
-The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and bundled assets before publishing:
+The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and prompts before publishing:
 
 ```sh
 make npm-opencode-package

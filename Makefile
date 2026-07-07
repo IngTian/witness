@@ -40,7 +40,7 @@ package-windows: build-all fetch-model
 	done; \
 	rm -rf bin/pkg
 
-## npm-opencode-package: stage prebuilt binaries/assets and verify the npm package
+## npm-opencode-package: stage prebuilt binaries/prompts and verify the npm package
 npm-opencode-package:
 	./scripts/stage-npm-opencode.sh --build
 	cd npm/opencode && npm pack --dry-run

@@ -2,6 +2,8 @@ package commands
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -448,6 +450,52 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	}
 	if !strings.Contains(src, `"import", "--agent", "opencode", "--quiet"`) {
 		t.Fatalf("installed plugin should reconcile OpenCode DB before distillation: %s", src)
+	}
+}
+
+func TestRemoveLegacyOpenCodePluginsKeepsCurrentName(t *testing.T) {
+	dir := t.TempDir()
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(plugins, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	current := openCodePluginPath(dir, openCodePluginName)
+	legacy := openCodePluginPath(dir, legacyOpenCodePluginName)
+	if err := os.WriteFile(current, []byte("current"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removeLegacyOpenCodePlugins(dir)
+
+	if _, err := os.Stat(current); err != nil {
+		t.Fatalf("current plugin should stay installed: %v", err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy plugin should be removed, got %v", err)
+	}
+}
+
+func TestRemoveAllOpenCodePluginsRemovesCurrentAndLegacyNames(t *testing.T) {
+	dir := t.TempDir()
+	plugins := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(plugins, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{openCodePluginName, legacyOpenCodePluginName} {
+		if err := os.WriteFile(openCodePluginPath(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeAllOpenCodePlugins(dir)
+
+	for _, name := range []string{openCodePluginName, legacyOpenCodePluginName} {
+		if _, err := os.Stat(openCodePluginPath(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s should be removed, got %v", name, err)
+		}
 	}
 }
 

@@ -288,6 +288,25 @@ func opencodeConfigPath() string {
 	return jsonPath
 }
 
+const (
+	openCodePluginName       = "witness.js"
+	legacyOpenCodePluginName = "claude-witness.js"
+)
+
+func openCodePluginPath(dir, name string) string {
+	return filepath.Join(dir, "plugins", name)
+}
+
+func removeLegacyOpenCodePlugins(dir string) {
+	_ = os.Remove(openCodePluginPath(dir, legacyOpenCodePluginName))
+}
+
+func removeAllOpenCodePlugins(dir string) {
+	for _, name := range []string{openCodePluginName, legacyOpenCodePluginName} {
+		_ = os.Remove(openCodePluginPath(dir, name))
+	}
+}
+
 // repoShim resolves <repo>/hooks/witness.sh from the running binary at <repo>/bin/.
 func repoShim() (string, error) {
 	exe, err := os.Executable()
@@ -418,10 +437,11 @@ func cmdInstallOpenCode() error {
 	if err := os.MkdirAll(plugins, 0o755); err != nil {
 		return err
 	}
-	pluginPath := filepath.Join(plugins, "witness.js")
+	pluginPath := openCodePluginPath(dir, openCodePluginName)
 	if err := writeFileAtomic(pluginPath, []byte(opencodeplugin.Source(shim))); err != nil {
 		return err
 	}
+	removeLegacyOpenCodePlugins(dir)
 	fmt.Printf("OpenCode plugin installed at %s\n", pluginPath)
 
 	if err := writeFileAtomic(config, merged); err != nil {
@@ -461,7 +481,6 @@ func cmdUninstallClaude() error {
 
 func cmdUninstallOpenCode() error {
 	dir := opencodeDir()
-	pluginPath := filepath.Join(dir, "plugins", "witness.js")
 	config := opencodeConfigPath()
 	configUpdated := false
 	if data, err := os.ReadFile(config); err == nil {
@@ -476,8 +495,9 @@ func cmdUninstallOpenCode() error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	_ = os.Remove(pluginPath)
-	fmt.Printf("OpenCode plugin removed from %s (if it was present)\n", pluginPath)
+	removeAllOpenCodePlugins(dir)
+	fmt.Printf("OpenCode plugin removed from %s (if it was present)\n", openCodePluginPath(dir, openCodePluginName))
+	fmt.Printf("Legacy OpenCode plugin removed from %s (if it was present)\n", openCodePluginPath(dir, legacyOpenCodePluginName))
 	if configUpdated {
 		fmt.Println("OpenCode MCP server 'witness' removed from OpenCode config (if it was present)")
 	} else {
