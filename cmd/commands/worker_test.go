@@ -20,7 +20,7 @@ func TestRunWorkerReportsSkippedWhenLockHeld(t *testing.T) {
 	}
 	defer unlock()
 
-	ran, err := runWorker()
+	ran, err := runWorker(false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,10 +29,16 @@ func TestRunWorkerReportsSkippedWhenLockHeld(t *testing.T) {
 	}
 }
 
-func TestWorkerSessionBudgetIsUnbounded(t *testing.T) {
+func TestWorkerSessionBudgetIsUnboundedWhenManual(t *testing.T) {
 	for _, runner := range []string{"opencode", "claude"} {
-		if got := workerSessionBudget(store.Config{Runner: runner}); got != 0 {
+		if got := workerSessionBudget(store.Config{Runner: runner, AutoDistillSessionBudget: 1}, false); got != 0 {
 			t.Fatalf("%s budget = %d, want unbounded", runner, got)
 		}
+	}
+}
+
+func TestWorkerSessionBudgetUsesAutoLimit(t *testing.T) {
+	if got := workerSessionBudget(store.Config{AutoDistillSessionBudget: 1}, true); got != 1 {
+		t.Fatalf("auto budget = %d, want 1", got)
 	}
 }

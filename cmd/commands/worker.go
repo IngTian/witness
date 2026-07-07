@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -17,7 +18,15 @@ import (
 )
 
 func newInternalWorkerCmd() *cobra.Command {
-	return &cobra.Command{Use: "worker", Hidden: true, RunE: func(_ *cobra.Command, args []string) error { return cmdWorker(args) }}
+	var auto bool
+	c := &cobra.Command{Use: "worker", Hidden: true, RunE: func(_ *cobra.Command, args []string) error {
+		if auto {
+			args = append(args, "--auto")
+		}
+		return cmdWorker(args)
+	}}
+	c.Flags().BoolVar(&auto, "auto", false, "run with automatic distillation limits")
+	return c
 }
 
 // cmdWorker is the single-flight background consumer. It holds one global lock for
@@ -26,12 +35,29 @@ func newInternalWorkerCmd() *cobra.Command {
 // this; if a consumer is already running, the new one no-ops immediately — no
 // blocked-process pile-up, no daemon. The filesystem is the durable job queue;
 // this lock elects the single consumer that drains it.
-func cmdWorker(_ []string) error {
-	_, err := runWorker()
+func cmdWorker(args []string) error {
+	auto, err := workerAutoFlag(args)
+	if err != nil {
+		return err
+	}
+	_, err = runWorker(auto)
 	return err
 }
 
-func runWorker() (bool, error) {
+func workerAutoFlag(args []string) (bool, error) {
+	auto := false
+	for _, arg := range args {
+		switch arg {
+		case "--auto":
+			auto = true
+		default:
+			return false, fmt.Errorf("usage: witness worker [--auto]")
+		}
+	}
+	return auto, nil
+}
+
+func runWorker(auto bool) (bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return false, err
@@ -47,16 +73,24 @@ func runWorker() (bool, error) {
 	started := time.Now().UTC().Format(time.RFC3339)
 	_ = st.SetMetaString("worker_status", "running")
 	_ = st.SetMetaString("worker_pid", strconv.Itoa(os.Getpid()))
+	if auto {
+		_ = st.SetMetaString("worker_mode", "auto")
+	} else {
+		_ = st.SetMetaString("worker_mode", "manual")
+	}
 	_ = st.SetMetaString("worker_started_at", started)
 	_ = st.SetMetaString("worker_heartbeat", started)
 	_ = st.SetMetaString("worker_stop_requested", "")
 	defer func() {
 		_ = st.SetMetaString("worker_status", "idle")
 		_ = st.SetMetaString("worker_pid", "")
+		_ = st.SetMetaString("worker_mode", "")
 		_ = st.SetMetaString("worker_current", "")
 		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
 	}()
-	defer scheduleRetryWakeup(st)
+	if auto {
+		defer scheduleRetryWakeup(st)
+	}
 
 	cfg := st.LoadConfig()
 	lenses, err := activeLenses(st)
@@ -66,8 +100,10 @@ func runWorker() (bool, error) {
 	}
 	ctx := context.Background()
 
-	// Embedder is heavy (~448MB); load it lazily and once, only if a session
-	// actually needs mining. Review doesn't need it.
+	// Embedder is heavy (~448MB); load it lazily and once per short-lived worker
+	// process, only if a session actually needs mining. There is deliberately no
+	// resident embedding service: when the queue drains, the process exits and the
+	// model memory is released.
 	var emb *embed.Embedder
 	var embErr error
 	getEmb := func() (*embed.Embedder, error) {
@@ -92,7 +128,7 @@ func runWorker() (bool, error) {
 		}()
 		runFn = opencodeServer.Run
 	}
-	sessionBudget := workerSessionBudget(cfg)
+	sessionBudget := workerSessionBudget(cfg, auto)
 	processedSessions := drainQueueLimit(pending, func(session string) {
 		if st.MetaString("worker_stop_requested") == "1" {
 			return
@@ -132,9 +168,11 @@ func runWorker() (bool, error) {
 	return true, nil
 }
 
-func workerSessionBudget(cfg store.Config) int {
-	_ = cfg
-	return 0
+func workerSessionBudget(cfg store.Config, auto bool) int {
+	if !auto {
+		return 0
+	}
+	return cfg.AutoDistillSessionBudget
 }
 
 func cleanupOpenCodeDistillSessions(ctx context.Context, before time.Time) {

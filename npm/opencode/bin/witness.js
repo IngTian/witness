@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { modelDir } from "./model.js"
 
 function binaryName() {
   const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform]
@@ -22,7 +23,7 @@ if (!bin || !existsSync(bin)) {
 
 const result = spawnSync(bin, process.argv.slice(2), {
   stdio: "inherit",
-  env: process.env,
+  env: { ...process.env, WITNESS_ASSETS: process.env.WITNESS_ASSETS || modelDir() },
 })
 
 if (result.error) {

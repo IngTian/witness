@@ -29,7 +29,17 @@ func cmdWorkerWakeup(args []string) error {
 	if seconds > 0 {
 		time.Sleep(time.Duration(seconds) * time.Second)
 	}
-	_, err = runWorker()
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	cfg := st.LoadConfig()
+	auto := cfg.AutoDistill
+	st.Close()
+	if !auto {
+		return nil
+	}
+	_, err = runWorker(true)
 	return err
 }
 

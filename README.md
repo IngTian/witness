@@ -221,9 +221,9 @@ are left in place for now.
 OpenCode support has two pieces:
 
 - A plugin captures OpenCode message events into witness L0, reconciles OpenCode's SQLite DB on idle,
-  and kicks background distillation through that import path without waiting. From-source installs write
-  a local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm
-  plugin `@witness-ai/opencode`.
+  and asks the laptop-friendly auto-start gate to distill when allowed. From-source installs write a
+  local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm plugin
+  `@witness-ai/opencode`.
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.
@@ -278,7 +278,14 @@ triage_model     = "claude-haiku-4-5"   # cheap per-session mining ("" = claude 
 distill_model    = "claude-opus-4-8"    # the reviewer ("" = claude -p default)
 review_every     = 5                    # run the reviewer every N distilled sessions...
 review_poignancy = 30                   # ...or sooner once accumulated salience crosses this (0 = off)
+auto_distill = true                     # hooks/plugins may start model work automatically
+auto_distill_interval_minutes = 10      # minimum gap between automatic worker starts
+auto_distill_session_budget = 0         # sessions per automatic run (0 = drain current queue)
 ```
+
+Set `auto_distill = false` for capture-only mode on battery-constrained machines, then run
+`witness distill start` manually when plugged in. Automatic workers are short-lived: they load the
+embed model only while draining queued sessions, then exit.
 
 When `runner = opencode`, `triage_model` and `distill_model` should use OpenCode model names such
 as `openai/gpt-5.5`; empty values use your OpenCode defaults. Non-empty OpenCode model names are

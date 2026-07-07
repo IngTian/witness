@@ -32,6 +32,9 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		"distill_model",
 		"review_every",
 		"review_poignancy",
+		"auto_distill",
+		"auto_distill_interval_minutes",
+		"auto_distill_session_budget",
 		"lens =",
 	} {
 		if !strings.Contains(body, want) {
@@ -39,7 +42,7 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		}
 	}
 	c := st.LoadConfig()
-	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 {
+	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 || !c.AutoDistill || c.AutoDistillIntervalMinutes != 10 || c.AutoDistillSessionBudget != 0 {
 		t.Errorf("template defaults not loadable: %+v", c)
 	}
 }
@@ -59,6 +62,9 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 		"runner = \"opencode\"\n" +
 		"triage_model = \"my-fine-model\"\n" +
 		"review_every = 99\n" +
+		"auto_distill = false\n" +
+		"auto_distill_interval_minutes = 120\n" +
+		"auto_distill_session_budget = 2\n" +
 		"lens = math\n")
 	if err := os.WriteFile(filepath.Join(root, "config.toml"), original, 0o600); err != nil {
 		t.Fatal(err)
@@ -78,7 +84,7 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 		t.Errorf("Open() modified an existing config (forward-compatibility broken):\n got %q\nwant %q", got, original)
 	}
 	c := st.LoadConfig()
-	if c.Runner != "opencode" || c.TriageModel != "my-fine-model" || c.ReviewEvery != 99 || !slices.Contains(c.EnabledLenses, "math") {
+	if c.Runner != "opencode" || c.TriageModel != "my-fine-model" || c.ReviewEvery != 99 || c.AutoDistill || c.AutoDistillIntervalMinutes != 120 || c.AutoDistillSessionBudget != 2 || !slices.Contains(c.EnabledLenses, "math") {
 		t.Errorf("existing values not loaded intact: %+v", c)
 	}
 }

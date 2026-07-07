@@ -42,13 +42,23 @@ func newDistillCmd() *cobra.Command {
 	}
 	statusCmd.Flags().BoolVarP(&statusJSON, "json", "j", false, "output as JSON")
 	distillCmd.AddCommand(statusCmd)
-	distillCmd.AddCommand(&cobra.Command{
+	var stopAutoOnly bool
+	stopCmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Request the running worker to stop.",
 		Long:  "Set the worker stop flag and send SIGTERM to the running worker process when it is still alive.",
 		Args:  cobra.NoArgs,
-		RunE:  func(_ *cobra.Command, _ []string) error { return cmdDistill([]string{"stop"}) },
-	})
+		RunE: func(_ *cobra.Command, _ []string) error {
+			args := []string{"stop"}
+			if stopAutoOnly {
+				args = append(args, "--auto-only")
+			}
+			return cmdDistill(args)
+		},
+	}
+	stopCmd.Flags().BoolVar(&stopAutoOnly, "auto-only", false, "stop only an automatically-started worker")
+	_ = stopCmd.Flags().MarkHidden("auto-only")
+	distillCmd.AddCommand(stopCmd)
 	return distillCmd
 }
 
@@ -70,7 +80,11 @@ func cmdDistill(args []string) error {
 	case "status":
 		return cmdDistillStatus(false)
 	case "stop":
-		return cmdDistillStop()
+		autoOnly := len(args) > 1 && args[1] == "--auto-only"
+		if len(args) > 2 || (len(args) == 2 && !autoOnly) {
+			return fmt.Errorf("usage: witness distill stop [--auto-only]")
+		}
+		return cmdDistillStop(autoOnly)
 	default:
 		return fmt.Errorf("unknown distill subcommand %q (want start|status|stop)", args[0])
 	}
@@ -88,6 +102,7 @@ func cmdDistillStatus(asJSON bool) error {
 		status = "idle"
 	}
 	pid := st.MetaString("worker_pid")
+	mode := st.MetaString("worker_mode")
 	heartbeat := st.MetaString("worker_heartbeat")
 	current := st.MetaString("worker_current")
 	if (status == "running" || status == "stopping") && !workerPIDAlive(pid) {
@@ -96,10 +111,12 @@ func cmdDistillStatus(asJSON bool) error {
 		current = ""
 		_ = st.SetMetaString("worker_status", "idle")
 		_ = st.SetMetaString("worker_pid", "")
+		_ = st.SetMetaString("worker_mode", "")
 		_ = st.SetMetaString("worker_current", "")
 	}
 	if status == "idle" {
 		pid = ""
+		mode = ""
 		current = ""
 	}
 	lastRaw := st.LastRawTS()
@@ -109,6 +126,7 @@ func cmdDistillStatus(asJSON bool) error {
 			Worker: distillWorkerJSON{
 				Status:    status,
 				PID:       pid,
+				Mode:      mode,
 				Heartbeat: heartbeat,
 				Current:   current,
 			},
@@ -143,6 +161,9 @@ func cmdDistillStatus(asJSON bool) error {
 	if pid != "" {
 		fmt.Printf("  %s", dim("pid="+pid))
 	}
+	if mode != "" {
+		fmt.Printf("  %s", dim("mode="+mode))
+	}
 	if heartbeat != "" {
 		fmt.Printf("  %s", dim("♥ "+heartbeat))
 	}
@@ -174,6 +195,7 @@ type distillStatusJSON struct {
 type distillWorkerJSON struct {
 	Status    string `json:"status"`
 	PID       string `json:"pid,omitempty"`
+	Mode      string `json:"mode,omitempty"`
 	Heartbeat string `json:"heartbeat,omitempty"`
 	Current   string `json:"current,omitempty"`
 }
@@ -190,12 +212,15 @@ type distillQueueJSON struct {
 	BackedOff int `json:"backed_off"`
 }
 
-func cmdDistillStop() error {
+func cmdDistillStop(autoOnly bool) error {
 	st, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if autoOnly && st.MetaString("worker_mode") != "auto" {
+		return nil
+	}
 	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
 		return err
 	}

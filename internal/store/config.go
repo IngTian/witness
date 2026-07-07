@@ -13,11 +13,14 @@ import (
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
 // keys are ignored; missing file = all defaults.
 type Config struct {
-	Runner          string // "claude" (default) or "opencode" for headless distillation calls
-	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
-	DistillModel    string // model for the reviewer ("" = claude -p default)
-	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
-	ReviewPoignancy int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
+	Runner                     string // "claude" (default) or "opencode" for headless distillation calls
+	TriageModel                string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
+	DistillModel               string // model for the reviewer ("" = claude -p default)
+	ReviewEvery                int    // run the reviewer after this many distilled sessions since last review
+	ReviewPoignancy            int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
+	AutoDistill                bool   // whether hooks/plugins may start the worker automatically
+	AutoDistillIntervalMinutes int    // minimum wall-clock gap between automatic worker starts
+	AutoDistillSessionBudget   int    // max sessions per automatic worker run (0 = unbounded)
 	// EnabledLenses is the set of registered lens names that run on EVERY session
 	// (alongside the always-on "default" lens). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
@@ -31,6 +34,12 @@ func DefaultConfig() Config {
 		DistillModel:    "",
 		ReviewEvery:     5,
 		ReviewPoignancy: 30, // a few high-salience sessions trigger review before the count cap
+		AutoDistill:     true,
+		// Automatic triggers should be laptop-friendly without starving distillation:
+		// capture stays immediate, model work is batched by a short cooldown, and the
+		// worker exits after draining the queue so the embed model never stays resident.
+		AutoDistillIntervalMinutes: 10,
+		AutoDistillSessionBudget:   0,
 	}
 }
 
@@ -69,6 +78,18 @@ func (s *Store) LoadConfig() Config {
 			if n, err := strconv.Atoi(v); err == nil {
 				c.ReviewPoignancy = n
 			}
+		case "auto_distill":
+			if b, ok := parseBool(v); ok {
+				c.AutoDistill = b
+			}
+		case "auto_distill_interval_minutes":
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				c.AutoDistillIntervalMinutes = n
+			}
+		case "auto_distill_session_budget":
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				c.AutoDistillSessionBudget = n
+			}
 		case "lens":
 			// One enabled lens per line: "lens = <name>". Global — runs on every
 			// session. Deduped so repeated lines don't multiply.
@@ -78,6 +99,17 @@ func (s *Store) LoadConfig() Config {
 		}
 	}
 	return c
+}
+
+func parseBool(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // SetRunner writes `runner = "<runner>"` into config.toml, creating or replacing
@@ -143,6 +175,14 @@ distill_model = ""
 review_every = 5
 # ...or once accumulated observation poignancy crosses this threshold (0 = off).
 review_poignancy = 30
+
+# Automatic distillation is laptop-friendly without keeping the embed model resident:
+# hooks/plugins capture immediately, model work starts at most once per interval,
+# drains the current queue, then exits. Set session_budget > 0 to cap each auto run.
+# Manual ` + "`witness distill start`" + ` is always unbounded.
+auto_distill = true
+auto_distill_interval_minutes = 10
+auto_distill_session_budget = 0
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math

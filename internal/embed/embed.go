@@ -27,10 +27,12 @@ import (
 )
 
 const (
-	Dim    = 384 // e5-small hidden size
-	bosID  = 0   // XLM-R <s>
-	eosID  = 2   // XLM-R </s>
-	maxLen = 512
+	Dim               = 384 // e5-small hidden size
+	bosID             = 0   // XLM-R <s>
+	eosID             = 2   // XLM-R </s>
+	maxLen            = 512
+	modelMinBytes     = 400_000_000
+	tokenizerMinBytes = 1_000_000
 )
 
 // Embedder holds the loaded model + tokenizer. Construct once, reuse. Not safe
@@ -52,14 +54,38 @@ func assetsDir() string {
 	return bundle.Dir(filepath.Join("assets", "e5-small"), "WITNESS_ASSETS")
 }
 
+// AssetsDir returns the directory where model.onnx and tokenizer.json should
+// live. Commands use this to explain missing-model state without loading GoMLX.
+func AssetsDir() string { return assetsDir() }
+
+// ModelReady is a cheap integrity gate for auto-start decisions. It mirrors the
+// fetch script's coarse minimum-size checks so a partial download never causes
+// the heavy embedder path to start and fail repeatedly.
+func ModelReady() bool {
+	dir := assetsDir()
+	return fileAtLeast(filepath.Join(dir, "model.onnx"), modelMinBytes) &&
+		fileAtLeast(filepath.Join(dir, "tokenizer.json"), tokenizerMinBytes)
+}
+
+func fileAtLeast(path string, min int64) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Size() >= min
+}
+
 // New loads the embedder from the assets directory.
 func New() (*Embedder, error) {
 	dir := assetsDir()
 	modelPath := filepath.Join(dir, "model.onnx")
 	tokPath := filepath.Join(dir, "tokenizer.json")
 
-	if _, err := os.Stat(modelPath); err != nil {
-		return nil, fmt.Errorf("embed model not found at %s (run scripts/fetch-model.sh): %w", modelPath, err)
+	if !ModelReady() {
+		if _, err := os.Stat(modelPath); err != nil {
+			return nil, fmt.Errorf("embed model not found at %s (run scripts/fetch-model.sh): %w", modelPath, err)
+		}
+		if _, err := os.Stat(tokPath); err != nil {
+			return nil, fmt.Errorf("embed tokenizer not found at %s (run scripts/fetch-model.sh): %w", tokPath, err)
+		}
+		return nil, fmt.Errorf("embed model incomplete at %s (run scripts/fetch-model.sh)", dir)
 	}
 
 	model, err := parser.ParseFile(modelPath)

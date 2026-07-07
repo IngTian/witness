@@ -27,6 +27,7 @@ done
 cp -R "$ROOT/prompts" "$PKG/prompts"
 
 chmod +x "$PKG/bin/witness.js"
+chmod +x "$PKG/bin/download-model.js"
 chmod +x "$PKG/dist"/witness-* 2>/dev/null || true
 
 echo "staged npm package assets in $PKG"

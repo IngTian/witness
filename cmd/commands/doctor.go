@@ -82,11 +82,14 @@ func cmdDoctor(asJSON bool) error {
 		out := doctorJSON{
 			DataRoot: st.Root,
 			Config: doctorConfigJSON{
-				Runner:          cfg.Runner,
-				TriageModel:     cfg.TriageModel,
-				DistillModel:    cfg.DistillModel,
-				ReviewEvery:     cfg.ReviewEvery,
-				ReviewPoignancy: cfg.ReviewPoignancy,
+				Runner:                     cfg.Runner,
+				TriageModel:                cfg.TriageModel,
+				DistillModel:               cfg.DistillModel,
+				ReviewEvery:                cfg.ReviewEvery,
+				ReviewPoignancy:            cfg.ReviewPoignancy,
+				AutoDistill:                cfg.AutoDistill,
+				AutoDistillIntervalMinutes: cfg.AutoDistillIntervalMinutes,
+				AutoDistillSessionBudget:   cfg.AutoDistillSessionBudget,
 			},
 			OpenCodeModels: opencodeModels,
 			Archive: doctorArchiveJSON{
@@ -140,6 +143,7 @@ func cmdDoctor(asJSON bool) error {
 		fmt.Printf("    %s %s\n", label("oc models"), opencodeModels)
 	}
 	fmt.Printf("    %s review_every=%d  poignancy=%d\n", label("review"), cfg.ReviewEvery, cfg.ReviewPoignancy)
+	fmt.Printf("    %s enabled=%t  interval=%dm  session_budget=%d\n", label("auto"), cfg.AutoDistill, cfg.AutoDistillIntervalMinutes, cfg.AutoDistillSessionBudget)
 	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
 	fmt.Printf("    %s edit %s  %s\n", dim("↳ set models:  "), st.ConfigPath(), dim("(triage_model, distill_model)"))
 
@@ -199,11 +203,14 @@ type doctorJSON struct {
 }
 
 type doctorConfigJSON struct {
-	Runner          string `json:"runner"`
-	TriageModel     string `json:"triage_model"`
-	DistillModel    string `json:"distill_model"`
-	ReviewEvery     int    `json:"review_every"`
-	ReviewPoignancy int    `json:"review_poignancy"`
+	Runner                     string `json:"runner"`
+	TriageModel                string `json:"triage_model"`
+	DistillModel               string `json:"distill_model"`
+	ReviewEvery                int    `json:"review_every"`
+	ReviewPoignancy            int    `json:"review_poignancy"`
+	AutoDistill                bool   `json:"auto_distill"`
+	AutoDistillIntervalMinutes int    `json:"auto_distill_interval_minutes"`
+	AutoDistillSessionBudget   int    `json:"auto_distill_session_budget"`
 }
 
 type doctorArchiveJSON struct {
