@@ -1,0 +1,60 @@
+# Publishes @witness-ai/opencode (the OpenCode plugin, in npm/opencode/) to the
+# PUBLIC npm registry on a GitHub Release, via npm Trusted Publishing (OIDC).
+#
+# No stored NPM_TOKEN: `id-token: write` lets npm mint a short-lived OIDC token,
+# and provenance is generated automatically (so do NOT pass --provenance).
+# Configure the matching trusted publisher once at npmjs.com → the package's
+# Settings → Trusted Publisher: owner=IngTian, repo=witness, workflow=npm-publish.yml.
+#
+# Provenance requires npm/opencode/package.json's `repository` URL to match this
+# repo (it does: git+https://github.com/IngTian/witness.git).
+name: Publish @witness-ai/opencode to npm
+
+on:
+  release:
+    types: [published]      # cut a GitHub Release (tag vX.Y.Z) to publish
+  workflow_dispatch: {}     # manual run for testing the build path (guard skips the publish-version check)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # OIDC — the whole point: token-free trusted publishing + auto-provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      # The package's prepublishOnly runs `make build-all` (cross-compiles all 6
+      # Go binaries into bin/, which the staging script copies into dist/), so the
+      # Go toolchain must be present in CI.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'                          # >= 22.14 required for trusted publishing
+          registry-url: 'https://registry.npmjs.org'  # PUBLIC npm, not GitHub Packages
+
+      # Trusted publishing needs npm >= 11.5.1 (newer than what Node 22 bundles).
+      - run: npm install -g npm@latest
+
+      # Fail fast if the release tag (vX.Y.Z) doesn't match the committed package
+      # version — 0.0.1 is already published and immutable, so the tag must bump it.
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./npm/opencode/package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "release tag ($tag) != npm/opencode/package.json version ($pkg)" >&2
+            echo "bump npm/opencode/package.json to $tag (or tag v$pkg) and re-release." >&2
+            exit 1
+          fi
+
+      # `npm publish` triggers prepublishOnly (build-all + stage the 6 binaries +
+      # prompts into dist/). No NODE_AUTH_TOKEN and no --provenance under OIDC.
+      - name: Publish
+        if: github.event_name == 'release'
+        working-directory: npm/opencode
+        run: npm publish
