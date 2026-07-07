@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // openTmpStore gives each test its own on-disk store under a temp WITNESS_HOME.

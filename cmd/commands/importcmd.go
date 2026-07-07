@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/IngTian/claude-witness/internal/runtimes"
-	opencodeimport "github.com/IngTian/claude-witness/internal/runtimes/opencode"
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/runtimes"
+	opencodeimport "github.com/IngTian/witness/internal/runtimes/opencode"
+	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
 

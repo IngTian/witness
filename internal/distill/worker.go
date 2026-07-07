@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/IngTian/claude-witness/internal/lens"
-	"github.com/IngTian/claude-witness/internal/store"
-	"github.com/IngTian/claude-witness/internal/vector"
+	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/store"
+	"github.com/IngTian/witness/internal/vector"
 )
 
 // backoffDelay is the wait before a failed session's delta is retried: 5m, 10m,

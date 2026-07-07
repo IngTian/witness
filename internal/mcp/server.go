@@ -11,8 +11,8 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/IngTian/claude-witness/internal/store"
-	"github.com/IngTian/claude-witness/internal/vector"
+	"github.com/IngTian/witness/internal/store"
+	"github.com/IngTian/witness/internal/vector"
 )
 
 // searchInput is the typed argument for search_observations.
@@ -114,7 +114,7 @@ func Serve(ctx context.Context, st *store.Store, emb Embedder) error {
 // suppresses the output schema so clients use Content. (See TestNoStructuredOutput.)
 func newServer(st *store.Store, emb Embedder) *mcpsdk.Server {
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
-		Name:    "claude-witness",
+		Name:    "witness",
 		Version: "0.1.0",
 	}, nil)
 

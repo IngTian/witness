@@ -22,7 +22,8 @@ make vet          # CGO_ENABLED=0 go vet ./...
 make fmt          # gofmt -w internal cmd
 make doctor       # build + run the embedder/model/config health check
 make install claude      # (or: opencode) wire hooks/plugin + MCP + bind runner
-make build-all    # cross-compile darwin+linux, amd64+arm64
+make build-all    # cross-compile darwin+linux+windows, amd64+arm64
+make package-windows     # self-contained Windows zips (exe + prompts + model)
 ```
 
 Before finishing a change, run `make fmt vet test` and expect all green.
@@ -30,7 +31,9 @@ Before finishing a change, run `make fmt vet test` and expect all green.
 **macOS gotcha:** always `make build` (or `go build -o bin/...`) — do **not**
 `cp` a built arm64 binary to another path and run it. macOS invalidates the
 ad-hoc code signature on copy and the copy dies with SIGKILL (137). Build in
-place.
+place. (The Windows install path *does* copy the binary into `%LOCALAPPDATA%`
+— that's fine, Windows has no such signature, and `install_windows.go` guards a
+self-copy with `os.SameFile` + writes atomically via temp+rename.)
 
 ## Architecture (where things live)
 
@@ -41,11 +44,15 @@ place.
 - `internal/store/` — SQLite data model + the filesystem/DB-as-queue. `raw`
   (L0), `observations` (L1), `facets`/`facet_versions` (L2, bi-temporal),
   `progress` (distill watermark), `staged`, `meta`. `MaxOpenConns(1)` + WAL +
-  `busy_timeout` is the deliberate concurrency model.
+  `busy_timeout` is the deliberate concurrency model. `resolveRoot()` picks the
+  data dir via `dataDirNames` (adopt-in-place, see invariants below).
 - `internal/distill/` — the worker: mines L0→L1 per lens, reviews L1→L2, and
   regenerates L4 via a headless runner (`claude -p` or `opencode serve`).
 - `internal/runtimes/{claude,opencode}/` — the per-runtime capture/import
   adapters. `internal/runtimes/opencode/plugin/` embeds the OpenCode plugin JS.
+- `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding
+  model) relative to the binary via `os.Executable()` when no env var points at
+  them, so a copied/installed binary self-locates its assets.
 - `internal/{embed,vector,lens,mcp}/` — embeddings (pure-Go GoMLX), cosine
   search, lens loading, the MCP server.
 
@@ -61,14 +68,30 @@ place.
   are best-effort: they log failures but always exit 0. Do not make them return
   errors on a bad hook payload.
 - **Recursion guard.** The worker runs `claude -p`, which would re-fire the
-  hooks. `WITNESS_WORKER=1` short-circuits witness inside that subprocess (both
-  the shim `hooks/witness.sh` and `commands.Run()` check it). Keep it intact.
+  hooks. `WITNESS_WORKER=1` short-circuits witness inside that subprocess. Both
+  the Unix shim `hooks/witness.sh` and `commands.Run()` check it — and on Windows
+  (exec-form hooks, no shim) `commands.Run()` is the *only* guard, so keep it
+  intact.
+- **Install is per-platform (`resolveClaudeInstall`, GOOS-split).** Unix wires
+  shell-form hooks through the `hooks/witness.sh` shim (in-repo working copy).
+  Windows has no guaranteed shell: `install_windows.go` COPIES the binary +
+  `prompts/` + model into `%LOCALAPPDATA%\witness` and wires **exec-form** hooks
+  (`{command: <exe>, args: [...]}`) pointing at the installed exe. Keep the two
+  paths separate — don't unify onto the shim.
 - **Hook name contract.** Installed hooks invoke `witness <session-start|capture|
-  session-end>`; the binary must keep cobra commands of exactly those names.
-  `cmd/commands/hookcontract_test.go` locks this — run it after touching install
-  wiring or command names.
+  session-end>` (shell form) or the same tokens as exec-form `args`; the binary
+  must keep cobra commands of exactly those names, and `isWitnessEntry` must
+  recognize *only* our own hooks (exact `witness` basename + our tokens) so a
+  re-install never strips a foreign hook. `cmd/commands/hookcontract_test.go` +
+  `install_test.go` lock these — run them after touching install wiring or
+  command names.
 - **Lenses are global** (never repo-scoped): a cloned/hostile repo cannot inject
   a prompt into your archive. Nothing is read from a repo directory.
+- **Data dir adopts, never moves.** `dataDirNames = {"witness","claude-witness"}`
+  (preferred first, legacy appended). `resolveRoot()` uses an existing dir under
+  any listed name IN PLACE and only creates `witness` on a fresh machine — the
+  repo renamed but the data dir must never orphan an existing archive. A future
+  rename just prepends a name; never rewrite these literals as a "cleanup".
 
 ## Conventions
 

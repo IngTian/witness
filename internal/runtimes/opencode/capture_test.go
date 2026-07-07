@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/store"
 )
 
 func TestCaptureWritesOpenCodeEventOnce(t *testing.T) {

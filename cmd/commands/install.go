@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	opencodeplugin "github.com/IngTian/claude-witness/internal/runtimes/opencode/plugin"
-	"github.com/IngTian/claude-witness/internal/store"
+	opencodeplugin "github.com/IngTian/witness/internal/runtimes/opencode/plugin"
+	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
 

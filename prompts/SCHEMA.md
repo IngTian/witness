@@ -1,8 +1,8 @@
-# claude-witness schema
+# witness schema
 
 The data model in one page. Four layers: one ground-truth, three derived and regenerable.
 Everything lives in a single embedded SQLite database, `witness.db`, under the data root
-(`$WITNESS_HOME`, else `$XDG_DATA_HOME/claude-witness`, else `~/.local/share/claude-witness`).
+(`$WITNESS_HOME`, else `$XDG_DATA_HOME/witness`, else `~/.local/share/witness`).
 The one exception is the L4 profile, written as plain markdown files so you can read them directly.
 
 Layer vocabulary: **raw → observations → facets → profile** (`L0/L1/L2` are shorthand; L3 is

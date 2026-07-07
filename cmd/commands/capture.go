@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/IngTian/claude-witness/internal/runtimes"
-	runtimeclaude "github.com/IngTian/claude-witness/internal/runtimes/claude"
-	opencodeimport "github.com/IngTian/claude-witness/internal/runtimes/opencode"
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/runtimes"
+	runtimeclaude "github.com/IngTian/witness/internal/runtimes/claude"
+	opencodeimport "github.com/IngTian/witness/internal/runtimes/opencode"
+	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
 

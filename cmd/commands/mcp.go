@@ -3,9 +3,9 @@ package commands
 import (
 	"context"
 
-	"github.com/IngTian/claude-witness/internal/embed"
-	"github.com/IngTian/claude-witness/internal/mcp"
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/mcp"
+	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
 

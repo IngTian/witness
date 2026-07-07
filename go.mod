@@ -1,4 +1,4 @@
-module github.com/IngTian/claude-witness
+module github.com/IngTian/witness
 
 go 1.25.1
 

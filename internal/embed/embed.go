@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/IngTian/claude-witness/internal/bundle"
+	"github.com/IngTian/witness/internal/bundle"
 	"github.com/gomlx/gomlx/backends"
 	_ "github.com/gomlx/gomlx/backends/simplego" // register pure-Go "go" backend
 	"github.com/gomlx/gomlx/pkg/core/graph"

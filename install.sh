@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command install for claude-witness (working-copy / from-source).
+# One-command install for witness (working-copy / from-source).
 # Builds the binary, fetches the embedding model once, and wires the selected
 # agent integration (Claude Code or OpenCode). Idempotent — safe to re-run after
 # a `git pull`.
@@ -25,7 +25,7 @@ info() { printf '      %s%s%s\n' "$D" "$1" "$X"; }
 die()  { printf '\n%s✗ %s%s\n' "$R" "$1" "$X" >&2; exit 1; }
 
 printf '\n%s╭───────────────────────────────────────────╮%s\n' "$C" "$X"
-printf '%s│%s  %sclaude-witness%s · installer               %s│%s\n' "$C" "$X" "$B" "$X" "$C" "$X"
+printf '%s│%s  %switness%s · installer                      %s│%s\n' "$C" "$X" "$B" "$X" "$C" "$X"
 printf '%s│%s  %slet Claude Code witness your growth%s      %s│%s\n' "$C" "$X" "$D" "$X" "$C" "$X"
 printf '%s╰───────────────────────────────────────────╯%s\n' "$C" "$X"
 
@@ -75,7 +75,7 @@ else
       mkdir -p "$HOME/.local/bin"
       cat > "$HOME/.local/bin/witness" <<EOF
 #!/usr/bin/env bash
-# Launcher for the claude-witness CLI — execs the plugin shim by its real path.
+# Launcher for the witness CLI — execs the plugin shim by its real path.
 exec "$ROOT/hooks/witness.sh" "\$@"
 EOF
       chmod +x "$HOME/.local/bin/witness"

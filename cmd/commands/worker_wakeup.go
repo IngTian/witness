@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
 
