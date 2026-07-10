@@ -218,11 +218,21 @@ func cmdDistillStop(autoOnly bool) error {
 		return err
 	}
 	defer st.Close()
-	if autoOnly && st.MetaString("worker_mode") != "auto" {
+	if autoOnly {
+		_ = clearScheduledWakeup(st, "auto")
+	}
+	if !autoOnly {
+		_ = clearScheduledWakeup(st, "")
+	}
+	mode := st.MetaString("worker_mode")
+	if autoOnly && mode == "manual" {
 		return nil
 	}
 	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
 		return err
+	}
+	if autoOnly && mode != "auto" {
+		return nil // cancels an auto worker that has been spawned but has not claimed the lock yet
 	}
 	pid := st.MetaString("worker_pid")
 	if !workerPIDAlive(pid) {

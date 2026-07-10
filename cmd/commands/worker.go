@@ -30,11 +30,10 @@ func newInternalWorkerCmd() *cobra.Command {
 }
 
 // cmdWorker is the single-flight background consumer. It holds one global lock for
-// its whole run, drains EVERY pending session (delta-distilling each, once per
-// run), then runs the reviewer if due. Triggers (session-start/end) just spawn
-// this; if a consumer is already running, the new one no-ops immediately — no
-// blocked-process pile-up, no daemon. The filesystem is the durable job queue;
-// this lock elects the single consumer that drains it.
+// its whole run, drains pending sessions (bounded only for automatic runs), then
+// runs the reviewer if due. Triggers just spawn this; if a consumer is already
+// running, the new one no-ops immediately. The filesystem is the durable job
+// queue; this lock elects the single consumer that drains it.
 func cmdWorker(args []string) error {
 	auto, err := workerAutoFlag(args)
 	if err != nil {
@@ -70,6 +69,13 @@ func runWorker(auto bool) (bool, error) {
 		return false, nil // a consumer already holds the lock; our jobs are on disk for it
 	}
 	defer unlock()
+	if auto && st.MetaString("worker_stop_requested") == "1" {
+		_ = st.SetMetaString("worker_mode", "")
+		return true, nil
+	}
+	if !auto {
+		_ = st.SetMetaString("worker_stop_requested", "")
+	}
 	started := time.Now().UTC().Format(time.RFC3339)
 	_ = st.SetMetaString("worker_status", "running")
 	_ = st.SetMetaString("worker_pid", strconv.Itoa(os.Getpid()))
@@ -80,7 +86,6 @@ func runWorker(auto bool) (bool, error) {
 	}
 	_ = st.SetMetaString("worker_started_at", started)
 	_ = st.SetMetaString("worker_heartbeat", started)
-	_ = st.SetMetaString("worker_stop_requested", "")
 	defer func() {
 		_ = st.SetMetaString("worker_status", "idle")
 		_ = st.SetMetaString("worker_pid", "")
@@ -88,9 +93,7 @@ func runWorker(auto bool) (bool, error) {
 		_ = st.SetMetaString("worker_current", "")
 		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
 	}()
-	if auto {
-		defer scheduleRetryWakeup(st)
-	}
+	defer scheduleRetryWakeup(st)
 
 	cfg := st.LoadConfig()
 	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so every
@@ -152,7 +155,13 @@ func runWorker(auto bool) (bool, error) {
 			slog.Error("process session", "session", session, "err", err)
 		}
 	}, sessionBudget)
-	if sessionBudget > 0 && processedSessions >= sessionBudget {
+	remainingPending := len(pending())
+	if workerBudgetReached(auto, sessionBudget, processedSessions, remainingPending) {
+		next, _ := autoDistillNextAt(st, cfg.AutoDistillIntervalMinutes, time.Now())
+		if next.IsZero() {
+			next = time.Now().Add(time.Second)
+		}
+		scheduleWorkerWakeup(st, next, "auto")
 		slog.Info("distill: runner background budget reached; leaving remaining work queued", "runner", cfg.Runner, "processed", processedSessions)
 		return true, nil
 	}
@@ -180,6 +189,10 @@ func workerSessionBudget(cfg store.Config, auto bool) int {
 		return 0
 	}
 	return cfg.AutoDistillSessionBudget
+}
+
+func workerBudgetReached(auto bool, sessionBudget, processedSessions, remainingPending int) bool {
+	return auto && sessionBudget > 0 && processedSessions >= sessionBudget && remainingPending > 0
 }
 
 func cleanupOpenCodeDistillSessions(ctx context.Context, before time.Time) {

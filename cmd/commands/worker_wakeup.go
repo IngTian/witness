@@ -12,9 +12,9 @@ import (
 
 func newInternalWorkerWakeupCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:    "worker-wakeup <seconds>",
+		Use:    "worker-wakeup <seconds> [stamp] [mode]",
 		Hidden: true,
-		Args:   cobra.ExactArgs(1),
+		Args:   cobra.RangeArgs(1, 3),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdWorkerWakeup(args)
 		},
@@ -33,13 +33,38 @@ func cmdWorkerWakeup(args []string) error {
 	if err != nil {
 		return err
 	}
+	defer st.Close()
 	cfg := st.LoadConfig()
-	auto := cfg.AutoDistill
-	st.Close()
-	if !auto {
+	expectedStamp := ""
+	if len(args) >= 2 {
+		expectedStamp = args[1]
+	}
+	mode := ""
+	if len(args) >= 3 {
+		mode = args[2]
+	}
+	if mode == "" {
+		if cfg.AutoDistill {
+			mode = "auto"
+		} else {
+			mode = "manual"
+		}
+	}
+	if expectedStamp != "" && st.MetaString(workerWakeupKey(mode)) != expectedStamp {
 		return nil
 	}
-	_, err = runWorker(true)
+	if mode == "auto" && !cfg.AutoDistill {
+		_ = clearScheduledWakeup(st, "auto")
+		return nil
+	}
+	_ = clearScheduledWakeup(st, mode)
+	ran, err := runWorker(mode == "auto")
+	if err == nil && !ran {
+		pending, _ := st.PendingSessions()
+		if len(pending) > 0 || st.ReviewDue(cfg) {
+			scheduleWorkerWakeup(st, time.Now().Add(time.Second), mode)
+		}
+	}
 	return err
 }
 
@@ -48,16 +73,55 @@ func scheduleRetryWakeup(st *store.Store) {
 	if !ok {
 		return
 	}
-	stamp := next.UTC().Format(time.RFC3339)
-	if st.MetaString("worker_wakeup_at") == stamp {
-		return
+	scheduleWorkerWakeup(st, next, workerWakeMode(st))
+}
+
+func scheduleWorkerWakeup(st *store.Store, next time.Time, mode string) {
+	scheduleWorkerWakeupWith(st, next, mode, spawnDetached)
+}
+
+func scheduleWorkerWakeupWith(st *store.Store, next time.Time, mode string, spawn func(...string)) {
+	if mode != "auto" {
+		mode = "manual"
 	}
-	_ = st.SetMetaString("worker_wakeup_at", stamp)
+	stamp := next.UTC().Format(time.RFC3339Nano)
+	key := workerWakeupKey(mode)
+	if current, err := time.Parse(time.RFC3339Nano, st.MetaString(key)); err == nil && current.After(time.Now()) && !current.After(next) {
+		return // an earlier wakeup already covers this work
+	}
+	_ = st.SetMetaString(key, stamp)
 	delay := time.Until(next)
 	if delay < 0 {
 		delay = 0
 	}
 	seconds := int(delay/time.Second) + 1
-	spawnDetached("worker-wakeup", strconv.Itoa(seconds))
-	slog.Info("distill: scheduled retry wakeup", "at", stamp, "delay", delay.String())
+	spawn("worker-wakeup", strconv.Itoa(seconds), stamp, mode)
+	slog.Info("distill: scheduled worker wakeup", "at", stamp, "delay", delay.String(), "mode", mode)
+}
+
+func clearScheduledWakeup(st *store.Store, mode string) bool {
+	if mode == "" {
+		clearedAuto := clearScheduledWakeup(st, "auto")
+		return clearScheduledWakeup(st, "manual") || clearedAuto
+	}
+	key := workerWakeupKey(mode)
+	if st.MetaString(key) == "" {
+		return false
+	}
+	_ = st.SetMetaString(key, "")
+	return true
+}
+
+func workerWakeMode(st *store.Store) string {
+	if mode := st.MetaString("worker_mode"); mode != "" {
+		return mode
+	}
+	return "manual"
+}
+
+func workerWakeupKey(mode string) string {
+	if mode == "auto" {
+		return "worker_auto_wakeup_at"
+	}
+	return "worker_manual_wakeup_at"
 }
