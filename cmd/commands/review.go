@@ -31,6 +31,7 @@ func cmdReview() error {
 	defer st.Close()
 	defer setupLogging(st)()
 	cfg := st.LoadConfig()
+	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
 		return err

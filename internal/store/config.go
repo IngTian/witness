@@ -101,11 +101,11 @@ func (s *Store) LoadConfig() Config {
 	return c
 }
 
-// runnerBoundKey marks that the user explicitly bound a runner via `witness
-// install` (SetRunner). Its presence is what distinguishes a deliberate runner
-// choice from the template default, so a WITNESS_RUNNER env fallback never
-// overrides a real choice. See ResolveRunner.
+// runnerBoundKey marks that `witness install` explicitly bound a runner. New
+// templates leave the assignment commented, so an active runner line also
+// counts as deliberate without requiring this DB marker.
 const runnerBoundKey = "runner_bound"
+const configTemplateUnboundMarker = "# witness template: runner remains unbound until configured."
 
 // ResolveRunner returns the distillation runner to actually use, layering a
 // non-persistent WITNESS_RUNNER env fallback UNDER any explicit config choice.
@@ -116,22 +116,40 @@ const runnerBoundKey = "runner_bound"
 // WITNESS_RUNNER=opencode so the worker it kicks distills via OpenCode instead.
 //
 // Precedence (safety-first, so a dual CC+OpenCode user is never hijacked):
-//  1. If the user bound a runner via `witness install` (runner_bound stamped),
+//  1. If install bound a runner, or config.toml has an active runner assignment,
 //     the config value ALWAYS wins — WITNESS_RUNNER is ignored.
 //  2. Else, if WITNESS_RUNNER is set, use it (the plugin fallback).
 //  3. Else, the config/default value.
 //
-// Non-persistent: this never writes config.toml, so it can't corrupt a real
-// choice. (A hand-edited runner without `install` isn't marked bound; document
-// that WITNESS_RUNNER is honored only until you run `witness install`.)
+// Non-persistent: this never writes config.toml. Marker-less configs predate the
+// fallback and are treated as bound, preserving upgrade-time install choices.
 func (s *Store) ResolveRunner(cfg Config) string {
 	if s.MetaString(runnerBoundKey) == "1" {
+		return cfg.Runner
+	}
+	if !s.configRunnerUnbound() {
 		return cfg.Runner
 	}
 	if env := strings.TrimSpace(os.Getenv("WITNESS_RUNNER")); env != "" {
 		return env
 	}
 	return cfg.Runner
+}
+
+func (s *Store) configRunnerUnbound() bool {
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		return false
+	}
+	if !strings.Contains(string(data), configTemplateUnboundMarker) {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if isRunnerLine(line) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseBool(v string) (bool, bool) {
@@ -160,6 +178,9 @@ func (s *Store) SetRunner(runner string) error {
 	set := false
 	if len(data) > 0 {
 		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == configTemplateUnboundMarker {
+				continue
+			}
 			if isRunnerLine(line) {
 				if !set {
 					kept = append(kept, fmt.Sprintf("runner = %q", runner))
@@ -200,9 +221,11 @@ func (s *Store) EnsureConfigFile() error {
 	tpl := `# witness configuration — all fields optional, shown with defaults.
 # Docs: https://github.com/IngTian/witness#configuration
 
+` + configTemplateUnboundMarker + `
+
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode run`" + `). Bound automatically by ` + "`witness install`" + `.
-runner = "claude"
+# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
+# runner = "claude"
 
 # Models for the per-session miner and the periodic reviewer. Empty = use the
 # ` + "`claude -p`" + ` / ` + "`opencode run`" + ` default. With runner = opencode, use OpenCode
@@ -216,7 +239,7 @@ review_every = 5
 review_poignancy = 30
 
 # Automatic distillation is laptop-friendly without keeping the embed model resident:
-# hooks/plugins capture immediately, model work starts at most once per interval,
+# hooks capture immediately and plugins reconcile at idle; model work starts at most once per interval,
 # drains the current queue, then exits. Set session_budget > 0 to cap each auto run.
 # Manual ` + "`witness distill start`" + ` is always unbounded.
 auto_distill = true

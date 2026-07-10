@@ -26,6 +26,9 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		t.Fatalf("Open did not create config.toml: %v", err)
 	}
 	body := string(data)
+	if !strings.Contains(body, configTemplateUnboundMarker) {
+		t.Fatalf("auto-created config missing unbound runner marker:\n%s", body)
+	}
 	for _, want := range []string{
 		"runner =",
 		"triage_model",
@@ -130,6 +133,9 @@ func TestSetRunnerReplacesExistingLine(t *testing.T) {
 	if !strings.Contains(string(body), "review_every = 7") {
 		t.Errorf("other fields lost:\n%s", body)
 	}
+	if strings.Contains(string(body), configTemplateUnboundMarker) {
+		t.Error("SetRunner left the template marked unbound")
+	}
 }
 
 func TestSetRunnerAppendsWhenAbsent(t *testing.T) {
@@ -170,6 +176,9 @@ func TestInstallSequenceMatchesBindRunner(t *testing.T) {
 			t.Errorf("config missing %q:\n%s", want, body)
 		}
 	}
+	if strings.Contains(string(body), configTemplateUnboundMarker) {
+		t.Error("SetRunner left the generated template marked unbound")
+	}
 }
 
 // --- ResolveRunner: the WITNESS_RUNNER env fallback for the npm OpenCode user,
@@ -208,6 +217,33 @@ func TestResolveRunnerDefaultsToConfig(t *testing.T) {
 	cfg := s.LoadConfig()
 	if got := s.ResolveRunner(cfg); got != "claude" {
 		t.Errorf("no bind, no env: got %q, want claude (config default)", got)
+	}
+}
+
+func TestResolveRunnerLegacyMarkerlessConfigIsConservativelyBound(t *testing.T) {
+	s := tempStore(t)
+	if err := os.WriteFile(s.ConfigPath(), []byte("runner = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
+		t.Fatalf("markerless config should stay bound to config runner: got %q", got)
+	}
+}
+
+func TestResolveRunnerHonorsManualRunnerInNewTemplate(t *testing.T) {
+	s := tempStore(t)
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("runner = \"claude\"\n")...)
+	if err := os.WriteFile(s.ConfigPath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
+		t.Fatalf("manual runner should beat the npm fallback: got %q", got)
 	}
 }
 
