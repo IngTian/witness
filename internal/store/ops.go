@@ -143,6 +143,31 @@ func (s *Store) ReadMeta(session string) SessionMeta {
 	return m
 }
 
+// SetSessionPlatform records which platform OWNS a session (the per-session axis,
+// issue #21) — distinct from the global distillation runner. Upsert, since a CC
+// session has no session_meta row until now: INSERT the row if absent, else set
+// only the platform column (leaving cwd/started untouched). Best-effort at the
+// capture/import boundary; ForSession falls back to the id prefix when unset, so a
+// missed write degrades to the same answer rather than misclassifying.
+func (s *Store) SetSessionPlatform(session, platform string) {
+	if session == "" || platform == "" {
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO session_meta(session, platform) VALUES (?, ?)
+		 ON CONFLICT(session) DO UPDATE SET platform = excluded.platform`,
+		session, platform)
+}
+
+// SessionPlatform returns the recorded owning platform for a session, or "" if no
+// row exists or it was never classified. ForSession layers the prefix/default rule
+// on top of this — this method only reports the persisted column.
+func (s *Store) SessionPlatform(session string) string {
+	var p string
+	_ = s.db.QueryRow(`SELECT platform FROM session_meta WHERE session = ?`, session).Scan(&p)
+	return p
+}
+
 // --- active observation staging (in-session via MCP) ------------------------
 
 // StageObservation records an active (in-session) observation with no quantity

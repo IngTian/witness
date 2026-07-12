@@ -13,11 +13,12 @@ import (
 
 // schemaVersion is the current on-disk schema, written to PRAGMA user_version so
 // a future binary can detect and migrate older databases instead of silently
-// misreading them. It is 3 because two earlier dev-only versions existed: the
-// staged-uniqueness index from v2 is folded into schemaV1 (a plain CREATE ... IF
-// NOT EXISTS), and the v2->v3 `l0`->`raw` table rename is applied as a guarded
-// legacy step in migrate() for any DB that still has the old table.
-const schemaVersion = 3
+// misreading them. History: two earlier dev-only versions existed (the
+// staged-uniqueness index from v2 is folded into schemaV1 as a plain CREATE ... IF
+// NOT EXISTS, and the v2->v3 `l0`->`raw` rename is a guarded legacy step in
+// migrate()); v4 adds session_meta.platform (the per-session owning-platform axis,
+// issue #21) via a guarded ADD COLUMN + one-time prefix backfill in migrate().
+const schemaVersion = 4
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -157,11 +158,66 @@ func migrate(db *sql.DB) error {
 		tx.Rollback()
 		return fmt.Errorf("apply schema: %w", err)
 	}
+
+	// 3. v3 -> v4: session_meta.platform (the per-session owning-platform axis).
+	// A pre-v4 DB has session_meta WITHOUT this column; schemaV1's CREATE ... IF
+	// NOT EXISTS won't alter an existing table, so add it explicitly (SQLite has no
+	// ADD COLUMN IF NOT EXISTS — guard on pragma_table_info), then BACKFILL from the
+	// L0 session-id prefix: "opencode:"-prefixed sessions are OpenCode, everything
+	// else is Claude (the same asymmetric rule ForSession uses). Idempotent: the
+	// guard skips the ALTER once the column exists, and the backfill only writes
+	// rows still at '' so a re-run is a no-op. Fresh DBs already have the column
+	// (schemaV1) and no rows, so both steps are no-ops there.
+	if err := addSessionPlatformColumn(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v4 add session_meta.platform: %w", err)
+	}
+
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("set user_version: %w", err)
 	}
 	return tx.Commit()
+}
+
+// addSessionPlatformColumn is the v3->v4 step: add session_meta.platform if the
+// running DB's table predates it, then backfill from the L0 session-id prefix.
+//
+// The prefix literal "opencode:" is duplicated from internal/platform here on
+// purpose: internal/store must NOT import internal/platform (platform imports
+// store; the reverse would cycle). This is the one backfill rule and it is frozen
+// history once written, so a literal is correct — a future prefix change does not
+// retroactively re-key already-backfilled rows.
+func addSessionPlatformColumn(tx *sql.Tx) error {
+	var hasColumn int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('session_meta') WHERE name='platform'`,
+	).Scan(&hasColumn); err != nil {
+		return fmt.Errorf("probe platform column: %w", err)
+	}
+	if hasColumn == 0 {
+		// Column-level DEFAULT '' so existing rows get a concrete value; the backfill
+		// then upgrades the ones we can classify.
+		if _, err := tx.Exec(`ALTER TABLE session_meta ADD COLUMN platform TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add column: %w", err)
+		}
+	}
+	// Backfill only rows still unclassified (''), so this is idempotent and never
+	// overwrites a value a newer binary already wrote. OpenCode sessions carry the
+	// "opencode:" id prefix; everything else is Claude.
+	if _, err := tx.Exec(
+		`UPDATE session_meta SET platform = 'opencode'
+		  WHERE platform = '' AND session LIKE 'opencode:%'`,
+	); err != nil {
+		return fmt.Errorf("backfill opencode: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE session_meta SET platform = 'claude'
+		  WHERE platform = '' AND session NOT LIKE 'opencode:%'`,
+	); err != nil {
+		return fmt.Errorf("backfill claude: %w", err)
+	}
+	return nil
 }
 
 // schemaV1 is the full current schema. `raw` is the append-only ground-truth
@@ -185,9 +241,10 @@ CREATE TABLE IF NOT EXISTS raw (
 CREATE INDEX IF NOT EXISTS idx_raw_session ON raw(session, id);
 
 CREATE TABLE IF NOT EXISTS session_meta (
-  session TEXT PRIMARY KEY,
-  cwd     TEXT NOT NULL DEFAULT '',
-  started TEXT NOT NULL DEFAULT ''
+  session  TEXT PRIMARY KEY,
+  cwd      TEXT NOT NULL DEFAULT '',
+  started  TEXT NOT NULL DEFAULT '',
+  platform TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS observations (
