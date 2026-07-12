@@ -95,6 +95,12 @@ witness lens enable  math                     # start running it on every sessio
 `register` stores a **copy** — editing the original afterward has no effect until you re-register.
 `enable` is the separate switch that makes it actually run.
 
+The source file may live anywhere. As a recommended canonical location, witness keeps the
+registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/lens.md` (normally
+`~/.local/share/witness/lenses/<name>/lens.md`, or `$WITNESS_HOME/lenses/<name>/lens.md`). You can
+edit that registered copy directly, but this location is a convention rather than a restriction on
+the file passed to `lens register`.
+
 ## Example: one moment, end to end
 
 Say a session contains this exchange (fictional):
@@ -169,7 +175,11 @@ by hand):
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
 - `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
-- `witness distill start|status|stop` — manage the background distillation worker.
+- `witness distill start|status|stop` — manage the background distillation worker. Manual starts
+  accept `--since`/`--until` to select pending sessions by their latest raw timestamp; for example,
+  `witness distill start --since 7d` distills sessions updated in the last seven days. Bounds also
+  accept RFC3339 timestamps or UTC dates (`YYYY-MM-DD`) and do not discard sessions outside the
+  selected range.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness export <path>` — write a consistent single-file snapshot of the archive (safe to back up / cloud-sync).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
@@ -220,41 +230,92 @@ are left in place for now.
 
 OpenCode support has two pieces:
 
-- A plugin captures OpenCode message events into witness L0, reconciles OpenCode's SQLite DB on idle,
-  and kicks background distillation through that import path without waiting. From-source installs write
-  a local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm
-  plugin `@witness-ai/opencode`.
+- A plugin reconciles OpenCode's SQLite DB on startup and when a session goes idle, then asks the
+  laptop-friendly auto-start gate to distill when allowed. From-source installs write a
+  local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm plugin
+  `@witness-ai/opencode`.
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.
 
 The npm package ships the OpenCode plugin, a `witness` CLI shim, prebuilt witness binaries, and prompts.
-Install it, then add the plugin and MCP server to `~/.config/opencode/opencode.json`:
+The config-only path is the default: add the plugin to `~/.config/opencode/opencode.json`, and OpenCode
+installs it automatically with Bun on startup. If `mcp.witness` is absent, the plugin auto-registers it
+for you.
+
+The npm distribution supports exactly these platforms:
+
+| Operating system | Architecture | npm platform package |
+| --- | --- | --- |
+| macOS | Apple Silicon (`darwin/arm64`) | `@witness-ai/opencode-darwin-arm64` |
+| Linux | x86-64 (`linux/x64`) | `@witness-ai/opencode-linux-x64` |
+
+macOS Intel, Linux ARM, and Windows are not supported by the npm distribution. Each binary is
+published as an optional platform package, so npm installs only the binary for the current machine.
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@witness-ai/opencode"]
+}
+```
+
+To test the current prerelease without replacing `latest`, pin the plugin entry:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@witness-ai/opencode@beta"]
+}
+```
+
+Optional: install it globally if you also want a `witness` command on your shell `PATH`:
 
 ```sh
 npm install -g @witness-ai/opencode
 ```
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@witness-ai/opencode"],
-  "mcp": {
-    "witness": {
-      "type": "local",
-      "command": ["witness", "mcp"],
-      "enabled": true
-    }
-  }
-}
+Optional: run it ad hoc without a global install:
+
+```sh
+npm exec --yes --package=@witness-ai/opencode -- witness doctor
+```
+
+The main npm package contains the plugin, CLI wrapper, and prompts; the matching optional platform package
+contains one binary. The first embedding-model download is about 470MB. Installing the packages does not
+start that download: the plugin starts it when OpenCode next runs. Keep OpenCode running until the first
+download finishes. The plugin owns the downloader, stops it on shutdown, and retries later with bounded
+backoff.
+If you already have your own `mcp.witness` config, the plugin leaves it untouched. The npm wrapper does
+not support `witness install` / `witness uninstall`; those commands are for source-checkout installs.
+Custom model mirrors must provide `WITNESS_MODEL_SHA256` and `WITNESS_TOKENIZER_SHA256` alongside
+`WITNESS_MODEL_BASE_URL`.
+
+After the first download, verify the model, OpenCode runner, archive, and queue:
+
+```sh
+npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
+npm exec --yes --package=@witness-ai/opencode@beta -- witness distill status
 ```
 
 The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and prompts before publishing:
 
 ```sh
 make npm-opencode-package
-(cd npm/opencode && npm publish --access public)
+npm publish ./npm/platform/darwin-arm64 --access public --tag beta
+npm publish ./npm/platform/linux-x64 --access public --tag beta
+(cd npm/opencode && npm publish --access public --ignore-scripts --tag beta)
 ```
+
+Configure npm Trusted Publishing separately for the main package and both platform packages before using
+the release workflow. The npm package page renders [`npm/opencode/README.md`](npm/opencode/README.md);
+the workflow verifies after publishing that npm identifies it as the package README and that the published
+tarball contains it.
+
+For the first platform-package release only, publish both platform packages manually before creating the
+GitHub Release, then configure their Trusted Publishers on npm. npm requires a package to exist before its
+package-level Trusted Publisher can be configured. The release workflow is idempotent: it skips an already
+published package version, publishes any missing platform versions first, then publishes the main package.
 
 Manual verification path:
 
@@ -278,7 +339,14 @@ triage_model     = "claude-haiku-4-5"   # cheap per-session mining ("" = claude 
 distill_model    = "claude-opus-4-8"    # the reviewer ("" = claude -p default)
 review_every     = 5                    # run the reviewer every N distilled sessions...
 review_poignancy = 30                   # ...or sooner once accumulated salience crosses this (0 = off)
+auto_distill = true                     # hooks/plugins may start model work automatically
+auto_distill_interval_minutes = 10      # minimum gap between automatic worker starts
+auto_distill_session_budget = 0         # sessions per automatic run (0 = drain current queue)
 ```
+
+Set `auto_distill = false` for capture-only mode on battery-constrained machines, then run
+`witness distill start` manually when plugged in. Automatic workers are short-lived: they load the
+embed model only while draining queued sessions, then exit.
 
 When `runner = opencode`, `triage_model` and `distill_model` should use OpenCode model names such
 as `openai/gpt-5.5`; empty values use your OpenCode defaults. Non-empty OpenCode model names are

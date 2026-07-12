@@ -3,8 +3,12 @@
 #
 # No stored NPM_TOKEN: `id-token: write` lets npm mint a short-lived OIDC token,
 # and provenance is generated automatically (so do NOT pass --provenance).
-# Configure the matching trusted publisher once at npmjs.com → the package's
-# Settings → Trusted Publisher: owner=IngTian, repo=witness, workflow=npm-publish.yml.
+# Configure the matching trusted publisher for all three packages at npmjs.com:
+# @witness-ai/opencode, @witness-ai/opencode-darwin-arm64, and
+# @witness-ai/opencode-linux-x64. Each uses owner=IngTian, repo=witness, and
+# workflow=npm-publish.yml.
+# New platform packages need one manual bootstrap publish before their package-
+# level Trusted Publishers can be configured; the publish steps are idempotent.
 #
 # Provenance requires npm/opencode/package.json's `repository` URL to match this
 # repo (it does: git+https://github.com/IngTian/witness.git).
@@ -24,9 +28,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The package's prepublishOnly runs `make build-all` (cross-compiles all 6
-      # Go binaries into bin/, which the staging script copies into dist/), so the
-      # Go toolchain must be present in CI.
+      # The package's prepublishOnly cross-compiles the two supported npm targets
+      # and stages their platform packages, so the Go toolchain must be present.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -52,9 +55,74 @@ jobs:
             exit 1
           fi
 
-      # `npm publish` triggers prepublishOnly (build-all + stage the 6 binaries +
-      # prompts into dist/). No NODE_AUTH_TOKEN and no --provenance under OIDC.
-      - name: Publish
+      - name: Test and stage packages
+        run: |
+          npm --prefix npm/opencode run check
+          ./scripts/stage-npm-opencode.sh --build
+          npm pack ./npm/platform/darwin-arm64 --dry-run
+          npm pack ./npm/platform/linux-x64 --dry-run
+          npm pack ./npm/opencode --ignore-scripts --dry-run
+
+      # Platform packages must exist before the main package references them as
+      # optional dependencies. No NODE_AUTH_TOKEN or --provenance under OIDC.
+      - name: Publish platform packages
+        if: github.event_name == 'release'
+        run: |
+          version="$(node -p "require('./npm/opencode/package.json').version")"
+          tag=latest
+          case "$version" in *-*) tag="${version#*-}"; tag="${tag%%.*}" ;; esac
+          publish_if_missing() {
+            package="$1"
+            directory="$2"
+            if npm view "$package@$version" version >/dev/null 2>&1; then
+              echo "$package@$version is already published; skipping"
+              return
+            fi
+            npm publish "$directory" --tag "$tag"
+          }
+          publish_if_missing "@witness-ai/opencode-darwin-arm64" ./npm/platform/darwin-arm64
+          publish_if_missing "@witness-ai/opencode-linux-x64" ./npm/platform/linux-x64
+
+      - name: Publish main package
         if: github.event_name == 'release'
         working-directory: npm/opencode
-        run: npm publish
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag=latest
+          case "$version" in *-*) tag="${version#*-}"; tag="${tag%%.*}" ;; esac
+          if npm view "@witness-ai/opencode@$version" version >/dev/null 2>&1; then
+            echo "@witness-ai/opencode@$version is already published; skipping"
+          else
+            npm publish --ignore-scripts --tag "$tag"
+          fi
+
+      - name: Verify published packages and README
+        if: github.event_name == 'release'
+        run: |
+          version="$(node -p "require('./npm/opencode/package.json').version")"
+          packages=(
+            "@witness-ai/opencode"
+            "@witness-ai/opencode-darwin-arm64"
+            "@witness-ai/opencode-linux-x64"
+          )
+          for package in "${packages[@]}"; do
+            for attempt in {1..12}; do
+              published="$(npm view "$package@$version" version 2>/dev/null || true)"
+              [ "$published" = "$version" ] && break
+              sleep 5
+            done
+            [ "$published" = "$version" ] || {
+              echo "$package@$version is not visible on npm after 60 seconds" >&2
+              exit 1
+            }
+          done
+
+          readme="$(npm view "@witness-ai/opencode@$version" readmeFilename)"
+          [ "$readme" = "README.md" ] || {
+            echo "npm metadata does not identify README.md (got: $readme)" >&2
+            exit 1
+          }
+
+          verify_dir="$(mktemp -d)"
+          archive="$(npm pack "@witness-ai/opencode@$version" --ignore-scripts --pack-destination "$verify_dir" --silent)"
+          tar -xOf "$verify_dir/$archive" package/README.md | grep -Fq "Supported platforms"

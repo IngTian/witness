@@ -51,3 +51,4 @@ assets/e5-small/*.onnx_data
 /npm/opencode/dist/
 /npm/opencode/prompts/
 /npm/opencode/assets/
+/npm/platform/*/bin/

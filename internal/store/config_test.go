@@ -26,12 +26,18 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		t.Fatalf("Open did not create config.toml: %v", err)
 	}
 	body := string(data)
+	if !strings.Contains(body, configTemplateUnboundMarker) {
+		t.Fatalf("auto-created config missing unbound runner marker:\n%s", body)
+	}
 	for _, want := range []string{
 		"runner =",
 		"triage_model",
 		"distill_model",
 		"review_every",
 		"review_poignancy",
+		"auto_distill",
+		"auto_distill_interval_minutes",
+		"auto_distill_session_budget",
 		"lens =",
 	} {
 		if !strings.Contains(body, want) {
@@ -39,7 +45,7 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		}
 	}
 	c := st.LoadConfig()
-	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 {
+	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 || !c.AutoDistill || c.AutoDistillIntervalMinutes != 10 || c.AutoDistillSessionBudget != 0 {
 		t.Errorf("template defaults not loadable: %+v", c)
 	}
 }
@@ -59,6 +65,9 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 		"runner = \"opencode\"\n" +
 		"triage_model = \"my-fine-model\"\n" +
 		"review_every = 99\n" +
+		"auto_distill = false\n" +
+		"auto_distill_interval_minutes = 120\n" +
+		"auto_distill_session_budget = 2\n" +
 		"lens = math\n")
 	if err := os.WriteFile(filepath.Join(root, "config.toml"), original, 0o600); err != nil {
 		t.Fatal(err)
@@ -78,7 +87,7 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 		t.Errorf("Open() modified an existing config (forward-compatibility broken):\n got %q\nwant %q", got, original)
 	}
 	c := st.LoadConfig()
-	if c.Runner != "opencode" || c.TriageModel != "my-fine-model" || c.ReviewEvery != 99 || !slices.Contains(c.EnabledLenses, "math") {
+	if c.Runner != "opencode" || c.TriageModel != "my-fine-model" || c.ReviewEvery != 99 || c.AutoDistill || c.AutoDistillIntervalMinutes != 120 || c.AutoDistillSessionBudget != 2 || !slices.Contains(c.EnabledLenses, "math") {
 		t.Errorf("existing values not loaded intact: %+v", c)
 	}
 }
@@ -124,6 +133,9 @@ func TestSetRunnerReplacesExistingLine(t *testing.T) {
 	if !strings.Contains(string(body), "review_every = 7") {
 		t.Errorf("other fields lost:\n%s", body)
 	}
+	if strings.Contains(string(body), configTemplateUnboundMarker) {
+		t.Error("SetRunner left the template marked unbound")
+	}
 }
 
 func TestSetRunnerAppendsWhenAbsent(t *testing.T) {
@@ -163,6 +175,89 @@ func TestInstallSequenceMatchesBindRunner(t *testing.T) {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("config missing %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(string(body), configTemplateUnboundMarker) {
+		t.Error("SetRunner left the generated template marked unbound")
+	}
+}
+
+// --- ResolveRunner: the WITNESS_RUNNER env fallback for the npm OpenCode user,
+// which must never override an explicit `install` (SetRunner) choice. ----------
+
+// The npm user never ran install (no runner_bound), config carries the default
+// "claude", and the plugin passes WITNESS_RUNNER=opencode → OpenCode wins.
+func TestResolveRunnerEnvFallbackWhenUnbound(t *testing.T) {
+	s := tempStore(t)
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	cfg := s.LoadConfig() // default runner = "claude"
+	if got := s.ResolveRunner(cfg); got != "opencode" {
+		t.Errorf("unbound + WITNESS_RUNNER=opencode: got %q, want opencode", got)
+	}
+}
+
+// A user who explicitly ran `witness install claude` (SetRunner stamps
+// runner_bound) must NOT be hijacked by a stray WITNESS_RUNNER — the persisted
+// choice wins. This is the dual CC+OpenCode safety property.
+func TestResolveRunnerBoundBeatsEnv(t *testing.T) {
+	s := tempStore(t)
+	if err := s.SetRunner("claude"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	cfg := s.LoadConfig()
+	if got := s.ResolveRunner(cfg); got != "claude" {
+		t.Errorf("bound=claude must beat WITNESS_RUNNER=opencode: got %q", got)
+	}
+}
+
+// With neither a bound choice nor the env, ResolveRunner returns the config value.
+func TestResolveRunnerDefaultsToConfig(t *testing.T) {
+	s := tempStore(t)
+	os.Unsetenv("WITNESS_RUNNER")
+	cfg := s.LoadConfig()
+	if got := s.ResolveRunner(cfg); got != "claude" {
+		t.Errorf("no bind, no env: got %q, want claude (config default)", got)
+	}
+}
+
+func TestResolveRunnerLegacyMarkerlessConfigIsConservativelyBound(t *testing.T) {
+	s := tempStore(t)
+	if err := os.WriteFile(s.ConfigPath(), []byte("runner = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
+		t.Fatalf("markerless config should stay bound to config runner: got %q", got)
+	}
+}
+
+func TestResolveRunnerHonorsManualRunnerInNewTemplate(t *testing.T) {
+	s := tempStore(t)
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("runner = \"claude\"\n")...)
+	if err := os.WriteFile(s.ConfigPath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
+		t.Fatalf("manual runner should beat the npm fallback: got %q", got)
+	}
+}
+
+// SetRunner must stamp runner_bound so the very next ResolveRunner honors it.
+func TestSetRunnerStampsBound(t *testing.T) {
+	s := tempStore(t)
+	if s.MetaString("runner_bound") == "1" {
+		t.Fatal("runner_bound should be unset before install")
+	}
+	if err := s.SetRunner("opencode"); err != nil {
+		t.Fatal(err)
+	}
+	if s.MetaString("runner_bound") != "1" {
+		t.Error("SetRunner did not stamp runner_bound")
 	}
 }
 

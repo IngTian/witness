@@ -445,11 +445,18 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `export const Witness = plugin`) || !strings.Contains(src, `export const ClaudeWitness = plugin`) {
 		t.Fatalf("installed plugin should preserve both OpenCode export names: %s", src)
 	}
-	if !strings.Contains(src, `"capture", "--agent", "opencode"`) {
-		t.Fatalf("installed plugin should capture OpenCode events directly: %s", src)
-	}
 	if !strings.Contains(src, `"import", "--agent", "opencode", "--quiet"`) {
 		t.Fatalf("installed plugin should reconcile OpenCode DB before distillation: %s", src)
+	}
+	if !strings.Contains(src, `type === "session.idle"`) {
+		t.Fatalf("installed plugin should sync from idle events: %s", src)
+	}
+}
+
+func TestNpmPackageHidesSourceOnlyInstallCommands(t *testing.T) {
+	t.Setenv("WITNESS_NPM_PACKAGE", "1")
+	if !newInstallCmd().Hidden || !newUninstallCmd().Hidden {
+		t.Fatal("npm package should hide source-checkout install commands")
 	}
 }
 

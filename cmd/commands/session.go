@@ -25,14 +25,7 @@ func cmdSessionStart() error {
 		return nil
 	}
 	defer st.Close()
-	// Kick the consumer iff there's actually work — distilling pending sessions or
-	// a due review. The consumer (cmdWorker) is single-flight and drains
-	// everything, so we don't spawn a process just to have it find nothing.
-	cfg := st.LoadConfig()
-	pending, _ := st.PendingSessions()
-	if len(pending) > 0 || st.ReviewDue(cfg) {
-		spawnDetached("worker")
-	}
+	maybeSpawnAutoWorker(st)
 	return nil
 }
 
@@ -57,6 +50,11 @@ func cmdSessionStart() error {
 // tells it what's new), so the specific session id isn't needed here.
 // Distillation is delta-based, so resume→end→resume→end is safe.
 func cmdSessionEnd() error {
-	spawnDetached("worker")
+	st, err := store.Open()
+	if err != nil {
+		return nil
+	}
+	defer st.Close()
+	maybeSpawnAutoWorker(st)
 	return nil
 }

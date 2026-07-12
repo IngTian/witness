@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -17,21 +18,72 @@ import (
 )
 
 func newInternalWorkerCmd() *cobra.Command {
-	return &cobra.Command{Use: "worker", Hidden: true, RunE: func(_ *cobra.Command, args []string) error { return cmdWorker(args) }}
+	var auto bool
+	var since string
+	var until string
+	c := &cobra.Command{Use: "worker", Hidden: true, RunE: func(_ *cobra.Command, args []string) error {
+		if auto {
+			args = append(args, "--auto")
+		}
+		if since != "" {
+			args = append(args, "--since", since)
+		}
+		if until != "" {
+			args = append(args, "--until", until)
+		}
+		return cmdWorker(args)
+	}}
+	c.Flags().BoolVar(&auto, "auto", false, "run with automatic distillation limits")
+	c.Flags().StringVar(&since, "since", "", "only sessions updated at or after this time")
+	c.Flags().StringVar(&until, "until", "", "only sessions updated at or before this time")
+	return c
 }
 
 // cmdWorker is the single-flight background consumer. It holds one global lock for
-// its whole run, drains EVERY pending session (delta-distilling each, once per
-// run), then runs the reviewer if due. Triggers (session-start/end) just spawn
-// this; if a consumer is already running, the new one no-ops immediately — no
-// blocked-process pile-up, no daemon. The filesystem is the durable job queue;
-// this lock elects the single consumer that drains it.
-func cmdWorker(_ []string) error {
-	_, err := runWorker()
+// its whole run, drains pending sessions (bounded only for automatic runs), then
+// runs the reviewer if due. Triggers just spawn this; if a consumer is already
+// running, the new one no-ops immediately. The filesystem is the durable job
+// queue; this lock elects the single consumer that drains it.
+func cmdWorker(args []string) error {
+	auto, timeRange, err := workerFlags(args)
+	if err != nil {
+		return err
+	}
+	_, err = runWorkerInRange(auto, timeRange)
 	return err
 }
 
-func runWorker() (bool, error) {
+func workerFlags(args []string) (bool, sessionTimeRange, error) {
+	auto := false
+	since := ""
+	until := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--auto":
+			auto = true
+		case "--since", "--until":
+			if i+1 >= len(args) {
+				return false, sessionTimeRange{}, fmt.Errorf("%s requires a value", args[i])
+			}
+			if args[i] == "--since" {
+				since = args[i+1]
+			} else {
+				until = args[i+1]
+			}
+			i++
+		default:
+			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker [--auto] [--since <time>] [--until <time>]")
+		}
+	}
+	timeRange, err := parseSessionTimeRange(since, until, time.Now())
+	return auto, timeRange, err
+}
+
+func runWorker(auto bool) (bool, error) {
+	return runWorkerInRange(auto, sessionTimeRange{})
+}
+
+func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return false, err
@@ -44,21 +96,42 @@ func runWorker() (bool, error) {
 		return false, nil // a consumer already holds the lock; our jobs are on disk for it
 	}
 	defer unlock()
+	if auto && st.MetaString("worker_stop_requested") == "1" {
+		_ = st.SetMetaString("worker_mode", "")
+		return true, nil
+	}
+	if !auto {
+		_ = st.SetMetaString("worker_stop_requested", "")
+	}
 	started := time.Now().UTC().Format(time.RFC3339)
 	_ = st.SetMetaString("worker_status", "running")
 	_ = st.SetMetaString("worker_pid", strconv.Itoa(os.Getpid()))
+	if auto {
+		_ = st.SetMetaString("worker_mode", "auto")
+	} else {
+		_ = st.SetMetaString("worker_mode", "manual")
+	}
 	_ = st.SetMetaString("worker_started_at", started)
 	_ = st.SetMetaString("worker_heartbeat", started)
-	_ = st.SetMetaString("worker_stop_requested", "")
 	defer func() {
 		_ = st.SetMetaString("worker_status", "idle")
 		_ = st.SetMetaString("worker_pid", "")
+		_ = st.SetMetaString("worker_mode", "")
 		_ = st.SetMetaString("worker_current", "")
 		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
 	}()
-	defer scheduleRetryWakeup(st)
+	if timeRange.empty() {
+		defer scheduleRetryWakeup(st)
+	}
 
 	cfg := st.LoadConfig()
+	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so every
+	// downstream consumer (the opencode-serve branch below, Worker/Reviewer/
+	// Summarizer's RunWith) inherits it with no per-site change. This is what lets
+	// an npm OpenCode user — who never ran `install`, so config says the default
+	// "claude" — distill via OpenCode: their plugin passes WITNESS_RUNNER=opencode.
+	// An explicit `install` choice (runner_bound) still wins (see ResolveRunner).
+	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
 		slog.Error("load lenses", "err", err)
@@ -66,8 +139,10 @@ func runWorker() (bool, error) {
 	}
 	ctx := context.Background()
 
-	// Embedder is heavy (~448MB); load it lazily and once, only if a session
-	// actually needs mining. Review doesn't need it.
+	// Embedder is heavy (~448MB); load it lazily and once per short-lived worker
+	// process, only if a session actually needs mining. There is deliberately no
+	// resident embedding service: when the queue drains, the process exits and the
+	// model memory is released.
 	var emb *embed.Embedder
 	var embErr error
 	getEmb := func() (*embed.Embedder, error) {
@@ -77,7 +152,10 @@ func runWorker() (bool, error) {
 		return emb, embErr
 	}
 
-	pending := func() []string { p, _ := st.PendingSessions(); return p }
+	pending := func() []string {
+		p, _ := st.PendingSessionsUpdatedBetween(timeRange.since, timeRange.until)
+		return p
+	}
 	var runFn distill.MineFunc
 	if (len(pending()) > 0 || st.ReviewDue(cfg)) && strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
 		cleanupOpenCodeDistillSessions(ctx, time.Now().Add(-1*time.Hour))
@@ -92,7 +170,7 @@ func runWorker() (bool, error) {
 		}()
 		runFn = opencodeServer.Run
 	}
-	sessionBudget := workerSessionBudget(cfg)
+	sessionBudget := workerSessionBudget(cfg, auto)
 	processedSessions := drainQueueLimit(pending, func(session string) {
 		if st.MetaString("worker_stop_requested") == "1" {
 			return
@@ -109,7 +187,13 @@ func runWorker() (bool, error) {
 			slog.Error("process session", "session", session, "err", err)
 		}
 	}, sessionBudget)
-	if sessionBudget > 0 && processedSessions >= sessionBudget {
+	remainingPending := len(pending())
+	if workerBudgetReached(auto, sessionBudget, processedSessions, remainingPending) {
+		next, _ := autoDistillNextAt(st, cfg.AutoDistillIntervalMinutes, time.Now())
+		if next.IsZero() {
+			next = time.Now().Add(time.Second)
+		}
+		scheduleWorkerWakeup(st, next, "auto")
 		slog.Info("distill: runner background budget reached; leaving remaining work queued", "runner", cfg.Runner, "processed", processedSessions)
 		return true, nil
 	}
@@ -132,9 +216,15 @@ func runWorker() (bool, error) {
 	return true, nil
 }
 
-func workerSessionBudget(cfg store.Config) int {
-	_ = cfg
-	return 0
+func workerSessionBudget(cfg store.Config, auto bool) int {
+	if !auto {
+		return 0
+	}
+	return cfg.AutoDistillSessionBudget
+}
+
+func workerBudgetReached(auto bool, sessionBudget, processedSessions, remainingPending int) bool {
+	return auto && sessionBudget > 0 && processedSessions >= sessionBudget && remainingPending > 0
 }
 
 func cleanupOpenCodeDistillSessions(ctx context.Context, before time.Time) {

@@ -298,9 +298,24 @@ func (s *Store) NextBackoffAttempt(now time.Time) (time.Time, bool) {
 // Keying on the watermark (not a mere marker) means a RESUMED session whose log
 // gains new turns is picked up again.
 func (s *Store) PendingSessions() ([]string, error) {
+	return s.PendingSessionsUpdatedBetween(time.Time{}, time.Time{})
+}
+
+// PendingSessionsUpdatedBetween applies an optional inclusive range to each
+// session's most recent raw timestamp. Zero bounds are open. Sessions with no
+// timestamp remain eligible only when no range is requested.
+func (s *Store) PendingSessionsUpdatedBetween(since, until time.Time) ([]string, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	sinceValue := ""
+	if !since.IsZero() {
+		sinceValue = since.UTC().Format(time.RFC3339Nano)
+	}
+	untilValue := ""
+	if !until.IsZero() {
+		untilValue = until.UTC().Format(time.RFC3339Nano)
+	}
 	rows, err := s.db.Query(
-		`SELECT session FROM (
+		`WITH candidates AS (
 		   SELECT l.session
 		     FROM (SELECT session, COUNT(*) AS c FROM raw GROUP BY session) l
 		     LEFT JOIN progress p ON p.session = l.session
@@ -312,7 +327,17 @@ func (s *Store) PendingSessions() ([]string, error) {
 		     LEFT JOIN progress p ON p.session = st.session
 		    WHERE COALESCE(st.session, '') != ''
 		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
-		  ) ORDER BY session`, now, now)
+		  ), updates AS (
+		   SELECT session, MAX(julianday(ts)) AS updated_at
+		     FROM raw
+		    GROUP BY session
+		  )
+		 SELECT c.session
+		   FROM candidates c
+		   LEFT JOIN updates u ON u.session = c.session
+		  WHERE (? = '' OR u.updated_at >= julianday(?))
+		    AND (? = '' OR u.updated_at <= julianday(?))
+		  ORDER BY c.session`, now, now, sinceValue, sinceValue, untilValue, untilValue)
 	if err != nil {
 		return nil, err
 	}

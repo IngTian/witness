@@ -14,6 +14,7 @@ import (
 func newImportCmd() *cobra.Command {
 	var agent string
 	var quiet bool
+	var auto bool
 	c := &cobra.Command{
 		Use:   "import --agent <claude|opencode>",
 		Short: "Import agent session data and kick background distillation.",
@@ -24,17 +25,23 @@ func newImportCmd() *cobra.Command {
 			if quiet {
 				args = append(args, "--quiet")
 			}
+			if auto {
+				args = append(args, "--auto")
+			}
 			return cmdImport(args)
 		},
 	}
 	c.Flags().StringVar(&agent, "agent", "", "agent to import from: claude or opencode")
 	c.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
+	c.Flags().BoolVar(&auto, "auto", false, "apply automatic distillation cooldown and session budget")
+	_ = c.Flags().MarkHidden("auto")
 	return c
 }
 
 func cmdImport(args []string) error {
 	agent := ""
 	quiet := false
+	auto := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--agent":
@@ -45,14 +52,16 @@ func cmdImport(args []string) error {
 			i++
 		case "--quiet":
 			quiet = true
+		case "--auto":
+			auto = true
 		default:
-			return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet]")
+			return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet] [--auto]")
 		}
 	}
 	if agent == "" {
-		return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet]")
+		return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet] [--auto]")
 	}
-	stats, kicked, err := runImport(agent, true)
+	stats, kicked, err := runImport(agent, true, auto)
 	if err != nil {
 		return err
 	}
@@ -67,7 +76,7 @@ func cmdImport(args []string) error {
 	return nil
 }
 
-func runImport(agent string, kickWorker bool) (runtimes.ImportStats, bool, error) {
+func runImport(agent string, kickWorker, auto bool) (runtimes.ImportStats, bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return runtimes.ImportStats{}, false, err
@@ -98,6 +107,9 @@ func runImport(agent string, kickWorker bool) (runtimes.ImportStats, bool, error
 	pending, _ := st.PendingSessions()
 	shouldRunWorker := len(pending) > 0 || st.ReviewDue(cfg)
 	if kickWorker && shouldRunWorker {
+		if auto {
+			return stats, maybeSpawnAutoWorker(st), nil
+		}
 		spawnDetached("worker")
 		return stats, true, nil
 	}

@@ -5,7 +5,7 @@ COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILDTIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS    := -X github.com/IngTian/witness/cmd/commands.version=$(VERSION) -X github.com/IngTian/witness/cmd/commands.commit=$(COMMIT) -X github.com/IngTian/witness/cmd/commands.buildTime=$(BUILDTIME)
 
-.PHONY: build build-all package-windows npm-opencode-package fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
+.PHONY: build build-all build-npm-platforms package-windows npm-opencode-package fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
 
 ## build: compile the binary for this OS/arch into bin/
 build:
@@ -18,6 +18,11 @@ build-all:
 	  echo "building $$os/$$arch"; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -ldflags "$(LDFLAGS)" -o bin/witness-$$os-$$arch$$ext ./cmd/witness; \
 	done; done
+
+## build-npm-platforms: compile only the npm-supported platforms
+build-npm-platforms:
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/witness-darwin-arm64 ./cmd/witness
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/witness-linux-amd64 ./cmd/witness
 
 ## package-windows: build self-contained Windows zips (exe + prompts + model) for
 ## each arch. Needs the model present (make fetch-model). Each zip unpacks to a
@@ -43,7 +48,9 @@ package-windows: build-all fetch-model
 ## npm-opencode-package: stage prebuilt binaries/prompts and verify the npm package
 npm-opencode-package:
 	./scripts/stage-npm-opencode.sh --build
-	cd npm/opencode && npm pack --dry-run
+	npm pack ./npm/platform/darwin-arm64 --dry-run
+	npm pack ./npm/platform/linux-x64 --dry-run
+	npm pack ./npm/opencode --ignore-scripts --dry-run
 
 ## fetch-model: download the embedding model (~448MB, once; idempotent)
 fetch-model:

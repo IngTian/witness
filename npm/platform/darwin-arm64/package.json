@@ -1,0 +1,17 @@
+{
+  "name": "@witness-ai/opencode-darwin-arm64",
+  "version": "0.2.2",
+  "description": "witness binary for OpenCode on macOS Apple Silicon.",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin/witness", "README.md"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IngTian/witness.git",
+    "directory": "npm/platform/darwin-arm64"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

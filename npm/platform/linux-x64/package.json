@@ -1,0 +1,17 @@
+{
+  "name": "@witness-ai/opencode-linux-x64",
+  "version": "0.2.2",
+  "description": "witness binary for OpenCode on Linux x86-64.",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/witness", "README.md"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IngTian/witness.git",
+    "directory": "npm/platform/linux-x64"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

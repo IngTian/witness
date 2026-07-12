@@ -15,10 +15,11 @@ import (
 
 func newInstallCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "install <claude|opencode>",
-		Short: "Install witness integrations.",
-		Long:  "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.",
-		Args:  cobra.ExactArgs(1),
+		Use:    "install <claude|opencode>",
+		Short:  "Install witness integrations.",
+		Long:   "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.",
+		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
+		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdInstall(args)
 		},
@@ -27,10 +28,11 @@ func newInstallCmd() *cobra.Command {
 
 func newUninstallCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "uninstall <claude|opencode>",
-		Short: "Remove witness integrations without deleting data.",
-		Long:  "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
-		Args:  cobra.ExactArgs(1),
+		Use:    "uninstall <claude|opencode>",
+		Short:  "Remove witness integrations without deleting data.",
+		Long:   "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
+		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
+		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdUninstall(args)
 		},

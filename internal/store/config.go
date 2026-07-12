@@ -13,11 +13,14 @@ import (
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
 // keys are ignored; missing file = all defaults.
 type Config struct {
-	Runner          string // "claude" (default) or "opencode" for headless distillation calls
-	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
-	DistillModel    string // model for the reviewer ("" = claude -p default)
-	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
-	ReviewPoignancy int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
+	Runner                     string // "claude" (default) or "opencode" for headless distillation calls
+	TriageModel                string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
+	DistillModel               string // model for the reviewer ("" = claude -p default)
+	ReviewEvery                int    // run the reviewer after this many distilled sessions since last review
+	ReviewPoignancy            int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
+	AutoDistill                bool   // whether hooks/plugins may start the worker automatically
+	AutoDistillIntervalMinutes int    // minimum wall-clock gap between automatic worker starts
+	AutoDistillSessionBudget   int    // max sessions per automatic worker run (0 = unbounded)
 	// EnabledLenses is the set of registered lens names that run on EVERY session
 	// (alongside the always-on "default" lens). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
@@ -31,6 +34,12 @@ func DefaultConfig() Config {
 		DistillModel:    "",
 		ReviewEvery:     5,
 		ReviewPoignancy: 30, // a few high-salience sessions trigger review before the count cap
+		AutoDistill:     true,
+		// Automatic triggers should be laptop-friendly without starving distillation:
+		// capture stays immediate, model work is batched by a short cooldown, and the
+		// worker exits after draining the queue so the embed model never stays resident.
+		AutoDistillIntervalMinutes: 10,
+		AutoDistillSessionBudget:   0,
 	}
 }
 
@@ -69,6 +78,18 @@ func (s *Store) LoadConfig() Config {
 			if n, err := strconv.Atoi(v); err == nil {
 				c.ReviewPoignancy = n
 			}
+		case "auto_distill":
+			if b, ok := parseBool(v); ok {
+				c.AutoDistill = b
+			}
+		case "auto_distill_interval_minutes":
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				c.AutoDistillIntervalMinutes = n
+			}
+		case "auto_distill_session_budget":
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				c.AutoDistillSessionBudget = n
+			}
 		case "lens":
 			// One enabled lens per line: "lens = <name>". Global — runs on every
 			// session. Deduped so repeated lines don't multiply.
@@ -78,6 +99,68 @@ func (s *Store) LoadConfig() Config {
 		}
 	}
 	return c
+}
+
+// runnerBoundKey marks that `witness install` explicitly bound a runner. New
+// templates leave the assignment commented, so an active runner line also
+// counts as deliberate without requiring this DB marker.
+const runnerBoundKey = "runner_bound"
+const configTemplateUnboundMarker = "# witness template: runner remains unbound until configured."
+
+// ResolveRunner returns the distillation runner to actually use, layering a
+// non-persistent WITNESS_RUNNER env fallback UNDER any explicit config choice.
+//
+// Why this exists: the npm OpenCode plugin user never runs `witness install`, so
+// their config.toml carries the template default runner="claude" — but they have
+// no `claude` CLI, and distillation would silently fail. The plugin passes
+// WITNESS_RUNNER=opencode so the worker it kicks distills via OpenCode instead.
+//
+// Precedence (safety-first, so a dual CC+OpenCode user is never hijacked):
+//  1. If install bound a runner, or config.toml has an active runner assignment,
+//     the config value ALWAYS wins — WITNESS_RUNNER is ignored.
+//  2. Else, if WITNESS_RUNNER is set, use it (the plugin fallback).
+//  3. Else, the config/default value.
+//
+// Non-persistent: this never writes config.toml. Marker-less configs predate the
+// fallback and are treated as bound, preserving upgrade-time install choices.
+func (s *Store) ResolveRunner(cfg Config) string {
+	if s.MetaString(runnerBoundKey) == "1" {
+		return cfg.Runner
+	}
+	if !s.configRunnerUnbound() {
+		return cfg.Runner
+	}
+	if env := strings.TrimSpace(os.Getenv("WITNESS_RUNNER")); env != "" {
+		return env
+	}
+	return cfg.Runner
+}
+
+func (s *Store) configRunnerUnbound() bool {
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		return false
+	}
+	if !strings.Contains(string(data), configTemplateUnboundMarker) {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if isRunnerLine(line) {
+			return false
+		}
+	}
+	return true
+}
+
+func parseBool(v string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // SetRunner writes `runner = "<runner>"` into config.toml, creating or replacing
@@ -95,6 +178,9 @@ func (s *Store) SetRunner(runner string) error {
 	set := false
 	if len(data) > 0 {
 		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == configTemplateUnboundMarker {
+				continue
+			}
 			if isRunnerLine(line) {
 				if !set {
 					kept = append(kept, fmt.Sprintf("runner = %q", runner))
@@ -112,7 +198,13 @@ func (s *Store) SetRunner(runner string) error {
 		kept = append(kept, fmt.Sprintf("runner = %q", runner))
 	}
 	out := strings.Join(kept, "\n") + "\n"
-	return writeAtomic(s.ConfigPath(), []byte(out))
+	if err := writeAtomic(s.ConfigPath(), []byte(out)); err != nil {
+		return err
+	}
+	// Mark that a runner was explicitly chosen via install, so ResolveRunner lets
+	// this persisted value win over any WITNESS_RUNNER env fallback (a dual
+	// CC+OpenCode user who ran `install` is never hijacked by the plugin env).
+	return s.SetMetaString(runnerBoundKey, "1")
 }
 
 // EnsureConfigFile creates config.toml with a full commented template if it does
@@ -129,9 +221,11 @@ func (s *Store) EnsureConfigFile() error {
 	tpl := `# witness configuration — all fields optional, shown with defaults.
 # Docs: https://github.com/IngTian/witness#configuration
 
+` + configTemplateUnboundMarker + `
+
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode run`" + `). Bound automatically by ` + "`witness install`" + `.
-runner = "claude"
+# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
+# runner = "claude"
 
 # Models for the per-session miner and the periodic reviewer. Empty = use the
 # ` + "`claude -p`" + ` / ` + "`opencode run`" + ` default. With runner = opencode, use OpenCode
@@ -143,6 +237,14 @@ distill_model = ""
 review_every = 5
 # ...or once accumulated observation poignancy crosses this threshold (0 = off).
 review_poignancy = 30
+
+# Automatic distillation is laptop-friendly without keeping the embed model resident:
+# hooks capture immediately and plugins reconcile at idle; model work starts at most once per interval,
+# drains the current queue, then exits. Set session_budget > 0 to cap each auto run.
+# Manual ` + "`witness distill start`" + ` is always unbounded.
+auto_distill = true
+auto_distill_interval_minutes = 10
+auto_distill_session_budget = 0
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math
