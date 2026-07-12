@@ -71,8 +71,8 @@ async function loadPlugin(harness) {
   globalThis.WITNESS_SHIM = Object.hasOwn(harness, "shim") ? harness.shim : "/shim/witness"
   if (Object.hasOwn(harness, "witnessBin")) process.env.WITNESS_BIN = harness.witnessBin
   globalThis.Bun = {
-    spawn(args) {
-      return harness.spawn(args)
+    spawn(args, options) {
+      return harness.spawn(args, options)
     },
   }
 
@@ -122,6 +122,7 @@ test("npm plugin stays inactive when no supported platform binary is available",
 
 test("npm plugin reconciles on init/idle, ignores message.updated, and auto-registers MCP only when absent", async () => {
   const events = []
+  const importEnvs = []
   const harness = {
     modelDir: () => "/assets/e5-small",
     modelReady: () => true,
@@ -129,9 +130,12 @@ test("npm plugin reconciles on init/idle, ignores message.updated, and auto-regi
     startModelDownload() {
       throw new Error("download should not start when model is ready")
     },
-    spawn(args) {
+    spawn(args, options) {
       events.push(`spawn:${args.join(" ")}`)
-      if (args[1] === "import") return makeProc(`import-${events.length}`, events, { autoExit: 0 })
+      if (args[1] === "import") {
+        importEnvs.push(options?.env)
+        return makeProc(`import-${events.length}`, events, { autoExit: 0 })
+      }
       return makeProc(`proc-${events.length}`, events, { autoExit: 0 })
     },
   }
@@ -143,6 +147,11 @@ test("npm plugin reconciles on init/idle, ignores message.updated, and auto-regi
     const hooks = await mod.default()
     await Promise.resolve()
     assert.equal(events.filter((event) => event.includes(" import ")).length, 1)
+    // The spawned distill/import subprocess must carry the prompts override, or
+    // the binary's exe-relative probe misses the main package's prompts/.
+    assert.equal(importEnvs[0]?.WITNESS_PROMPTS, "/pkg/prompts")
+    assert.equal(importEnvs[0]?.WITNESS_ASSETS, "/assets/e5-small")
+    assert.equal(importEnvs[0]?.WITNESS_RUNNER, "opencode")
 
     await hooks.event({ event: { type: "message.updated" } })
     assert.equal(events.filter((event) => event.includes(" import ")).length, 1)
