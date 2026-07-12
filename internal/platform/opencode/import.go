@@ -201,6 +201,9 @@ func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow)
 	if err := im.Store.ApplyRawImport(meta, records, stateKey, string(stateValue), replace); err != nil {
 		return 0, err
 	}
+	// Stamp the owning platform so platform.ForSession is column-authoritative
+	// (prefix remains the fallback for rows imported before this).
+	im.Store.SetSessionPlatform(session, "opencode")
 	return len(records), nil
 }
 

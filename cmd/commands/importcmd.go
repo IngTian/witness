@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/IngTian/witness/internal/platform"
-	opencodeimport "github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -84,23 +83,16 @@ func runImport(agent string, kickWorker, auto bool) (platform.ImportStats, bool,
 	defer st.Close()
 	defer setupLogging(st)()
 
-	var stats platform.ImportStats
-	switch agent {
-	case platform.AgentOpenCode:
-		unlock, ok := st.OpenCodeSyncLock()
-		if !ok {
-			return platform.ImportStats{Agent: agent}, false, nil
-		}
-		opencodeStats, err := (&opencodeimport.Importer{Store: st}).Import(context.Background(), nil)
-		unlock()
-		if err != nil {
-			return stats, false, err
-		}
-		stats = platform.ImportStats{Agent: agent, Sessions: opencodeStats.Sessions, Records: opencodeStats.Records, MaxUpdated: opencodeStats.MaxUpdated}
-	case platform.AgentClaude:
-		stats = platform.ImportStats{Agent: agent}
-	default:
-		return stats, false, fmt.Errorf("unknown import agent %q (want claude or opencode)", agent)
+	p, ok := platform.ByName(agent)
+	if !ok {
+		return platform.ImportStats{}, false, fmt.Errorf("unknown import agent %q (want claude or opencode)", agent)
+	}
+	// The Importer owns its own reconcile mechanics (OpenCode takes the sync lock
+	// and reads its SQLite store; Claude is a hook-fed no-op) — cmd no longer
+	// branches on the runtime.
+	stats, err := p.Import(context.Background(), st)
+	if err != nil {
+		return stats, false, err
 	}
 
 	cfg := st.LoadConfig()

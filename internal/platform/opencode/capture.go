@@ -64,6 +64,9 @@ func Capture(st *store.Store, data []byte, now time.Time) (bool, error) {
 	if err := st.ApplyRawImport(meta, []store.RawRecord{rec}, stateKey, string(stateValue), false); err != nil {
 		return false, err
 	}
+	// Record the owning platform so platform.ForSession is column-authoritative for
+	// this session (the id prefix remains the fallback for un-stamped rows).
+	st.SetSessionPlatform(session, "opencode")
 	return true, nil
 }
 

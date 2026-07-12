@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,8 +8,6 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
-	runtimeclaude "github.com/IngTian/witness/internal/platform/claude"
-	opencodeimport "github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -53,22 +50,14 @@ func cmdCapture(args []string) error {
 		slog.Warn("capture: unreadable hook event", "err", err)
 		return nil
 	}
-	switch agent {
-	case platform.AgentClaude:
-		var e runtimeclaude.HookEvent
-		if err := json.Unmarshal(data, &e); err != nil {
-			slog.Warn("capture: unreadable claude hook event", "err", err)
-			return nil
-		}
-		if err := runtimeclaude.Capture(st, e, time.Now()); err != nil {
-			slog.Error("capture: append raw failed", "agent", agent, "session", e.SessionID, "err", err)
-		}
-	case platform.AgentOpenCode:
-		if _, err := opencodeimport.Capture(st, data, time.Now()); err != nil {
-			slog.Error("capture: opencode event failed", "err", err)
-		}
-	default:
+	p, ok := platform.ByName(agent)
+	if !ok {
 		return fmt.Errorf("unknown capture agent %q", agent)
+	}
+	if _, err := p.Capture(st, data, time.Now()); err != nil {
+		// Best-effort: a malformed payload or write error is logged, never fatal —
+		// capture must never break the user's session.
+		slog.Error("capture: event failed", "agent", agent, "err", err)
 	}
 	return nil
 }
