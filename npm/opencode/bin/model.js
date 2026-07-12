@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { createReadStream, createWriteStream, existsSync, mkdirSync, openSync, statSync, unlinkSync, closeSync, chmodSync, readFileSync, writeFileSync } from "node:fs"
+import { createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, statSync, unlinkSync, closeSync, chmodSync, readFileSync, utimesSync, writeFileSync } from "node:fs"
 import { rename } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
 import { get as httpGet } from "node:http"
@@ -148,8 +148,11 @@ function verifiedMarkerPath(dir) {
 }
 
 function verifiedFile(file, sha256) {
-  const stat = statSync(file)
-  return { sha256, size: stat.size, mtimeMs: stat.mtimeMs }
+  // Identity = sha256 + size only. mtime was deliberately dropped: it changes on
+  // any external touch (backup restore, rsync, editor stat) of a byte-identical
+  // model and would force a needless full 470MB re-hash/re-download. sha256 already
+  // proves content; size is a cheap pre-check.
+  return { sha256, size: statSync(file).size }
 }
 
 function verifiedMarkerContent(dir, hashes) {
@@ -217,17 +220,44 @@ export function modelReady(packageRoot) {
   return false
 }
 
+// The lock file records "<token> <pid> <hostname>" so a stale lock can be reaped
+// two ways: (1) same-host liveness — if the recorded pid is gone, the owner
+// crashed and we reclaim immediately (fixes the up-to-12h wedge a hard-killed
+// downloader used to cause); (2) a 12h wall-clock fallback for a cross-host lock
+// (a networked data dir) or an unreadable body, where pid liveness is meaningless.
+function lockOwnerDead(lock) {
+  let body
+  try {
+    body = readFileSync(lock, "utf8")
+  } catch {
+    return false // can't read it; fall back to the mtime rule
+  }
+  const [, pidRaw, host] = body.trim().split(/\s+/)
+  const pid = Number(pidRaw)
+  if (!Number.isInteger(pid) || pid <= 0 || host !== os.hostname()) return false
+  try {
+    process.kill(pid, 0) // signal 0: liveness probe, sends nothing
+    return false // owner still alive
+  } catch (err) {
+    return err.code === "ESRCH" // no such process — owner is gone
+  }
+}
+
+function lockStale(lock) {
+  return lockOwnerDead(lock) || Date.now() - fileMtime(lock) > LOCK_STALE_MS
+}
+
 function acquireLock(dir) {
   ensureModelDir(dir)
   const lock = path.join(dir, ".download.lock")
   const token = randomUUID()
   try {
     const fd = openSync(lock, "wx")
-    writeFileSync(fd, `${token}\n`, { encoding: "utf8" })
+    writeFileSync(fd, `${token} ${process.pid} ${os.hostname()}\n`, { encoding: "utf8" })
     closeSync(fd)
     return { lock, token }
   } catch {
-    if (Date.now() - fileMtime(lock) > LOCK_STALE_MS) {
+    if (lockStale(lock)) {
       try {
         unlinkSync(lock)
       } catch {}
@@ -240,7 +270,17 @@ function acquireLock(dir) {
 export function startModelDownload(packageRoot, options = {}) {
   if (process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(packageRoot)) return null
   const dir = modelDir(packageRoot)
-  const lock = acquireLock(dir)
+  // acquireLock → ensureModelDir → mkdirSync can throw synchronously (read-only
+  // or unwritable data dir). This is a best-effort kickoff whose contract is
+  // "return null if it can't start", and it runs on the OpenCode plugin's init/
+  // idle path — an unhandled throw here would reject the plugin factory promise
+  // and break the session, violating "capture must never break a session".
+  let lock
+  try {
+    lock = acquireLock(dir)
+  } catch {
+    return null
+  }
   if (!lock) return null
   const env = { ...process.env }
   // Plugin-owned downloads must die with OpenCode. The child also watches this
@@ -305,10 +345,12 @@ async function downloadFile(baseURL, remotePath, outName, minBytes, sha256, dir)
   try {
     unlinkSync(dst)
   } catch {}
-  const tmp = `${dst}.part`
-  try {
-    unlinkSync(tmp)
-  } catch {}
+  // PID-namespace the temp file. A stale-lock reap can hand the lock to a second
+  // downloader while a >12h (or crashed-but-not-yet-reaped) first one is mid-write;
+  // a shared `${dst}.part` would then interleave two byte streams into one file and
+  // pass the size check with corrupt contents. Per-pid parts can't collide, and the
+  // sha256 gate still rejects a partial file before it is renamed into place.
+  const tmp = `${dst}.${process.pid}.part`
   const url = `${baseURL.replace(/\/+$/, "")}/${remotePath}`
   try {
     const res = await request(url)
@@ -352,11 +394,35 @@ async function downloadFile(baseURL, remotePath, outName, minBytes, sha256, dir)
   }
 }
 
+// reapForeignParts removes leftover *.part temp files from OTHER pids. Safe
+// because downloadModel only runs while holding the download lock, so we are the
+// sole legitimate writer: any part not named for our pid is an orphan from a
+// crashed prior owner (per-pid parts replaced the old self-cleaning shared name).
+// If a >12h stale-lock reap ever overlapped a still-live cross-host writer,
+// unlinking its open .part just drops the dirent — that writer's final rename
+// fails cleanly (ENOENT) rather than producing a corrupt file.
+function reapForeignParts(dir) {
+  const mine = `.${process.pid}.part`
+  let entries
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".part") || name.endsWith(mine)) continue
+    try {
+      unlinkSync(path.join(dir, name))
+    } catch {}
+  }
+}
+
 export async function downloadModel(packageRoot) {
   const dir = modelDir(packageRoot)
   ensureModelDir(dir)
   const hashes = configuredMirrorHashes()
   if (modelReady(packageRoot)) return
+  reapForeignParts(dir)
   if (await ensureVerified(dir, hashes)) return
   await downloadFile(hashes.baseURL, "onnx/model.onnx", "model.onnx", modelMinBytes(), hashes.model, dir)
   await downloadFile(hashes.baseURL, "tokenizer.json", "tokenizer.json", tokenizerMinBytes(), hashes.tokenizer, dir)
@@ -365,4 +431,7 @@ export async function downloadModel(packageRoot) {
 
 export const __test = {
   verifiedMarkerPath,
+  acquireLock,
+  lockStale,
+  reapForeignParts,
 }

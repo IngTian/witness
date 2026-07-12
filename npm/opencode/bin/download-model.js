@@ -19,7 +19,10 @@ const lockToken = args[0] === "--foreground" ? args[3] || "" : ""
 function releaseLock() {
   if (!lock) return
   try {
-    if (lockToken && readFileSync(lock, "utf8").trim() !== lockToken) return
+    // The lock body is "<token> <pid> <hostname>"; only release the lock we still
+    // own. If a stale-lock reap already handed our slot to another downloader, the
+    // recorded token differs and we must not delete their lock.
+    if (lockToken && readFileSync(lock, "utf8").trim().split(/\s+/)[0] !== lockToken) return
     unlinkSync(lock)
   } catch {}
 }
