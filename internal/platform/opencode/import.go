@@ -21,7 +21,6 @@ const (
 	SessionPrefix        = "opencode:"
 	syncMetaKey          = "opencode_sync_time_updated_ms"
 	importKeysMetaPrefix = "opencode_import_keys:"
-	witnessDistillTitle  = "witness-distill"
 )
 
 // Importer mirrors OpenCode text messages into witness raw records. It treats
@@ -132,22 +131,33 @@ func sqliteURI(path string) string {
 }
 
 func (im *Importer) sessions(ctx context.Context, db *sql.DB, ids []string) ([]sessionRow, error) {
+	// Exclude witness's OWN distill sessions by NEGATING the shared self-traffic
+	// predicate (the same one cleanup DELETEs by), so the read and delete sides can
+	// never disagree. Agent-authoritative: this fixes the old title-only filter,
+	// which OpenCode's auto-titler could defeat by renaming a witness-distill
+	// session — letting witness's own lens-prompt + analysis get ingested as a user
+	// session. Older schemas with no agent column fall back to the title match.
+	self, selfArgs := selfTrafficWhere(sessionHasAgentColumn(ctx, db))
+	notSelf := `NOT (` + self + `)`
+
+	const cols = `SELECT id, directory, title, time_created, time_updated FROM session`
 	if len(ids) > 0 {
 		placeholders := make([]string, len(ids))
-		args := make([]any, 0, len(ids)+1)
+		args := make([]any, 0, len(ids)+len(selfArgs))
 		for i, id := range ids {
 			placeholders[i] = "?"
 			args = append(args, strings.TrimPrefix(id, SessionPrefix))
 		}
-		args = append(args, witnessDistillTitle)
-		q := `SELECT id, directory, title, time_created, time_updated FROM session WHERE id IN (` + strings.Join(placeholders, ",") + `) AND title != ? ORDER BY time_updated`
+		args = append(args, selfArgs...)
+		q := cols + ` WHERE id IN (` + strings.Join(placeholders, ",") + `) AND ` + notSelf + ` ORDER BY time_updated`
 		return scanSessions(ctx, db, q, args...)
 	}
 	last, _ := strconv.ParseInt(strings.TrimSpace(im.Store.MetaString(syncMetaKey)), 10, 64)
 	if last > 0 {
-		return scanSessions(ctx, db, `SELECT id, directory, title, time_created, time_updated FROM session WHERE time_updated >= ? AND title != ? ORDER BY time_updated`, last, witnessDistillTitle)
+		args := append([]any{last}, selfArgs...)
+		return scanSessions(ctx, db, cols+` WHERE time_updated >= ? AND `+notSelf+` ORDER BY time_updated`, args...)
 	}
-	return scanSessions(ctx, db, `SELECT id, directory, title, time_created, time_updated FROM session WHERE title != ? ORDER BY time_updated`, witnessDistillTitle)
+	return scanSessions(ctx, db, cols+` WHERE `+notSelf+` ORDER BY time_updated`, selfArgs...)
 }
 
 func scanSessions(ctx context.Context, db *sql.DB, q string, args ...any) ([]sessionRow, error) {

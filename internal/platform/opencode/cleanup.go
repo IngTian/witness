@@ -38,12 +38,10 @@ func CleanupWitnessDistillSessions(ctx context.Context, dbPath string, before ti
 	}
 	defer tx.Rollback()
 
-	where := `title = ?`
-	args := []any{witnessDistillTitle}
-	if hasSessionColumn(ctx, tx, "agent") {
-		where = `(title = ? OR agent = ?)`
-		args = []any{witnessDistillTitle, witnessDistillTitle}
-	}
+	// The self-traffic predicate is shared with the import filter (which negates it),
+	// so read and delete can never disagree. Agent-authoritative when the column
+	// exists; title fallback only for older schemas.
+	where, args := selfTrafficWhere(hasSessionColumn(ctx, tx, "agent"))
 	if !before.IsZero() {
 		where += ` AND time_created < ?`
 		args = append(args, before.UTC().UnixMilli())
