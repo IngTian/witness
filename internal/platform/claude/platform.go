@@ -1,7 +1,10 @@
 package claude
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -25,6 +28,31 @@ func (Platform) SessionPrefix() string { return "" }
 // chunk — one input per session.
 func (Platform) RenderInputs(raw []store.RawRecord) []string {
 	return []string{RenderTranscript(raw)}
+}
+
+// Capture unmarshals the Claude Code hook payload and writes one L0 record. The
+// []byte signature is the uniform Capturer contract; the typed HookEvent is an
+// internal detail. On a successful write it stamps the session's owning platform
+// so ForSession is column-authoritative for it. Best-effort: a malformed payload
+// is not an error (returns ok=false) — capture must never break a session.
+func (Platform) Capture(st *store.Store, data []byte, now time.Time) (bool, error) {
+	var e HookEvent
+	if err := json.Unmarshal(data, &e); err != nil {
+		return false, err
+	}
+	if err := Capture(st, e, now); err != nil {
+		return false, err
+	}
+	if e.SessionID != "" {
+		st.SetSessionPlatform(e.SessionID, "claude")
+	}
+	return true, nil
+}
+
+// Import is a no-op: Claude Code is hook-fed (capture writes L0 live), so there is
+// no external native store to reconcile from.
+func (Platform) Import(context.Context, *store.Store) (platform.ImportStats, error) {
+	return platform.ImportStats{Agent: "claude"}, nil
 }
 
 // RenderTranscript renders raw records as "ROLE: text\n\n". Exported because it is

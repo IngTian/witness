@@ -1,6 +1,9 @@
 package opencode
 
 import (
+	"context"
+	"time"
+
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/platform/claude"
 	"github.com/IngTian/witness/internal/store"
@@ -42,6 +45,36 @@ func (Platform) SessionPrefix() string { return SessionPrefix }
 // still large) does not force a single oversized model call.
 func (Platform) RenderInputs(raw []store.RawRecord) []string {
 	return renderChunks(raw, chunkMaxChars, chunkOverlapRecords)
+}
+
+// Capture mirrors one OpenCode plugin event into L0 (best-effort; SQLite import is
+// the source-of-truth reconcile). The package Capture func stamps the session's
+// owning platform itself (it already resolves the prefixed session id), so this is
+// a thin adapter to the Capturer interface.
+func (Platform) Capture(st *store.Store, data []byte, now time.Time) (bool, error) {
+	return Capture(st, data, now)
+}
+
+// Import reconciles OpenCode's SQLite store into L0. It takes the sync lock INSIDE
+// the method (so cmd need not know about it) and maps the internal stats onto the
+// shared platform.ImportStats. A held lock means another import is in flight —
+// return zero stats, not an error.
+func (Platform) Import(ctx context.Context, st *store.Store) (platform.ImportStats, error) {
+	unlock, ok := st.OpenCodeSyncLock()
+	if !ok {
+		return platform.ImportStats{Agent: "opencode"}, nil
+	}
+	defer unlock()
+	s, err := (&Importer{Store: st}).Import(ctx, nil)
+	if err != nil {
+		return platform.ImportStats{Agent: "opencode"}, err
+	}
+	return platform.ImportStats{
+		Agent:      "opencode",
+		Sessions:   s.Sessions,
+		Records:    s.Records,
+		MaxUpdated: s.MaxUpdated,
+	}, nil
 }
 
 // renderChunks splits raw into overlapping windows under maxChars, each rendered
