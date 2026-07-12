@@ -1,6 +1,6 @@
 {
   "name": "@witness-ai/opencode",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "OpenCode plugin for witness session capture and background distillation.",
   "type": "module",
   "main": "./witness.js",
@@ -20,8 +20,8 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@witness-ai/opencode-darwin-arm64": "0.2.1",
-    "@witness-ai/opencode-linux-x64": "0.2.1"
+    "@witness-ai/opencode-darwin-arm64": "0.2.2",
+    "@witness-ai/opencode-linux-x64": "0.2.2"
   },
   "keywords": [
     "opencode",
