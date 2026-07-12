@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/IngTian/witness/internal/platform"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -328,17 +329,12 @@ func repoShim() (string, error) {
 // runtime into config.toml.
 func cmdInstall(args []string) error {
 	target := installTarget(args)
-	switch target {
-	case "claude":
-		if err := cmdInstallClaude(); err != nil {
-			return err
-		}
-	case "opencode":
-		if err := cmdInstallOpenCode(); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unknown install target %q (want claude or opencode)", target)
+	in, ok := platform.InstallerFor(target)
+	if !ok {
+		return fmt.Errorf("unknown install target %q (want %s)", target, strings.Join(platform.InstallTargets(), " or "))
+	}
+	if err := in.Install(); err != nil {
+		return err
 	}
 	return bindRunner(target)
 }
@@ -458,14 +454,11 @@ func cmdInstallOpenCode() error {
 // Data, config, and the runner setting are left untouched.
 func cmdUninstall(args []string) error {
 	target := installTarget(args)
-	switch target {
-	case "claude":
-		return cmdUninstallClaude()
-	case "opencode":
-		return cmdUninstallOpenCode()
-	default:
-		return fmt.Errorf("unknown uninstall target %q (want claude or opencode)", target)
+	in, ok := platform.InstallerFor(target)
+	if !ok {
+		return fmt.Errorf("unknown uninstall target %q (want %s)", target, strings.Join(platform.InstallTargets(), " or "))
 	}
+	return in.Uninstall()
 }
 
 func cmdUninstallClaude() error {
