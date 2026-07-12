@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { modelDir, modelReady, startModelDownload } from "./bin/model.js"
+import { modelDir, modelReady, promptsDir, startModelDownload } from "./bin/model.js"
 import { platformWitnessBin } from "./bin/platform.js"
 
 const PACKAGE_ROOT = fileURLToPath(new URL(".", import.meta.url))
@@ -16,6 +16,10 @@ function spawnWitness(args, payload) {
   try {
     const env = { ...process.env, WITNESS_OPENCODE_PLUGIN: "1" }
     env.WITNESS_ASSETS ||= modelDir(PACKAGE_ROOT)
+    // Point the binary at THIS package's bundled prompts. The binary lives in a
+    // separate per-platform package, so its exe-relative probe can't find them —
+    // without this, LoadDefault fails and no distillation happens. Mirrors WITNESS_ASSETS.
+    env.WITNESS_PROMPTS ||= promptsDir(PACKAGE_ROOT)
     // Bind distillation to OpenCode for the npm user, who never runs `witness
     // install` (so their config carries the default runner="claude" but they have
     // no `claude` CLI). Non-persistent fallback: an explicit `install` choice
@@ -111,6 +115,7 @@ const plugin = async () => {
         command: [WITNESS_BIN, "mcp"],
         environment: {
           WITNESS_ASSETS: modelDir(PACKAGE_ROOT),
+          WITNESS_PROMPTS: promptsDir(PACKAGE_ROOT),
           WITNESS_RUNNER: "opencode",
         },
         enabled: true,

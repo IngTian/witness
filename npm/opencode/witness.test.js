@@ -52,6 +52,7 @@ async function loadPlugin(harness) {
       const harness = globalThis.__witnessTestHarness
       export function modelDir() { return harness.modelDir() }
       export function modelReady() { return harness.modelReady() }
+      export function promptsDir(packageRoot) { return (harness.promptsDir || ((r) => r + "/prompts"))(packageRoot) }
       export function startModelDownload(packageRoot, options = {}) { return harness.startModelDownload(packageRoot, options) }
     `,
   )
@@ -124,6 +125,7 @@ test("npm plugin reconciles on init/idle, ignores message.updated, and auto-regi
   const harness = {
     modelDir: () => "/assets/e5-small",
     modelReady: () => true,
+    promptsDir: () => "/pkg/prompts",
     startModelDownload() {
       throw new Error("download should not start when model is ready")
     },
@@ -155,6 +157,7 @@ test("npm plugin reconciles on init/idle, ignores message.updated, and auto-regi
     assert.deepEqual(input.mcp.witness.command, ["/shim/witness", "mcp"])
     assert.deepEqual(input.mcp.witness.environment, {
       WITNESS_ASSETS: "/assets/e5-small",
+      WITNESS_PROMPTS: "/pkg/prompts",
       WITNESS_RUNNER: "opencode",
     })
     assert.equal(input.mcp.witness.enabled, true)

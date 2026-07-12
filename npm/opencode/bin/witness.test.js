@@ -9,7 +9,7 @@ const sourcePath = new URL("./witness.js", import.meta.url)
 const source = (await readFile(sourcePath, "utf8"))
   .replace('import { spawnSync } from "node:child_process"', 'const { spawnSync } = globalThis.__witnessCliHarness.childProcess')
   .replace('import { existsSync } from "node:fs"', 'const { existsSync } = globalThis.__witnessCliHarness.fs')
-  .replace('import { modelDir } from "./model.js"', 'const { modelDir } = globalThis.__witnessCliHarness.model')
+  .replace('import { modelDir, promptsDir } from "./model.js"', 'const { modelDir, promptsDir } = globalThis.__witnessCliHarness.model')
   .replace('import { platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"', 'const { platformPackage, platformWitnessBin, supportedPlatforms } = globalThis.__witnessCliHarness.platform')
 
 async function runCLI(argv, harness) {
@@ -64,6 +64,9 @@ test("npm CLI gives a clear install/uninstall error before looking for bundled b
       modelDir() {
         return "/assets/e5-small"
       },
+      promptsDir() {
+        return "/pkg/prompts"
+      },
     },
     platform: {
       platformPackage() {
@@ -100,6 +103,9 @@ test("npm CLI still forwards non-install commands to the bundled binary with wit
       modelDir() {
         return "/assets/e5-small"
       },
+      promptsDir() {
+        return "/pkg/prompts"
+      },
     },
     platform: {
       platformPackage() {
@@ -125,6 +131,7 @@ test("npm CLI still forwards non-install commands to the bundled binary with wit
   assert.equal(spawnCalls[0].bin, "/packages/darwin-arm64/bin/witness")
   assert.deepEqual(spawnCalls[0].args, ["profile"])
   assert.equal(spawnCalls[0].options.env.WITNESS_ASSETS, "/assets/e5-small")
+  assert.equal(spawnCalls[0].options.env.WITNESS_PROMPTS, "/pkg/prompts")
   assert.equal(spawnCalls[0].options.env.WITNESS_RUNNER, "opencode")
   assert.equal(spawnCalls[0].options.env.WITNESS_NPM_PACKAGE, "1")
 })

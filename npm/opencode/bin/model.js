@@ -47,6 +47,17 @@ export function modelDir() {
   return process.env.WITNESS_ASSETS || path.join(dataRoot(), "assets", "e5-small")
 }
 
+// promptsDir returns the bundled prompt/lens templates shipped in THIS (main)
+// package. Critical since the optionalDependencies split: the witness binary now
+// lives in a SEPARATE per-platform package (@witness-ai/opencode-<plat>/bin), so
+// the binary's exe-relative probe for prompts/ looks beside itself and misses the
+// main package's prompts/ entirely — LoadDefault then fails and ALL distillation
+// silently breaks. We pass this to the binary as WITNESS_PROMPTS (mirroring how
+// WITNESS_ASSETS points at the model dir), which bundle.Dir honors first.
+export function promptsDir(packageRoot) {
+  return path.join(packageRoot, "prompts")
+}
+
 function envInt(name, fallback) {
   const raw = process.env[name]
   if (!raw) return fallback

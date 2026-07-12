@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
-import { modelDir } from "./model.js"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+import { modelDir, promptsDir } from "./model.js"
 import { platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"
+
+// This wrapper lives in <package>/bin/, so the package root (holding prompts/) is
+// one level up.
+const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 const command = process.argv[2] || ""
 
@@ -27,6 +33,9 @@ if (!bin || !existsSync(bin)) {
 // (runner_bound), and an already-set env is respected.
 const env = { ...process.env }
 env.WITNESS_ASSETS ||= modelDir()
+// The binary is in a separate per-platform package, so it can't self-locate the
+// prompts bundled in THIS package — point it at them (mirrors WITNESS_ASSETS).
+env.WITNESS_PROMPTS ||= promptsDir(PACKAGE_ROOT)
 env.WITNESS_RUNNER ||= "opencode"
 env.WITNESS_NPM_PACKAGE = "1"
 
