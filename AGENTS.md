@@ -48,8 +48,9 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   data dir via `dataDirNames` (adopt-in-place, see invariants below).
 - `internal/distill/` — the worker: mines L0→L1 per lens, reviews L1→L2, and
   regenerates L4 via a headless runner (`claude -p` or `opencode serve`).
-- `internal/runtimes/{claude,opencode}/` — the per-runtime capture/import
-  adapters. `internal/runtimes/opencode/plugin/` embeds the OpenCode plugin JS.
+- `internal/platform/{claude,opencode}/` — the per-runtime capture/import
+  adapters. `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
+  (`internal/platform/platform.go` holds the cross-runtime constants + types.)
 - `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding
   model) relative to the binary via `os.Executable()` when no env var points at
   them, so a copied/installed binary self-locates its assets.
@@ -100,7 +101,7 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - Human CLI output may use `cmd/commands/style.go` helpers (color/glyphs) — but
   keep it TTY + `NO_COLOR` aware, and never let styling touch `--json` output.
 - New behavior needs a test. The CC capture path and the hook name-contract are
-  guarded (`internal/runtimes/claude/capture_test.go`,
+  guarded (`internal/platform/claude/capture_test.go`,
   `cmd/commands/hookcontract_test.go`) — keep them passing.
 - Never commit anyone's actual archive data (see `.gitignore`); the repo ships
   the framework, schema, and prompts only.

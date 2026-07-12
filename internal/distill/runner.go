@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	opencodeimport "github.com/IngTian/witness/internal/runtimes/opencode"
+	opencodeimport "github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 )
 

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/IngTian/witness/internal/runtimes"
-	opencodeimport "github.com/IngTian/witness/internal/runtimes/opencode"
+	"github.com/IngTian/witness/internal/platform"
+	opencodeimport "github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -76,29 +76,29 @@ func cmdImport(args []string) error {
 	return nil
 }
 
-func runImport(agent string, kickWorker, auto bool) (runtimes.ImportStats, bool, error) {
+func runImport(agent string, kickWorker, auto bool) (platform.ImportStats, bool, error) {
 	st, err := store.Open()
 	if err != nil {
-		return runtimes.ImportStats{}, false, err
+		return platform.ImportStats{}, false, err
 	}
 	defer st.Close()
 	defer setupLogging(st)()
 
-	var stats runtimes.ImportStats
+	var stats platform.ImportStats
 	switch agent {
-	case runtimes.AgentOpenCode:
+	case platform.AgentOpenCode:
 		unlock, ok := st.OpenCodeSyncLock()
 		if !ok {
-			return runtimes.ImportStats{Agent: agent}, false, nil
+			return platform.ImportStats{Agent: agent}, false, nil
 		}
 		opencodeStats, err := (&opencodeimport.Importer{Store: st}).Import(context.Background(), nil)
 		unlock()
 		if err != nil {
 			return stats, false, err
 		}
-		stats = runtimes.ImportStats{Agent: agent, Sessions: opencodeStats.Sessions, Records: opencodeStats.Records, MaxUpdated: opencodeStats.MaxUpdated}
-	case runtimes.AgentClaude:
-		stats = runtimes.ImportStats{Agent: agent}
+		stats = platform.ImportStats{Agent: agent, Sessions: opencodeStats.Sessions, Records: opencodeStats.Records, MaxUpdated: opencodeStats.MaxUpdated}
+	case platform.AgentClaude:
+		stats = platform.ImportStats{Agent: agent}
 	default:
 		return stats, false, fmt.Errorf("unknown import agent %q (want claude or opencode)", agent)
 	}
