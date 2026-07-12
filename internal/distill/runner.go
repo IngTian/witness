@@ -32,8 +32,8 @@ type Runner interface {
 	// distill sessions, then start `opencode serve`. Claude: no-op. Callers may skip
 	// Open when there is no work; Close must tolerate an unopened runner.
 	Open(ctx context.Context) error
-	// Run performs one extraction/review/summarize pass. systemPrompt is the trusted
-	// witness instruction; input is the UNTRUSTED corpus (see buildRunCmd fencing).
+	// Run performs one extraction/review/summarize pass. systemPrompt is witness's
+	// own instruction; input is the corpus being analyzed (see the WrapCorpus fence).
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
 	// Close releases engine resources and, for a session-persisting engine, sweeps
 	// witness's own distill sessions so they are never re-ingested as user sessions.
