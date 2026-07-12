@@ -1,13 +1,15 @@
 name: CI
 
 on:
+  # Also run on PUSH to an integration branch (not just PRs into it), so the branch
+  # tip itself is always a verified state before it merges to main.
   push:
-    branches: [main]
-  # Run on PRs into main AND into long-lived integration branches (e.g. the #21
-  # platform-agnostic refactor stack), so a multi-PR series is CI-gated the whole
-  # way in — not only when it finally lands on main.
+    branches: [main, "integration/**"]
+  # Convention: multi-PR work stacks on a long-lived `integration/<name>` branch and
+  # merges to main once. Gating PRs into integration/** means every stacked PR is
+  # CI-verified the whole way in, not only when the series finally lands on main.
   pull_request:
-    branches: [main, "refactor/**"]
+    branches: [main, "integration/**"]
 
 # One in-flight run per ref; newer pushes cancel older ones.
 concurrency:
