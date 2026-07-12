@@ -424,11 +424,12 @@ func (s *Store) WorkerLock() (unlock func(), ok bool) {
 	return s.lockFile(".worker.lock")
 }
 
-// OpenCodeSyncLock serializes imports from OpenCode's session database. The
-// importer is watermark-based, but concurrent importers can otherwise read the
-// same count and append the same text rows twice.
-func (s *Store) OpenCodeSyncLock() (unlock func(), ok bool) {
-	return s.lockFile(".opencode-sync.lock")
+// ImportLock serializes a platform's import from its external source. The importer
+// is watermark-based, but concurrent importers can otherwise read the same count
+// and append the same text rows twice. name identifies the source (the platform
+// owns it, so the store stays platform-agnostic) and keys a per-source lock file.
+func (s *Store) ImportLock(name string) (unlock func(), ok bool) {
+	return s.lockFile("." + name + "-sync.lock")
 }
 
 func (s *Store) lockFile(name string) (unlock func(), ok bool) {

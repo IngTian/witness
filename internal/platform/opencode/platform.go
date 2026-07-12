@@ -60,7 +60,9 @@ func (Platform) Capture(st *store.Store, data []byte, now time.Time) (bool, erro
 // shared platform.ImportStats. A held lock means another import is in flight —
 // return zero stats, not an error.
 func (Platform) Import(ctx context.Context, st *store.Store) (platform.ImportStats, error) {
-	unlock, ok := st.OpenCodeSyncLock()
+	// Same lock file as before (".opencode-sync.lock"); the store no longer names
+	// the platform — this package owns the "opencode" key.
+	unlock, ok := st.ImportLock("opencode")
 	if !ok {
 		return platform.ImportStats{Agent: "opencode"}, nil
 	}
