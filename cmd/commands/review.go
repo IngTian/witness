@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -40,7 +41,7 @@ func cmdReview() error {
 	// the OpenCode self-traffic cleanup sweep — which this path previously OMITTED
 	// (it deferred only the server's Close), leaking witness-distill sessions back
 	// into the pending queue. Routing through the Runner makes that impossible.
-	runner, err := distill.NewRunner(cfg)
+	runner, err := platform.RunnerFor(st, cfg)
 	if err != nil {
 		return err
 	}

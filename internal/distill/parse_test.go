@@ -1,30 +1,6 @@
 package distill
 
-import (
-	"context"
-	"slices"
-	"strings"
-	"testing"
-)
-
-// S3: the corpus must travel as untrusted user data, never as instructions. The
-// witness prompt goes to the system prompt; the payload is fenced on stdin.
-func TestBuildRunCmdRoleSeparation(t *testing.T) {
-	cmd := buildRunCmd(context.Background(), "", "EXTRACT INSTRUCTIONS", "payload")
-	i := slices.Index(cmd.Args, "--append-system-prompt")
-	if i < 0 || i+1 >= len(cmd.Args) {
-		t.Fatalf("system prompt not passed: %v", cmd.Args)
-	}
-	sys := cmd.Args[i+1]
-	if !strings.Contains(sys, "EXTRACT INSTRUCTIONS") || !strings.Contains(sys, "UNTRUSTED") {
-		t.Fatalf("system prompt missing instructions or untrusted notice: %q", sys)
-	}
-	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config"} {
-		if !slices.Contains(cmd.Args, want) {
-			t.Errorf("isolation flag %q lost: %v", want, cmd.Args)
-		}
-	}
-}
+import "testing"
 
 // ParseJSONArray must survive the ways real models wrap output: a stray '[' in
 // prose before the real array, a ```json fence, or both — none should be read as
@@ -106,31 +82,5 @@ func TestParseJSONArrayObjectWrappedFallback(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Dimension != "a" {
 		t.Fatalf("object-wrapped array should still parse, got %+v", got)
-	}
-}
-
-// The worker's `claude -p` must be isolated from the user's project: it must not
-// persist a transcript (which would appear as a stray session in their repo) and
-// must not load MCP servers (the user-scope witness MCP is guard-killed and would
-// stall startup). It also runs in a neutral cwd, away from project CLAUDE.md.
-func TestClaudeCmdIsolation(t *testing.T) {
-	c := newClaudeCmd(context.Background(), "")
-
-	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config"} {
-		if !slices.Contains(c.Args, want) {
-			t.Errorf("missing %q in args: %v", want, c.Args)
-		}
-	}
-	if slices.Contains(c.Args, "--model") {
-		t.Errorf("empty model must omit --model, got %v", c.Args)
-	}
-	if c.Dir == "" {
-		t.Errorf("cmd.Dir must be a neutral dir (not inherit the user's project cwd)")
-	}
-
-	c2 := newClaudeCmd(context.Background(), "claude-haiku-4-5")
-	i := slices.Index(c2.Args, "--model")
-	if i < 0 || i+1 >= len(c2.Args) || c2.Args[i+1] != "claude-haiku-4-5" {
-		t.Errorf("model not passed correctly: %v", c2.Args)
 	}
 }

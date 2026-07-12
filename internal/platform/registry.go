@@ -2,11 +2,19 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/store"
 )
+
+// unknownRunnerError is the fail-closed error when a runner name doesn't resolve to
+// a registered RunnerProvider (a typo'd cfg.Runner / WITNESS_RUNNER, or a name with
+// no runner capability). Surfacing it beats silently falling back to a default.
+func unknownRunnerError(name string) error {
+	return fmt.Errorf("unknown distillation runner %q (want claude or opencode)", name)
+}
 
 // Platform is one agent runtime (Claude Code, OpenCode, …) as a first-class type,
 // replacing the bare "claude"/"opencode" strings that were re-parsed across the

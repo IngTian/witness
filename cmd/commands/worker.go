@@ -11,6 +11,7 @@ import (
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -157,7 +158,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	// Resolve the global distillation runner once and, if there's work, Open it for
 	// the whole drain (OpenCode: one `opencode serve` + a pre-cleanup sweep; Claude:
 	// no-op). Close runs the paired post-cleanup — so nothing leaks distill sessions.
-	runner, err := distill.NewRunner(cfg)
+	runner, err := platform.RunnerFor(st, cfg)
 	if err != nil {
 		slog.Error("resolve runner", "err", err)
 		return true, err

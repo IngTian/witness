@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/IngTian/witness/internal/vector"
 )
@@ -45,10 +46,11 @@ type Embedder interface {
 // runnerMine), tests supply a fake directly.
 type MineFunc func(ctx context.Context, model, prompt, input string) (string, error)
 
-// RunnerMine adapts a Runner into the MineFunc seam. This keeps the injectable
-// MineFunc for tests while routing production through the single Runner resolved
-// once per drain (no per-call runner-name switch).
-func RunnerMine(r Runner) MineFunc {
+// RunnerMine adapts a platform.Runner into the MineFunc seam. This keeps the
+// injectable MineFunc for tests while routing production through the single Runner
+// (platform.RunnerFor) resolved once per drain. distill knows only platform.Runner
+// — never which runtime it is.
+func RunnerMine(r platform.Runner) MineFunc {
 	return func(ctx context.Context, model, prompt, input string) (string, error) {
 		return r.Run(ctx, model, prompt, input)
 	}

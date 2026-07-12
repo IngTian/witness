@@ -1,4 +1,4 @@
-package distill
+package opencode
 
 import (
 	"bytes"
@@ -341,7 +341,7 @@ func loadOpenCodeModels(ctx context.Context, provider string) (openCodeModelList
 	}
 	cmd := exec.CommandContext(ctx, "opencode", "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
-	cmd.Env = append(envWithoutKey(), "WITNESS_WORKER=1")
+	cmd.Env = append(os.Environ(), "WITNESS_WORKER=1")
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -396,7 +396,7 @@ func modelHint(models []string) string {
 func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "opencode", "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
 	cmd.Dir = os.TempDir()
-	cmd.Env = append(envWithoutKey(),
+	cmd.Env = append(os.Environ(),
 		"WITNESS_WORKER=1",
 		"OPENCODE_DISABLE_CLAUDE_CODE=1",
 		"OPENCODE_SERVER_USERNAME=opencode",

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -45,8 +45,15 @@ func cmdDoctor(asJSON bool) error {
 	// failure and surface it as the exit code at the very end.
 	var deferredErr error
 	opencodeModels := "skipped"
-	if strings.EqualFold(cfg.Runner, "opencode") {
-		if err := distill.ValidateOpenCodeModels(context.Background(), cfg.TriageModel, cfg.DistillModel); err != nil {
+	// Validate the configured models through the resolved runner (platform-agnostic:
+	// Claude's ValidateModels is a no-op, OpenCode checks its model list). The field
+	// keeps its historical name/skip semantics — only the OpenCode runner reports a
+	// non-empty status, matching the prior EqualFold(cfg.Runner,"opencode") gate.
+	if runner, rerr := platform.RunnerFor(st, cfg); rerr != nil {
+		opencodeModels = "INVALID: " + rerr.Error()
+		deferredErr = rerr
+	} else if runner.InvocationHint() == "opencode serve" {
+		if err := runner.ValidateModels(context.Background(), cfg.TriageModel, cfg.DistillModel); err != nil {
 			opencodeModels = "INVALID: " + err.Error()
 			deferredErr = err
 		} else {
