@@ -121,7 +121,7 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 	var mined []store.Observation
 	mineFailed := false
 	if len(newRecs) > 0 {
-		for _, transcript := range distillInputs(session, newRecs) {
+		for _, transcript := range distillInputs(w.Store, session, newRecs) {
 			for _, ln := range w.Lenses {
 				obs, err := w.mine(ctx, ln, session, transcript)
 				if err != nil {
@@ -258,17 +258,6 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 		})
 	}
 	return obs, nil
-}
-
-func renderTranscript(raw []store.RawRecord) string {
-	var b strings.Builder
-	for _, r := range raw {
-		b.WriteString(strings.ToUpper(r.Role))
-		b.WriteString(": ")
-		b.WriteString(r.Text)
-		b.WriteString("\n\n")
-	}
-	return b.String()
 }
 
 func obsID(session, lens, text string) string {

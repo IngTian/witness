@@ -82,6 +82,73 @@ func TestMigrateRenamesLegacyL0(t *testing.T) {
 	}
 }
 
+// v3 -> v4 adds session_meta.platform. A pre-v4 DB has session_meta WITHOUT the
+// column; migrate() must ADD it and BACKFILL from the L0 session-id prefix
+// ("opencode:" => opencode, else claude), non-destructively and idempotently.
+func TestMigrateAddsAndBackfillsSessionPlatform(t *testing.T) {
+	s := tempStore(t) // fully migrated (has the column)
+	// Simulate a v3 DB: drop the column by rebuilding session_meta without it, seed
+	// rows, and set the version back to 3.
+	for _, stmt := range []string{
+		`DROP TABLE session_meta`,
+		`CREATE TABLE session_meta (session TEXT PRIMARY KEY, cwd TEXT NOT NULL DEFAULT '', started TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO session_meta(session) VALUES ('opencode:abc')`,
+		`INSERT INTO session_meta(session) VALUES ('plain-cc-session')`,
+		`PRAGMA user_version=3`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v3 (%q): %v", stmt, err)
+		}
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v3->v4 migrate: %v", err)
+	}
+
+	if got := s.SessionPlatform("opencode:abc"); got != "opencode" {
+		t.Fatalf("opencode-prefixed row: platform=%q, want opencode", got)
+	}
+	if got := s.SessionPlatform("plain-cc-session"); got != "claude" {
+		t.Fatalf("unprefixed row: platform=%q, want claude", got)
+	}
+	var v int
+	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// Idempotent: re-running migrate over the applied v4 schema must not error or
+	// reclassify. Force the version back so migrate() actually re-executes the step.
+	if _, err := s.db.Exec("PRAGMA user_version=3"); err != nil {
+		t.Fatal(err)
+	}
+	// A value a newer binary wrote must NOT be clobbered by the backfill.
+	s.SetSessionPlatform("opencode:abc", "claude") // deliberately "wrong" to prove the backfill won't overwrite a set value
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("re-run migrate: %v", err)
+	}
+	if got := s.SessionPlatform("opencode:abc"); got != "claude" {
+		t.Fatalf("backfill must not overwrite an already-set value: got %q", got)
+	}
+}
+
+// SetSessionPlatform upserts even when no session_meta row exists yet (CC sessions
+// have none until now), and SessionPlatform reads it back.
+func TestSetSessionPlatformUpsert(t *testing.T) {
+	s := tempStore(t)
+	if got := s.SessionPlatform("nope"); got != "" {
+		t.Fatalf("absent session: want empty, got %q", got)
+	}
+	s.SetSessionPlatform("s1", "opencode") // no prior row -> INSERT
+	if got := s.SessionPlatform("s1"); got != "opencode" {
+		t.Fatalf("insert path: got %q", got)
+	}
+	s.SetSessionPlatform("s1", "claude") // existing row -> UPDATE column only
+	if got := s.SessionPlatform("s1"); got != "claude" {
+		t.Fatalf("update path: got %q", got)
+	}
+}
+
 // Two record_observation calls with identical content (same obs_id) in a session
 // must collapse to ONE staged row, so a retrying agent can't burn the per-session
 // quota (or double-write the same active observation).

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/IngTian/witness/internal/lens"
+	_ "github.com/IngTian/witness/internal/platform/claude" // register the default platform for ForSession
+	opencodeplatform "github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -71,13 +73,7 @@ func TestOpenCodeSessionsAreChunked(t *testing.T) {
 	s := newStore(t)
 	m := &fakeMiner{}
 	w := testWorker(s, m)
-	oldMax := openCodeChunkMaxChars
-	oldOverlap := openCodeChunkOverlapRecords
-	openCodeChunkMaxChars = 18
-	defer func() {
-		openCodeChunkMaxChars = oldMax
-		_ = oldOverlap
-	}()
+	defer opencodeplatform.SetChunkMaxCharsForTest(18)()
 
 	capture(t, s, "opencode:s", "user", "alpha alpha alpha")
 	capture(t, s, "opencode:s", "assistant", "beta beta beta")
@@ -94,9 +90,7 @@ func TestNonOpenCodeSessionsUseSingleLegacyTranscript(t *testing.T) {
 	s := newStore(t)
 	m := &fakeMiner{}
 	w := testWorker(s, m)
-	oldMax := openCodeChunkMaxChars
-	openCodeChunkMaxChars = 18
-	defer func() { openCodeChunkMaxChars = oldMax }()
+	defer opencodeplatform.SetChunkMaxCharsForTest(18)()
 
 	capture(t, s, "claude:s", "user", "alpha alpha alpha")
 	capture(t, s, "claude:s", "assistant", "beta beta beta")
