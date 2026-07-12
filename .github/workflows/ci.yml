@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # Run on PRs into main AND into long-lived integration branches (e.g. the #21
+  # platform-agnostic refactor stack), so a multi-PR series is CI-gated the whole
+  # way in — not only when it finally lands on main.
   pull_request:
-    branches: [main]
+    branches: [main, "refactor/**"]
 
 # One in-flight run per ref; newer pushes cancel older ones.
 concurrency:
