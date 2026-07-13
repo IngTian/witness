@@ -97,9 +97,12 @@ type Embedder interface {
 	Embed(text string) ([]float32, error)
 }
 
-// Serve runs the MCP stdio server until the context is cancelled.
-func Serve(ctx context.Context, st *store.Store, emb Embedder) error {
-	return newServer(st, emb).Run(ctx, &mcpsdk.StdioTransport{})
+// Serve runs the MCP stdio server until the context is cancelled. version is the
+// witness build version to report in the MCP initialize handshake; it is passed
+// in from cmd (which owns the ldflags-injected version) so this leaf package does
+// not import cmd. Empty falls back to "dev".
+func Serve(ctx context.Context, st *store.Store, emb Embedder, version string) error {
+	return newServer(st, emb, version).Run(ctx, &mcpsdk.StdioTransport{})
 }
 
 // newServer builds the MCP server with all tools registered. Split from Serve so
@@ -112,10 +115,13 @@ func Serve(ctx context.Context, st *store.Store, emb Embedder) error {
 // text Content — so a typed-but-empty return made every tool look like it
 // returned `{}` even though the real payload was in Content. Returning `any`/nil
 // suppresses the output schema so clients use Content. (See TestNoStructuredOutput.)
-func newServer(st *store.Store, emb Embedder) *mcpsdk.Server {
+func newServer(st *store.Store, emb Embedder, version string) *mcpsdk.Server {
+	if strings.TrimSpace(version) == "" {
+		version = "dev"
+	}
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "witness",
-		Version: "0.1.0",
+		Version: version,
 	}, nil)
 
 	// search_observations: read-time recall, tag-filtered, default lens.

@@ -1,0 +1,41 @@
+# witness
+
+> A local memory & self-improvement engine for Claude Code and OpenCode. It captures your
+> coding sessions and distills how your patterns, habits, and knowledge **evolve over time** —
+> a person-centric growth archive with provenance. Not project memory (what your code did) —
+> a record of who you are becoming. One pure-Go binary, served over an MCP server + plain files.
+> File & PDF ingestion is on the roadmap, so the same distillation engine can track how
+> knowledge evolves across your notes and documents too.
+
+## What it does (the needs it serves)
+
+- **Remember how I grow as a developer** across all my AI coding sessions (Claude Code, OpenCode).
+- **Second brain / AI memory** for my thinking, workstyle, and habits — queryable by my agent.
+- **Reflect / journal / retrospective**: a re-readable record of how I thought and changed.
+- **Track how my knowledge and patterns evolve over time**, with provenance (why each change was recorded).
+- **Distill knowledge** from conversations today — and (roadmap) from notes, Markdown, and PDFs.
+
+## How it works
+
+- Captures raw turns (L0) via Claude Code hooks / an OpenCode plugin, or reconciles from OpenCode's store.
+- Distills L0 → observations (L1) → bi-temporal facets (L2) → a narrative profile (L4) using configurable, global, shareable **lenses**.
+- Bi-temporal facet history (valid_from/valid_to + provenance) is what captures *evolution*, not just a snapshot.
+- A background worker mines sessions in parallel; nothing leaves your machine (local embeddings, local model).
+
+## Capabilities (MCP tools)
+
+- `search_observations` — semantic search over the growth archive.
+- `get_facets` — structured, synthesized attributes for a lens.
+- `get_profile` — the narrative prose profile for a lens.
+- `record_observation` — record a decision-aware observation in-session.
+- `delete_observation` — remove one observation by id.
+
+## Install
+
+- Claude Code / OpenCode: see the README "Install" section (`witness install claude` or `witness install opencode`).
+- npm (OpenCode): `@witness-ai/opencode`.
+
+## Docs
+
+- README: https://github.com/IngTian/witness#readme
+- Agent/contributor guide: AGENTS.md in the repo.

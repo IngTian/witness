@@ -8,8 +8,8 @@
     {
       "name": "witness",
       "source": "./",
-      "version": "0.1.0",
-      "description": "Quietly tracks how you grow and change as you work — a person-centric growth archive with an MCP read API and pluggable per-repo lenses."
+      "version": "0.2.2",
+      "description": "Local memory & self-improvement engine: quietly captures your coding sessions and distills how your habits and knowledge evolve over time — a person-centric growth archive (file/PDF support coming), with provenance, served over an MCP read API + plain files. Global shareable lenses."
     }
   ]
 }

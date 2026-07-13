@@ -23,5 +23,5 @@ func cmdMCP() error {
 	if err != nil {
 		return err
 	}
-	return mcp.Serve(context.Background(), st, emb)
+	return mcp.Serve(context.Background(), st, emb, version)
 }
