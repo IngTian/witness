@@ -174,3 +174,86 @@ func TestDrainParallelAttemptsEachOnce(t *testing.T) {
 		t.Fatalf("expected %d observations (one per session), got %d", n, len(obs))
 	}
 }
+
+// PR2 re-check loop: the worker keeps draining while `capture` lands new sessions
+// mid-run, WITHOUT any external wakeup. Simulated by the worker calling Drain in a
+// loop with a SHARED Attempted set (as runWorkerInRange does): a new session
+// appears after the first Drain empties the queue, and the next Drain picks it up.
+func TestDrainRecheckLoopPicksUpMidRunArrivals(t *testing.T) {
+	s := newStore(t)
+	w := drainWorker(s, (&safeMiner{}).run)
+	capture(t, s, "first", "user", "turn-first")
+
+	released := false // becomes true after the first Drain empties the queue
+	pending := func() []string {
+		p, _ := s.PendingSessions()
+		if released && s.RawCount("second") == 0 {
+			// a new session lands the instant the first drain finished
+			capture(t, s, "second", "user", "turn-second")
+			p, _ = s.PendingSessions()
+		}
+		return p
+	}
+
+	attempted := map[string]bool{}
+	passes, total := 0, 0
+	for {
+		n := w.Drain(context.Background(), DrainOpts{Conc: 1, Pending: pending, Attempted: attempted})
+		passes++
+		total += n
+		released = true
+		if n == 0 {
+			break
+		}
+	}
+	// Both sessions must be distilled, across more than one pass (the arrival was
+	// caught by the loop, not the first drain).
+	if raw, _ := s.ReadObservations(""); len(raw) != 2 {
+		t.Fatalf("expected 2 observations (first + mid-run arrival), got %d", len(raw))
+	}
+	if s.DistilledCount("second") == 0 {
+		t.Fatal("mid-run arrival 'second' was never distilled by the re-check loop")
+	}
+	if passes < 2 {
+		t.Fatalf("expected the arrival to require a second pass, ran %d pass(es)", passes)
+	}
+}
+
+// PR2 livelock guard: a session that stays pending WITHOUT backing off (a commit
+// path that never advances) must be attempted exactly once across the shared-set
+// re-check loop, so the loop terminates instead of re-mining forever. We simulate
+// "stuck" with a miner that always errors (MineFailed → backoff), plus the shared
+// Attempted set that the outer loop relies on.
+func TestDrainRecheckLoopTerminatesOnStuckSession(t *testing.T) {
+	s := newStore(t)
+	// Miner always fails → the session backs off and drops out of PendingSessions,
+	// but we also assert the shared Attempted set prevents re-attempt within the run.
+	m := &safeMiner{}
+	w := drainWorker(s, func(ctx context.Context, a, b, c string) (string, error) {
+		m.mu.Lock()
+		m.calls++
+		m.mu.Unlock()
+		return "", context.DeadlineExceeded // transport-style failure
+	})
+	capture(t, s, "stuck", "user", "turn")
+
+	// A pending source that would ALWAYS return the stuck session (ignores backoff),
+	// so only the shared Attempted set can stop the loop.
+	pending := func() []string { return []string{"stuck"} }
+
+	attempted := map[string]bool{}
+	passes := 0
+	for passes < 100 { // hard cap so a bug fails loudly instead of hanging
+		n := w.Drain(context.Background(), DrainOpts{Conc: 1, Pending: pending, Attempted: attempted})
+		passes++
+		if n == 0 {
+			break
+		}
+	}
+	if passes >= 100 {
+		t.Fatal("re-check loop did not terminate on a perpetually-pending session")
+	}
+	if m.calls != 1 {
+		t.Fatalf("stuck session mined %d times, want exactly 1 (shared Attempted set)", m.calls)
+	}
+}

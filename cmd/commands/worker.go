@@ -159,14 +159,22 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	}
 	defer runner.Close()
 	runFn := distill.RunnerMine(runner)
-	sessionBudget := workerSessionBudget(cfg, auto)
 
 	// Drain pending sessions. The embedder is heavy (~448MB) and loaded once per
 	// short-lived worker process ONLY when there is mining to do; it is shared
 	// across the parallel miners (its own mutex serializes concurrent Embed calls,
 	// which is cheap next to the LLM latency). Mining runs up to `conc` sessions at
 	// once (MAP); commits are serial (REDUCE) — see distill.Worker.Drain.
-	var processedSessions int
+	//
+	// RE-CHECK LOOP (no external wakeup cascade): `capture` writes L0 without taking
+	// WorkerLock, so new work can land WHILE this worker drains — and any trigger it
+	// fires no-ops because we hold the lock. So after each Drain we re-check the
+	// queue ourselves and keep working while it grows, instead of relying on a
+	// detached per-second wakeup to re-drive us (the old 1 Hz CPU-peg cascade). A
+	// SHARED `attempted` set across iterations makes this safe: a session that stays
+	// pending without backing off (a commit/read error, not a mining timeout) is
+	// tried once total, so a persistent failure can't spin the loop or re-mine
+	// forever. We only loop again while a pass makes progress (commits > 0).
 	stopRequested := func() bool { return st.MetaString("worker_stop_requested") == "1" }
 	if hasPending && !stopRequested() {
 		emb, err := embed.New()
@@ -175,27 +183,28 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		} else {
 			conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
 			w := &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn}
-			processedSessions = w.Drain(ctx, distill.DrainOpts{
-				Conc:    conc,
-				Pending: pending,
-				Max:     sessionBudget,
-				Stop:    stopRequested,
-				OnCommit: func(session string) {
-					_ = st.SetMetaString("worker_current", session)
-					_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
-				},
-			})
+			attempted := map[string]bool{}
+			for !stopRequested() {
+				n := w.Drain(ctx, distill.DrainOpts{
+					Conc:      conc,
+					Pending:   pending,
+					Stop:      stopRequested,
+					Attempted: attempted,
+					OnCommit: func(session string) {
+						_ = st.SetMetaString("worker_current", session)
+						_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+					},
+				})
+				// No progress this pass → either the queue is empty or every remaining
+				// session was already attempted this run (stuck/backed-off). Stop; a
+				// backed-off session is re-driven later by scheduleRetryWakeup, and any
+				// row that landed in the tail window is caught by the session-start
+				// backlog sweep on the next launch.
+				if n == 0 {
+					break
+				}
+			}
 		}
-	}
-	remainingPending := len(pending())
-	if workerBudgetReached(auto, sessionBudget, processedSessions, remainingPending) {
-		next, _ := autoDistillNextAt(st, cfg.AutoDistillIntervalMinutes, time.Now())
-		if next.IsZero() {
-			next = time.Now().Add(time.Second)
-		}
-		scheduleWorkerWakeup(st, next, "auto")
-		slog.Info("distill: runner background budget reached; leaving remaining work queued", "runner", cfg.Runner, "processed", processedSessions)
-		return true, nil
 	}
 
 	// Review folded into the same single-flight pass (serialized under the lock,
@@ -214,17 +223,6 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		}
 	}
 	return true, nil
-}
-
-func workerSessionBudget(cfg store.Config, auto bool) int {
-	if !auto {
-		return 0
-	}
-	return cfg.AutoDistillSessionBudget
-}
-
-func workerBudgetReached(auto bool, sessionBudget, processedSessions, remainingPending int) bool {
-	return auto && sessionBudget > 0 && processedSessions >= sessionBudget && remainingPending > 0
 }
 
 // regenerateProfile refreshes the L4 narrative summaries from the current facets.

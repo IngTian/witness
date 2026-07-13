@@ -36,8 +36,7 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		"review_every",
 		"review_poignancy",
 		"auto_distill",
-		"auto_distill_interval_minutes",
-		"auto_distill_session_budget",
+		"mine_concurrency",
 		"lens =",
 	} {
 		if !strings.Contains(body, want) {
@@ -45,7 +44,7 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		}
 	}
 	c := st.LoadConfig()
-	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 || !c.AutoDistill || c.AutoDistillIntervalMinutes != 10 || c.AutoDistillSessionBudget != 0 {
+	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 || !c.AutoDistill || c.MineConcurrency != DefaultMineConcurrency {
 		t.Errorf("template defaults not loadable: %+v", c)
 	}
 }
@@ -61,6 +60,9 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Includes the retired auto_distill_interval_minutes / auto_distill_session_budget
+	// lines (pre-#22): Open must still preserve them byte-for-byte, and LoadConfig
+	// must ignore them gracefully (unknown keys) rather than error.
 	original := []byte("# my custom config from an older CLI\n" +
 		"runner = \"opencode\"\n" +
 		"triage_model = \"my-fine-model\"\n" +
@@ -87,7 +89,7 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 		t.Errorf("Open() modified an existing config (forward-compatibility broken):\n got %q\nwant %q", got, original)
 	}
 	c := st.LoadConfig()
-	if c.Runner != "opencode" || c.TriageModel != "my-fine-model" || c.ReviewEvery != 99 || c.AutoDistill || c.AutoDistillIntervalMinutes != 120 || c.AutoDistillSessionBudget != 2 || !slices.Contains(c.EnabledLenses, "math") {
+	if c.Runner != "opencode" || c.TriageModel != "my-fine-model" || c.ReviewEvery != 99 || c.AutoDistill || !slices.Contains(c.EnabledLenses, "math") {
 		t.Errorf("existing values not loaded intact: %+v", c)
 	}
 }

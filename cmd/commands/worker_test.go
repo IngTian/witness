@@ -31,20 +31,6 @@ func TestRunWorkerReportsSkippedWhenLockHeld(t *testing.T) {
 	}
 }
 
-func TestWorkerSessionBudgetIsUnboundedWhenManual(t *testing.T) {
-	for _, runner := range []string{"opencode", "claude"} {
-		if got := workerSessionBudget(store.Config{Runner: runner, AutoDistillSessionBudget: 1}, false); got != 0 {
-			t.Fatalf("%s budget = %d, want unbounded", runner, got)
-		}
-	}
-}
-
-func TestWorkerSessionBudgetUsesAutoLimit(t *testing.T) {
-	if got := workerSessionBudget(store.Config{AutoDistillSessionBudget: 1}, true); got != 1 {
-		t.Fatalf("auto budget = %d, want 1", got)
-	}
-}
-
 func TestParseSessionTimeRangeAcceptsRelativeAgeAndDate(t *testing.T) {
 	now := time.Date(2026, 7, 12, 15, 0, 0, 0, time.UTC)
 	r, err := parseSessionTimeRange("7d", "2026-07-12", now)
@@ -67,34 +53,46 @@ func TestParseSessionTimeRangeRejectsReversedRange(t *testing.T) {
 	}
 }
 
-func TestWorkerBudgetReachedOnlyWhenWorkRemains(t *testing.T) {
-	if !workerBudgetReached(true, 1, 1, 2) {
-		t.Fatal("budget with remaining pending work should pause and reschedule")
-	}
-	if workerBudgetReached(true, 1, 1, 0) {
-		t.Fatal("budget should not skip review when the queue is empty")
-	}
-}
-
-func TestAutoWorkerStartActionSchedulesCooldownWakeup(t *testing.T) {
+// autoWorkerShouldStart is the (debounce-free) gate: start iff auto is on, there is
+// work (pending or a due review), no worker is already running, and — for mining —
+// the model is ready. No cooldown/interval: WorkerLock single-flights and the
+// running worker self-drains new arrivals (issue #22 PR2).
+func TestAutoWorkerShouldStartWhenWorkAndModelReady(t *testing.T) {
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
-	_ = st.SetMetaString(workerAutoStartedAtKey, now.Add(-2*time.Minute).Format(time.RFC3339))
-	action := autoWorkerStartAction(st, store.Config{AutoDistill: true, AutoDistillIntervalMinutes: 10}, []string{"sess"}, true, now)
-	if action.start {
-		t.Fatal("cooldown action should schedule wakeup, not start immediately")
-	}
-	if got, want := action.wakeAt, now.Add(8*time.Minute); !got.Equal(want) {
-		t.Fatalf("wakeAt = %s, want %s", got, want)
+	if !autoWorkerShouldStart(st, store.Config{AutoDistill: true}, []string{"sess"}, true) {
+		t.Fatal("should start: auto on, pending work, model ready, no worker running")
 	}
 }
 
-func TestAutoWorkerStartActionAllowsReviewWithoutModel(t *testing.T) {
+func TestAutoWorkerShouldNotStartWhenDisabledOrIdleOrNoModel(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// ReviewEvery high so an empty store doesn't spuriously report a review due
+	// (SessionsSinceReview 0 >= 0 would be true), isolating the intended conditions.
+	noReview := store.Config{AutoDistill: true, ReviewEvery: 99}
+	if autoWorkerShouldStart(st, store.Config{AutoDistill: false, ReviewEvery: 99}, []string{"sess"}, true) {
+		t.Fatal("must not start when auto_distill is off")
+	}
+	if autoWorkerShouldStart(st, noReview, nil, true) {
+		t.Fatal("must not start with no pending work and no review due")
+	}
+	if autoWorkerShouldStart(st, noReview, []string{"sess"}, false) {
+		t.Fatal("must not start mining when the embedding model is not ready")
+	}
+}
+
+// Review-only work (poignancy threshold crossed) should start even without the
+// model, because reviewing needs no embedder.
+func TestAutoWorkerShouldStartForReviewWithoutModel(t *testing.T) {
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
 	if err != nil {
@@ -104,12 +102,8 @@ func TestAutoWorkerStartActionAllowsReviewWithoutModel(t *testing.T) {
 	if err := st.AppendObservations([]store.Observation{{ID: "o1", Lens: store.LensDefault, Poignancy: 9}}); err != nil {
 		t.Fatal(err)
 	}
-	action := autoWorkerStartAction(st, store.Config{AutoDistill: true, ReviewEvery: 99, ReviewPoignancy: 5}, nil, false, time.Now())
-	if !action.start {
-		t.Fatal("review-only auto worker should start even when model is not ready")
-	}
-	if !action.wakeAt.IsZero() {
-		t.Fatalf("unexpected wakeAt: %s", action.wakeAt)
+	if !autoWorkerShouldStart(st, store.Config{AutoDistill: true, ReviewEvery: 99, ReviewPoignancy: 5}, nil, false) {
+		t.Fatal("review-only auto worker should start even when the model is not ready")
 	}
 }
 

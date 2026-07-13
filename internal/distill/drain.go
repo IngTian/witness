@@ -31,12 +31,20 @@ func EffectiveConcurrency(want int, concurrentRunSafe bool) int {
 // request (checked before dispatching each new session); max caps the number of
 // sessions committed (<=0 = unbounded); onCommit is called just before each
 // session's results are committed (e.g. to stamp worker_current).
+//
+// Attempted, if non-nil, is the attempt-once set to use instead of a fresh internal
+// one. The caller passes the SAME map across several Drain calls in one worker run
+// (the re-check loop that keeps working when capture lands new L0 mid-drain): a
+// session attempted in an earlier Drain is never re-attempted, so a stuck session
+// (commit/read error that never backs off) can't spin the outer loop forever. When
+// nil, Drain makes its own — a single Drain is still attempt-once by itself.
 type DrainOpts struct {
-	Conc     int
-	Pending  func() []string
-	Stop     func() bool
-	Max      int
-	OnCommit func(session string)
+	Conc      int
+	Pending   func() []string
+	Stop      func() bool
+	Max       int
+	OnCommit  func(session string)
+	Attempted map[string]bool
 }
 
 // Drain is the engine's session-drain loop. It preserves drainQueueLimit's contract
@@ -65,7 +73,10 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 	stop := func() bool { return opts.Stop != nil && opts.Stop() }
 	reached := func(claimed int) bool { return opts.Max > 0 && claimed >= opts.Max }
 
-	attempted := map[string]bool{}
+	attempted := opts.Attempted
+	if attempted == nil {
+		attempted = map[string]bool{}
+	}
 	processed := 0
 
 	for {

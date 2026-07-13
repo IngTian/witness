@@ -58,13 +58,15 @@ func cmdWorkerWakeup(args []string) error {
 		return nil
 	}
 	_ = clearScheduledWakeup(st, mode)
-	ran, err := runWorker(mode == "auto")
-	if err == nil && !ran {
-		pending, _ := st.PendingSessions()
-		if len(pending) > 0 || st.ReviewDue(cfg) {
-			scheduleWorkerWakeup(st, time.Now().Add(time.Second), mode)
-		}
-	}
+	// If runWorker reports !ran, another worker already holds the lock — and that
+	// holder drains ALL pending work itself (its post-drain re-check loop keeps
+	// going while `capture` lands new sessions mid-run), so there is nothing to
+	// re-drive. We deliberately do NOT reschedule here: the old "lock held → wake
+	// again in 1s" reschedule was a busy-poll that spawned ~1 detached process per
+	// second for the running worker's whole life (the CPU peg). A genuinely deferred
+	// need — a backed-off session due later, with no worker running — is covered by
+	// scheduleRetryWakeup, which schedules that single real future wakeup on exit.
+	_, err = runWorker(mode == "auto")
 	return err
 }
 

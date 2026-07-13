@@ -13,15 +13,13 @@ import (
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
 // keys are ignored; missing file = all defaults.
 type Config struct {
-	Runner                     string // "claude" (default) or "opencode" for headless distillation calls
-	TriageModel                string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
-	DistillModel               string // model for the reviewer ("" = claude -p default)
-	ReviewEvery                int    // run the reviewer after this many distilled sessions since last review
-	ReviewPoignancy            int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
-	AutoDistill                bool   // whether hooks/plugins may start the worker automatically
-	AutoDistillIntervalMinutes int    // minimum wall-clock gap between automatic worker starts
-	AutoDistillSessionBudget   int    // max sessions per automatic worker run (0 = unbounded)
-	MineConcurrency            int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and to 1 when the runner is not ConcurrentRunSafe (issue #22). <=0 means DefaultMineConcurrency.
+	Runner          string // "claude" (default) or "opencode" for headless distillation calls
+	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
+	DistillModel    string // model for the reviewer ("" = claude -p default)
+	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
+	ReviewPoignancy int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
+	AutoDistill     bool   // whether hooks/plugins may start the worker automatically
+	MineConcurrency int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and to 1 when the runner is not ConcurrentRunSafe (issue #22). <=0 means DefaultMineConcurrency.
 	// EnabledLenses is the set of registered lens names that run on EVERY session
 	// (alongside the always-on "default" lens). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
@@ -42,13 +40,12 @@ func DefaultConfig() Config {
 		DistillModel:    "",
 		ReviewEvery:     5,
 		ReviewPoignancy: 30, // a few high-salience sessions trigger review before the count cap
+		// Automatic triggers stay laptop-friendly WITHOUT a cooldown: capture is
+		// immediate, the machine-wide WorkerLock single-flights the worker (extra
+		// triggers no-op in ms), and the worker drains everything then exits so the
+		// embed model never stays resident.
 		AutoDistill:     true,
-		// Automatic triggers should be laptop-friendly without starving distillation:
-		// capture stays immediate, model work is batched by a short cooldown, and the
-		// worker exits after draining the queue so the embed model never stays resident.
-		AutoDistillIntervalMinutes: 10,
-		AutoDistillSessionBudget:   0,
-		MineConcurrency:            DefaultMineConcurrency,
+		MineConcurrency: DefaultMineConcurrency,
 	}
 }
 
@@ -91,14 +88,11 @@ func (s *Store) LoadConfig() Config {
 			if b, ok := parseBool(v); ok {
 				c.AutoDistill = b
 			}
-		case "auto_distill_interval_minutes":
-			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-				c.AutoDistillIntervalMinutes = n
-			}
-		case "auto_distill_session_budget":
-			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-				c.AutoDistillSessionBudget = n
-			}
+		// auto_distill_interval_minutes / auto_distill_session_budget were the
+		// pre-#22 throughput throttles (a start cooldown + a per-run session cap).
+		// They are gone: WorkerLock single-flights the worker and it self-drains via
+		// its re-check loop, so throttling WHEN it starts bought nothing but the 1 Hz
+		// wakeup cascade. Old config lines are harmlessly ignored (unknown keys are).
 		case "mine_concurrency":
 			// <=0 restores the default rather than disabling mining (0 goroutines
 			// would drain nothing); the engine still clamps the effective value.
@@ -257,13 +251,11 @@ review_every = 5
 # ...or once accumulated observation poignancy crosses this threshold (0 = off).
 review_poignancy = 30
 
-# Automatic distillation is laptop-friendly without keeping the embed model resident:
-# hooks capture immediately and plugins reconcile at idle; model work starts at most once per interval,
-# drains the current queue, then exits. Set session_budget > 0 to cap each auto run.
-# Manual ` + "`witness distill start`" + ` is always unbounded.
+# Automatic distillation is laptop-friendly without keeping the embed model
+# resident: hooks capture immediately, a single-flight lock ensures just one worker
+# runs, and it drains the whole queue (re-checking for new work as it goes) then
+# exits. Set false to distill only on demand via ` + "`witness distill start`" + `.
 auto_distill = true
-auto_distill_interval_minutes = 10
-auto_distill_session_budget = 0
 
 # Sessions mined in parallel per drain (backfill speed). The embedder loads once
 # and is shared; each concurrent distillation call adds ~0.35GB. Clamped to the
