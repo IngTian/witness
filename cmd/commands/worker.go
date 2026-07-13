@@ -226,27 +226,12 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		}
 	}
 
-	// Drain, then review, then RE-CHECK before releasing the lock (issue #22 review
-	// #1). `capture` writes L0 without WorkerLock, so work can arrive while we hold
-	// it — during the (possibly multi-second) review, or in the drain→unlock tail.
-	// A trigger fired in that window no-ops because we hold the lock, and nothing
-	// else re-drives ordinary L0 (scheduleRetryWakeup only covers backed-off
-	// sessions). So we loop: drain everything, review if due, then look again — if
-	// new pending work appeared, go around. The (session,RawCount) attempted key
-	// lets a resumed/regrown session re-enter while a stuck one stays filtered, so
-	// this outer loop terminates. Only a row landing in the sub-millisecond gap
-	// between the final pending() check and unlock falls to the next-launch sweep.
-	for iter := 0; !stopRequested(); iter++ {
-		if hasPending || iter == 0 {
-			drainAll()
-		}
-		// Review folded into the same single-flight pass (serialized under the lock,
-		// so concurrent reviews can't clobber the facets). Due on the session-count
-		// cap OR accumulated poignancy — whichever first. A successful review updates
-		// the facets, so we regenerate the L4 narrative profile right after ("on
-		// profile change"). The profile is purely derived: summarizing is best-effort
-		// (log and move on), never failing the worker or blocking distillation.
-		if !stopRequested() && st.ReviewDue(cfg) {
+	runDistillLoop(distillLoopDeps{
+		stopRequested: stopRequested,
+		pending:       pending,
+		drainAll:      drainAll,
+		reviewDue:     func() bool { return st.ReviewDue(cfg) },
+		runReview: func() {
 			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
 			if err := r.Run(ctx, time.Now()); err != nil {
 				slog.Error("review", "err", err)
@@ -254,17 +239,68 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 				slog.Info("review complete")
 				regenerateProfile(ctx, st, cfg, runFn)
 			}
+		},
+		ensureMiner:    func() bool { return getMiner() != nil },
+		hasUnattempted: func(p []string) bool { return miner.HasUnattempted(p, attempted) },
+	})
+	return true, nil
+}
+
+// distillLoopDeps is the set of seams runDistillLoop needs. Extracted so the
+// drain→review→re-check loop is unit-testable without a real store, embedder, or
+// `claude -p` (the inline version could only be exercised end-to-end, which is why
+// the review-only livelock — issue #49 C1 — shipped uncaught).
+type distillLoopDeps struct {
+	stopRequested  func() bool         // a graceful-stop was requested → exit promptly
+	pending        func() []string     // currently-distillable sessions (re-consulted each pass)
+	drainAll       func()              // drain every pending session (no-op if none / no miner)
+	reviewDue      func() bool         // is an L2 review due (session-count or poignancy)
+	runReview      func()              // run the reviewer + regenerate the L4 profile
+	ensureMiner    func() bool         // lazily build the miner; false if the embedder is unavailable
+	hasUnattempted func([]string) bool // any of these sessions not yet attempted this run
+}
+
+// runDistillLoop is the worker's drain→review→RE-CHECK-before-unlock loop (issue
+// #22 review #1). `capture` writes L0 without WorkerLock, so work can arrive while
+// we hold it — during the (possibly multi-second) review, or in the drain→unlock
+// tail. A trigger fired in that window no-ops because we hold the lock, and nothing
+// else re-drives ordinary L0 (scheduleRetryWakeup only covers backed-off sessions).
+// So we loop: drain everything, review if due, then look again — if new pending
+// work appeared, go around. The (session,RawCount) attempted key (inside
+// hasUnattempted) lets a resumed/regrown session re-enter while a stuck one stays
+// filtered, so this loop terminates. Only a row landing in the sub-millisecond gap
+// between the final pending() check and unlock falls to the next-launch sweep.
+func runDistillLoop(d distillLoopDeps) {
+	for !d.stopRequested() {
+		// Gate the drain on a FRESH pending() check every pass — never a stale
+		// pre-loop snapshot. Gating on a one-time `hasPending` livelocked a review-only
+		// worker: it starts with nothing pending, so the drain ran only once; if
+		// capture then landed L0 during the multi-second review, the re-check below
+		// saw the new session and looped, but the stale gate kept the drain from ever
+		// draining it — an unbounded spin holding WorkerLock, the new session never
+		// distilled (issue #49 C1). A fresh pending() also skips the ~448MB embedder
+		// load when there is genuinely nothing to mine (drainAll no-ops regardless).
+		if len(d.pending()) > 0 {
+			d.drainAll()
+		}
+		// Review folded into the same single-flight pass (serialized under the lock,
+		// so concurrent reviews can't clobber the facets).
+		if !d.stopRequested() && d.reviewDue() {
+			d.runReview()
 		}
 		// Re-check under the lock: did capture land NEW distillable work while we
-		// drained/reviewed? "New" means a session whose (session,RawCount) attempt key
-		// we have NOT already tried this run — so a still-pending STUCK/backed-off
-		// session (same key, already attempted) does NOT re-trigger the loop (that
-		// would spin forever), but a fresh or regrown session does. If none, let go.
-		if miner == nil || !miner.HasUnattempted(pending(), attempted) {
+		// drained/reviewed? Consult pending() BEFORE ensureMiner() so a review-only run
+		// that never had work releases the lock without paying the embedder load. But
+		// when fresh work HAS arrived we build the miner and loop to drain it here — a
+		// review-only worker won't have built it above, and deferring the session to
+		// the next launch is exactly the gap this re-check closes. ensureMiner()==false
+		// means the embedder is unavailable (can't mine at all this run) → stop rather
+		// than spin on work we can never attempt.
+		p := d.pending()
+		if len(p) == 0 || !d.ensureMiner() || !d.hasUnattempted(p) {
 			break
 		}
 	}
-	return true, nil
 }
 
 // regenerateProfile refreshes the L4 narrative summaries from the current facets.
