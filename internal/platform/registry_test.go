@@ -3,7 +3,6 @@ package platform_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/IngTian/witness/internal/platform"
 	_ "github.com/IngTian/witness/internal/platform/claude"
@@ -30,10 +29,7 @@ type mixedCasePlatform struct{}
 func (mixedCasePlatform) Name() string                              { return " MixedCasePlat " }
 func (mixedCasePlatform) SessionPrefix() string                     { return "mixedcaseplat:" }
 func (mixedCasePlatform) RenderInputs(r []store.RawRecord) []string { return []string{""} }
-func (mixedCasePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) {
-	return false, nil
-}
-func (mixedCasePlatform) Import(context.Context, *store.Store) (platform.ImportStats, error) {
+func (mixedCasePlatform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{}, nil
 }
 

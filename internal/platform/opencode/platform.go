@@ -2,7 +2,6 @@ package opencode
 
 import (
 	"context"
-	"time"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/platform/claude"
@@ -47,19 +46,11 @@ func (Platform) RenderInputs(raw []store.RawRecord) []string {
 	return renderChunks(raw, chunkMaxChars, chunkOverlapRecords)
 }
 
-// Capture mirrors one OpenCode plugin event into L0 (best-effort; SQLite import is
-// the source-of-truth reconcile). The package Capture func stamps the session's
-// owning platform itself (it already resolves the prefixed session id), so this is
-// a thin adapter to the Capturer interface.
-func (Platform) Capture(st *store.Store, data []byte, now time.Time) (bool, error) {
-	return Capture(st, data, now)
-}
-
 // Import reconciles OpenCode's SQLite store into L0. It takes the sync lock INSIDE
 // the method (so cmd need not know about it) and maps the internal stats onto the
 // shared platform.ImportStats. A held lock means another import is in flight —
 // return zero stats, not an error.
-func (Platform) Import(ctx context.Context, st *store.Store) (platform.ImportStats, error) {
+func (Platform) Import(ctx context.Context, st *store.Store, sessionIDs []string) (platform.ImportStats, error) {
 	// Same lock file as before (".opencode-sync.lock"); the store no longer names
 	// the platform — this package owns the "opencode" key.
 	unlock, ok := st.ImportLock("opencode")
@@ -67,7 +58,7 @@ func (Platform) Import(ctx context.Context, st *store.Store) (platform.ImportSta
 		return platform.ImportStats{Agent: "opencode"}, nil
 	}
 	defer unlock()
-	s, err := (&Importer{Store: st}).Import(ctx, nil)
+	s, err := (&Importer{Store: st}).Import(ctx, sessionIDs)
 	if err != nil {
 		return platform.ImportStats{Agent: "opencode"}, err
 	}

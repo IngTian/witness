@@ -51,7 +51,7 @@ func (Platform) Capture(st *store.Store, data []byte, now time.Time) (bool, erro
 
 // Import is a no-op: Claude Code is hook-fed (capture writes L0 live), so there is
 // no external native store to reconcile from.
-func (Platform) Import(context.Context, *store.Store) (platform.ImportStats, error) {
+func (Platform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{Agent: "claude"}, nil
 }
 

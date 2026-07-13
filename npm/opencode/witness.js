@@ -7,6 +7,7 @@ const PACKAGE_ROOT = fileURLToPath(new URL(".", import.meta.url))
 const DOWNLOAD_RETRY_MAX = 6
 const DOWNLOAD_RETRY_BASE_MS = 1000
 const DOWNLOAD_RETRY_CAP_MS = 30000
+const IMPORT_GRACE_MS = 5000
 
 const platformBin = platformWitnessBin()
 const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || (existsSync(platformBin) ? platformBin : "")
@@ -54,9 +55,17 @@ function waitForExit(child) {
 
 const plugin = async () => {
   let disposed = false
+  let disposing = false
+  let disposePromise = null
   let retryTimer = null
   let download = null
-  const imports = new Set()
+  let activeImport = null
+  let activeWaiters = null
+  let globalImportPending = false
+  const pendingSessions = new Set()
+  const sessionWaiters = new Map()
+  const modernIdleWaiters = new Map()
+  const idleWaiters = []
 
   function clearRetry() {
     if (retryTimer) clearTimeout(retryTimer)
@@ -64,7 +73,7 @@ const plugin = async () => {
   }
 
   function scheduleRetry(attempt) {
-    if (disposed || process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(PACKAGE_ROOT) || attempt > DOWNLOAD_RETRY_MAX) return
+    if (disposed || disposing || process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(PACKAGE_ROOT) || attempt > DOWNLOAD_RETRY_MAX) return
     clearRetry()
     const delay = Math.min(DOWNLOAD_RETRY_BASE_MS * (2 ** (attempt - 1)), DOWNLOAD_RETRY_CAP_MS)
     retryTimer = setTimeout(() => {
@@ -75,16 +84,16 @@ const plugin = async () => {
   }
 
   function ensureDownload(attempt = 0) {
-    if (disposed || download || process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(PACKAGE_ROOT)) return
+    if (disposed || disposing || download || process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(PACKAGE_ROOT)) return
     // Retry lock contention and transient download failures, but stop after a
     // small bounded backoff window so a broken network does not spin forever.
     const nextAttempt = attempt + 1
     download = startModelDownload(PACKAGE_ROOT, {
       onExit(code) {
         download = null
-        if (disposed) return
+        if (disposed || disposing) return
         if (code === 0 && modelReady(PACKAGE_ROOT)) {
-          syncOpenCode()
+          sync()
           return
         }
         scheduleRetry(nextAttempt)
@@ -93,17 +102,88 @@ const plugin = async () => {
     if (!download && !modelReady(PACKAGE_ROOT)) scheduleRetry(nextAttempt)
   }
 
-  function syncOpenCode() {
-    const proc = spawnWitness(["import", "--agent", "opencode", "--quiet", "--auto"])
+  function syncOpenCode(sessions = []) {
+    const args = ["import", "--agent", "opencode", "--quiet", "--auto"]
+    for (const sessionID of sessions) args.push("--session", sessionID)
+    const proc = spawnWitness(args)
     if (!proc) return
-    imports.add(proc)
-    waitForExit(proc).finally(() => imports.delete(proc))
     return proc
+  }
+
+  function claimWaiters(sessions) {
+    const claimed = new Map()
+    for (const sessionID of sessions) {
+      claimed.set(sessionID, sessionWaiters.get(sessionID) || [])
+      sessionWaiters.delete(sessionID)
+    }
+    return claimed
+  }
+
+  function resolveWaiters(waiters) {
+    for (const resolves of waiters.values()) {
+      for (const resolve of resolves) resolve()
+    }
+  }
+
+  function queueIdle() {
+    return !activeImport && !globalImportPending && pendingSessions.size === 0
+  }
+
+  function notifyIdle() {
+    if (!queueIdle()) return
+    while (idleWaiters.length) idleWaiters.pop()()
+  }
+
+  function waitForIdle() {
+    return queueIdle() ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve))
+  }
+
+  function drain() {
+    if (disposed || activeImport) return
+    const coveredSessions = [...pendingSessions]
+    if (!globalImportPending && coveredSessions.length === 0) return
+    const sessions = globalImportPending ? [] : coveredSessions
+    globalImportPending = false
+    pendingSessions.clear()
+    const batchWaiters = claimWaiters(coveredSessions)
+    const proc = syncOpenCode(sessions)
+    if (!proc) {
+      resolveWaiters(batchWaiters)
+      drain()
+      notifyIdle()
+      return
+    }
+    activeImport = proc
+    activeWaiters = batchWaiters
+    waitForExit(proc).then(() => resolveWaiters(batchWaiters)).finally(() => {
+      if (activeImport === proc) {
+        activeImport = null
+        activeWaiters = null
+      }
+      drain()
+      notifyIdle()
+    })
+  }
+
+  function sync() {
+    globalImportPending = true
+    drain()
+  }
+
+  function syncSessions(sessionID) {
+    pendingSessions.add(sessionID)
+    const done = new Promise((resolve) => {
+      const waiters = sessionWaiters.get(sessionID) || []
+      waiters.push(resolve)
+      sessionWaiters.set(sessionID, waiters)
+    })
+    drain()
+    return done
   }
 
   if (WITNESS_BIN) {
     ensureDownload()
-    syncOpenCode()
+    sync()
   }
   return {
     config: async (input) => {
@@ -122,29 +202,59 @@ const plugin = async () => {
       }
     },
     dispose: async () => {
-      disposed = true
+      if (disposePromise) return disposePromise
+      disposing = true
       clearRetry()
-      const activeImports = [...imports]
-      for (const proc of activeImports) {
-        if (!proc.killed && proc.exitCode === null) proc.kill?.()
-      }
-      await Promise.all(activeImports.map((proc) => waitForExit(proc)))
-      download?.stop()
-      await waitForExit(download?.child)
-      download = null
-      // Only stop automatically-started workers. A user may have explicitly run
-      // `witness distill start`; closing OpenCode must not kill that manual job.
-      const proc = spawnWitness(["distill", "stop", "--auto-only"])
-      await proc?.exited?.catch?.(() => {})
+      modernIdleWaiters.clear()
+      disposePromise = (async () => {
+        let timer
+        const drained = await Promise.race([
+          waitForIdle().then(() => true),
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve(false), IMPORT_GRACE_MS)
+          }),
+        ])
+        clearTimeout(timer)
+        if (!drained) {
+          disposed = true
+          resolveWaiters(claimWaiters(pendingSessions))
+          pendingSessions.clear()
+          globalImportPending = false
+          const importProc = activeImport
+          resolveWaiters(activeWaiters || new Map())
+          activeWaiters = null
+          if (importProc && !importProc.killed && importProc.exitCode === null) importProc.kill?.()
+          await waitForExit(importProc)
+        }
+        disposed = true
+        download?.stop()
+        await waitForExit(download?.child)
+        download = null
+        // Only stop automatically-started workers. A user may have explicitly run
+        // `witness distill start`; closing OpenCode must not kill that manual job.
+        const proc = spawnWitness(["distill", "stop", "--auto-only"])
+        await proc?.exited?.catch?.(() => {})
+      })()
+      return disposePromise
     },
     event: async ({ event }) => {
-      if (!WITNESS_BIN || disposed || process.env.WITNESS_WORKER === "1") return
+      if (!WITNESS_BIN || disposed || disposing || process.env.WITNESS_WORKER === "1") return
       const type = eventType(event)
-      if (type === "session.idle") {
+      const sessionID = event?.properties?.sessionID
+      const modernIdle = type === "session.status" && event?.properties?.status?.type === "idle"
+      if (type === "session.idle" && sessionID && modernIdleWaiters.has(sessionID)) {
+        const done = modernIdleWaiters.get(sessionID)
+        modernIdleWaiters.delete(sessionID)
+        return done
+      }
+      if ((type === "session.idle" || modernIdle) && sessionID) {
         clearRetry()
         ensureDownload()
-        syncOpenCode()
+        const done = syncSessions(sessionID)
+        if (modernIdle) modernIdleWaiters.set(sessionID, done)
+        return done
       }
+      if (type === "session.status" && sessionID) modernIdleWaiters.delete(sessionID)
     },
   }
 }

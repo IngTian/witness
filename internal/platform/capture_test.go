@@ -2,7 +2,6 @@ package platform_test
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -28,9 +27,10 @@ func openStore(t *testing.T) *store.Store {
 func TestClaudeCapturerWritesAndStampsPlatform(t *testing.T) {
 	st := openStore(t)
 	p, _ := platform.ByName("claude")
+	capturer := p.(platform.Capturer)
 
-	payload, _ := json.Marshal(map[string]any{"session_id": "cc1", "prompt": "hello"})
-	ok, err := p.Capture(st, payload, time.Now())
+	payload := []byte(`{"session_id":"cc1","prompt":"hello"}`)
+	ok, err := capturer.Capture(st, payload, time.Now())
 	if err != nil || !ok {
 		t.Fatalf("Capture: ok=%v err=%v", ok, err)
 	}
@@ -51,28 +51,16 @@ func TestClaudeCapturerWritesAndStampsPlatform(t *testing.T) {
 func TestClaudeCapturerMalformedPayload(t *testing.T) {
 	st := openStore(t)
 	p, _ := platform.ByName("claude")
-	if _, err := p.Capture(st, []byte("not json"), time.Now()); err == nil {
+	capturer := p.(platform.Capturer)
+	if _, err := capturer.Capture(st, []byte("not json"), time.Now()); err == nil {
 		t.Fatal("malformed payload should return an error (logged, non-fatal)")
 	}
 }
 
-func TestOpenCodeCapturerStampsPrefixedSession(t *testing.T) {
-	st := openStore(t)
+func TestOpenCodeDoesNotSupportEventCapture(t *testing.T) {
 	p, _ := platform.ByName("opencode")
-
-	payload, _ := json.Marshal(map[string]any{
-		"event": map[string]any{
-			"sessionID": "oc1",
-			"role":      "user",
-			"parts":     []any{map[string]any{"type": "text", "text": "hi there"}},
-		},
-	})
-	ok, err := p.Capture(st, payload, time.Now())
-	if err != nil || !ok {
-		t.Fatalf("Capture: ok=%v err=%v", ok, err)
-	}
-	if got := st.SessionPlatform("opencode:oc1"); got != "opencode" {
-		t.Fatalf("platform not stamped on prefixed session: %q", got)
+	if _, ok := p.(platform.Capturer); ok {
+		t.Fatal("OpenCode must reconcile from SQLite instead of partial event payloads")
 	}
 }
 
@@ -80,7 +68,7 @@ func TestOpenCodeCapturerStampsPrefixedSession(t *testing.T) {
 func TestClaudeImporterIsNoOp(t *testing.T) {
 	st := openStore(t)
 	p, _ := platform.ByName("claude")
-	stats, err := p.Import(context.Background(), st)
+	stats, err := p.Import(context.Background(), st, nil)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}

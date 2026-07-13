@@ -58,7 +58,7 @@ func (fakePlatform) Capture(st *store.Store, data []byte, now time.Time) (bool, 
 	return true, nil
 }
 
-func (fakePlatform) Import(context.Context, *store.Store) (platform.ImportStats, error) {
+func (fakePlatform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{Agent: "fake"}, nil
 }
 
@@ -103,7 +103,11 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 		t.Fatal("fake platform not registered")
 	}
 	payload, _ := json.Marshal(map[string]string{"session": "s1", "text": "hello from a platform the engine never heard of"})
-	if okCap, err := p.Capture(st, payload, time.Now()); err != nil || !okCap {
+	capturer, ok := p.(platform.Capturer)
+	if !ok {
+		t.Fatal("fake platform should expose its optional capture capability")
+	}
+	if okCap, err := capturer.Capture(st, payload, time.Now()); err != nil || !okCap {
 		t.Fatalf("Capture: ok=%v err=%v", okCap, err)
 	}
 	session := fakePrefix + "s1"

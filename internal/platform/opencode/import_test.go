@@ -10,6 +10,21 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
+func TestDefaultDBPathHonorsXDGDataHome(t *testing.T) {
+	t.Setenv("WITNESS_OPENCODE_DB", "")
+	xdg := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdg)
+
+	got, err := DefaultDBPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(xdg, "opencode", "opencode.db")
+	if got != want {
+		t.Fatalf("DefaultDBPath() = %q, want %q", got, want)
+	}
+}
+
 func TestImporterMirrorsOpenCodeTextParts(t *testing.T) {
 	dbPath := seedOpenCodeDB(t)
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
@@ -47,6 +62,38 @@ func TestImporterMirrorsOpenCodeTextParts(t *testing.T) {
 	}
 	if stats.Records != 0 {
 		t.Fatalf("second import should be idempotent, wrote %d records", stats.Records)
+	}
+}
+
+func TestImporterTargetsSessionsWithoutAdvancingFullSyncWatermark(t *testing.T) {
+	dbPath := seedOpenCodeDB(t)
+	mutateOpenCodeDB(t, dbPath, `
+		INSERT INTO session VALUES ('ses_other', '/other', 'other work', 6000, 9000);
+		INSERT INTO message VALUES ('msg_other', 'ses_other', 6100, 6100, '{"role":"user"}');
+		INSERT INTO part VALUES ('prt_other', 'msg_other', 'ses_other', 6100, 6100, '{"type":"text","text":"do not import me"}');
+	`)
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMetaString(syncMetaKey, "1234"); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := (&Importer{Store: st, DBPath: dbPath}).Import(context.Background(), []string{"ses_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Sessions != 1 || stats.Records != 2 {
+		t.Fatalf("stats = %+v, want one targeted session", stats)
+	}
+	if got := st.RawCount(SessionPrefix + "ses_other"); got != 0 {
+		t.Fatalf("non-target session imported %d records", got)
+	}
+	if got := st.MetaString(syncMetaKey); got != "1234" {
+		t.Fatalf("targeted import advanced full sync watermark to %q", got)
 	}
 }
 

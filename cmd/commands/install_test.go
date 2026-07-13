@@ -445,11 +445,17 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `export const Witness = plugin`) || !strings.Contains(src, `export const ClaudeWitness = plugin`) {
 		t.Fatalf("installed plugin should preserve both OpenCode export names: %s", src)
 	}
-	if !strings.Contains(src, `"import", "--agent", "opencode", "--quiet"`) {
+	if !strings.Contains(src, `const args = ["import", "--agent", "opencode", "--quiet", "--auto"]`) {
 		t.Fatalf("installed plugin should reconcile OpenCode DB before distillation: %s", src)
 	}
-	if !strings.Contains(src, `type === "session.idle"`) {
+	if !strings.Contains(src, `type === "session.idle"`) || !strings.Contains(src, `type === "session.status"`) || !strings.Contains(src, `status?.type === "idle"`) {
 		t.Fatalf("installed plugin should sync from idle events: %s", src)
+	}
+	if !strings.Contains(src, `const sessionWaiters = new Map()`) || !strings.Contains(src, `const batchWaiters = claimWaiters(coveredSessions)`) || !strings.Contains(src, `const modernIdleWaiters = new Map()`) {
+		t.Fatalf("installed plugin should wait for and deduplicate idle imports: %s", src)
+	}
+	if !strings.Contains(src, `const IMPORT_GRACE_MS = 5000`) || !strings.Contains(src, `let disposing = false`) || !strings.Contains(src, `waitForIdle()`) {
+		t.Fatalf("installed plugin should drain imports gracefully before disposal: %s", src)
 	}
 }
 

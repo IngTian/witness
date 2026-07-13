@@ -12,6 +12,7 @@ import (
 
 func newImportCmd() *cobra.Command {
 	var agent string
+	var sessions []string
 	var quiet bool
 	var auto bool
 	c := &cobra.Command{
@@ -21,6 +22,9 @@ func newImportCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			args := []string{"--agent", agent}
+			for _, session := range sessions {
+				args = append(args, "--session", session)
+			}
 			if quiet {
 				args = append(args, "--quiet")
 			}
@@ -31,6 +35,7 @@ func newImportCmd() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&agent, "agent", "", "agent to import from: claude or opencode")
+	c.Flags().StringArrayVar(&sessions, "session", nil, "native session id to import (repeatable)")
 	c.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
 	c.Flags().BoolVar(&auto, "auto", false, "use the automatic worker gate (only start if auto_distill is on and no worker is running)")
 	_ = c.Flags().MarkHidden("auto")
@@ -39,6 +44,7 @@ func newImportCmd() *cobra.Command {
 
 func cmdImport(args []string) error {
 	agent := ""
+	var sessions []string
 	quiet := false
 	auto := false
 	for i := 0; i < len(args); i++ {
@@ -53,14 +59,20 @@ func cmdImport(args []string) error {
 			quiet = true
 		case "--auto":
 			auto = true
+		case "--session":
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return fmt.Errorf("--session requires a value")
+			}
+			sessions = append(sessions, strings.TrimSpace(args[i+1]))
+			i++
 		default:
-			return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet] [--auto]")
+			return fmt.Errorf("usage: witness import --agent <claude|opencode> [--session <id>]... [--quiet] [--auto]")
 		}
 	}
 	if agent == "" {
-		return fmt.Errorf("usage: witness import --agent <claude|opencode> [--quiet] [--auto]")
+		return fmt.Errorf("usage: witness import --agent <claude|opencode> [--session <id>]... [--quiet] [--auto]")
 	}
-	stats, kicked, err := runImport(agent, true, auto)
+	stats, kicked, err := runImport(agent, sessions, true, auto)
 	if err != nil {
 		return err
 	}
@@ -75,7 +87,7 @@ func cmdImport(args []string) error {
 	return nil
 }
 
-func runImport(agent string, kickWorker, auto bool) (platform.ImportStats, bool, error) {
+func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platform.ImportStats, bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return platform.ImportStats{}, false, err
@@ -90,7 +102,7 @@ func runImport(agent string, kickWorker, auto bool) (platform.ImportStats, bool,
 	// The Importer owns its own reconcile mechanics (OpenCode takes the sync lock
 	// and reads its SQLite store; Claude is a hook-fed no-op) — cmd no longer
 	// branches on the runtime.
-	stats, err := p.Import(context.Background(), st)
+	stats, err := p.Import(context.Background(), st, sessionIDs)
 	if err != nil {
 		return stats, false, err
 	}

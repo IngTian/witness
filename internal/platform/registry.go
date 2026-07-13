@@ -29,26 +29,23 @@ func unknownRunnerError(name string) error {
 type Platform interface {
 	Identity
 	InputRenderer
-	Capturer
 	Importer
 }
 
-// Capturer writes one L0 record from a raw hook/event payload. The []byte
-// signature is uniform across platforms: Claude unmarshals its typed HookEvent
-// internally, OpenCode parses its event JSON. Best-effort by contract — capture
-// must never break a session, so callers log the error and carry on. ok reports
-// whether a record was actually written (false = ignored/duplicate payload, not an
-// error). Implementations also record the session's owning platform
-// (SetSessionPlatform) so ForSession is column-authoritative going forward.
+// Capturer is the optional capability for hook-fed platforms that write one L0
+// record from a raw event payload. Best-effort by contract: capture must never
+// break a session, so callers log the error and carry on. Reconcile-only
+// platforms such as OpenCode deliberately do not implement it.
 type Capturer interface {
 	Capture(st *store.Store, data []byte, now time.Time) (ok bool, err error)
 }
 
-// Importer pulls external native sessions into L0 (the reconcile path). OpenCode
-// reads its SQLite store (taking the sync lock internally); Claude is hook-fed, so
-// its Import is a no-op returning zero stats. This collapses the importcmd switch.
+// Importer pulls external native sessions into L0 (the reconcile path). An empty
+// session list performs the platform's global incremental import; otherwise only
+// the requested native session ids are reconciled. OpenCode reads its SQLite
+// store, while Claude's hook-fed implementation is a no-op.
 type Importer interface {
-	Import(ctx context.Context, st *store.Store) (ImportStats, error)
+	Import(ctx context.Context, st *store.Store, sessionIDs []string) (ImportStats, error)
 }
 
 // Identity is a platform's naming/namespacing surface: its stable name and the

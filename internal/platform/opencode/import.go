@@ -59,6 +59,9 @@ func DefaultDBPath() (string, error) {
 	if p := strings.TrimSpace(os.Getenv("WITNESS_OPENCODE_DB")); p != "" {
 		return p, nil
 	}
+	if dataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); dataHome != "" {
+		return filepath.Join(dataHome, "opencode", "opencode.db"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
