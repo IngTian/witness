@@ -272,6 +272,58 @@ func (s *Store) MarkDistilled(session string, count int) error {
 	return err
 }
 
+// MaxRawID returns the highest raw.id for a session — the session's raw
+// "generation". raw.id is INTEGER PRIMARY KEY AUTOINCREMENT, so an id is NEVER
+// reused after its row is deleted (that's the AUTOINCREMENT guarantee); a replace-
+// import (DELETE + re-INSERT) therefore always yields a strictly higher max id
+// than what a worker read before the replace. That property is what makes the
+// watermark CAS below sound. Returns 0 for a session with no raw rows.
+func (s *Store) MaxRawID(session string) int64 {
+	var id int64
+	_ = s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM raw WHERE session = ?`, session).Scan(&id)
+	return id
+}
+
+// MarkDistilledIfCurrent advances the watermark ONLY if the session's raw is still
+// the exact generation the worker mined — proven by the highest raw.id it read
+// (rawHighID) still being present. It reports whether the write happened.
+//
+// Why this exists (issue #49 C2): MarkDistilled is a blind upsert of a COUNT
+// captured at the start of a mine. That count assumes raw is append-only. It isn't
+// always: an OpenCode history rewrite/edit takes the replace path (DELETE raw +
+// DELETE progress + re-INSERT the new turns), and `witness cleanup` deletes raw too
+// — both under a DIFFERENT lock than the worker. If such a delete lands mid-mine,
+// a trailing blind MarkDistilled would RESURRECT the just-deleted progress row with
+// a stale count, silently marking never-mined turns as done. The guard closes that:
+// after a replace the old rawHighID no longer exists, the UPDATE/INSERT matches no
+// row, nothing is written, progress stays absent, and the pending query re-offers
+// the session so it re-mines the new generation from scratch. The wasted mine is
+// discarded — correctness over the (rare, racy) wasted work.
+//
+// Runtime-agnostic: it guards EVERY session (Claude Code + OpenCode) with one code
+// path. On the append-only Claude path the mined rawHighID always still exists, so
+// the guard always passes — free insurance there, an active fix on the OpenCode/
+// cleanup paths that can delete raw under a mine.
+func (s *Store) MarkDistilledIfCurrent(session string, count int, rawHighID int64) (bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	// The guard: only write when a raw row with the mined generation's high id still
+	// exists for this session. rawHighID==0 means the mine saw an empty session
+	// (nothing mined) — still gate on "no raw exists now" so a concurrent import that
+	// added rows isn't clobbered.
+	res, err := s.db.Exec(
+		`INSERT INTO progress(session, distilled, distilled_at)
+		 SELECT ?, ?, ?
+		  WHERE (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
+		     OR EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)
+		 ON CONFLICT(session) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`,
+		session, count, now, rawHighID, session, session, rawHighID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // RetryCount returns how many times distilling this session has failed in a row.
 func (s *Store) RetryCount(session string) int {
 	var n int

@@ -158,3 +158,87 @@ func TestDistilledCountRoundTrip(t *testing.T) {
 		t.Fatalf("after advance: want 12, got %d", got)
 	}
 }
+
+// TestMarkDistilledIfCurrentGuardsStaleGeneration is the CAS primitive behind the
+// #49 C2 fix: the watermark advances only if the raw generation the caller mined
+// (its high raw.id) still exists.
+func TestMarkDistilledIfCurrentGuardsStaleGeneration(t *testing.T) {
+	s := tempStore(t)
+	appendN(t, s, "sess", 3)
+	high := s.MaxRawID("sess")
+	if high == 0 {
+		t.Fatal("MaxRawID should be non-zero after appending raw")
+	}
+
+	// Current generation still present → advances.
+	ok, err := s.MarkDistilledIfCurrent("sess", 3, high)
+	if err != nil {
+		t.Fatalf("MarkDistilledIfCurrent: %v", err)
+	}
+	if !ok || s.DistilledCount("sess") != 3 {
+		t.Fatalf("current generation should advance: ok=%v count=%d", ok, s.DistilledCount("sess"))
+	}
+
+	// Simulate a replace: delete + re-insert raw (new ids), reset progress. The old
+	// `high` id no longer exists.
+	meta := SessionMeta{Session: "sess"}
+	newRecs := []RawRecord{{Session: "sess", Seq: 0, Role: "user", Text: "edited"}}
+	if err := s.ApplyRawImport(meta, newRecs, "", "", true); err != nil {
+		t.Fatalf("ApplyRawImport(replace): %v", err)
+	}
+	if s.DistilledCount("sess") != 0 {
+		t.Fatalf("replace should have reset progress to 0, got %d", s.DistilledCount("sess"))
+	}
+
+	// A stale MarkDistilledIfCurrent keyed on the OLD high id must be refused.
+	ok, err = s.MarkDistilledIfCurrent("sess", 3, high)
+	if err != nil {
+		t.Fatalf("MarkDistilledIfCurrent(stale): %v", err)
+	}
+	if ok {
+		t.Fatal("stale generation should NOT advance the watermark")
+	}
+	if got := s.DistilledCount("sess"); got != 0 {
+		t.Fatalf("watermark must remain 0 after a refused stale write, got %d", got)
+	}
+
+	// Keyed on the NEW generation's id → advances again.
+	newHigh := s.MaxRawID("sess")
+	if newHigh == high {
+		t.Fatal("new generation should have a strictly higher max raw.id (AUTOINCREMENT never reuses)")
+	}
+	ok, err = s.MarkDistilledIfCurrent("sess", 1, newHigh)
+	if err != nil {
+		t.Fatalf("MarkDistilledIfCurrent(new): %v", err)
+	}
+	if !ok || s.DistilledCount("sess") != 1 {
+		t.Fatalf("new generation should advance: ok=%v count=%d", ok, s.DistilledCount("sess"))
+	}
+}
+
+// TestMarkDistilledIfCurrentEmptySessionGuard: rawHighID==0 (mine saw an empty
+// session) must not clobber a concurrent import that added rows.
+func TestMarkDistilledIfCurrentEmptySessionGuard(t *testing.T) {
+	s := tempStore(t)
+
+	// Mine saw nothing (rawHighID 0) and no raw exists → the no-op advance is allowed
+	// (records the quiet session at count 0).
+	ok, err := s.MarkDistilledIfCurrent("sess", 0, 0)
+	if err != nil {
+		t.Fatalf("MarkDistilledIfCurrent(empty): %v", err)
+	}
+	if !ok {
+		t.Fatal("empty session with no raw should be allowed to record count 0")
+	}
+
+	// Now an import added rows AFTER the empty mine read. A stale rawHighID==0 write
+	// must be refused so it doesn't mark the newly-imported rows as distilled.
+	appendN(t, s, "sess", 2)
+	ok, err = s.MarkDistilledIfCurrent("sess", 0, 0)
+	if err != nil {
+		t.Fatalf("MarkDistilledIfCurrent(empty, raced): %v", err)
+	}
+	if ok {
+		t.Fatal("stale empty-mine write must be refused once raw exists")
+	}
+}

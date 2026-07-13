@@ -85,6 +85,7 @@ type Worker struct {
 type SessionMining struct {
 	Session         string
 	Total           int    // len(raw) at read time — the watermark to advance to on success
+	RawHighID       int64  // MAX(raw.id) at read time — the raw "generation" this mine saw (issue #49 C2)
 	SessionTS       string // recency anchor for observations lacking their own ts
 	StagedThroughID int64  // how far staged was drained, to clear exactly those rows on success
 	Active          []store.Observation
@@ -121,13 +122,18 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 	total := len(raw)
 	done := w.Store.DistilledCount(session) // records already distilled
 
+	// Capture the raw "generation" this mine reads — the highest raw.id. CommitMining
+	// advances the watermark only if this id still exists, so a replace-import/cleanup
+	// that deletes raw mid-mine can't have a stale count blind-written over it (#49 C2).
+	rawHighID := w.Store.MaxRawID(session)
+
 	// Only the turns past the watermark are new.
 	var newRecs []store.RawRecord
 	if total > done {
 		newRecs = raw[done:]
 	}
 
-	m := &SessionMining{Session: session, Total: total, StagedThroughID: 0}
+	m := &SessionMining{Session: session, Total: total, RawHighID: rawHighID, StagedThroughID: 0}
 	if total > 0 {
 		m.SessionTS = raw[total-1].TS
 	}
@@ -213,7 +219,14 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 // what makes parallel mining safe without a cross-session dedup gap.
 func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) error {
 	if m.NothingToDo {
-		return w.Store.MarkDistilled(m.Session, m.Total)
+		// Guarded like the main path: if raw was replaced under this mine (an OpenCode
+		// history rewrite / cleanup deleting the rows), don't blind-advance the
+		// watermark past a generation we didn't see (#49 C2). Not advancing leaves the
+		// session pending so it re-checks the new generation.
+		if _, err := w.Store.MarkDistilledIfCurrent(m.Session, m.Total, m.RawHighID); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	// Failure handling (S1: at-least-once, NEVER-drop). A transport failure leaves
@@ -268,8 +281,21 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 	if err := w.Store.AppendObservations(toWrite); err != nil {
 		return fmt.Errorf("append L1: %w", err)
 	}
-	if err := w.Store.MarkDistilled(m.Session, m.Total); err != nil {
+	// Advance the watermark ONLY if the raw generation we mined is still current.
+	// If a replace-import / cleanup deleted raw mid-mine (#49 C2), the guard fails,
+	// the watermark is NOT written (progress stays as the reset the import wrote, or
+	// absent), and the pending query re-offers the session so it re-mines the new
+	// generation from scratch. The L1 obs already appended are harmless: append-only,
+	// obsID-idempotent, and the reviewer reconciles stale/superseded obs at L2 — the
+	// only correctness-critical thing is that the watermark not skip un-mined turns.
+	advanced, err := w.Store.MarkDistilledIfCurrent(m.Session, m.Total, m.RawHighID)
+	if err != nil {
 		return err
+	}
+	if !advanced {
+		slog.Warn("distill: raw changed under mine; watermark held, session will re-mine",
+			"session", m.Session, "mined_to", m.Total)
+		return nil // leave staged rows for the re-mine; don't clear on a stale commit
 	}
 	w.Store.ClearStagedThrough(m.Session, m.StagedThroughID)
 	// Feed the just-written observations into the running snapshot so the next

@@ -103,6 +103,129 @@ func TestNonOpenCodeSessionsUseSingleLegacyTranscript(t *testing.T) {
 	}
 }
 
+// replaceRaw simulates an OpenCode replace-import landing mid-mine: it DELETEs the
+// session's raw + progress (the reset ApplyRawImport(replace=true) does) and
+// re-INSERTs a fresh generation of turns. Because raw.id is AUTOINCREMENT, the new
+// rows get strictly higher ids than anything a prior mine read.
+func replaceRaw(t *testing.T, s *store.Store, session string, turns []string) {
+	t.Helper()
+	meta := store.SessionMeta{Session: session}
+	recs := make([]store.RawRecord, len(turns))
+	for i, txt := range turns {
+		recs[i] = store.RawRecord{Session: session, Seq: i, Role: "user", Text: txt}
+	}
+	if err := s.ApplyRawImport(meta, recs, "", "", true); err != nil {
+		t.Fatalf("ApplyRawImport(replace): %v", err)
+	}
+}
+
+// TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine reproduces issue #49 C2:
+// a worker mines a session, then a replace-import (OpenCode history rewrite) deletes
+// and re-inserts that session's raw UNDER the mine, then the worker commits. The
+// stale count must NOT be blind-written over the reset progress row — else the
+// re-imported turns are silently marked distilled and never mined. The guard
+// (MarkDistilledIfCurrent, keyed on the mined raw.id still existing) holds the
+// watermark so the new generation stays pending. OpenCode-triggered path.
+func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
+	s := newStore(t)
+	m := &fakeMiner{}
+	w := testWorker(s, m)
+	ctx := context.Background()
+	sess := "opencode:s"
+
+	// Original generation: 2 turns.
+	capture(t, s, sess, "user", "original one")
+	capture(t, s, sess, "assistant", "original two")
+
+	// MAP: mine the original generation (captures RawHighID at read time).
+	mining, err := w.MineSession(ctx, sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mining.Total != 2 {
+		t.Fatalf("mined Total = %d, want 2", mining.Total)
+	}
+
+	// RACE: a replace-import lands before the commit — 3 brand-new (edited) turns.
+	replaceRaw(t, s, sess, []string{"edited one", "edited two", "edited three"})
+
+	// REDUCE: commit the stale mining result.
+	existing, _ := s.ReadObservations("")
+	if err := w.CommitMining(mining, &existing); err != nil {
+		t.Fatal(err)
+	}
+
+	// The watermark must NOT have been advanced to the stale count of 2 over the
+	// replaced generation. Progress was reset by the replace-import (absent → 0), so
+	// the guard leaves it at 0 and the session stays fully pending.
+	if got := s.DistilledCount(sess); got != 0 {
+		t.Fatalf("watermark advanced to %d over a replaced generation; want 0 (session must re-mine)", got)
+	}
+	pending, _ := s.PendingSessions()
+	found := false
+	for _, p := range pending {
+		if p == sess {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("session with a replaced raw generation must be pending for a re-mine")
+	}
+
+	// And a subsequent clean pass re-mines the NEW generation end-to-end.
+	if err := w.Process(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DistilledCount(sess); got != 3 {
+		t.Fatalf("after re-mine, watermark = %d, want 3 (the new generation)", got)
+	}
+}
+
+// TestCommitAdvancesWatermarkOnAppendOnlyPath is the both-paths guarantee: on the
+// normal append-only path (Claude Code capture never deletes raw), the CAS guard
+// always passes and the watermark advances exactly as before — the fix is free
+// insurance there, never a false block. Also covers an append landing mid-mine
+// (a resume): the mined generation's raw.id still exists, so the watermark advances
+// to what was mined and the appended turns remain pending, as intended.
+func TestCommitAdvancesWatermarkOnAppendOnlyPath(t *testing.T) {
+	s := newStore(t)
+	m := &fakeMiner{}
+	w := testWorker(s, m)
+	ctx := context.Background()
+	sess := "claude:s" // append-only runtime
+
+	capture(t, s, sess, "user", "one")
+	capture(t, s, sess, "assistant", "two")
+
+	mining, err := w.MineSession(ctx, sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A resume APPENDS a turn mid-mine (does not delete). The mined high id still
+	// exists, so the guard passes and the watermark advances to the mined count.
+	capture(t, s, sess, "user", "three (arrived during mine)")
+
+	existing, _ := s.ReadObservations("")
+	if err := w.CommitMining(mining, &existing); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DistilledCount(sess); got != 2 {
+		t.Fatalf("append-only watermark = %d, want 2 (the mined count advances cleanly)", got)
+	}
+	// The appended 3rd turn is past the watermark → still pending, as designed.
+	pending, _ := s.PendingSessions()
+	found := false
+	for _, p := range pending {
+		if p == sess {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the turn appended during the mine should leave the session pending")
+	}
+}
+
 func newStore(t *testing.T) *store.Store {
 	t.Helper()
 	t.Setenv("WITNESS_HOME", t.TempDir())
