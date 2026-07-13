@@ -35,8 +35,11 @@ const (
 	tokenizerMinBytes = 1_000_000
 )
 
-// Embedder holds the loaded model + tokenizer. Construct once, reuse. Not safe
-// for concurrent Embed calls (the worker is single-threaded; guard if shared).
+// Embedder holds the loaded model + tokenizer. Construct once, reuse. Embed IS
+// safe for concurrent callers: e.mu serializes the whole model exec, and the
+// parallel distill drain (issue #22) shares ONE embedder across all miner
+// goroutines and relies on that lock. Do NOT remove e.mu as "unnecessary on a
+// single-threaded worker" — the worker is no longer single-threaded.
 type Embedder struct {
 	model   onnx.Model
 	ctx     *context.Context

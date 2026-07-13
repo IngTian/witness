@@ -355,7 +355,20 @@ func isWitnessWorkerProcess(pid int) bool {
 		return false
 	}
 	cmd := strings.TrimSpace(string(out))
-	return strings.Contains(cmd, "witness") && strings.Contains(cmd, " worker")
+	if !strings.Contains(cmd, "witness") {
+		return false
+	}
+	// Match the `worker` subcommand but NOT its `worker-wakeup` sibling — a bare
+	// `strings.Contains(cmd, " worker")` also matches "worker-wakeup", which would
+	// make a liveness check treat a transient wakeup process as the worker (issue
+	// #24). Accept `worker` only as a whole token: end of string, or followed by a
+	// space (a flag/arg), never `worker-…`.
+	for _, field := range strings.Fields(cmd) {
+		if field == "worker" {
+			return true
+		}
+	}
+	return false
 }
 
 func terminateWorker(pid string) error {

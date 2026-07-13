@@ -2,6 +2,7 @@ package distill
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -9,16 +10,28 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
+// maxMineConcurrency is an absolute upper bound on parallel miners, independent of
+// core count. Each concurrent miner holds a ~0.35GB `claude -p` process, so MEMORY
+// (not CPUs) is the binding constraint — on a 64-core box an un-clamped
+// mine_concurrency would spawn dozens of processes and OOM. 16 keeps the worst case
+// (16×0.35 + 1.5GB embedder ≈ 7GB) safe on a typical laptop while leaving ample
+// headroom above the default of 4.
+const maxMineConcurrency = 16
+
 // EffectiveConcurrency is the number of sessions the engine will mine in parallel:
-// the configured cap, clamped to the CPU count and to 1 when the runner cannot run
-// concurrently. This is the POLICY (engine-owned) applied to the platform FACT
-// (runner.ConcurrentRunSafe) — the platform never picks a number (issue #22).
+// the configured cap, clamped to the CPU count, to an absolute memory-safe ceiling,
+// and to 1 when the runner cannot run concurrently. This is the POLICY
+// (engine-owned) applied to the platform FACT (runner.ConcurrentRunSafe) — the
+// platform never picks a number (issue #22).
 func EffectiveConcurrency(want int, concurrentRunSafe bool) int {
 	if !concurrentRunSafe {
 		return 1
 	}
 	if want < 1 {
 		want = 1
+	}
+	if want > maxMineConcurrency {
+		want = maxMineConcurrency
 	}
 	if n := runtime.GOMAXPROCS(0); want > n {
 		want = n
@@ -62,7 +75,11 @@ type DrainOpts struct {
 //   - Commits happen in submission order (FIFO over in-flight jobs), so the result
 //     is deterministic w.r.t. the pending order.
 //
-// Returns the number of sessions committed, for the auto budget check.
+// Returns the number of sessions ATTEMPTED-and-reaped this call (including
+// map-failures, backoffs, quiet sessions, and no-op advances — every reaped job
+// increments it), NOT strictly the number committed to L1. The worker's re-check
+// loop uses "0 attempted → queue is drained → stop"; do not treat this as a commit
+// count (e.g. for a budget) without re-deriving it.
 func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 	conc := opts.Conc
 	if conc < 1 {
@@ -101,7 +118,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 					return processed
 				}
 				attempted[s] = true
-				m, err := w.MineSession(ctx, s)
+				m, err := w.mineSessionSafe(ctx, s)
 				w.commitResult(m, err, &existing, opts.OnCommit)
 				processed++
 			}
@@ -141,7 +158,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 			go func(session string) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				m, err := w.MineSession(ctx, session)
+				m, err := w.mineSessionSafe(ctx, session)
 				ch <- minedResult{m: m, err: err}
 			}(s)
 			if len(inflight) >= conc {
@@ -160,6 +177,25 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		}
 		// else loop and re-scan pending for arrivals.
 	}
+}
+
+// mineSessionSafe wraps MineSession with a recover barrier so a panic in one
+// session's mining (e.g. the embedder's context.MustExecOnceN panics on a
+// pathological input) does NOT crash the whole worker and orphan the other
+// in-flight `claude -p` children. A recovered panic is converted into a normal
+// mining error: commitResult logs it and leaves the session pending (its delta is
+// never advanced, so it retries), exactly like a read-side failure. Returns a
+// SessionMining carrying the session id so the error is attributable. This upholds
+// the "distillation must never take down the process" invariant now that mining
+// runs across goroutines.
+func (w *Worker) mineSessionSafe(ctx context.Context, session string) (m *SessionMining, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			m = &SessionMining{Session: session}
+			err = fmt.Errorf("panic mining session %s: %v", session, r)
+		}
+	}()
+	return w.MineSession(ctx, session)
 }
 
 // commitResult applies one mining result: a map-phase read error is logged and

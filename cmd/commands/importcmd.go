@@ -32,7 +32,7 @@ func newImportCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&agent, "agent", "", "agent to import from: claude or opencode")
 	c.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
-	c.Flags().BoolVar(&auto, "auto", false, "apply automatic distillation cooldown and session budget")
+	c.Flags().BoolVar(&auto, "auto", false, "use the automatic worker gate (only start if auto_distill is on and no worker is running)")
 	_ = c.Flags().MarkHidden("auto")
 	return c
 }

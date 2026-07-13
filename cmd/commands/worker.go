@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -136,7 +138,15 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		slog.Error("load lenses", "err", err)
 		return true, err
 	}
-	ctx := context.Background()
+	// Cancel the drain context on SIGTERM/SIGINT so a `distill stop` (SIGTERM to the
+	// detached worker) or a Ctrl-C on a foreground `--all` backfill (SIGINT) tears
+	// down in-flight `claude -p` children too — the ctx threads worker→Drain→
+	// MineSession→Run→exec.CommandContext, and cancelling it sends the child a kill.
+	// Without this, stopping the parent left up to `conc` orphaned children to run to
+	// their own 10-min timeout (issue #22 audit). runner.Close still runs (deferred)
+	// to sweep any OpenCode distill sessions.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
 	pending := func() []string {
 		p, _ := st.PendingSessionsUpdatedBetween(timeRange.since, timeRange.until)

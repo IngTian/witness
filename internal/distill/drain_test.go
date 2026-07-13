@@ -3,6 +3,7 @@ package distill
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -52,6 +53,42 @@ func TestEffectiveConcurrency(t *testing.T) {
 	// Safe, small want → honored (GOMAXPROCS on CI is >= 2).
 	if got := EffectiveConcurrency(2, true); got != 2 {
 		t.Fatalf("safe runner should honor want=2 (GOMAXPROCS>=2), got %d", got)
+	}
+	// A huge want must be clamped to min(maxMineConcurrency, GOMAXPROCS) — never
+	// spawn hundreds of `claude -p` (memory, not cores, is the binding constraint).
+	ceiling := maxMineConcurrency
+	if n := runtime.GOMAXPROCS(0); n < ceiling {
+		ceiling = n
+	}
+	if got := EffectiveConcurrency(1000, true); got != ceiling {
+		t.Fatalf("want=1000 must clamp to min(maxMineConcurrency=%d, GOMAXPROCS)=%d, got %d", maxMineConcurrency, ceiling, got)
+	}
+}
+
+// A panic inside MineSession (e.g. the embedder panicking on a pathological input)
+// must NOT crash the worker: mineSessionSafe converts it into a mining error so the
+// session is logged and left pending, and sibling goroutines finish cleanly.
+func TestMineSessionSafeRecoversPanic(t *testing.T) {
+	s := newStore(t)
+	w := drainWorker(s, func(context.Context, string, string, string) (string, error) {
+		panic("boom in the model exec")
+	})
+	capture(t, s, "boom", "user", "turn")
+	m, err := w.mineSessionSafe(context.Background(), "boom")
+	if err == nil {
+		t.Fatal("a panic in mining must surface as an error, not crash")
+	}
+	if m == nil || m.Session != "boom" {
+		t.Fatalf("recovered result must carry the session id for attribution, got %+v", m)
+	}
+	// And the whole Drain must survive a panicking session, committing nothing for it.
+	pending := func() []string { return []string{"boom"} }
+	n := w.Drain(context.Background(), DrainOpts{Conc: 2, Pending: pending})
+	if n != 1 {
+		t.Fatalf("panicking session should be attempted-and-reaped once, got n=%d", n)
+	}
+	if obs, _ := s.ReadObservations(""); len(obs) != 0 {
+		t.Fatalf("panicking session must write no observations, got %d", len(obs))
 	}
 }
 
