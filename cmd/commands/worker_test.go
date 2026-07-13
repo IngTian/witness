@@ -31,6 +31,107 @@ func TestRunWorkerReportsSkippedWhenLockHeld(t *testing.T) {
 	}
 }
 
+// TestRunDistillLoopReviewOnlyThenArrivalTerminatesAndDrains reproduces issue #49
+// C1: a review-only worker (nothing pending at start) that has L0 land DURING the
+// review must (a) NOT spin forever and (b) actually drain the late arrival. Before
+// the fix, the drain was gated on a stale one-time hasPending=false, so the loop
+// saw the new session via hasUnattempted and looped, but never drained it — an
+// unbounded spin. The fix gates the drain on a fresh pending() each pass.
+func TestRunDistillLoopReviewOnlyThenArrivalTerminatesAndDrains(t *testing.T) {
+	// pending() reports empty until the (single) review runs, then reports one
+	// session — modeling capture landing L0 while the worker was reviewing.
+	reviewed := false
+	pendingCalls := 0
+	pending := func() []string {
+		pendingCalls++
+		if reviewed {
+			return []string{"late-sess"}
+		}
+		return nil
+	}
+	drained := 0
+	attempted := map[string]bool{}
+	drainAll := func() {
+		for _, s := range pending() {
+			attempted[s] = true // mark drained so the arrival isn't re-offered forever
+			drained++
+		}
+	}
+	reviewRuns := 0
+	// A hard iteration cap converts the pre-fix infinite spin into a test failure
+	// rather than a hang.
+	iters := 0
+	stopRequested := func() bool {
+		iters++
+		if iters > 1000 {
+			t.Fatal("runDistillLoop did not terminate — review-only livelock (issue #49 C1) regressed")
+		}
+		return false
+	}
+	runDistillLoop(distillLoopDeps{
+		stopRequested: stopRequested,
+		pending:       pending,
+		drainAll:      drainAll,
+		reviewDue:     func() bool { return !reviewed }, // due exactly once
+		runReview:     func() { reviewRuns++; reviewed = true },
+		ensureMiner:   func() bool { return true },
+		hasUnattempted: func(p []string) bool {
+			for _, s := range p {
+				if !attempted[s] {
+					return true
+				}
+			}
+			return false
+		},
+	})
+	if reviewRuns != 1 {
+		t.Fatalf("review should run exactly once, ran %d", reviewRuns)
+	}
+	if drained != 1 {
+		t.Fatalf("the session that arrived during review must be drained; drained=%d", drained)
+	}
+	_ = pendingCalls
+}
+
+// TestRunDistillLoopStopsWhenEmbedderUnavailable: if fresh work arrives but the
+// embedder can't be built (ensureMiner=false), the loop must stop rather than spin
+// on work it can never attempt.
+func TestRunDistillLoopStopsWhenEmbedderUnavailable(t *testing.T) {
+	iters := 0
+	runDistillLoop(distillLoopDeps{
+		stopRequested: func() bool {
+			iters++
+			if iters > 1000 {
+				t.Fatal("loop did not terminate when the embedder is unavailable")
+			}
+			return false
+		},
+		pending:        func() []string { return []string{"sess"} },
+		drainAll:       func() {}, // no miner → drainAll is a no-op
+		reviewDue:      func() bool { return false },
+		runReview:      func() { t.Fatal("review should not run") },
+		ensureMiner:    func() bool { return false }, // embedder unavailable
+		hasUnattempted: func([]string) bool { return true },
+	})
+}
+
+// TestRunDistillLoopHonorsStopRequest: a stop request breaks the loop immediately.
+func TestRunDistillLoopHonorsStopRequest(t *testing.T) {
+	drained := 0
+	runDistillLoop(distillLoopDeps{
+		stopRequested:  func() bool { return true },
+		pending:        func() []string { return []string{"sess"} },
+		drainAll:       func() { drained++ },
+		reviewDue:      func() bool { return true },
+		runReview:      func() { t.Fatal("review should not run under a stop request") },
+		ensureMiner:    func() bool { return true },
+		hasUnattempted: func([]string) bool { return true },
+	})
+	if drained != 0 {
+		t.Fatalf("no drain should happen under an immediate stop; drained=%d", drained)
+	}
+}
+
 func TestParseSessionTimeRangeAcceptsRelativeAgeAndDate(t *testing.T) {
 	now := time.Date(2026, 7, 12, 15, 0, 0, 0, time.UTC)
 	r, err := parseSessionTimeRange("7d", "2026-07-12", now)
