@@ -102,6 +102,14 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 // --all is deliberately incompatible with --since/--until: a bounded backfill is
 // just `distill start --since ...` (which the background path already supports);
 // "all" means all.
+//
+// Contract (issue #22 review #2): a foreground backfill MUST NOT report success
+// when the backlog was not actually drained. runWorkerInRange swallows an
+// embedder-load failure and per-session mine/commit failures (they log or back off
+// rather than propagate), so a nil error alone does NOT mean "done". We therefore
+// inspect the END STATE after the drain and fail (nonzero exit) if any pending or
+// backed-off work remains — so automation can detect an incomplete migration
+// regardless of which internal layer failed.
 func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 	if strings.TrimSpace(sinceValue) != "" || strings.TrimSpace(untilValue) != "" {
 		return fmt.Errorf("--all drains the entire backlog and cannot be combined with --since/--until")
@@ -116,6 +124,19 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 	if !ran {
 		fmt.Println("another distillation worker is already running; it is draining the backlog — nothing to do")
 		return nil
+	}
+
+	// Verify the end state: nothing should be pending or backed off after a full
+	// foreground drain. If work remains, mining did not complete (missing model,
+	// provider outage, or commit error) — surface it as a failure, not "complete".
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	stats := st.Stats()
+	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
+		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log; a missing embedding model or provider failure is the usual cause)", stats.Pending, stats.BackedOff)
 	}
 	if !quiet {
 		fmt.Println("backfill complete")

@@ -186,50 +186,82 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	// tried once total, so a persistent failure can't spin the loop or re-mine
 	// forever. We only loop again while a pass makes progress (commits > 0).
 	stopRequested := func() bool { return st.MetaString("worker_stop_requested") == "1" }
-	if hasPending && !stopRequested() {
-		emb, err := embed.New()
-		if err != nil {
-			slog.Error("embedder", "err", err) // can't mine this run; fall through to review
-		} else {
-			conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
-			w := &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn}
-			attempted := map[string]bool{}
-			for !stopRequested() {
-				n := w.Drain(ctx, distill.DrainOpts{
-					Conc:      conc,
-					Pending:   pending,
-					Stop:      stopRequested,
-					Attempted: attempted,
-					OnCommit: func(session string) {
-						_ = st.SetMetaString("worker_current", session)
-						_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
-					},
-				})
-				// No progress this pass → either the queue is empty or every remaining
-				// session was already attempted this run (stuck/backed-off). Stop; a
-				// backed-off session is re-driven later by scheduleRetryWakeup, and any
-				// row that landed in the tail window is caught by the session-start
-				// backlog sweep on the next launch.
-				if n == 0 {
-					break
-				}
+
+	// Lazily build the parallel-mining worker the first time there is mining to do;
+	// the embedder (~448MB) loads once and is shared across drain passes. nil if the
+	// model isn't ready (review-only work can still proceed).
+	var miner *distill.Worker
+	attempted := map[string]bool{}
+	getMiner := func() *distill.Worker {
+		if miner == nil {
+			emb, err := embed.New()
+			if err != nil {
+				slog.Error("embedder", "err", err) // can't mine this run; review may still run
+				return nil
+			}
+			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn}
+		}
+		return miner
+	}
+	conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
+	drainAll := func() {
+		w := getMiner()
+		if w == nil {
+			return
+		}
+		for !stopRequested() {
+			n := w.Drain(ctx, distill.DrainOpts{
+				Conc:      conc,
+				Pending:   pending,
+				Stop:      stopRequested,
+				Attempted: attempted,
+				OnCommit: func(session string) {
+					_ = st.SetMetaString("worker_current", session)
+					_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+				},
+			})
+			if n == 0 {
+				break
 			}
 		}
 	}
 
-	// Review folded into the same single-flight pass (serialized under the lock,
-	// so concurrent reviews can't clobber the facets). Due on the session-count
-	// cap OR accumulated poignancy — whichever first. A successful review updates
-	// the facets, so we regenerate the L4 narrative profile right after ("on
-	// profile change"). The profile is purely derived: summarizing is best-effort
-	// (log and move on), never failing the worker or blocking distillation.
-	if st.MetaString("worker_stop_requested") != "1" && st.ReviewDue(cfg) {
-		r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
-		if err := r.Run(ctx, time.Now()); err != nil {
-			slog.Error("review", "err", err)
-		} else {
-			slog.Info("review complete")
-			regenerateProfile(ctx, st, cfg, runFn)
+	// Drain, then review, then RE-CHECK before releasing the lock (issue #22 review
+	// #1). `capture` writes L0 without WorkerLock, so work can arrive while we hold
+	// it — during the (possibly multi-second) review, or in the drain→unlock tail.
+	// A trigger fired in that window no-ops because we hold the lock, and nothing
+	// else re-drives ordinary L0 (scheduleRetryWakeup only covers backed-off
+	// sessions). So we loop: drain everything, review if due, then look again — if
+	// new pending work appeared, go around. The (session,RawCount) attempted key
+	// lets a resumed/regrown session re-enter while a stuck one stays filtered, so
+	// this outer loop terminates. Only a row landing in the sub-millisecond gap
+	// between the final pending() check and unlock falls to the next-launch sweep.
+	for iter := 0; !stopRequested(); iter++ {
+		if hasPending || iter == 0 {
+			drainAll()
+		}
+		// Review folded into the same single-flight pass (serialized under the lock,
+		// so concurrent reviews can't clobber the facets). Due on the session-count
+		// cap OR accumulated poignancy — whichever first. A successful review updates
+		// the facets, so we regenerate the L4 narrative profile right after ("on
+		// profile change"). The profile is purely derived: summarizing is best-effort
+		// (log and move on), never failing the worker or blocking distillation.
+		if !stopRequested() && st.ReviewDue(cfg) {
+			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
+			if err := r.Run(ctx, time.Now()); err != nil {
+				slog.Error("review", "err", err)
+			} else {
+				slog.Info("review complete")
+				regenerateProfile(ctx, st, cfg, runFn)
+			}
+		}
+		// Re-check under the lock: did capture land NEW distillable work while we
+		// drained/reviewed? "New" means a session whose (session,RawCount) attempt key
+		// we have NOT already tried this run — so a still-pending STUCK/backed-off
+		// session (same key, already attempted) does NOT re-trigger the loop (that
+		// would spin forever), but a fresh or regrown session does. If none, let go.
+		if miner == nil || !miner.HasUnattempted(pending(), attempted) {
+			break
 		}
 	}
 	return true, nil

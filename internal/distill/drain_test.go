@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
@@ -292,5 +295,97 @@ func TestDrainRecheckLoopTerminatesOnStuckSession(t *testing.T) {
 	}
 	if m.calls != 1 {
 		t.Fatalf("stuck session mined %d times, want exactly 1 (shared Attempted set)", m.calls)
+	}
+}
+
+// Review #1 regression: a session that was ALREADY drained this run but then gains
+// new turns (resumed session) must be RE-ATTEMPTED, not filtered out by the shared
+// attempted set. The (session, RawCount) key is what makes this work — the old
+// session-only key would silently skip the new delta and it would sit undistilled
+// until an unrelated later trigger. Uses a lying pending() that always returns the
+// session, so ONLY the attempt-key logic decides re-attempt vs skip.
+func TestDrainReattemptsRegrownSession(t *testing.T) {
+	s := newStore(t)
+	w := drainWorker(s, (&safeMiner{}).run)
+	capture(t, s, "S", "user", "turn-1")
+
+	grown := false
+	pending := func() []string { return []string{"S"} } // always claims S is pending
+
+	attempted := map[string]bool{}
+	passes := 0
+	for passes < 20 {
+		n := w.Drain(context.Background(), DrainOpts{Conc: 1, Pending: pending, Attempted: attempted})
+		passes++
+		if n == 0 {
+			if !grown {
+				// After the first drain settles, the session is resumed with a new turn.
+				capture(t, s, "S", "user", "turn-2")
+				grown = true
+				continue // the regrown session must be picked up on the next pass
+			}
+			break
+		}
+	}
+	if passes >= 20 {
+		t.Fatal("loop did not terminate")
+	}
+	// Both deltas distilled: watermark advanced to all 2 raw turns.
+	if got := s.DistilledCount("S"); got != 2 {
+		t.Fatalf("regrown session watermark = %d, want 2 (both turns distilled)", got)
+	}
+}
+
+// Review #3: the parallel path must be a TRUE rolling window — a slow oldest job
+// must NOT idle the other slots. We make session "slow0" block on a gate while the
+// rest finish fast; if the window were FIFO-blocked on the oldest, the fast jobs
+// couldn't complete until slow0 released. We assert the fast jobs finish while
+// slow0 is still blocked.
+func TestDrainRollingWindowDoesNotHeadOfLineBlock(t *testing.T) {
+	s := newStore(t)
+	gate := make(chan struct{})
+	var fastDone int32
+	miner := func(_ context.Context, _, _, input string) (string, error) {
+		if strings.Contains(input, "slow0") {
+			<-gate // block the oldest submission until the fast ones have run
+		} else {
+			atomic.AddInt32(&fastDone, 1)
+		}
+		arr := []minedObs{{Dimension: "thinking", Observation: "obs:" + input, Evidence: "e", Poignancy: 3}}
+		b, _ := json.Marshal(arr)
+		return string(b), nil
+	}
+	w := drainWorker(s, miner)
+
+	const n = 4
+	ids := []string{"slow0", "b1", "c2", "d3"} // slow0 submitted first (the oldest)
+	for _, id := range ids {
+		capture(t, s, id, "user", "turn-"+id)
+	}
+	pending := func() []string { return append([]string(nil), ids...) }
+
+	go func() {
+		// Wait until the 3 fast jobs have all run despite slow0 blocking, then release.
+		for atomic.LoadInt32(&fastDone) < n-1 {
+			runtime.Gosched()
+		}
+		close(gate)
+	}()
+
+	done := make(chan int, 1)
+	go func() {
+		done <- w.Drain(context.Background(), DrainOpts{Conc: n, Pending: pending})
+	}()
+
+	select {
+	case got := <-done:
+		if got != n {
+			t.Fatalf("committed %d, want %d", got, n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain hung — rolling window head-of-line blocked on the slow oldest job")
+	}
+	if obs, _ := s.ReadObservations(""); len(obs) != n {
+		t.Fatalf("expected %d observations, got %d", n, len(obs))
 	}
 }

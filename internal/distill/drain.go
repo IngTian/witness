@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strconv"
 	"sync"
 
 	"github.com/IngTian/witness/internal/store"
@@ -47,10 +48,16 @@ func EffectiveConcurrency(want int, concurrentRunSafe bool) int {
 //
 // Attempted, if non-nil, is the attempt-once set to use instead of a fresh internal
 // one. The caller passes the SAME map across several Drain calls in one worker run
-// (the re-check loop that keeps working when capture lands new L0 mid-drain): a
-// session attempted in an earlier Drain is never re-attempted, so a stuck session
-// (commit/read error that never backs off) can't spin the outer loop forever. When
-// nil, Drain makes its own — a single Drain is still attempt-once by itself.
+// (the re-check loop that keeps working when capture lands new L0 mid-drain). The
+// key is (session, watermark) — NOT session alone — so:
+//   - a STUCK session (commit/read error that never advances the watermark) keeps
+//     the same key every pass → attempted once → can't spin the loop or re-mine
+//     forever;
+//   - a REGROWN session (distilled, then resumed and gained new turns → its
+//     watermark moved) gets a NEW key → is re-attempted, so mid-run arrivals for an
+//     already-drained session are not silently filtered out (issue #22 review #1).
+//
+// When nil, Drain makes its own — a single Drain is still attempt-once by itself.
 type DrainOpts struct {
 	Conc      int
 	Pending   func() []string
@@ -58,6 +65,37 @@ type DrainOpts struct {
 	Max       int
 	OnCommit  func(session string)
 	Attempted map[string]bool
+}
+
+// attemptKey identifies a (session, raw-turn-count) attempt — the question it
+// answers is "has NEW raw work arrived for this session since I last attempted it
+// this run?". Keying on RawCount (not the distilled watermark) is what makes the
+// re-check loop both safe and complete:
+//   - a STUCK session (mine/commit fails → RawCount unchanged) keeps the same key
+//     → attempted once → no spin/re-mine, the loop terminates;
+//   - a REGROWN session (resumed, gained turns → RawCount increased) gets a NEW key
+//     → re-attempted, so mid-run arrivals for an already-drained session are caught
+//     (issue #22 review #1). A successful distill is NOT itself a reason to
+//     re-attempt — the real pending() query drops a fully-distilled session — so
+//     the advancing distilled-count must NOT be in the key.
+func (w *Worker) attemptKey(session string) string {
+	return session + "\x00" + strconv.Itoa(w.Store.RawCount(session))
+}
+
+// HasUnattempted reports whether any of the given sessions has NOT yet been
+// attempted (by its current (session,RawCount) key) in the run tracked by
+// attempted. The worker's outer drain→review→re-check loop uses this to decide
+// whether NEW work arrived while it held the lock — a still-pending stuck/backed-off
+// session (same key, already attempted) returns false so the loop can't spin, while
+// a fresh or regrown session returns true. Keeps the attempt-key format private to
+// the engine (issue #22 review #1).
+func (w *Worker) HasUnattempted(sessions []string, attempted map[string]bool) bool {
+	for _, s := range sessions {
+		if !attempted[w.attemptKey(s)] {
+			return true
+		}
+	}
+	return false
 }
 
 // Drain is the engine's session-drain loop. It preserves drainQueueLimit's contract
@@ -98,11 +136,12 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 
 	for {
 		// Build the next batch of not-yet-attempted pending sessions. Re-scanning
-		// here (not per-session) is what picks up mid-drain arrivals; `attempted`
-		// guarantees a stuck session is tried once, so the loop always terminates.
+		// here (not per-session) is what picks up mid-drain arrivals; the
+		// (session,watermark)-keyed `attempted` set guarantees a stuck session is
+		// tried once (so the loop always terminates) while a regrown session re-enters.
 		var batch []string
 		for _, s := range opts.Pending() {
-			if !attempted[s] {
+			if !attempted[w.attemptKey(s)] {
 				batch = append(batch, s)
 			}
 		}
@@ -117,7 +156,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 				if stop() || reached(processed) {
 					return processed
 				}
-				attempted[s] = true
+				attempted[w.attemptKey(s)] = true
 				m, err := w.mineSessionSafe(ctx, s)
 				w.commitResult(m, err, &existing, opts.OnCommit)
 				processed++
@@ -125,58 +164,94 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 			continue
 		}
 
-		// Parallel path: a rolling window of up to `conc` miners; commit the oldest
-		// in-flight job whenever the window is full, so at most `conc` MineSession
-		// calls run at once and memory/provider pressure stays bounded.
-		type minedResult struct {
-			m   *SessionMining
-			err error
-		}
-		var inflight []chan minedResult
-		sem := make(chan struct{}, conc)
-		var wg sync.WaitGroup
-
-		reap := func() {
-			ch := inflight[0]
-			inflight = inflight[1:]
-			r := <-ch
-			w.commitResult(r.m, r.err, &existing, opts.OnCommit)
-			processed++
-		}
-
-		for _, s := range batch {
-			// Never keep more than Max sessions committed-or-in-flight, so the budget
-			// isn't overshot by the parallel window.
-			if stop() || reached(processed+len(inflight)) {
-				break
-			}
-			attempted[s] = true
-			ch := make(chan minedResult, 1)
-			inflight = append(inflight, ch)
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(session string) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				m, err := w.mineSessionSafe(ctx, session)
-				ch <- minedResult{m: m, err: err}
-			}(s)
-			if len(inflight) >= conc {
-				reap()
-			}
-		}
-		// Commit everything we already dispatched — finishing in-flight work even on
-		// stop/budget, since that mining is already paid for and must not be dropped.
-		for len(inflight) > 0 {
-			reap()
-		}
-		wg.Wait()
+		// Parallel path: a TRUE rolling window. Up to `conc` miners run at once; a
+		// miner slot frees the moment ANY map finishes (not just the oldest), so one
+		// slow session no longer idles the other slots or stalls new dispatch (issue
+		// #22 review #3). Commits still happen in submission order: each result
+		// carries its submission index, out-of-order arrivals are buffered, and the
+		// reducer commits the contiguous prefix. Only the single Drain goroutine
+		// commits, so the store stays single-writer and `existing` race-free.
+		processed += w.drainWindow(ctx, batch, conc, &existing, attempted, stop, reached, processed, opts.OnCommit)
 
 		if stop() || reached(processed) {
 			return processed
 		}
 		// else loop and re-scan pending for arrivals.
 	}
+}
+
+// drainWindow runs one batch through the rolling-window MAP + ordered REDUCE and
+// returns how many sessions it committed. See Drain for the invariants.
+func (w *Worker) drainWindow(ctx context.Context, batch []string, conc int, existing *[]store.Observation, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string)) int {
+	type minedResult struct {
+		idx int // submission index, for ordered commit
+		m   *SessionMining
+		err error
+	}
+	done := make(chan minedResult, conc) // any miner signals completion here
+	sem := make(chan struct{}, conc)     // caps concurrent miners
+	var wg sync.WaitGroup
+
+	pending := make(map[int]minedResult) // out-of-order results awaiting their turn
+	nextToCommit := 0                    // submission index of the next commit
+	committed := 0
+
+	// commitReady flushes every buffered result that is now contiguous from
+	// nextToCommit, in submission order — so commits are deterministic even though
+	// maps finish out of order.
+	commitReady := func() {
+		for {
+			r, ok := pending[nextToCommit]
+			if !ok {
+				return
+			}
+			delete(pending, nextToCommit)
+			nextToCommit++
+			w.commitResult(r.m, r.err, existing, onCommit)
+			committed++
+		}
+	}
+
+	dispatched := 0
+	for _, s := range batch {
+		// Budget/stop: don't launch more than allowed committed-or-in-flight.
+		if stop() || reached(processedBase+dispatched) {
+			break
+		}
+		attempted[w.attemptKey(s)] = true
+		sem <- struct{}{} // blocks until a slot frees — THIS is the rolling window
+		// Drain any completions that arrived while we waited for a slot, freeing
+		// their buffer + advancing commits promptly.
+		for {
+			select {
+			case r := <-done:
+				pending[r.idx] = r
+				commitReady()
+				continue
+			default:
+			}
+			break
+		}
+		idx := dispatched
+		dispatched++
+		wg.Add(1)
+		go func(idx int, session string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			m, err := w.mineSessionSafe(ctx, session)
+			done <- minedResult{idx: idx, m: m, err: err}
+		}(idx, s)
+	}
+
+	// Drain remaining completions until every dispatched job has committed —
+	// finishing in-flight work even on stop/budget (its mining is already paid for).
+	for committed < dispatched {
+		r := <-done
+		pending[r.idx] = r
+		commitReady()
+	}
+	wg.Wait()
+	return committed
 }
 
 // mineSessionSafe wraps MineSession with a recover barrier so a panic in one
