@@ -38,7 +38,7 @@ func TestNoStructuredOutput(t *testing.T) {
 
 	ctx := context.Background()
 	clientT, serverT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(st, fakeEmbedder{}).Connect(ctx, serverT, nil)
+	ss, err := newServer(st, fakeEmbedder{}, "v9.9.9-test").Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,4 +124,39 @@ func TestNormalizeRecordClampsAndDefaults(t *testing.T) {
 	if ok.Poignancy != 7 {
 		t.Errorf("valid poignancy should be preserved, got %d", ok.Poignancy)
 	}
+}
+
+// The MCP initialize handshake must report the build version passed in from cmd
+// (previously hardcoded "0.1.0"), and fall back to "dev" when empty. Registries
+// and clients read this ServerInfo.Version (issue #45).
+func TestServerReportsInjectedVersion(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	check := func(in, want string) {
+		t.Helper()
+		ctx := context.Background()
+		clientT, serverT := mcpsdk.NewInMemoryTransports()
+		ss, err := newServer(st, fakeEmbedder{}, in).Connect(ctx, serverT, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ss.Close()
+		client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "t", Version: "0"}, nil)
+		cs, err := client.Connect(ctx, clientT, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cs.Close()
+		got := cs.InitializeResult().ServerInfo.Version
+		if got != want {
+			t.Errorf("version=%q: handshake reported %q, want %q", in, got, want)
+		}
+	}
+	check("v1.2.3", "v1.2.3")
+	check("", "dev") // empty (bare `go build`) → dev, never a stale hardcoded number
 }

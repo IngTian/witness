@@ -1,7 +1,7 @@
 {
   "name": "witness",
-  "description": "A quiet observer that tracks how you grow and change as you work — your thinking, workstyle, habits, and the patterns you climb out of. Coach-oriented, not clone. Person-centric growth archive with pluggable per-repo lenses.",
-  "version": "0.1.0",
+  "description": "Local memory & self-improvement engine for Claude Code: quietly captures your coding sessions and distills how your thinking, habits, and knowledge evolve over time — a person-centric growth archive (file/PDF support coming), with provenance. A pure capture-and-serve tool (not a coach), served over MCP + plain files, with global shareable lenses.",
+  "version": "0.2.2",
   "author": {
     "name": "Zeying Tian",
     "url": "https://github.com/IngTian"
@@ -17,10 +17,18 @@
   },
   "keywords": [
     "memory",
+    "ai-memory",
+    "agent-memory",
+    "second-brain",
+    "self-improvement",
+    "personal-knowledge-management",
+    "knowledge-distillation",
     "growth",
-    "personal",
-    "observability",
+    "reflection",
+    "provenance",
+    "claude-code",
     "mcp",
-    "coaching"
+    "mcp-server",
+    "model-context-protocol"
   ]
 }

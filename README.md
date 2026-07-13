@@ -5,6 +5,13 @@
 ![Single binary](https://img.shields.io/badge/single%20binary-CGO__ENABLED%3D0-informational)
 ![Runtimes](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20OpenCode-8A2BE2)
 
+**witness is a local memory & self-improvement engine for Claude Code and OpenCode.** It captures
+your coding sessions and distills how your patterns, habits, and knowledge **evolve over time** —
+a person-centric growth archive with provenance, served over an MCP server + plain files, as a
+single pure-Go binary. Think *second brain / AI memory* for how you think and grow, not project
+memory for what your code did. *(File & PDF ingestion is on the way — see the roadmap — so the
+same engine can distill how knowledge evolves across your notes and documents too.)*
+
 > *"Aah, you were at my side, all along.*  
 > *My true mentor...*  
 > *My guiding moonlight..."*  
