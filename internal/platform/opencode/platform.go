@@ -2,6 +2,8 @@ package opencode
 
 import (
 	"context"
+	"os"
+	"strconv"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/platform/claude"
@@ -43,7 +45,28 @@ func (Platform) SessionPrefix() string { return SessionPrefix }
 // (whose command/file outputs were filtered upstream but whose remaining text is
 // still large) does not force a single oversized model call.
 func (Platform) RenderInputs(raw []store.RawRecord) []string {
-	return renderChunks(raw, chunkMaxChars, chunkOverlapRecords)
+	return renderChunks(raw, effectiveChunkMaxChars(), chunkOverlapRecords)
+}
+
+// effectiveChunkMaxChars lets an operator sweep the chunk budget via
+// WITNESS_CHUNK_MAX_CHARS (experiment knob for issue #57 — measuring how chunk
+// size trades off against arc-preservation). Unset/invalid falls back to the
+// compiled default. A value <= 0 means "never chunk" (renderChunks sends whole).
+func effectiveChunkMaxChars() int {
+	if v, ok := lookupChunkEnv(); ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return chunkMaxChars
+}
+
+// lookupChunkEnv returns the raw WITNESS_CHUNK_MAX_CHARS value and whether it was
+// set to a non-empty string (an empty value is treated as unset). Split out so a
+// test can detect an ambient override and skip the "unset" assertion.
+func lookupChunkEnv() (string, bool) {
+	v := os.Getenv("WITNESS_CHUNK_MAX_CHARS")
+	return v, v != ""
 }
 
 // Import reconciles OpenCode's SQLite store into L0. It takes the sync lock INSIDE
