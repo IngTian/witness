@@ -60,7 +60,11 @@ func TestLensRegistry(t *testing.T) {
 // that keeps default's NAME protected even though the engine treats every lens's
 // BEHAVIOR identically.
 func TestReservedLensNamesRejected(t *testing.T) {
-	for _, name := range []string{"unified", "default"} {
+	// Include case variants: on case-insensitive filesystems (macOS/Windows) a
+	// "Default" lens's profile file (Default.md) collides with the built-in's
+	// (default.md), so the guard must fold case and reject these too — else the
+	// registered lens's summary silently clobbers the built-in's.
+	for _, name := range []string{"unified", "default", "Default", "UNIFIED", "Unified"} {
 		t.Run(name, func(t *testing.T) {
 			s := tempStore(t)
 			src := filepath.Join(t.TempDir(), "src.md")
@@ -83,6 +87,12 @@ func TestReservedLensNamesRejected(t *testing.T) {
 	}
 	if !ReservedLensName("default") || !ReservedLensName("unified") {
 		t.Fatal("ReservedLensName must report both reserved names")
+	}
+	// Case-folded: mixed/upper-case variants of the reserved names are also reserved.
+	for _, v := range []string{"Default", "DEFAULT", "Unified", "UNIFIED", "uNiFiEd"} {
+		if !ReservedLensName(v) {
+			t.Fatalf("ReservedLensName(%q) must be true (case-insensitive)", v)
+		}
 	}
 	if ReservedLensName("math") {
 		t.Fatal("ReservedLensName must not reserve an ordinary lens name")

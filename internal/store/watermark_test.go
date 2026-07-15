@@ -212,6 +212,36 @@ func TestBackoffIgnoresInactiveLens(t *testing.T) {
 	}
 }
 
+// LensBackedOff is the per-lens mining gate: true only while a pair's next_attempt
+// is set AND still in the future. It defaults open (absent/elapsed/empty → false) so
+// it can never permanently park a lens.
+func TestLensBackedOff(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+
+	// No progress row → not backed off.
+	if s.LensBackedOff("s", LensDefault, now) {
+		t.Fatal("a pair with no progress row must not be backed off")
+	}
+	// Future next_attempt → backed off until it elapses.
+	_ = s.SetNextAttempt("s", LensDefault, now.Add(5*time.Minute))
+	if !s.LensBackedOff("s", LensDefault, now) {
+		t.Fatal("a pair with a future next_attempt must be backed off")
+	}
+	if s.LensBackedOff("s", LensDefault, now.Add(6*time.Minute)) {
+		t.Fatal("once next_attempt has elapsed the pair is no longer backed off")
+	}
+	// A different lens on the same session is independent.
+	if s.LensBackedOff("s", "codereview", now) {
+		t.Fatal("a sibling lens must not inherit another lens's backoff")
+	}
+	// ResetRetry clears next_attempt → open again.
+	s.ResetRetry("s", LensDefault)
+	if s.LensBackedOff("s", LensDefault, now) {
+		t.Fatal("ResetRetry must clear the backoff")
+	}
+}
+
 func TestNextBackoffAttempt(t *testing.T) {
 	s := tempStore(t)
 	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)

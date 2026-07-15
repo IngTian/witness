@@ -8,6 +8,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/lens"
 	_ "github.com/IngTian/witness/internal/platform/claude" // register the default platform for ForSession
@@ -243,6 +244,20 @@ func capture(t *testing.T, s *store.Store, session, role, text string) {
 	}
 }
 
+// elapseBackoff simulates the per-lens retry-backoff window passing — i.e. the
+// production scheduleRetryWakeup timer firing — by moving the pair's next_attempt
+// into the past WITHOUT touching its retry counter. MineSession now honors the
+// per-lens backoff (issue #55): a backed-off lens is skipped even when a healthy
+// sibling keeps the session offered. So a test that drives retries or recovery via
+// back-to-back Process calls must advance past each backoff the way real elapsed time
+// would, or the lens is (correctly) skipped and never re-attempted within the test.
+func elapseBackoff(t *testing.T, s *store.Store, session, lens string) {
+	t.Helper()
+	if err := s.SetNextAttempt(session, lens, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("elapseBackoff: %v", err)
+	}
+}
+
 // Staged active observations are re-read by DrainStaged on every pass (it does
 // not clear the file). Across a resume re-distill, the same active obs must not be
 // appended twice — obsID dedup against L1 guards this.
@@ -360,6 +375,7 @@ func TestMineFailureNeverDropsDelta(t *testing.T) {
 		if err := w.Process(context.Background(), "s"); err != nil {
 			t.Fatalf("Process attempt %d: %v", i, err)
 		}
+		elapseBackoff(t, s, "s", "default") // let the retry window pass so the next pass re-mines
 	}
 
 	if got := s.DistilledCount("s", "default"); got != 0 {
@@ -429,6 +445,7 @@ func TestMineRecoversAfterFailure(t *testing.T) {
 		if err := w.Process(context.Background(), "s"); err != nil {
 			t.Fatalf("Process attempt %d: %v", i, err)
 		}
+		elapseBackoff(t, s, "s", "default") // let each retry window pass so the next pass re-mines
 	}
 
 	if obs, _ := s.ReadObservations(""); len(obs) != 1 {
@@ -553,7 +570,10 @@ func TestPerLensFailureIsolation(t *testing.T) {
 	}
 
 	// A recovery pass (codereview no longer fails) catches it up without touching
-	// default (already at watermark).
+	// default (already at watermark). Let codereview's backoff window elapse first —
+	// MineSession now skips a still-backed-off lens, so real recovery only happens
+	// once the retry timer would have fired.
+	elapseBackoff(t, s, "s", "codereview")
 	r2 := &lensRouter{}
 	if err := twoLensWorker(s, r2).Process(context.Background(), "s"); err != nil {
 		t.Fatalf("recovery Process: %v", err)
@@ -563,6 +583,60 @@ func TestPerLensFailureIsolation(t *testing.T) {
 	}
 	if got := s.DistilledCount("s", "codereview"); got != 2 {
 		t.Fatalf("codereview must catch up on recovery, got %d", got)
+	}
+}
+
+// #55 backoff-parity: a lens that is currently backed off (its own next_attempt is
+// in the future) must NOT be re-mined just because a HEALTHY sibling lens keeps the
+// session in the pending queue. The offer gate is session-granular, so an actively-
+// capturing session stays pending while `default` is behind; the mining loop must
+// still honor codereview's per-lens backoff and skip it — else the failing lens is
+// hammered on every drain, defeating the backoff.
+func TestBackedOffLensSkippedWhileSiblingMines(t *testing.T) {
+	s := newStore(t)
+	capture(t, s, "s", "user", "alpha")
+	capture(t, s, "s", "assistant", "reply")
+
+	// Pass 1: codereview fails → backs off (next_attempt in the future); default succeeds.
+	r1 := &lensRouter{failPrompt: "mine-codereview"}
+	if err := twoLensWorker(s, r1).Process(context.Background(), "s"); err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	if got := s.DistilledCount("s", "default"); got != 2 {
+		t.Fatalf("default should advance to 2 in pass 1, got %d", got)
+	}
+	if got := s.RetryCount("s", "codereview"); got != 1 {
+		t.Fatalf("codereview should count 1 retry after its failure, got %d", got)
+	}
+	if !s.LensBackedOff("s", "codereview", time.Now()) {
+		t.Fatal("codereview must be backed off after a failure")
+	}
+
+	// New turns arrive (live capture) → default is behind again, so the session is
+	// re-offered — but codereview is still inside its backoff window.
+	capture(t, s, "s", "user", "beta")
+	capture(t, s, "s", "assistant", "reply-beta")
+
+	// Pass 2: default mines the new delta; codereview must be SKIPPED (still backed off),
+	// so it is neither re-mined nor does its retry counter climb.
+	r2 := &lensRouter{failPrompt: "mine-codereview"}
+	if err := twoLensWorker(s, r2).Process(context.Background(), "s"); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	if n := len(r2.inputsByPrompt["mine-codereview"]); n != 0 {
+		t.Fatalf("backed-off codereview must NOT be re-mined while its sibling drains, got %d call(s)", n)
+	}
+	if n := len(r2.inputsByPrompt["mine-default"]); n != 1 {
+		t.Fatalf("healthy default must mine its new delta once, got %d", n)
+	}
+	if got := s.DistilledCount("s", "default"); got != 4 {
+		t.Fatalf("default should advance to 4 in pass 2, got %d", got)
+	}
+	if got := s.RetryCount("s", "codereview"); got != 1 {
+		t.Fatalf("skipped codereview's retry counter must stay 1 (not re-hit), got %d", got)
+	}
+	if got := s.DistilledCount("s", "codereview"); got != 0 {
+		t.Fatalf("skipped codereview's watermark must stay 0, got %d", got)
 	}
 }
 

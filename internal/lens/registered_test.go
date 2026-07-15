@@ -36,7 +36,10 @@ func TestLoadRegistered(t *testing.T) {
 // EnableLens guard the registry NAME, but only the resolved header name is known
 // here, so this is where the impersonation is caught.
 func TestLoadRegisteredRejectsReservedHeaderName(t *testing.T) {
-	for _, reserved := range []string{"default", "unified"} {
+	// Case variants too: the reserved-name check folds case (a "Default" profile file
+	// collides with the built-in's on case-insensitive filesystems), so a header that
+	// resolves to a case-variant of a reserved name must also be rejected at load.
+	for _, reserved := range []string{"default", "unified", "Default", "UNIFIED"} {
 		t.Run(reserved, func(t *testing.T) {
 			dir := t.TempDir()
 			// Registered under an innocent dir name "foo", but the header claims a

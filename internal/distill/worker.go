@@ -161,9 +161,23 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 	// delta stays pending and retries while healthy sibling lenses still commit and
 	// advance. (A parse-miss is NOT a failure — mine() returns it as a quiet session,
 	// so the lens still advances past an uneventful delta.)
+	now := time.Now()
 	anyDelta := false
 	for _, ln := range w.Lenses {
 		done := w.Store.DistilledCount(session, ln.Name)
+		// Honor this lens's OWN retry backoff even though the SESSION was offered. The
+		// pending query is session-granular (it offers a session while ANY active lens
+		// is behind-and-ready), so a healthy sibling lens keeps the session in the queue
+		// while THIS lens is still sleeping out a failure. Without this gate MineSession
+		// would re-run a backed-off lens's `claude -p` on every sibling-driven drain —
+		// hammering exactly the failing lens the backoff exists to spare (issue #55; the
+		// offer gate is per-lens-aware, the mining loop must be too). Skip it ENTIRELY:
+		// CommitMining only advances lenses present in m.Lenses, so a skipped lens keeps
+		// its watermark AND its next_attempt untouched and retries once the backoff
+		// elapses and the pending query re-offers the session for it.
+		if total > done && w.Store.LensBackedOff(session, ln.Name, now) {
+			continue
+		}
 		lm := LensMining{Lens: ln.Name, Done: done}
 		if total > done {
 			anyDelta = true
