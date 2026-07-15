@@ -201,11 +201,13 @@ func cmdObservationRecord(session, lensName, dimension, observation, evidence st
 		return err
 	}
 	if !inserted {
-		if st.StagedCount(session) >= maxCLIStagedPerSession {
-			return fmt.Errorf("too many staged observations for session %s (limit %d)", session, maxCLIStagedPerSession)
+		// Duplicate vs. cap: check the dedup case first so a re-recorded obs at the
+		// cap isn't mislabeled a quota error (mirrors the MCP path).
+		if st.StagedExists(session, o.ID) {
+			fmt.Printf("already recorded (%s/%s) id=%s\n", lensName, dimension, o.ID)
+			return nil
 		}
-		fmt.Printf("already recorded (%s/%s) id=%s\n", lensName, dimension, o.ID)
-		return nil
+		return fmt.Errorf("too many staged observations for session %s (limit %d)", session, maxCLIStagedPerSession)
 	}
 	spawnDetached("worker")
 	fmt.Printf("recorded (%s/%s) id=%s\n", lensName, dimension, o.ID)

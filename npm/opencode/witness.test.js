@@ -58,7 +58,11 @@ async function loadPlugin(harness) {
   )
   await writeFile(
     path.join(dir, "bin", "platform.js"),
-    `export function platformWitnessBin() { return globalThis.__witnessTestHarness.platformBin?.() || "" }`,
+    `
+      export function platformWitnessBin() { return globalThis.__witnessTestHarness.platformBin?.() || "" }
+      export function platformPackage() { return globalThis.__witnessTestHarness.platformPackage?.() ?? "" }
+      export function supportedPlatforms() { return "macOS Apple Silicon (darwin/arm64) and Linux x86-64 (linux/x64)" }
+    `,
   )
 
   const previous = {
@@ -96,6 +100,7 @@ test("npm plugin stays inactive when no supported platform binary is available",
     shim: "",
     witnessBin: "",
     platformBin: () => "",
+    platformPackage: () => "", // unsupported platform: no matching optional package
     modelDir: () => "/assets/e5-small",
     modelReady() {
       throw new Error("unsupported platforms should not inspect the model")
@@ -107,6 +112,9 @@ test("npm plugin stays inactive when no supported platform binary is available",
       throw new Error("unsupported platforms should not spawn witness")
     },
   }
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (msg) => warnings.push(String(msg))
   const { mod, restore } = await loadPlugin(harness)
   try {
     const hooks = await mod.default()
@@ -115,7 +123,41 @@ test("npm plugin stays inactive when no supported platform binary is available",
     await hooks.event({ event: { type: "session.idle" } })
     await hooks.dispose()
     assert.deepEqual(input, {})
+    // #54 I4: the inert plugin must warn once (not silently do nothing), so the
+    // user does not falsely believe witness is capturing.
+    assert.equal(warnings.length, 1, "inert plugin should warn exactly once at init")
+    assert.match(warnings[0], /plugin inactive/)
+    assert.match(warnings[0], /unsupported platform/)
+    assert.match(warnings[0], /nothing is being captured/)
   } finally {
+    console.warn = realWarn
+    await restore()
+  }
+})
+
+test("npm plugin does not warn when a binary is available", async () => {
+  const events = []
+  const harness = {
+    modelDir: () => "/assets/e5-small",
+    modelReady: () => true,
+    startModelDownload() {
+      throw new Error("download should not start when model is ready")
+    },
+    spawn(args) {
+      events.push(`spawn:${args.join(" ")}`)
+      return makeProc(`proc-${events.length}`, events, { autoExit: 0 })
+    },
+  }
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (msg) => warnings.push(String(msg))
+  const { mod, restore } = await loadPlugin(harness)
+  try {
+    const hooks = await mod.default()
+    await hooks.dispose()
+    assert.equal(warnings.length, 0, "an active plugin (WITNESS_BIN present) must stay silent")
+  } finally {
+    console.warn = realWarn
     await restore()
   }
 })

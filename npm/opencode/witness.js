@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { modelDir, modelReady, promptsDir, startModelDownload } from "./bin/model.js"
-import { platformWitnessBin } from "./bin/platform.js"
+import { platformPackage, platformWitnessBin, supportedPlatforms } from "./bin/platform.js"
 
 const PACKAGE_ROOT = fileURLToPath(new URL(".", import.meta.url))
 const DOWNLOAD_RETRY_MAX = 6
@@ -11,6 +11,25 @@ const IMPORT_GRACE_MS = 5000
 
 const platformBin = platformWitnessBin()
 const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || (existsSync(platformBin) ? platformBin : "")
+
+// Warn ONCE, non-throwing, when the plugin is genuinely inert: no witness binary
+// resolved for this platform/arch. Every hook below early-returns on an empty
+// WITNESS_BIN, so without this a user on darwin-x64 / linux-arm64 / win32 (no
+// matching optional package) sees the plugin load with zero diagnostic and
+// believes witness is capturing when nothing runs (issue #54 I4). Mirrors the
+// clear message the CLI (bin/witness.js) already prints. Suppressed inside the
+// worker subprocess (WITNESS_WORKER=1) so the recursion guard stays quiet, and a
+// warn must never throw — capture/plugin code must never break an OpenCode session.
+function warnIfInert() {
+  if (WITNESS_BIN || process.env.WITNESS_WORKER === "1") return
+  try {
+    const pkg = platformPackage()
+    const reason = pkg ? `optional package ${pkg} is not installed` : `unsupported platform ${process.platform}/${process.arch}`
+    console.warn(`witness: plugin inactive — ${reason}; nothing is being captured. Supported platforms: ${supportedPlatforms()}`)
+  } catch {
+    // Never let a diagnostic break the session.
+  }
+}
 
 function spawnWitness(args, payload) {
   if (!WITNESS_BIN || process.env.WITNESS_WORKER === "1") return
@@ -54,6 +73,7 @@ function waitForExit(child) {
 }
 
 const plugin = async () => {
+  warnIfInert()
   let disposed = false
   let disposing = false
   let disposePromise = null

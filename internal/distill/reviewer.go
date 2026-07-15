@@ -3,6 +3,7 @@ package distill
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
@@ -48,13 +49,27 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	byKey := indexFacets(facets)
 	nowStr := now.UTC().Format(time.RFC3339)
 
+	// Track lenses whose review call failed. A read error or an empty obs set is
+	// benign (skip), but a FAILED review call (timeout, model error, unparseable
+	// reply) must not be swallowed: silently continuing here — then stamping the
+	// review and returning nil below — advanced the watermark past a lens that was
+	// never actually reviewed and reported "review complete" with zero facets
+	// synthesized (issue #16 C1). We still apply the lenses that DID succeed (no
+	// data loss; their facets are real), but we refuse to stamp and surface the
+	// failure so the review stays due and is retried on the next pass.
+	var failed []string
 	for _, ln := range r.Lenses {
 		obs, err := r.Store.ReadObservationsLite(ln.Name) // reviewer slims embeddings off anyway
-		if err != nil || len(obs) == 0 {
+		if err != nil {
+			failed = append(failed, ln.Name)
+			continue
+		}
+		if len(obs) == 0 {
 			continue
 		}
 		reviewed, err := r.reviewLens(ctx, ln, obs, facets)
 		if err != nil {
+			failed = append(failed, ln.Name)
 			continue
 		}
 		for _, rf := range reviewed {
@@ -65,6 +80,22 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	merged := collectFacets(byKey)
 	if err := r.Store.WriteFacets(merged); err != nil {
 		return fmt.Errorf("write L2: %w", err)
+	}
+	// Only advance the review watermark if EVERY active lens was reviewed. A partial
+	// stamp would mark the failed lens as reviewed-through-now and let it drift
+	// unreviewed until the next unrelated trigger.
+	//
+	// Tradeoff (bounded, accepted): not stamping keeps ReviewDue() true, so under a
+	// PERSISTENTLY-failing lens with concurrent live capture the worker re-reviews
+	// the healthy lenses each drain iteration (O(new-sessions) redundant full reviews
+	// vs ~1). This terminates when capture stops — it is NOT the #49-C1 unbounded
+	// no-progress spin (loop continuation gates on unattempted mining work, never on
+	// ReviewDue). Correctly never reporting silent success outweighs the redundant
+	// cost; the clean fix is per-lens review state (#55), which lets a healthy lens
+	// stamp independently of a failing one.
+	if len(failed) > 0 {
+		return fmt.Errorf("review failed for %d lens(es): %s (partial facets written; review left pending)",
+			len(failed), strings.Join(failed, ", "))
 	}
 	return r.Store.StampReview()
 }

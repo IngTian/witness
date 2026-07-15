@@ -2,7 +2,7 @@
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { readFileSync, unlinkSync } from "node:fs"
-import { downloadModel, modelReady, startModelDownload } from "./model.js"
+import { downloadModel, modelReady, restampLockOwner, startModelDownload } from "./model.js"
 
 const args = process.argv.slice(2)
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
@@ -33,6 +33,13 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     process.exit(128 + (signal === "SIGINT" ? 2 : 15))
   })
 }
+
+// The lock was stamped with the PARENT's pid by startModelDownload's acquireLock;
+// re-stamp it with OUR pid (this downloader child) so a hard kill of the child is
+// detected by lockOwnerDead's liveness probe instead of wedging for 12h behind a
+// still-alive parent (issue #54 I5). Token-guarded and best-effort. Also covers the
+// detached --background launcher, which routes through --foreground.
+if (args[0] === "--foreground" && lock && lockToken) restampLockOwner(lock, lockToken)
 
 const parentPID = Number(process.env.WITNESS_MODEL_PARENT_PID || "0")
 if (parentPID > 0) {

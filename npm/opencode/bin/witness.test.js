@@ -23,12 +23,19 @@ async function runCLI(argv, harness) {
     exit: process.exit,
     error: console.error,
     harness: globalThis.__witnessCliHarness,
+    witnessBin: process.env.WITNESS_BIN,
   }
   const errors = []
   const sentinel = new Error("exit")
   sentinel.name = "WitnessCLIExit"
 
   globalThis.__witnessCliHarness = harness
+  // Hermetic env: bin/witness.js now reads WITNESS_BIN (the CLI override, #54
+  // minor). Clear any ambient value so a developer dogfooding with WITNESS_BIN set
+  // doesn't flip tests that assume the platform-resolved binary; a test that wants
+  // the override sets it explicitly (and this snapshot restores it after).
+  if (Object.hasOwn(harness, "witnessBin")) process.env.WITNESS_BIN = harness.witnessBin
+  else delete process.env.WITNESS_BIN
   process.argv = argv
   process.exit = (code) => {
     sentinel.code = code
@@ -49,6 +56,8 @@ async function runCLI(argv, harness) {
     process.exit = previous.exit
     console.error = previous.error
     globalThis.__witnessCliHarness = previous.harness
+    if (previous.witnessBin === undefined) delete process.env.WITNESS_BIN
+    else process.env.WITNESS_BIN = previous.witnessBin
     await rm(dir, { recursive: true, force: true })
   }
 }
@@ -134,6 +143,35 @@ test("npm CLI still forwards non-install commands to the bundled binary with wit
   assert.equal(spawnCalls[0].options.env.WITNESS_PROMPTS, "/pkg/prompts")
   assert.equal(spawnCalls[0].options.env.WITNESS_RUNNER, "opencode")
   assert.equal(spawnCalls[0].options.env.WITNESS_NPM_PACKAGE, "1")
+})
+
+test("npm CLI honors an explicit WITNESS_BIN override even when no platform package resolves", async () => {
+  const spawnCalls = []
+  const harness = {
+    spawnCalls,
+    witnessBin: "/custom/dev/witness", // runCLI sets process.env.WITNESS_BIN to this
+    fs: {
+      existsSync() {
+        throw new Error("an explicit WITNESS_BIN must be used verbatim, not existsSync-gated")
+      },
+    },
+    model: { modelDir: () => "/assets/e5-small", promptsDir: () => "/pkg/prompts" },
+    platform: {
+      platformPackage: () => "", // unsupported platform: no bundled binary
+      platformWitnessBin: () => "",
+      supportedPlatforms: () => "supported",
+    },
+    childProcess: {
+      spawnSync(bin, args, options) {
+        spawnCalls.push({ bin, args, options })
+        return { status: 0 }
+      },
+    },
+  }
+  const result = await runCLI([process.execPath, "witness", "doctor"], harness)
+  assert.equal(result.code, 0)
+  assert.equal(spawnCalls.length, 1)
+  assert.equal(spawnCalls[0].bin, "/custom/dev/witness")
 })
 
 test("npm CLI reports the supported matrix when no platform package is available", async () => {

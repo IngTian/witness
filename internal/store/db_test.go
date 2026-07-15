@@ -191,6 +191,24 @@ func TestStageObservationCap(t *testing.T) {
 	if ok, _ := s.StageObservationCapped(Observation{ID: "d", Session: "other", Observation: "d"}, 2); !ok {
 		t.Fatalf("a different session should still accept observations")
 	}
+
+	// StagedExists disambiguates the two not-inserted reasons (issue #54 minor):
+	// a DUPLICATE at the cap must be distinguishable from hitting the cap with a
+	// genuinely new obs, so the caller can report "already recorded" not "too many".
+	if !s.StagedExists("s", "a") {
+		t.Fatalf("StagedExists should see an already-staged obs")
+	}
+	if s.StagedExists("s", "c") {
+		t.Fatalf("StagedExists must be false for an obs rejected by the cap (never staged)")
+	}
+	// Re-staging an existing id while the session is AT the cap: still not inserted,
+	// but it's a dedup, not a quota breach — StagedExists tells them apart.
+	if ok, _ := s.StageObservationCapped(Observation{ID: "a", Session: "s", Observation: "a"}, 2); ok {
+		t.Fatalf("re-staging a duplicate must not insert")
+	}
+	if !s.StagedExists("s", "a") {
+		t.Fatalf("the duplicate id is still present (a dedup, not a cap error)")
+	}
 }
 
 func TestObservationDedupIdempotent(t *testing.T) {
@@ -354,6 +372,13 @@ func TestPruneSessionsBefore(t *testing.T) {
 	// A recent session that must survive.
 	_ = s.AppendRaw(RawRecord{Session: "new", Seq: 0, TS: "2030-06-01T00:00:00Z", Role: "user", Text: "c"})
 
+	// Per-session state parked in `meta` under "<namespace>:<session>" (as opencode's
+	// import bookkeeping does) must be reclaimed with the session — otherwise it leaks
+	// (issue #54 minor). A global meta row and another session's row must survive.
+	_ = s.SetMetaString("opencode_import_keys:old", `["k1","k2"]`)
+	_ = s.SetMetaString("opencode_import_keys:new", `["k3"]`)
+	_ = s.SetMetaString("review_ts", "2024-01-01T00:00:00Z")
+
 	cutoff := "2025-01-01T00:00:00Z"
 
 	// Preview matches what the prune will do.
@@ -388,6 +413,18 @@ func TestPruneSessionsBefore(t *testing.T) {
 	// The recent session is untouched.
 	if raw, _ := s.ReadRaw("new"); len(raw) != 1 {
 		t.Fatalf("recent session must survive, got %d records", len(raw))
+	}
+
+	// The pruned session's per-session meta row is reclaimed; the surviving
+	// session's row and the global row are untouched.
+	if got := s.MetaString("opencode_import_keys:old"); got != "" {
+		t.Fatalf("pruned session's per-session meta row should be removed, got %q", got)
+	}
+	if got := s.MetaString("opencode_import_keys:new"); got != `["k3"]` {
+		t.Fatalf("surviving session's meta row must be kept, got %q", got)
+	}
+	if got := s.MetaString("review_ts"); got != "2024-01-01T00:00:00Z" {
+		t.Fatalf("a global meta row must never be touched by prune, got %q", got)
 	}
 }
 
