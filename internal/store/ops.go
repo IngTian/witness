@@ -493,9 +493,9 @@ func (s *Store) PendingSessionsUpdatedBetween(lenses []string, since, until time
 	// finds that specific (session,lens) watermark.
 	lensValues, lensArgs := lensValuesClause(lenses)
 	args := []any{}
-	args = append(args, lensArgs...) // raw-branch CROSS JOIN
-	args = append(args, now)         // raw-branch backoff gate
-	args = append(args, now)         // staged-branch backoff gate (staged is lens-agnostic; default lens)
+	args = append(args, lensArgs...) // active_lens CTE (referenced by both branches)
+	args = append(args, now)         // raw-branch per-lens backoff gate
+	args = append(args, now)         // staged-branch per-lens backoff gate
 	args = append(args, sinceValue, sinceValue, untilValue, untilValue)
 	rows, err := s.db.Query(
 		`WITH active_lens(lens) AS (`+lensValues+`),
@@ -507,9 +507,17 @@ func (s *Store) PendingSessionsUpdatedBetween(lenses []string, since, until time
 		    WHERE l.c > COALESCE(p.distilled, 0)
 		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
 		   UNION
+		   -- Staged (active-obs) branch: a session with staged obs needs a drain even
+		   -- if no lens has new raw turns. Gate it per-lens against the SAME active_lens
+		   -- set (not a hardcoded 'default'): offer the session if ANY active lens's
+		   -- (session,lens) pair is ready — no progress row, or its backoff has elapsed.
+		   -- Draining staged obs is lens-independent, so "some active lens can run" is
+		   -- the right, lens-equal readiness condition; if EVERY active lens is backed
+		   -- off there is nothing to do this pass, matching the raw branch.
 		   SELECT st.session
 		     FROM staged st
-		     LEFT JOIN progress p ON p.session = st.session AND p.lens = 'default'
+		     CROSS JOIN active_lens x
+		     LEFT JOIN progress p ON p.session = st.session AND p.lens = x.lens
 		    WHERE COALESCE(st.session, '') != ''
 		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
 		  ), updates AS (
@@ -600,7 +608,8 @@ func (s *Store) Stats(lenses []string) Stats {
 		   UNION
 		   SELECT st.session
 		     FROM staged st
-		     LEFT JOIN progress p ON p.session = st.session AND p.lens = 'default'
+		     CROSS JOIN active_lens x
+		     LEFT JOIN progress p ON p.session = st.session AND p.lens = x.lens
 		    WHERE COALESCE(st.session, '') != ''
 		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, args...).Scan(&st.Pending)
 	// BackedOff counts distinct sessions with an ACTIVE lens currently sleeping on a

@@ -140,6 +140,30 @@ func TestPendingIsPerLens(t *testing.T) {
 	}
 }
 
+// The staged-obs pending branch must be lens-EQUAL, not hardcoded to default: a
+// session with staged obs whose default lens is backed off is still offered if ANY
+// other active lens is ready (draining staged obs is lens-independent). Guards the
+// fix that replaced `p.lens = 'default'` with a CROSS JOIN over the active set.
+func TestStagedPendingIsLensEqual(t *testing.T) {
+	s := tempStore(t)
+	if err := s.StageObservation(Observation{ID: "obs_a", Session: "a", Observation: "x"}); err != nil {
+		t.Fatalf("StageObservation: %v", err)
+	}
+	// default is backed off far out; codereview has no progress row (ready).
+	_ = s.SetNextAttempt("a", LensDefault, time.Now().Add(time.Hour))
+
+	// With default + codereview active, the staged session is still offered (via the
+	// healthy codereview lens) even though default is parked.
+	if p, _ := s.PendingSessions([]string{LensDefault, "codereview"}); !slices.Contains(p, "a") {
+		t.Fatalf("staged session must be offered while a non-default lens is ready: %v", p)
+	}
+	// If default is the ONLY active lens and it's backed off, the staged session is
+	// correctly parked (nothing can run this pass).
+	if p, _ := s.PendingSessions([]string{LensDefault}); slices.Contains(p, "a") {
+		t.Fatalf("staged session must be parked when the only active lens is backed off: %v", p)
+	}
+}
+
 // A backoff on ONE lens must not park the session for a healthy sibling lens: the
 // pair-scoped next_attempt only hides that (session,lens) pair.
 func TestPerLensBackoffIsolation(t *testing.T) {
