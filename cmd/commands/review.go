@@ -30,7 +30,28 @@ func cmdReview() error {
 	}
 	defer st.Close()
 	defer setupLogging(st)()
+	ran, err := forceReview(st)
+	if err != nil {
+		return err
+	}
+	if !ran {
+		fmt.Println("a distillation worker is already running; skipping review (it reviews as part of that drain)")
+		return nil
+	}
+	fmt.Println("review complete; profile regenerated")
+	return nil
+}
 
+// forceReview runs an L2 review from the current observations, updates facets, and
+// regenerates the L4 profiles — the unconditional review the `witness review` command
+// exposes, factored out so `lens rebuild` can reuse it (a rebuild DELETES a lens's
+// facets, so it must force a review afterwards to rebuild them from the freshly
+// re-mined observations; the periodic ReviewDue triggers may not fire on a small
+// archive, which would otherwise leave that lens with empty facets + a stale profile
+// while the command reported success). Returns whether the review ran (false = another
+// worker holds the lock, so it will review as part of its own drain). The caller owns
+// st and setupLogging; this only borrows st for the review pass.
+func forceReview(st *store.Store) (bool, error) {
 	// Hold the SAME single-consumer lock the worker uses. A runner's Close() runs the
 	// OpenCode self-traffic cleanup sweep (agent='witness-distill' AND time_created <
 	// now+1s), which is process-global; without this lock a foreground `review`
@@ -39,8 +60,7 @@ func cmdReview() error {
 	// runner + sweep single-flight, which is what the +1s window assumes.
 	unlock, ok := st.WorkerLock()
 	if !ok {
-		fmt.Println("a distillation worker is already running; skipping review (it reviews as part of that drain)")
-		return nil
+		return false, nil
 	}
 	defer unlock()
 
@@ -48,7 +68,7 @@ func cmdReview() error {
 	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ctx := context.Background()
 	// Same runner lifecycle as the worker: Open before use, Close after. Close runs
@@ -57,18 +77,17 @@ func cmdReview() error {
 	// into the pending queue. Routing through the Runner makes that impossible.
 	runner, err := platform.RunnerFor(st, cfg)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := runner.Open(ctx); err != nil {
-		return err
+		return false, err
 	}
 	defer runner.Close()
 	runFn := distill.RunnerMine(runner)
 	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
 	if err := r.Run(ctx, time.Now()); err != nil {
-		return err
+		return false, err
 	}
 	regenerateProfile(ctx, st, cfg, runFn)
-	fmt.Println("review complete; profile regenerated")
-	return nil
+	return true, nil
 }

@@ -387,6 +387,29 @@ func (s *Store) SetNextAttempt(session, lens string, at time.Time) error {
 	return err
 }
 
+// LensBackedOff reports whether a (session, lens) pair is currently sleeping out a
+// retry backoff (its next_attempt is set and still in the future at `now`). This is
+// the SAME per-lens gate PendingSessions applies, exposed for the MINING path so the
+// worker can skip a backed-off lens even when a healthy sibling lens re-offers the
+// session (issue #55: the offer is session-granular, so a session stays pending as
+// long as ANY active lens is behind — but each lens's OWN backoff must still park it,
+// or a failing lens gets re-hammered on every sibling-driven drain). An empty/absent
+// next_attempt reads as not-backed-off, so this is cheap and defaults open.
+func (s *Store) LensBackedOff(session, lens string, now time.Time) bool {
+	var next string
+	_ = s.db.QueryRow(
+		`SELECT COALESCE(next_attempt, '') FROM progress WHERE session = ? AND lens = ?`,
+		session, lens).Scan(&next)
+	if next == "" {
+		return false
+	}
+	at, err := time.Parse(time.RFC3339, next)
+	if err != nil {
+		return false // an unparseable stamp must not permanently park a lens
+	}
+	return at.After(now)
+}
+
 // ResetLensWatermark drops every progress row for one lens, so all sessions read
 // as pending FOR THAT LENS on the next drain — the enable-a-new-lens backfill path
 // (issue #55). Other lenses' watermarks (rows with a different lens) are untouched,
