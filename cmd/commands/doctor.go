@@ -38,6 +38,11 @@ func cmdDoctor(asJSON bool) error {
 	// not the misleading template default "claude". Matches what the worker uses.
 	cfg.Runner = st.ResolveRunner(cfg)
 	stat := st.Stats(activeLensNames(st))
+	// prose_drift surfacing (#57): a monotonic count of passes where a lens's model
+	// returned no JSON array (likely a below-floor triage model), with the last event's
+	// when/lens so the count reads as dated rather than "broken forever".
+	driftTotal := st.DriftTotal()
+	driftLastTS, driftLastLens := st.DriftLast()
 
 	// Resolve the runner once; doctor asks IT how it runs and whether its models are
 	// valid — no branching on the runner name. runnerCmd is the runner's own
@@ -107,13 +112,16 @@ func cmdDoctor(asJSON bool) error {
 			},
 			ModelCheck: modelStatus,
 			Archive: doctorArchiveJSON{
-				Sessions:     stat.Sessions,
-				RawRecords:   stat.RawRecords,
-				Observations: stat.Observations,
-				Facets:       stat.Facets,
-				Pending:      stat.Pending,
-				BackedOff:    stat.BackedOff,
-				LastReview:   lastReview,
+				Sessions:      stat.Sessions,
+				RawRecords:    stat.RawRecords,
+				Observations:  stat.Observations,
+				Facets:        stat.Facets,
+				Pending:       stat.Pending,
+				BackedOff:     stat.BackedOff,
+				DriftEvents:   driftTotal,
+				DriftLast:     driftLastTS,
+				DriftLastLens: driftLastLens,
+				LastReview:    lastReview,
 			},
 			Embedder: doctorEmbedderJSON{
 				Status:      embedderStatus,
@@ -132,7 +140,7 @@ func cmdDoctor(asJSON bool) error {
 	overall := okGlyph()
 	if embErr != nil {
 		overall = badGlyph()
-	} else if stat.BackedOff > 0 || deferredErr != nil {
+	} else if stat.BackedOff > 0 || driftTotal > 0 || deferredErr != nil {
 		overall = warnGlyph()
 	}
 	fmt.Printf("%s  %s\n", overall, bold("witness doctor"))
@@ -158,6 +166,21 @@ func cmdDoctor(asJSON bool) error {
 	}
 	fmt.Printf("    %s review_every=%d  poignancy=%d\n", label("review"), cfg.ReviewEvery, cfg.ReviewPoignancy)
 	fmt.Printf("    %s enabled=%t  mine_concurrency=%d\n", label("auto"), cfg.AutoDistill, cfg.MineConcurrency)
+	// Surface prose_drift: the triage model returned no JSON observation array on some
+	// pass, so those sessions distilled to zero observations even though they may not be
+	// uneventful. The remedy is a stronger triage model then a re-mine (#57).
+	if driftTotal > 0 {
+		last := "—"
+		if driftLastTS != "" {
+			last = driftLastTS
+			if driftLastLens != "" {
+				last += ", lens=" + driftLastLens
+			}
+		}
+		fmt.Printf("    %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
+			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; raise triage_model, then `witness lens rebuild <lens>`",
+			driftTotal, last)))
+	}
 	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
 	fmt.Printf("    %s edit %s  %s\n", dim("↳ set models:  "), st.ConfigPath(), dim("(triage_model, distill_model)"))
 
@@ -227,13 +250,16 @@ type doctorConfigJSON struct {
 }
 
 type doctorArchiveJSON struct {
-	Sessions     int    `json:"sessions"`
-	RawRecords   int    `json:"raw_records"`
-	Observations int    `json:"observations"`
-	Facets       int    `json:"facets"`
-	Pending      int    `json:"pending"`
-	BackedOff    int    `json:"backed_off"`
-	LastReview   string `json:"last_review"`
+	Sessions      int    `json:"sessions"`
+	RawRecords    int    `json:"raw_records"`
+	Observations  int    `json:"observations"`
+	Facets        int    `json:"facets"`
+	Pending       int    `json:"pending"`
+	BackedOff     int    `json:"backed_off"`
+	DriftEvents   int    `json:"drift_events"` // not omitempty: 0 is a meaningful "no drift"
+	DriftLast     string `json:"drift_last,omitempty"`
+	DriftLastLens string `json:"drift_last_lens,omitempty"`
+	LastReview    string `json:"last_review"`
 }
 
 type doctorEmbedderJSON struct {

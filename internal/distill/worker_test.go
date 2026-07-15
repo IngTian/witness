@@ -408,13 +408,16 @@ func TestFailureBacksOffFromQueue(t *testing.T) {
 	}
 }
 
-// A quiet session (model legitimately returns no parseable observations) is NOT
-// a failure: the watermark advances with zero obs, no retry, no backoff.
-func TestQuietSessionAdvancesWithoutRetry(t *testing.T) {
+// prose_drift (#57): a reply with NO JSON array (the model conversed instead of
+// extracting — the below-model-floor failure). The watermark still advances with zero
+// obs, no retry, no backoff (data outcome identical to the pre-#57 silent behavior) —
+// but it is now COUNTED and surfaced as drift, so a too-weak model is visible rather
+// than masquerading as an uneventful session.
+func TestProseDriftAdvancesAndIsCounted(t *testing.T) {
 	s := newStore(t)
 	w := testWorker(s, &fakeMiner{})
 	w.Run = func(_ context.Context, _, _, _ string) (string, error) {
-		return "Nothing notable happened this session.", nil // prose, no JSON array
+		return "Nothing notable happened this session.", nil // prose, NO JSON array → drift
 	}
 	capture(t, s, "s", "user", "alpha")
 	capture(t, s, "s", "assistant", "reply")
@@ -422,13 +425,133 @@ func TestQuietSessionAdvancesWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := s.DistilledCount("s", "default"); got != 2 {
-		t.Fatalf("quiet session should advance watermark to 2, got %d", got)
+		t.Fatalf("drift should still advance the watermark to 2, got %d", got)
 	}
 	if got := s.RetryCount("s", "default"); got != 0 {
-		t.Fatalf("quiet session is not a failure; retry should be 0, got %d", got)
+		t.Fatalf("drift is NOT a transport failure; retry should be 0, got %d", got)
 	}
 	if obs, _ := s.ReadObservations(""); len(obs) != 0 {
-		t.Fatalf("quiet session yields no observations, got %d", len(obs))
+		t.Fatalf("drift yields no observations, got %d", len(obs))
+	}
+	// The distinguishing assertion: drift is counted (not silently bucketed as quiet).
+	if got := s.DriftTotal(); got != 1 {
+		t.Fatalf("drift must be recorded: DriftTotal=%d, want 1", got)
+	}
+	if ts, lens := s.DriftLast(); ts == "" || lens != "default" {
+		t.Fatalf("drift last stamp wrong: ts=%q lens=%q", ts, lens)
+	}
+	// Drift must NOT back the session off — the queue stays drainable (no wedge).
+	if p, _ := s.PendingSessions([]string{"default"}); contains(p, "s") {
+		t.Fatalf("a drifted (advanced) session must not be pending: %v", p)
+	}
+}
+
+// A genuinely quiet session: the model returned an explicit empty array "[]" (it did
+// the task and found nothing). This is LEGIT quiet — advances the watermark, and must
+// NOT be counted as drift (that distinction is the whole point of #57).
+func TestLegitEmptyArrayIsNotDrift(t *testing.T) {
+	s := newStore(t)
+	w := testWorker(s, &fakeMiner{})
+	w.Run = func(_ context.Context, _, _, _ string) (string, error) {
+		return "[]", nil // explicit empty array → legit quiet, NOT drift
+	}
+	capture(t, s, "s", "user", "alpha")
+	capture(t, s, "s", "assistant", "reply")
+	if err := w.Process(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DistilledCount("s", "default"); got != 2 {
+		t.Fatalf("legit-quiet session should advance watermark to 2, got %d", got)
+	}
+	if got := s.RetryCount("s", "default"); got != 0 {
+		t.Fatalf("legit-quiet is not a failure; retry should be 0, got %d", got)
+	}
+	if obs, _ := s.ReadObservations(""); len(obs) != 0 {
+		t.Fatalf("legit-quiet yields no observations, got %d", len(obs))
+	}
+	if got := s.DriftTotal(); got != 0 {
+		t.Fatalf("an explicit [] must NOT count as drift: DriftTotal=%d, want 0", got)
+	}
+}
+
+// Multi-input aggregation (#57): a session that renders to several chunks where SOME
+// chunk yields observations must NOT be flagged as drift, even if another chunk
+// prose-drifts. Drift is a lens-produced-NOTHING signal, so one good chunk wins. This
+// is the rule that stops a long OpenCode (chunked) session from false-positiving.
+func TestPartialChunkSuccessIsNotDrift(t *testing.T) {
+	s := newStore(t)
+	defer opencodeplatform.SetChunkMaxCharsForTest(18)() // force multiple chunks
+	// A long OpenCode session so RenderInputs produces >1 chunk.
+	capture(t, s, "opencode:s", "user", "alpha alpha alpha")
+	capture(t, s, "opencode:s", "assistant", "beta beta beta")
+	capture(t, s, "opencode:s", "user", "gamma gamma gamma")
+
+	// First chunk mined returns a real array; every later chunk prose-drifts.
+	calls := 0
+	w := testWorker(s, &fakeMiner{})
+	w.Run = func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		if calls == 1 {
+			return `[{"dimension":"thinking","observation":"did a thing","evidence":"e","poignancy":4}]`, nil
+		}
+		return "Just chatting, no structured output here.", nil // prose → drift on this chunk
+	}
+	if err := w.Process(context.Background(), "opencode:s"); err != nil {
+		t.Fatal(err)
+	}
+	if calls < 2 {
+		t.Fatalf("test needs a multi-chunk session; got %d mine calls", calls)
+	}
+	// The lens produced an observation (chunk 1), so it is NOT drift despite later
+	// chunks drifting — the whole point of the producedObs && !drift aggregation.
+	if got := s.DriftTotal(); got != 0 {
+		t.Fatalf("a partially-successful chunked session must not count as drift, got DriftTotal=%d", got)
+	}
+	if obs, _ := s.ReadObservations("default"); len(obs) != 1 {
+		t.Fatalf("the one good chunk's observation must be written, got %d", len(obs))
+	}
+}
+
+// Per-lens drift isolation (#57): on a 2-lens session where default mines fine and an
+// arc lens drifts, default's obs are written, BOTH watermarks advance, and drift is
+// counted for the drifting lens only.
+func TestDriftIsPerLens(t *testing.T) {
+	s := newStore(t)
+	capture(t, s, "s", "user", "alpha")
+	capture(t, s, "s", "assistant", "reply")
+
+	// default (prompt "mine-default") extracts; codereview (prompt "mine-codereview") drifts.
+	w := twoLensWorker(s, &lensRouter{}) // router replaced below
+	w.Run = func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "mine-codereview" {
+			return "Sure, here's a summary of what you did today...", nil // prose → drift
+		}
+		return `[{"dimension":"thinking","observation":"o","evidence":"e","poignancy":3}]`, nil
+	}
+	if err := w.Process(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DistilledCount("s", "default"); got != 2 {
+		t.Fatalf("default must advance to 2, got %d", got)
+	}
+	if got := s.DistilledCount("s", "codereview"); got != 2 {
+		t.Fatalf("drifted codereview still advances to 2, got %d", got)
+	}
+	if obs, _ := s.ReadObservations("default"); len(obs) != 1 {
+		t.Fatalf("default's observation must be written, got %d", len(obs))
+	}
+	if obs, _ := s.ReadObservations("codereview"); len(obs) != 0 {
+		t.Fatalf("drifted codereview writes nothing, got %d", len(obs))
+	}
+	if got := s.DriftTotal(); got != 1 {
+		t.Fatalf("exactly the drifting lens is counted: DriftTotal=%d, want 1", got)
+	}
+	if _, lens := s.DriftLast(); lens != "codereview" {
+		t.Fatalf("drift attributed to wrong lens: %q", lens)
+	}
+	// Neither lens backed off — a mixed drift+success session stays fully drained.
+	if p, _ := s.PendingSessions([]string{"default", "codereview"}); contains(p, "s") {
+		t.Fatalf("session must be fully drained (no drift-induced backoff): %v", p)
 	}
 }
 
