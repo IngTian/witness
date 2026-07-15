@@ -158,10 +158,10 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	// The watermark must NOT have been advanced to the stale count of 2 over the
 	// replaced generation. Progress was reset by the replace-import (absent → 0), so
 	// the guard leaves it at 0 and the session stays fully pending.
-	if got := s.DistilledCount(sess); got != 0 {
+	if got := s.DistilledCount(sess, "default"); got != 0 {
 		t.Fatalf("watermark advanced to %d over a replaced generation; want 0 (session must re-mine)", got)
 	}
-	pending, _ := s.PendingSessions()
+	pending, _ := s.PendingSessions(nil)
 	found := false
 	for _, p := range pending {
 		if p == sess {
@@ -176,7 +176,7 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	if err := w.Process(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.DistilledCount(sess); got != 3 {
+	if got := s.DistilledCount(sess, "default"); got != 3 {
 		t.Fatalf("after re-mine, watermark = %d, want 3 (the new generation)", got)
 	}
 }
@@ -210,11 +210,11 @@ func TestCommitAdvancesWatermarkOnAppendOnlyPath(t *testing.T) {
 	if err := w.CommitMining(mining, &existing); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.DistilledCount(sess); got != 2 {
+	if got := s.DistilledCount(sess, "default"); got != 2 {
 		t.Fatalf("append-only watermark = %d, want 2 (the mined count advances cleanly)", got)
 	}
 	// The appended 3rd turn is past the watermark → still pending, as designed.
-	pending, _ := s.PendingSessions()
+	pending, _ := s.PendingSessions(nil)
 	found := false
 	for _, p := range pending {
 		if p == sess {
@@ -338,10 +338,10 @@ func TestMineFailureRetriesWithoutLoss(t *testing.T) {
 	if obs, _ := s.ReadObservations(""); len(obs) != 0 {
 		t.Fatalf("failed mine should write nothing, got %d obs", len(obs))
 	}
-	if got := s.DistilledCount("s"); got != 0 {
+	if got := s.DistilledCount("s", "default"); got != 0 {
 		t.Fatalf("watermark must NOT advance on failure, got %d", got)
 	}
-	if got := s.RetryCount("s"); got != 1 {
+	if got := s.RetryCount("s", "default"); got != 1 {
 		t.Fatalf("retry count should be 1, got %d", got)
 	}
 }
@@ -362,13 +362,13 @@ func TestMineFailureNeverDropsDelta(t *testing.T) {
 		}
 	}
 
-	if got := s.DistilledCount("s"); got != 0 {
+	if got := s.DistilledCount("s", "default"); got != 0 {
 		t.Fatalf("watermark must NEVER advance while mining fails, got %d", got)
 	}
 	if obs, _ := s.ReadObservations(""); len(obs) != 0 {
 		t.Fatalf("nothing should be written on persistent failure, got %d obs", len(obs))
 	}
-	if got := s.RetryCount("s"); got != 5 {
+	if got := s.RetryCount("s", "default"); got != 5 {
 		t.Fatalf("retry count should track every failure, got %d", got)
 	}
 }
@@ -384,7 +384,7 @@ func TestFailureBacksOffFromQueue(t *testing.T) {
 	if err := w.Process(context.Background(), "s"); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := s.PendingSessions()
+	p, _ := s.PendingSessions(nil)
 	for _, x := range p {
 		if x == "s" {
 			t.Fatalf("a backed-off session should be excluded from pending, got %v", p)
@@ -405,10 +405,10 @@ func TestQuietSessionAdvancesWithoutRetry(t *testing.T) {
 	if err := w.Process(context.Background(), "s"); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.DistilledCount("s"); got != 2 {
+	if got := s.DistilledCount("s", "default"); got != 2 {
 		t.Fatalf("quiet session should advance watermark to 2, got %d", got)
 	}
-	if got := s.RetryCount("s"); got != 0 {
+	if got := s.RetryCount("s", "default"); got != 0 {
 		t.Fatalf("quiet session is not a failure; retry should be 0, got %d", got)
 	}
 	if obs, _ := s.ReadObservations(""); len(obs) != 0 {
@@ -434,11 +434,135 @@ func TestMineRecoversAfterFailure(t *testing.T) {
 	if obs, _ := s.ReadObservations(""); len(obs) != 1 {
 		t.Fatalf("recovered run should write the observation, got %d", len(obs))
 	}
-	if got := s.DistilledCount("s"); got != 2 {
+	if got := s.DistilledCount("s", "default"); got != 2 {
 		t.Fatalf("watermark should advance after success, got %d", got)
 	}
-	if got := s.RetryCount("s"); got != 0 {
+	if got := s.RetryCount("s", "default"); got != 0 {
 		t.Fatalf("retry count should reset after success, got %d", got)
+	}
+}
+
+// lensRouter is a Run seam that dispatches by extract prompt: each lens's
+// ln.Extract string selects behavior, so a test can make ONE lens fail while
+// others succeed (per-lens failure isolation, issue #55).
+type lensRouter struct {
+	inputsByPrompt map[string][]string
+	failPrompt     string // the ln.Extract of the lens that should error
+}
+
+func (r *lensRouter) run(_ context.Context, _ string, prompt string, input string) (string, error) {
+	if r.inputsByPrompt == nil {
+		r.inputsByPrompt = map[string][]string{}
+	}
+	r.inputsByPrompt[prompt] = append(r.inputsByPrompt[prompt], input)
+	if prompt == r.failPrompt {
+		return "", fmt.Errorf("simulated failure for lens prompt %q", prompt)
+	}
+	arr := []minedObs{{Dimension: "thinking", Observation: "obs(" + prompt + "):" + input, Evidence: "e", Poignancy: 3}}
+	b, _ := json.Marshal(arr)
+	return string(b), nil
+}
+
+func twoLensWorker(s *store.Store, r *lensRouter) *Worker {
+	return &Worker{
+		Store:    s,
+		Embedder: fakeEmbedder{},
+		Lenses: []*lens.Lens{
+			{Name: "default", Global: true, Extract: "mine-default", Dimensions: []string{"thinking"}},
+			{Name: "codereview", Extract: "mine-codereview", Dimensions: []string{"thinking"}},
+		},
+		Config: store.Config{},
+		Run:    r.run,
+	}
+}
+
+// #55: enabling a NEW lens over an already-default-distilled session must mine ONLY
+// the new lens — default is at its watermark and must not be re-mined.
+func TestNewLensMinesOnlyItselfOverDistilledSession(t *testing.T) {
+	s := newStore(t)
+	capture(t, s, "s", "user", "alpha")
+	capture(t, s, "s", "assistant", "reply")
+
+	// First pass: default only, catches up to 2.
+	single := testWorker(s, &fakeMiner{})
+	if err := single.Process(context.Background(), "s"); err != nil {
+		t.Fatalf("default pass: %v", err)
+	}
+	if got := s.DistilledCount("s", "default"); got != 2 {
+		t.Fatalf("default should be at 2, got %d", got)
+	}
+
+	// Second pass: default + codereview now active. default is caught up (mines
+	// nothing); codereview is at 0 and mines the whole session.
+	r := &lensRouter{}
+	if err := twoLensWorker(s, r).Process(context.Background(), "s"); err != nil {
+		t.Fatalf("two-lens pass: %v", err)
+	}
+	if len(r.inputsByPrompt["mine-default"]) != 0 {
+		t.Fatalf("default is caught up; it must NOT be re-mined, got %d calls", len(r.inputsByPrompt["mine-default"]))
+	}
+	if len(r.inputsByPrompt["mine-codereview"]) != 1 {
+		t.Fatalf("codereview must mine the session once, got %d calls", len(r.inputsByPrompt["mine-codereview"]))
+	}
+	if got := s.DistilledCount("s", "codereview"); got != 2 {
+		t.Fatalf("codereview watermark should advance to 2, got %d", got)
+	}
+	if got := s.DistilledCount("s", "default"); got != 2 {
+		t.Fatalf("default watermark must stay 2, got %d", got)
+	}
+	// codereview produced its observation; default's earlier one is still there.
+	obs, _ := s.ReadObservations("codereview")
+	if len(obs) != 1 {
+		t.Fatalf("codereview should have 1 observation, got %d", len(obs))
+	}
+}
+
+// #55: when one lens's mine fails but a sibling succeeds, the healthy lens must
+// commit + advance while ONLY the failed lens backs off — the old all-or-nothing
+// rule discarded the healthy lens too.
+func TestPerLensFailureIsolation(t *testing.T) {
+	s := newStore(t)
+	capture(t, s, "s", "user", "alpha")
+	capture(t, s, "s", "assistant", "reply")
+
+	r := &lensRouter{failPrompt: "mine-codereview"} // codereview fails, default succeeds
+	w := twoLensWorker(s, r)
+	if err := w.Process(context.Background(), "s"); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	// default committed and advanced.
+	if got := s.DistilledCount("s", "default"); got != 2 {
+		t.Fatalf("healthy default lens must advance to 2, got %d", got)
+	}
+	if got := s.RetryCount("s", "default"); got != 0 {
+		t.Fatalf("healthy lens must not accrue retries, got %d", got)
+	}
+	if obs, _ := s.ReadObservations("default"); len(obs) != 1 {
+		t.Fatalf("healthy lens's observation must be written, got %d", len(obs))
+	}
+	// codereview failed: watermark held at 0, retry counted, backed off.
+	if got := s.DistilledCount("s", "codereview"); got != 0 {
+		t.Fatalf("failed lens watermark must hold at 0, got %d", got)
+	}
+	if got := s.RetryCount("s", "codereview"); got != 1 {
+		t.Fatalf("failed lens must count a retry, got %d", got)
+	}
+	if obs, _ := s.ReadObservations("codereview"); len(obs) != 0 {
+		t.Fatalf("failed lens must write nothing, got %d", len(obs))
+	}
+
+	// A recovery pass (codereview no longer fails) catches it up without touching
+	// default (already at watermark).
+	r2 := &lensRouter{}
+	if err := twoLensWorker(s, r2).Process(context.Background(), "s"); err != nil {
+		t.Fatalf("recovery Process: %v", err)
+	}
+	if len(r2.inputsByPrompt["mine-default"]) != 0 {
+		t.Fatalf("default already caught up; must not re-mine on recovery, got %d", len(r2.inputsByPrompt["mine-default"]))
+	}
+	if got := s.DistilledCount("s", "codereview"); got != 2 {
+		t.Fatalf("codereview must catch up on recovery, got %d", got)
 	}
 }
 
@@ -481,7 +605,7 @@ func TestResumeDistillsOnlyNewTurnsWithoutLoss(t *testing.T) {
 	if len(obs) != 2 {
 		t.Fatalf("expected 2 observations (one per run), got %d: %+v", len(obs), obs)
 	}
-	if got := s.DistilledCount("s"); got != 4 {
+	if got := s.DistilledCount("s", "default"); got != 4 {
 		t.Errorf("watermark should be 4 after distilling all turns, got %d", got)
 	}
 }

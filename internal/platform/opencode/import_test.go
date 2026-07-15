@@ -113,7 +113,7 @@ func TestImporterRebuildsWhenCompletedAssistantAppearsMidSession(t *testing.T) {
 	if stats.Records != 2 {
 		t.Fatalf("initial import wrote %d records, want 2", stats.Records)
 	}
-	if err := st.MarkDistilled(SessionPrefix+"ses_mutable", 2); err != nil {
+	if err := st.MarkDistilled(SessionPrefix+"ses_mutable", store.LensDefault, 2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,7 +145,7 @@ func TestImporterRebuildsWhenCompletedAssistantAppearsMidSession(t *testing.T) {
 			t.Fatalf("raw = %#v, want %#v", rolesAndText, want)
 		}
 	}
-	if got := st.DistilledCount(SessionPrefix + "ses_mutable"); got != 0 {
+	if got := st.DistilledCount(SessionPrefix+"ses_mutable", store.LensDefault); got != 0 {
 		t.Fatalf("rebuild should reset distill progress, got %d", got)
 	}
 }
@@ -162,7 +162,7 @@ func TestImporterRebuildsWhenImportedTextChanges(t *testing.T) {
 	if _, err := (&Importer{Store: st, DBPath: dbPath}).Import(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkDistilled(SessionPrefix+"ses_test", 2); err != nil {
+	if err := st.MarkDistilled(SessionPrefix+"ses_test", store.LensDefault, 2); err != nil {
 		t.Fatal(err)
 	}
 	mutateOpenCodeDB(t, dbPath, `
@@ -182,7 +182,7 @@ func TestImporterRebuildsWhenImportedTextChanges(t *testing.T) {
 	if raw[1].Text != "first note\n\nupdated answer" {
 		t.Fatalf("assistant text was not rebuilt: %+v", raw[1])
 	}
-	if got := st.DistilledCount(SessionPrefix + "ses_test"); got != 0 {
+	if got := st.DistilledCount(SessionPrefix+"ses_test", store.LensDefault); got != 0 {
 		t.Fatalf("changed text should reset distill progress, got %d", got)
 	}
 }

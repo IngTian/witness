@@ -89,9 +89,15 @@ func resolveRoot() (string, error) {
 }
 
 // Close releases the database handle (and flushes the WAL).
+// Close is idempotent: a second call is a no-op, not a double-close error. Some
+// paths close the store early (e.g. `lens backfill` closes before handing off to a
+// fresh worker store) while a defer will also fire — nil-ing the handle makes both
+// safe.
 func (s *Store) Close() error {
 	if s.db != nil {
-		return s.db.Close()
+		db := s.db
+		s.db = nil
+		return db.Close()
 	}
 	return nil
 }

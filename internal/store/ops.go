@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -104,12 +105,18 @@ func (s *Store) LastRawTS() string {
 	return ts
 }
 
+// LastDistilledRawTS is the timestamp of the latest raw turn any lens has distilled
+// past — a cosmetic "how fresh is distillation" indicator for status/profile.
+// Progress is now per-(session,lens), so collapse it to one watermark per session
+// (MAX(distilled) = the furthest any lens reached, which the always-on default lens
+// usually leads) before the JOIN, so multiple lens rows don't multiply the raw join.
 func (s *Store) LastDistilledRawTS() string {
 	var ts string
 	_ = s.db.QueryRow(`
 		SELECT COALESCE(MAX(r.ts), '')
 		  FROM raw r
-		  JOIN progress p ON p.session = r.session
+		  JOIN (SELECT session, MAX(distilled) AS distilled FROM progress GROUP BY session) p
+		    ON p.session = r.session
 		 WHERE r.seq < p.distilled`).Scan(&ts)
 	return ts
 }
@@ -263,24 +270,32 @@ func (s *Store) ClearStagedThrough(session string, throughID int64) {
 }
 
 // --- the distillation queue (progress / watermark / retries) -----------------
+//
+// The watermark is per-(session, lens) (issue #55): each lens tracks how far it has
+// mined a session independently, so enabling a NEW lens backfills only that lens
+// over history without re-mining the always-on `default` (or any other) lens. Every
+// queue op below takes a lens; the #49-C2 raw-generation CAS is preserved, now also
+// matching on lens.
 
-// DistilledCount returns the watermark: how many L0 records of a session the
-// worker has already distilled. 0 if absent.
-func (s *Store) DistilledCount(session string) int {
+// DistilledCount returns the watermark for one (session, lens): how many L0 records
+// this lens has already mined for the session. 0 if absent (a lens that has never
+// touched this session — e.g. a just-enabled lens — reads 0, so its whole history
+// is pending).
+func (s *Store) DistilledCount(session, lens string) int {
 	var n int
-	_ = s.db.QueryRow(`SELECT distilled FROM progress WHERE session = ?`, session).Scan(&n)
+	_ = s.db.QueryRow(`SELECT distilled FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&n)
 	return n
 }
 
-// MarkDistilled records the watermark (count of L0 records distilled so far) and
+// MarkDistilled records the watermark (count of L0 records this lens has mined) and
 // stamps when it advanced (for review cadence). Written LAST in Process so a
 // crash mid-distill re-runs the delta; obsID dedup keeps that from duplicating.
-func (s *Store) MarkDistilled(session string, count int) error {
+func (s *Store) MarkDistilled(session, lens string, count int) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(
-		`INSERT INTO progress(session, distilled, distilled_at) VALUES (?, ?, ?)
-		 ON CONFLICT(session) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`,
-		session, count, now)
+		`INSERT INTO progress(session, lens, distilled, distilled_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(session, lens) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`,
+		session, lens, count, now)
 	return err
 }
 
@@ -316,19 +331,21 @@ func (s *Store) MaxRawID(session string) int64 {
 // path. On the append-only Claude path the mined rawHighID always still exists, so
 // the guard always passes — free insurance there, an active fix on the OpenCode/
 // cleanup paths that can delete raw under a mine.
-func (s *Store) MarkDistilledIfCurrent(session string, count int, rawHighID int64) (bool, error) {
+func (s *Store) MarkDistilledIfCurrent(session, lens string, count int, rawHighID int64) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	// The guard: only write when a raw row with the mined generation's high id still
 	// exists for this session. rawHighID==0 means the mine saw an empty session
 	// (nothing mined) — still gate on "no raw exists now" so a concurrent import that
-	// added rows isn't clobbered.
+	// added rows isn't clobbered. The generation is a property of the session's raw,
+	// not the lens, so the guard is unchanged in spirit — only the row it writes/
+	// conflicts on is now keyed by (session, lens).
 	res, err := s.db.Exec(
-		`INSERT INTO progress(session, distilled, distilled_at)
-		 SELECT ?, ?, ?
+		`INSERT INTO progress(session, lens, distilled, distilled_at)
+		 SELECT ?, ?, ?, ?
 		  WHERE (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
 		     OR EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)
-		 ON CONFLICT(session) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`,
-		session, count, now, rawHighID, session, session, rawHighID)
+		 ON CONFLICT(session, lens) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`,
+		session, lens, count, now, rawHighID, session, session, rawHighID)
 	if err != nil {
 		return false, err
 	}
@@ -336,42 +353,100 @@ func (s *Store) MarkDistilledIfCurrent(session string, count int, rawHighID int6
 	return n > 0, nil
 }
 
-// RetryCount returns how many times distilling this session has failed in a row.
-func (s *Store) RetryCount(session string) int {
+// RetryCount returns how many times distilling this (session, lens) has failed in a
+// row.
+func (s *Store) RetryCount(session, lens string) int {
 	var n int
-	_ = s.db.QueryRow(`SELECT retries FROM progress WHERE session = ?`, session).Scan(&n)
+	_ = s.db.QueryRow(`SELECT retries FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&n)
 	return n
 }
 
-// IncRetry bumps the failure count and returns the new value.
-func (s *Store) IncRetry(session string) int {
+// IncRetry bumps the (session, lens) failure count and returns the new value.
+func (s *Store) IncRetry(session, lens string) int {
 	_, _ = s.db.Exec(
-		`INSERT INTO progress(session, retries) VALUES (?, 1)
-		 ON CONFLICT(session) DO UPDATE SET retries = retries + 1`, session)
-	return s.RetryCount(session)
+		`INSERT INTO progress(session, lens, retries) VALUES (?, ?, 1)
+		 ON CONFLICT(session, lens) DO UPDATE SET retries = retries + 1`, session, lens)
+	return s.RetryCount(session, lens)
 }
 
-// ResetRetry clears the failure count and any backoff (a clean distill).
-func (s *Store) ResetRetry(session string) {
-	_, _ = s.db.Exec(`UPDATE progress SET retries = 0, next_attempt = '' WHERE session = ?`, session)
+// ResetRetry clears the (session, lens) failure count and any backoff (a clean
+// distill).
+func (s *Store) ResetRetry(session, lens string) {
+	_, _ = s.db.Exec(`UPDATE progress SET retries = 0, next_attempt = '' WHERE session = ? AND lens = ?`, session, lens)
 }
 
-// SetNextAttempt records the earliest time this session should be retried.
-// PendingSessions excludes a session until then, so a failing session backs off
-// instead of being hammered every trigger.
-func (s *Store) SetNextAttempt(session string, at time.Time) error {
+// SetNextAttempt records the earliest time this (session, lens) should be retried.
+// The pending query excludes the pair until then, so a failing lens backs off
+// instead of being hammered every trigger — and a healthy sibling lens on the same
+// session is unaffected (independent watermarks).
+func (s *Store) SetNextAttempt(session, lens string, at time.Time) error {
 	v := at.UTC().Format(time.RFC3339)
 	_, err := s.db.Exec(
-		`INSERT INTO progress(session, next_attempt) VALUES (?, ?)
-		 ON CONFLICT(session) DO UPDATE SET next_attempt = excluded.next_attempt`, session, v)
+		`INSERT INTO progress(session, lens, next_attempt) VALUES (?, ?, ?)
+		 ON CONFLICT(session, lens) DO UPDATE SET next_attempt = excluded.next_attempt`, session, lens, v)
 	return err
 }
 
-// NextBackoffAttempt returns the earliest future retry time, if any session is
-// currently sleeping due to a mining failure.
-func (s *Store) NextBackoffAttempt(now time.Time) (time.Time, bool) {
+// ResetLensWatermark drops every progress row for one lens, so all sessions read
+// as pending FOR THAT LENS on the next drain — the enable-a-new-lens backfill path
+// (issue #55). Other lenses' watermarks (rows with a different lens) are untouched,
+// so `default` is never re-mined. Returns rows removed.
+func (s *Store) ResetLensWatermark(lens string) (int, error) {
+	res, err := s.db.Exec(`DELETE FROM progress WHERE lens = ?`, lens)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// DeleteLensData removes one lens's derived L1 observations and L2 facets (for a
+// `lens rebuild`: re-mine a lens from scratch after its prompt changed). Raw L0 is
+// the durable record and is NOT touched. facet_versions cascade via the ON DELETE
+// CASCADE foreign key. Runs in one transaction so a rebuild never leaves half a
+// lens's derived data behind. Returns (observations, facets) removed.
+func (s *Store) DeleteLensData(lens string) (obs, facets int, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+	res, err := tx.Exec(`DELETE FROM observations WHERE lens = ?`, lens)
+	if err != nil {
+		return 0, 0, err
+	}
+	no, _ := res.RowsAffected()
+	res, err = tx.Exec(`DELETE FROM facets WHERE lens = ?`, lens)
+	if err != nil {
+		return 0, 0, err
+	}
+	nf, _ := res.RowsAffected()
+	if err = tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return int(no), int(nf), nil
+}
+
+// NextBackoffAttempt returns the earliest future retry time among ACTIVE lenses, if
+// any (session,lens) is currently sleeping due to a mining failure. Filtering by
+// the active-lens set matters now that the watermark is per-lens (issue #55): a
+// backoff row stranded on a since-disabled lens must not schedule a useless wakeup
+// (nor be counted as outstanding work) — the disabled lens is no longer mined, so
+// its old backoff is inert. `lenses` follows the same contract as PendingSessions.
+func (s *Store) NextBackoffAttempt(lenses []string, now time.Time) (time.Time, bool) {
+	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
+	args := append([]any{}, lensArgs...)
+	args = append(args, now.UTC().Format(time.RFC3339))
 	var v string
-	_ = s.db.QueryRow(`SELECT COALESCE(MIN(next_attempt), '') FROM progress WHERE next_attempt != '' AND next_attempt > ?`, now.UTC().Format(time.RFC3339)).Scan(&v)
+	_ = s.db.QueryRow(
+		`WITH active_lens(lens) AS (`+lensValues+`)
+		 SELECT COALESCE(MIN(p.next_attempt), '')
+		   FROM progress p JOIN active_lens x ON x.lens = p.lens
+		  WHERE p.next_attempt != '' AND p.next_attempt > ?`, args...).Scan(&v)
 	if v == "" {
 		return time.Time{}, false
 	}
@@ -382,18 +457,28 @@ func (s *Store) NextBackoffAttempt(now time.Time) (time.Time, bool) {
 	return at, true
 }
 
-// PendingSessions returns sessions whose L0 has grown past the distillation
-// watermark, or that have staged active observations waiting to be drained.
-// Keying on the watermark (not a mere marker) means a RESUMED session whose log
-// gains new turns is picked up again.
-func (s *Store) PendingSessions() ([]string, error) {
-	return s.PendingSessionsUpdatedBetween(time.Time{}, time.Time{})
+// PendingSessions returns sessions for which SOME active lens has L0 grown past
+// that lens's watermark, or that have staged active observations waiting to be
+// drained. Keying on the watermark (not a mere marker) means a RESUMED session
+// whose log gains new turns is picked up again — and a newly-enabled lens makes
+// every historical session pending FOR THAT LENS without disturbing lenses already
+// caught up. `lenses` is the active-lens name set (default + enabled); it is passed
+// in rather than derived here so the store stays out of lens/config loading and a
+// config-enabled-but-unloadable lens can be excluded by the caller (else the query
+// would keep offering a session no worker can actually mine — a no-progress cycle).
+// An empty list falls back to `["default"]` (the always-on lens).
+func (s *Store) PendingSessions(lenses []string) ([]string, error) {
+	return s.PendingSessionsUpdatedBetween(lenses, time.Time{}, time.Time{})
 }
 
 // PendingSessionsUpdatedBetween applies an optional inclusive range to each
 // session's most recent raw timestamp. Zero bounds are open. Sessions with no
-// timestamp remain eligible only when no range is requested.
-func (s *Store) PendingSessionsUpdatedBetween(since, until time.Time) ([]string, error) {
+// timestamp remain eligible only when no range is requested. A session is pending
+// when ANY active lens is behind on it (raw count > that lens's watermark) and that
+// lens's (session,lens) backoff has elapsed — a per-lens backoff no longer parks
+// the whole session, only that lens's share of it.
+func (s *Store) PendingSessionsUpdatedBetween(lenses []string, since, until time.Time) ([]string, error) {
+	lenses = activeLensList(lenses)
 	now := time.Now().UTC().Format(time.RFC3339)
 	sinceValue := ""
 	if !since.IsZero() {
@@ -403,17 +488,28 @@ func (s *Store) PendingSessionsUpdatedBetween(since, until time.Time) ([]string,
 	if !until.IsZero() {
 		untilValue = until.UTC().Format(time.RFC3339Nano)
 	}
+	// Build the active-lens VALUES list and the arg vector. The lens list feeds a
+	// CROSS JOIN so each session is paired with every active lens; the LEFT JOIN then
+	// finds that specific (session,lens) watermark.
+	lensValues, lensArgs := lensValuesClause(lenses)
+	args := []any{}
+	args = append(args, lensArgs...) // raw-branch CROSS JOIN
+	args = append(args, now)         // raw-branch backoff gate
+	args = append(args, now)         // staged-branch backoff gate (staged is lens-agnostic; default lens)
+	args = append(args, sinceValue, sinceValue, untilValue, untilValue)
 	rows, err := s.db.Query(
-		`WITH candidates AS (
+		`WITH active_lens(lens) AS (`+lensValues+`),
+		  candidates AS (
 		   SELECT l.session
 		     FROM (SELECT session, COUNT(*) AS c FROM raw GROUP BY session) l
-		     LEFT JOIN progress p ON p.session = l.session
+		     CROSS JOIN active_lens x
+		     LEFT JOIN progress p ON p.session = l.session AND p.lens = x.lens
 		    WHERE l.c > COALESCE(p.distilled, 0)
 		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
 		   UNION
 		   SELECT st.session
 		     FROM staged st
-		     LEFT JOIN progress p ON p.session = st.session
+		     LEFT JOIN progress p ON p.session = st.session AND p.lens = 'default'
 		    WHERE COALESCE(st.session, '') != ''
 		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
 		  ), updates AS (
@@ -426,7 +522,7 @@ func (s *Store) PendingSessionsUpdatedBetween(since, until time.Time) ([]string,
 		   LEFT JOIN updates u ON u.session = c.session
 		  WHERE (? = '' OR u.updated_at >= julianday(?))
 		    AND (? = '' OR u.updated_at <= julianday(?))
-		  ORDER BY c.session`, now, now, sinceValue, sinceValue, untilValue, untilValue)
+		  ORDER BY c.session`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -442,6 +538,29 @@ func (s *Store) PendingSessionsUpdatedBetween(since, until time.Time) ([]string,
 	return pending, rows.Err()
 }
 
+// activeLensList normalizes the caller's active-lens set: empty falls back to the
+// always-on default lens. Keeps the queue queries well-formed even when a caller
+// (a test, or a degenerate config) passes nothing.
+func activeLensList(lenses []string) []string {
+	if len(lenses) == 0 {
+		return []string{LensDefault}
+	}
+	return lenses
+}
+
+// lensValuesClause builds a `VALUES (?),(?),...` fragment plus its args for binding
+// an in-memory lens list into a CTE. Parameterized (never string-interpolated) so a
+// lens name can't inject SQL.
+func lensValuesClause(lenses []string) (string, []any) {
+	rows := make([]string, len(lenses))
+	args := make([]any, len(lenses))
+	for i, ln := range lenses {
+		rows[i] = "(?)"
+		args[i] = ln
+	}
+	return "VALUES " + strings.Join(rows, ","), args
+}
+
 // Stats is a snapshot of the archive + queue health, for `witness doctor` — so a
 // user can see distillation is keeping up (or stuck) instead of it failing silently.
 type Stats struct {
@@ -454,28 +573,48 @@ type Stats struct {
 	LastReview   string // RFC3339 of the last reviewer run ("" = never)
 }
 
-// Stats gathers the doctor snapshot in a few cheap indexed queries.
-func (s *Store) Stats() Stats {
+// Stats gathers the doctor snapshot in a few cheap indexed queries. `lenses` is the
+// active-lens name set (same contract as PendingSessions): Pending counts distinct
+// sessions for which some active lens is behind, so the doctor count matches what
+// the worker will actually drain. BackedOff counts distinct sessions that have at
+// least one (session,lens) currently sleeping on a retry backoff.
+func (s *Store) Stats(lenses []string) Stats {
 	now := time.Now().UTC().Format(time.RFC3339)
 	var st Stats
 	_ = s.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM raw`).Scan(&st.Sessions)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM raw`).Scan(&st.RawRecords)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&st.Observations)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM facets`).Scan(&st.Facets)
+	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
+	args := append([]any{}, lensArgs...)
+	args = append(args, now, now)
 	_ = s.db.QueryRow(
-		`SELECT COUNT(*) FROM (
+		`WITH active_lens(lens) AS (`+lensValues+`)
+		 SELECT COUNT(*) FROM (
 		   SELECT l.session
 		     FROM (SELECT session, COUNT(*) c FROM raw GROUP BY session) l
-		     LEFT JOIN progress p ON p.session = l.session
+		     CROSS JOIN active_lens x
+		     LEFT JOIN progress p ON p.session = l.session AND p.lens = x.lens
 		    WHERE l.c > COALESCE(p.distilled,0)
 		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?)
 		   UNION
 		   SELECT st.session
 		     FROM staged st
-		     LEFT JOIN progress p ON p.session = st.session
+		     LEFT JOIN progress p ON p.session = st.session AND p.lens = 'default'
 		    WHERE COALESCE(st.session, '') != ''
-		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, now, now).Scan(&st.Pending)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM progress WHERE next_attempt != '' AND next_attempt > ?`, now).Scan(&st.BackedOff)
+		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, args...).Scan(&st.Pending)
+	// BackedOff counts distinct sessions with an ACTIVE lens currently sleeping on a
+	// retry. Filter to active lenses (like Pending): a backoff row left on a disabled
+	// lens is inert (never mined), so counting it would make `distill start --all` and
+	// `lens backfill` falsely report "incomplete" when every active lens is caught up.
+	backoffValues, backoffArgs := lensValuesClause(activeLensList(lenses))
+	bargs := append([]any{}, backoffArgs...)
+	bargs = append(bargs, now)
+	_ = s.db.QueryRow(
+		`WITH active_lens(lens) AS (`+backoffValues+`)
+		 SELECT COUNT(DISTINCT p.session)
+		   FROM progress p JOIN active_lens x ON x.lens = p.lens
+		  WHERE p.next_attempt != '' AND p.next_attempt > ?`, bargs...).Scan(&st.BackedOff)
 	st.LastReview = s.metaStr("review_ts")
 	return st
 }

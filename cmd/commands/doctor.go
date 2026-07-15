@@ -37,7 +37,7 @@ func cmdDoctor(asJSON bool) error {
 	// npm OpenCode user (who never bound a runner via install) sees "opencode",
 	// not the misleading template default "claude". Matches what the worker uses.
 	cfg.Runner = st.ResolveRunner(cfg)
-	stat := st.Stats()
+	stat := st.Stats(activeLensNames(st))
 
 	// Resolve the runner once; doctor asks IT how it runs and whether its models are
 	// valid — no branching on the runner name. runnerCmd is the runner's own

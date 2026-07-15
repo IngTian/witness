@@ -17,8 +17,12 @@ import (
 // staged-uniqueness index from v2 is folded into schemaV1 as a plain CREATE ... IF
 // NOT EXISTS, and the v2->v3 `l0`->`raw` rename is a guarded legacy step in
 // migrate()); v4 adds session_meta.platform (the per-session owning-platform axis,
-// issue #21) via a guarded ADD COLUMN + one-time prefix backfill in migrate().
-const schemaVersion = 4
+// issue #21) via a guarded ADD COLUMN + one-time prefix backfill in migrate();
+// v5 re-keys the distillation watermark from PK(session) to PK(session, lens) so a
+// single lens can be backfilled without re-mining every lens (issue #55) — a
+// guarded table rebuild in migrate() that seeds the pre-migration rows as the
+// 'default' lens's watermark (the lens they actually reflect).
+const schemaVersion = 5
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -173,6 +177,16 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v4 add session_meta.platform: %w", err)
 	}
 
+	// 4. v4 -> v5: re-key progress from PK(session) to PK(session, lens) so a lens can
+	// be backfilled independently (issue #55). schemaV1's CREATE ... IF NOT EXISTS
+	// won't reshape an existing table, so rebuild explicitly when the running DB's
+	// progress predates the lens column. Idempotent: the guard skips once `lens`
+	// exists (fresh DBs already have it from schemaV1; a re-run sees it too).
+	if err := migrateProgressPerLens(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v5 per-lens progress: %w", err)
+	}
+
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("set user_version: %w", err)
@@ -216,6 +230,56 @@ func addSessionPlatformColumn(tx *sql.Tx) error {
 		  WHERE platform = '' AND session NOT LIKE 'opencode:%'`,
 	); err != nil {
 		return fmt.Errorf("backfill claude: %w", err)
+	}
+	return nil
+}
+
+// migrateProgressPerLens is the v4->v5 step: re-key the distillation watermark from
+// PK(session) to PK(session, lens) (issue #55).
+//
+// Why a table rebuild and not ADD COLUMN: the primary key changes (session ->
+// session+lens), which SQLite's ALTER TABLE cannot do. So when the running DB's
+// progress lacks the `lens` column, rename it aside, let schemaV1 (already applied
+// above) provide the new-shape `progress`, and copy the old rows in as the
+// 'default' lens's watermark — the lens they actually reflect. Every OTHER
+// (session, lens) pair is deliberately left ABSENT so it reads as pending
+// (distilled defaults to 0 via the LEFT JOIN): a newly-enabled lens must NOT
+// inherit default's watermark, or it would falsely claim to have already mined
+// those turns. This mirrors the l0->raw rename discipline: one-time, in place,
+// data-preserving, idempotent.
+func migrateProgressPerLens(tx *sql.Tx) error {
+	var hasLens int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('progress') WHERE name='lens'`,
+	).Scan(&hasLens); err != nil {
+		return fmt.Errorf("probe lens column: %w", err)
+	}
+	if hasLens > 0 {
+		return nil // already per-lens (fresh DB from schemaV1, or a prior migrate run)
+	}
+	// The old single-key table exists without a lens column. schemaV1 ran with
+	// CREATE ... IF NOT EXISTS, so it did NOT create the new-shape table (the old one
+	// was present). Move the old rows aside, build the new shape, seed 'default'.
+	stmts := []string{
+		`ALTER TABLE progress RENAME TO progress_v4`,
+		`CREATE TABLE progress (
+		   session      TEXT    NOT NULL,
+		   lens         TEXT    NOT NULL DEFAULT 'default',
+		   distilled    INTEGER NOT NULL DEFAULT 0,
+		   retries      INTEGER NOT NULL DEFAULT 0,
+		   distilled_at TEXT    NOT NULL DEFAULT '',
+		   next_attempt TEXT    NOT NULL DEFAULT '',
+		   PRIMARY KEY (session, lens)
+		 )`,
+		`INSERT INTO progress(session, lens, distilled, retries, distilled_at, next_attempt)
+		   SELECT session, 'default', distilled, retries, distilled_at, next_attempt
+		     FROM progress_v4`,
+		`DROP TABLE progress_v4`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("rebuild progress: %w", err)
+		}
 	}
 	return nil
 }
@@ -292,11 +356,13 @@ CREATE TABLE IF NOT EXISTS facet_versions (
 );
 
 CREATE TABLE IF NOT EXISTS progress (
-  session      TEXT PRIMARY KEY,
+  session      TEXT    NOT NULL,
+  lens         TEXT    NOT NULL DEFAULT 'default',
   distilled    INTEGER NOT NULL DEFAULT 0,
   retries      INTEGER NOT NULL DEFAULT 0,
   distilled_at TEXT    NOT NULL DEFAULT '',
-  next_attempt TEXT    NOT NULL DEFAULT ''
+  next_attempt TEXT    NOT NULL DEFAULT '',
+  PRIMARY KEY (session, lens)
 );
 
 CREATE TABLE IF NOT EXISTS meta (

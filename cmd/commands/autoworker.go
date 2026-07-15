@@ -17,7 +17,7 @@ import (
 // review-only work.
 func maybeSpawnAutoWorker(st *store.Store) bool {
 	cfg := st.LoadConfig()
-	pending, _ := st.PendingSessions()
+	pending, _ := st.PendingSessions(activeLensNames(st))
 	modelReady := embed.ModelReady()
 	if !autoWorkerShouldStart(st, cfg, pending, modelReady) {
 		if len(pending) > 0 && !modelReady {

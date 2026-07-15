@@ -134,7 +134,7 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 		return err
 	}
 	defer st.Close()
-	stats := st.Stats()
+	stats := st.Stats(activeLensNames(st))
 	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
 		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log; a missing embedding model or provider failure is the usual cause)", stats.Pending, stats.BackedOff)
 	}
@@ -208,7 +208,7 @@ func cmdDistillStatus(asJSON bool) error {
 		return err
 	}
 	defer st.Close()
-	stat := st.Stats()
+	stat := st.Stats(activeLensNames(st))
 	status := st.MetaString("worker_status")
 	if status == "" {
 		status = "idle"

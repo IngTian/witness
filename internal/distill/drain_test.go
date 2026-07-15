@@ -226,11 +226,11 @@ func TestDrainRecheckLoopPicksUpMidRunArrivals(t *testing.T) {
 
 	released := false // becomes true after the first Drain empties the queue
 	pending := func() []string {
-		p, _ := s.PendingSessions()
+		p, _ := s.PendingSessions(nil)
 		if released && s.RawCount("second") == 0 {
 			// a new session lands the instant the first drain finished
 			capture(t, s, "second", "user", "turn-second")
-			p, _ = s.PendingSessions()
+			p, _ = s.PendingSessions(nil)
 		}
 		return p
 	}
@@ -251,7 +251,7 @@ func TestDrainRecheckLoopPicksUpMidRunArrivals(t *testing.T) {
 	if raw, _ := s.ReadObservations(""); len(raw) != 2 {
 		t.Fatalf("expected 2 observations (first + mid-run arrival), got %d", len(raw))
 	}
-	if s.DistilledCount("second") == 0 {
+	if s.DistilledCount("second", "default") == 0 {
 		t.Fatal("mid-run arrival 'second' was never distilled by the re-check loop")
 	}
 	if passes < 2 {
@@ -331,7 +331,7 @@ func TestDrainReattemptsRegrownSession(t *testing.T) {
 		t.Fatal("loop did not terminate")
 	}
 	// Both deltas distilled: watermark advanced to all 2 raw turns.
-	if got := s.DistilledCount("S"); got != 2 {
+	if got := s.DistilledCount("S", "default"); got != 2 {
 		t.Fatalf("regrown session watermark = %d, want 2 (both turns distilled)", got)
 	}
 }
