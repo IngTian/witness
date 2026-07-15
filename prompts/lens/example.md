@@ -1,5 +1,7 @@
 # name: math
 # dimensions: speed, independence, proof_rigor, abstraction, confusion_tolerance
+# kind: arc
+# model_floor: sonnet
 
 <!--
   A complete, ready-to-register example lens (a "math learner" lens).
@@ -15,6 +17,21 @@
   appends the transcript (EXTRACT) or the accumulated observations (REVIEW) as the
   user message; it injects no schema for you. Anything outside the two `##` sections
   (like this comment) is ignored by the loader.
+
+  Two OPTIONAL directives (both shown above; omit them and sensible defaults apply):
+    # kind: arc | atomic
+        "arc"   — an observation needs a whole-session arc (e.g. a confusion that
+                  resolves later); chunking a long session loses most of these, so
+                  the engine sends the session whole / reconciles across chunks.
+        "atomic"— per-moment observations that fit in a fragment; chunk-tolerant.
+        A registered lens that omits `# kind:` defaults to "arc" (the recall-safe
+        choice — a mislabeled arc lens loses far more than a mislabeled atomic one).
+    # model_floor: <model tier, e.g. sonnet>
+        ADVISORY only. Mining uses one global triage model, so this does NOT change
+        which model runs — but `witness doctor` warns if your triage model looks
+        weaker than this floor, because a too-weak model silently extracts nothing
+        (it "prose-drifts": converses instead of emitting the JSON array). Set it to
+        the weakest model you've verified actually produces observations for this lens.
 -->
 
 
