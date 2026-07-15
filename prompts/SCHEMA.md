@@ -56,6 +56,11 @@ Every observation/facet carries a `lens` tag.
   Definitions live in the central registry (`<root>/lenses/<name>/lens.md`), shared across all
   sessions — never read from a repo.
 
+A lens file's header carries `# name:` and `# dimensions:`. See `prompts/lens/example.md`. Mining
+uses one global model for every lens — there is no per-lens model today (a lens that needs a
+stronger model just means "set the global runner to a capable one" via `witness config set
+triage_model <model>`; per-lens model tuning is tracked separately).
+
 The profile is **collect-only / pull-only**: witness captures and distills everywhere, but never
 injects into a session. Agents read it on demand via the MCP tools (`get_facets`, `get_profile`,
 `search_observations`); humans read it via `witness profile`.

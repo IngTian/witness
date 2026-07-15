@@ -15,6 +15,13 @@
   appends the transcript (EXTRACT) or the accumulated observations (REVIEW) as the
   user message; it injects no schema for you. Anything outside the two `##` sections
   (like this comment) is ignored by the loader.
+
+  Note on models: mining uses ONE global model for every lens (set via `witness
+  install` or `witness config set triage_model <model>`). There is no per-lens model
+  yet, so a lens that needs a stronger model just means "point your global runner at a
+  capable one." A reasoning-heavy lens like this won't extract well on a weak model —
+  it will silently produce nothing rather than error (run `witness doctor` to see the
+  drift count). Use a capable model (sonnet/opus-class) for lenses like this.
 -->
 
 

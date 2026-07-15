@@ -116,25 +116,66 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 //	<extract prompt...>
 //	## REVIEW
 //	<review prompt...>
+//
+// Directives (`# key:` lines) are HEADER-ONLY: they are honored only BEFORE the first
+// `##` section and NOT inside an HTML comment. That matters because the header is
+// usually followed by a `<!-- ... -->` block documenting these very directives — those
+// mention lines (`# name: ...`) must NOT be parsed as real values and clobber the
+// actual header (last-write-wins would otherwise let a comment win). And a prompt
+// section's body is passed through VERBATIM, so a `# ...` line inside EXTRACT/REVIEW is
+// prompt text, never a directive. The gate makes both cases correct.
 func parseLensFile(s string) *Lens {
 	l := &Lens{}
 	var section string
 	var extract, review strings.Builder
+	inComment := false // inside an <!-- ... --> block (header directives are ignored there)
 	for _, line := range strings.Split(s, "\n") {
 		trimmed := strings.TrimSpace(line)
+
+		// A `## EXTRACT`/`## REVIEW` line is a STRUCTURAL delimiter: it always ends the
+		// header (and forcibly closes any open header comment) and starts its section.
+		// Checking it FIRST — before the comment-swallow below — means a malformed or
+		// unclosed `<!--` in the header can't silently eat the section markers and leave
+		// a lens with empty prompts (a silent-failure the reviewer catches as drift only
+		// much later). Tradeoff: a bare `## EXTRACT` line sitting inside a documentation
+		// comment would start the section early — but that is rare and produces a
+		// visibly-wrong prompt, not a silent-empty one, so it's the safer failure mode.
+		switch trimmed {
+		case "## EXTRACT":
+			section = "extract"
+			inComment = false
+			continue
+		case "## REVIEW":
+			section = "review"
+			inComment = false
+			continue
+		}
+
+		// Track HTML-comment nesting on lines that belong to the HEADER (a comment inside
+		// a prompt section is verbatim prompt text, handled by the section writer below).
+		if section == "" {
+			if !inComment && strings.HasPrefix(trimmed, "<!--") {
+				inComment = true
+			}
+			if inComment {
+				if strings.Contains(trimmed, "-->") {
+					inComment = false
+				}
+				continue // a header comment line is documentation, never a directive
+			}
+		}
+
 		switch {
-		case strings.HasPrefix(trimmed, "# name:"):
+		// Directives are header-only: once a `##` section has started, a `# key:` line is
+		// prompt content and falls through to the section writer.
+		case section == "" && strings.HasPrefix(trimmed, "# name:"):
 			l.Name = strings.TrimSpace(strings.TrimPrefix(trimmed, "# name:"))
-		case strings.HasPrefix(trimmed, "# dimensions:"):
+		case section == "" && strings.HasPrefix(trimmed, "# dimensions:"):
 			for _, d := range strings.Split(strings.TrimPrefix(trimmed, "# dimensions:"), ",") {
 				if d = strings.TrimSpace(d); d != "" {
 					l.Dimensions = append(l.Dimensions, d)
 				}
 			}
-		case trimmed == "## EXTRACT":
-			section = "extract"
-		case trimmed == "## REVIEW":
-			section = "review"
 		default:
 			switch section {
 			case "extract":

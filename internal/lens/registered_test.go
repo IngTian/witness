@@ -3,6 +3,7 @@ package lens
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +27,79 @@ func TestLoadRegistered(t *testing.T) {
 
 	if _, err := LoadRegistered("missing", dir); err == nil {
 		t.Fatalf("expected error for unregistered lens")
+	}
+}
+
+// Regression: a `# key:` line INSIDE an HTML comment (the usual place a lens file
+// documents its own directives) must NOT be parsed as a real directive and clobber the
+// actual header. Also: a `# ...` line inside a prompt SECTION is verbatim prompt text,
+// never a directive. Both are the header-only gate in parseLensFile.
+func TestLensDirectivesAreHeaderOnly(t *testing.T) {
+	dir := t.TempDir()
+	def := "# name: real\n" +
+		"# dimensions: a, b\n" +
+		"<!--\n" +
+		"  Docs for the author. These mentions must be IGNORED:\n" +
+		"  # name: not-the-real-name\n" +
+		"  # dimensions: x, y, z\n" +
+		"-->\n" +
+		"## EXTRACT\n" +
+		"Emit observations.\n" +
+		"# this looks like a directive but it's prompt text\n" +
+		"## REVIEW\n" +
+		"Synthesize.\n"
+	if err := os.MkdirAll(filepath.Join(dir, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real", "lens.md"), []byte(def), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := LoadRegistered("real", dir)
+	if err != nil {
+		t.Fatalf("LoadRegistered: %v", err)
+	}
+	if l.Name != "real" {
+		t.Fatalf("comment `# name:` must not override the real name, got %q", l.Name)
+	}
+	if len(l.Dimensions) != 2 {
+		t.Fatalf("comment `# dimensions:` must not append to the real header, got %v", l.Dimensions)
+	}
+	// The prompt-section `# ...` line is preserved verbatim as prompt text.
+	if !strings.Contains(l.Extract, "# this looks like a directive but it's prompt text") {
+		t.Fatalf("a `#` line inside EXTRACT must be kept as prompt text, got:\n%s", l.Extract)
+	}
+}
+
+// Regression (audit finding): a lens whose header comment is never closed before the
+// section markers must NOT silently swallow `## EXTRACT`/`## REVIEW` and yield empty
+// prompts — the section markers are structural delimiters that end the header and any
+// open comment. A lens with empty Extract/Review would distill on empty system prompts,
+// a silent failure surfacing only much later as prose drift.
+func TestUnclosedHeaderCommentDoesNotEatSections(t *testing.T) {
+	dir := t.TempDir()
+	def := "# name: real\n" +
+		"# dimensions: a, b\n" +
+		"<!--\n" +
+		"  the author forgot to close this comment\n" +
+		"## EXTRACT\n" +
+		"Emit observations.\n" +
+		"## REVIEW\n" +
+		"Synthesize.\n"
+	if err := os.MkdirAll(filepath.Join(dir, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real", "lens.md"), []byte(def), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := LoadRegistered("real", dir)
+	if err != nil {
+		t.Fatalf("LoadRegistered: %v", err)
+	}
+	if !strings.Contains(l.Extract, "Emit observations.") {
+		t.Fatalf("unclosed header comment ate the EXTRACT section, got Extract=%q", l.Extract)
+	}
+	if !strings.Contains(l.Review, "Synthesize.") {
+		t.Fatalf("unclosed header comment ate the REVIEW section, got Review=%q", l.Review)
 	}
 }
 

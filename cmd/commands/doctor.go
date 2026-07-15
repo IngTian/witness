@@ -178,11 +178,11 @@ func cmdDoctor(asJSON bool) error {
 			}
 		}
 		fmt.Printf("    %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
-			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; raise triage_model, then `witness lens rebuild <lens>`",
+			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; `witness config set triage_model <stronger>`, then `witness lens rebuild <lens>`",
 			driftTotal, last)))
 	}
 	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
-	fmt.Printf("    %s edit %s  %s\n", dim("↳ set models:  "), st.ConfigPath(), dim("(triage_model, distill_model)"))
+	fmt.Printf("    %s witness config set <triage_model|distill_model> <model>  %s\n", dim("↳ set models:  "), dim("(or edit "+st.ConfigPath()+")"))
 
 	fmt.Println()
 	fmt.Println("  " + bold("Archive"))
