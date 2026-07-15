@@ -71,7 +71,7 @@ func cmdWorkerWakeup(args []string) error {
 }
 
 func scheduleRetryWakeup(st *store.Store) {
-	next, ok := st.NextBackoffAttempt(time.Now())
+	next, ok := st.NextBackoffAttempt(activeLensNames(st), time.Now())
 	if !ok {
 		return
 	}

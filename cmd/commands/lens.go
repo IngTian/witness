@@ -48,6 +48,20 @@ func newLensCmd() *cobra.Command {
 			Args:  cobra.NoArgs,
 			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"list"}) },
 		},
+		&cobra.Command{
+			Use:   "backfill <name>",
+			Short: "Mine one lens over the whole history (catch up a newly-enabled lens).",
+			Long:  "Reset just this lens's distillation watermark so every past session is re-offered FOR THIS LENS, then drain the backlog in the foreground. Only the named lens is mined — the always-on default lens and every other lens keep their watermarks and are never re-mined. This is the enable-a-new-lens path: cost scales with one lens × history, not all lenses × history.",
+			Args:  cobra.ExactArgs(1),
+			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"backfill"}, args...)) },
+		},
+		&cobra.Command{
+			Use:   "rebuild <name>",
+			Short: "Drop one lens's observations + facets, then re-mine it from scratch.",
+			Long:  "For when you changed a lens's prompt: delete this lens's derived L1 observations and L2 facets (raw transcripts are untouched), reset its watermark, and re-mine the whole history in the foreground. Only the named lens is affected.",
+			Args:  cobra.ExactArgs(1),
+			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"rebuild"}, args...)) },
+		},
 	)
 	return lensCmd
 }
@@ -122,9 +136,108 @@ func cmdLens(args []string) error {
 				fmt.Printf("  %s %s  %s\n", dim("·"), name, dim("(registered, disabled)"))
 			}
 		}
+	case "backfill":
+		if len(args) < 2 || args[1] == "" {
+			return fmt.Errorf("usage: witness lens backfill <name>")
+		}
+		return lensBackfill(st, args[1], false)
+	case "rebuild":
+		if len(args) < 2 || args[1] == "" {
+			return fmt.Errorf("usage: witness lens rebuild <name>")
+		}
+		return lensBackfill(st, args[1], true)
 	default:
-		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list)", args[0])
+		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|backfill|rebuild)", args[0])
 	}
+	return nil
+}
+
+// lensBackfill catches one lens up over the whole history (issue #55). It resets
+// ONLY that lens's watermark rows (so every past session re-reads as pending for
+// it), optionally drops its derived L1/L2 first (rebuild, for a changed prompt),
+// then drains the backlog in the foreground. Because only this lens's watermark is
+// cleared, the drain mines just this lens on already-distilled sessions — default
+// and every other lens keep their watermarks and are never re-mined.
+//
+// It requires the lens to be ACTIVE (default, or registered+enabled): the drain's
+// pending query cross-joins the active-lens set, so a reset watermark for an
+// inactive lens would be invisible and nothing would happen. We fail fast with a
+// clear message rather than silently no-op.
+func lensBackfill(st *store.Store, name string, rebuild bool) error {
+	// Resolve the CLI arg to the name the WORKER actually keys data under. A
+	// registered lens's mined observations/facets/progress are tagged with the lens
+	// file's `# name:` header (lens.LoadRegistered), which can differ from the
+	// registry/CLI name the user typed. Operating on the CLI name would make
+	// DeleteLensData/ResetLensWatermark match ZERO rows and silently "succeed" while
+	// the real data persists. So load the lens and use its resolved .Name.
+	minedName := name
+	if name != store.LensDefault {
+		if !slices.Contains(st.RegisteredLenses(), name) {
+			return fmt.Errorf("lens %q is not registered (run: witness lens register %s <file>)", name, name)
+		}
+		if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
+			return fmt.Errorf("lens %q is registered but not enabled; enable it first (witness lens enable %s), or it won't be mined", name, name)
+		}
+		l, err := lens.LoadRegistered(name, st.LensesDir())
+		if err != nil {
+			return fmt.Errorf("load lens %q: %w", name, err)
+		}
+		minedName = l.Name // the name the worker tags observations/facets/progress with
+	}
+	if rebuild {
+		obs, facets, err := st.DeleteLensData(minedName)
+		if err != nil {
+			return fmt.Errorf("drop lens %q data: %w", name, err)
+		}
+		fmt.Printf("rebuild %q: dropped %d observation(s) + %d facet(s)\n", name, obs, facets)
+	}
+	n, err := st.ResetLensWatermark(minedName)
+	if err != nil {
+		return fmt.Errorf("reset lens %q watermark: %w", name, err)
+	}
+	fmt.Printf("reset watermark for lens %q (%d session row(s)); draining in the foreground…\n", name, n)
+	// Close our handle before the drain opens its own + takes the WorkerLock. The
+	// reset is already committed, so the worker's fresh store snapshot sees it.
+	st.Close()
+
+	ran, err := runWorker(false)
+	if err != nil {
+		return err
+	}
+	if !ran {
+		fmt.Println("another distillation worker is already running; it will pick up the backfill — nothing more to do here")
+		return nil
+	}
+	// End-state check (mirrors `distill start --all`): the reset lens must be caught
+	// up. runWorker swallows per-session failures, so a nil error alone isn't "done".
+	st2, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st2.Close()
+	stats := st2.Stats(activeLensNames(st2))
+	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
+		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log)", stats.Pending, stats.BackedOff)
+	}
+	// A rebuild DROPPED this lens's L2 facets (and its L4 profile is now stale). The
+	// re-mine above only rebuilt L1 observations; facets are reviewer-owned and are NOT
+	// regenerated by the drain unless a periodic ReviewDue trigger happens to fire —
+	// which it may not on a small or low-poignancy archive. So force a review now to
+	// rebuild the facets + profile from the freshly re-mined observations; otherwise
+	// `lens rebuild` would report success while leaving that lens with empty facets and
+	// a stale profile. (backfill, which only resets the watermark, keeps its facets, so
+	// this is rebuild-only.)
+	if rebuild {
+		fmt.Println("re-mine complete; running a review to rebuild this lens's facets + profile…")
+		ran, err := forceReview(st2)
+		if err != nil {
+			return fmt.Errorf("rebuild %q: review failed; observations were re-mined but facets/profile are not rebuilt (run `witness review`): %w", name, err)
+		}
+		if !ran {
+			fmt.Println("another worker holds the lock; it will run the review — facets/profile will rebuild as part of its drain")
+		}
+	}
+	fmt.Printf("lens %q backfill complete\n", name)
 	return nil
 }
 
@@ -146,4 +259,23 @@ func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 		out = append(out, l)
 	}
 	return out, nil
+}
+
+// activeLensNames is the per-lens-watermark (#55) view of the active lens set: the
+// NAMES the pending/stats queries cross-join sessions against. It returns only
+// lenses that actually LOAD (default + enabled-and-loadable), matching activeLenses,
+// so the queue never offers a (session,lens) pair the worker can't mine — which
+// would otherwise be a no-progress cycle (config says active, mining always skips).
+// On a total default-load failure it falls back to ["default"] so the always-on
+// lens is never dropped from the watermark accounting.
+func activeLensNames(st *store.Store) []string {
+	lenses, err := activeLenses(st)
+	if err != nil || len(lenses) == 0 {
+		return []string{store.LensDefault}
+	}
+	names := make([]string, 0, len(lenses))
+	for _, l := range lenses {
+		names = append(names, l.Name)
+	}
+	return names
 }

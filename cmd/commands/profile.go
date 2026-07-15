@@ -42,7 +42,7 @@ func cmdProfile(args []string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	stat := st.Stats()
+	stat := st.Stats(activeLensNames(st))
 	fresh := profileFreshness{
 		DistilledThrough: valueOrNever(st.LastDistilledRawTS()),
 		RawThrough:       valueOrNever(st.LastRawTS()),

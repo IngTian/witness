@@ -138,6 +138,14 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		slog.Error("load lenses", "err", err)
 		return true, err
 	}
+	// The pending query cross-joins sessions against the ACTIVE lens set (#55). Use
+	// the same loaded lenses the drain will mine, so the queue only offers pairs the
+	// worker can actually process (a config-enabled-but-unloadable lens is excluded by
+	// activeLenses above, so it won't spin here).
+	lensNames := make([]string, len(lenses))
+	for i, l := range lenses {
+		lensNames[i] = l.Name
+	}
 	// Cancel the drain context on SIGTERM/SIGINT so a `distill stop` (SIGTERM to the
 	// detached worker) or a Ctrl-C on a foreground `--all` backfill (SIGINT) tears
 	// down in-flight `claude -p` children too — the ctx threads worker→Drain→
@@ -149,7 +157,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	defer stopSignals()
 
 	pending := func() []string {
-		p, _ := st.PendingSessionsUpdatedBetween(timeRange.since, timeRange.until)
+		p, _ := st.PendingSessionsUpdatedBetween(lensNames, timeRange.since, timeRange.until)
 		return p
 	}
 	// Resolve the global distillation runner once and, if there's work, Open it for

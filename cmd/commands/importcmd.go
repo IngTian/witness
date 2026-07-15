@@ -108,7 +108,7 @@ func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platfo
 	}
 
 	cfg := st.LoadConfig()
-	pending, _ := st.PendingSessions()
+	pending, _ := st.PendingSessions(activeLensNames(st))
 	shouldRunWorker := len(pending) > 0 || st.ReviewDue(cfg)
 	if kickWorker && shouldRunWorker {
 		if auto {

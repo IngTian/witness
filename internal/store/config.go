@@ -328,11 +328,13 @@ func (s *Store) StampReview() error {
 }
 
 // SessionsSinceReview counts sessions distilled since the last review stamp.
+// Progress is per-(session,lens), so COUNT DISTINCT session — else a session mined
+// by N lenses would count N times and trip the review cadence N× too early.
 func (s *Store) SessionsSinceReview() int {
 	last := s.metaStr("review_ts")
 	var n int
 	_ = s.db.QueryRow(
-		`SELECT COUNT(*) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
+		`SELECT COUNT(DISTINCT session) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
 	return n
 }
 

@@ -132,6 +132,74 @@ func TestMigrateAddsAndBackfillsSessionPlatform(t *testing.T) {
 	}
 }
 
+// v4 -> v5 re-keys progress from PK(session) to PK(session, lens) (issue #55). A
+// pre-v5 DB has the old single-key `progress`; migrate() must rebuild it, preserve
+// each row's watermark AS THE 'default' LENS (the lens it actually reflects), and
+// leave every other lens absent so it reads as pending. Non-destructive, idempotent.
+func TestMigrateProgressToPerLens(t *testing.T) {
+	s := tempStore(t) // fully migrated (progress has the lens column)
+	// Simulate a v4 DB: rebuild progress WITHOUT the lens column, seed a watermark,
+	// and set the version back to 4.
+	for _, stmt := range []string{
+		`DROP TABLE progress`,
+		`CREATE TABLE progress (session TEXT PRIMARY KEY, distilled INTEGER NOT NULL DEFAULT 0,
+			retries INTEGER NOT NULL DEFAULT 0, distilled_at TEXT NOT NULL DEFAULT '', next_attempt TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO progress(session, distilled, retries, distilled_at) VALUES ('sess', 5, 2, '2026-07-01T00:00:00Z')`,
+		`PRAGMA user_version=4`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v4 (%q): %v", stmt, err)
+		}
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v4->v5 migrate: %v", err)
+	}
+
+	// The old row survived as the 'default' lens's watermark, values intact.
+	if got := s.DistilledCount("sess", LensDefault); got != 5 {
+		t.Fatalf("default lens watermark: got %d, want 5 (preserved from v4)", got)
+	}
+	if got := s.RetryCount("sess", LensDefault); got != 2 {
+		t.Fatalf("default lens retries: got %d, want 2 (preserved)", got)
+	}
+	// A DIFFERENT lens must read as never-mined (absent → 0), so it backfills.
+	if got := s.DistilledCount("sess", "codereview"); got != 0 {
+		t.Fatalf("a non-default lens must start un-mined, got %d", got)
+	}
+	// The lens column exists and PK is (session, lens): the same session can hold two
+	// independent lens rows.
+	if err := s.MarkDistilled("sess", "codereview", 3); err != nil {
+		t.Fatalf("MarkDistilled second lens: %v", err)
+	}
+	if got := s.DistilledCount("sess", "codereview"); got != 3 {
+		t.Fatalf("codereview watermark after mark: got %d, want 3", got)
+	}
+	if got := s.DistilledCount("sess", LensDefault); got != 5 {
+		t.Fatalf("default watermark must be untouched by the second lens: got %d, want 5", got)
+	}
+	var v int
+	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// Idempotent: re-running migrate over the applied v5 schema (version forced back)
+	// must not error or lose the rows.
+	if _, err := s.db.Exec("PRAGMA user_version=4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("re-run migrate must be idempotent: %v", err)
+	}
+	if got := s.DistilledCount("sess", LensDefault); got != 5 {
+		t.Fatalf("default watermark lost on idempotent re-run: got %d", got)
+	}
+	if got := s.DistilledCount("sess", "codereview"); got != 3 {
+		t.Fatalf("codereview watermark lost on idempotent re-run: got %d", got)
+	}
+}
+
 // SetSessionPlatform upserts even when no session_meta row exists yet (CC sessions
 // have none until now), and SessionPlatform reads it back.
 func TestSetSessionPlatformUpsert(t *testing.T) {
@@ -308,7 +376,7 @@ func TestStatsSnapshot(t *testing.T) {
 	_ = s.AppendRaw(RawRecord{Session: "a", Seq: 1, Role: "assistant", Text: "y"})
 	_ = s.AppendObservations([]Observation{{ID: "o1", Lens: LensDefault, Poignancy: 3}})
 
-	st := s.Stats()
+	st := s.Stats(nil)
 	if st.Sessions != 1 || st.RawRecords != 2 || st.Observations != 1 {
 		t.Fatalf("unexpected stats: %+v", st)
 	}
@@ -316,9 +384,78 @@ func TestStatsSnapshot(t *testing.T) {
 		t.Fatalf("session a (undistilled) should be pending: %+v", st)
 	}
 	// After distilling, it's no longer pending.
-	_ = s.MarkDistilled("a", 2)
-	if st := s.Stats(); st.Pending != 0 {
+	_ = s.MarkDistilled("a", LensDefault, 2)
+	if st := s.Stats(nil); st.Pending != 0 {
 		t.Fatalf("fully-distilled session should not be pending: %+v", st)
+	}
+}
+
+// ResetLensWatermark drops ONLY the named lens's progress rows (the backfill path,
+// #55) — other lenses' watermarks must survive so they're never re-mined.
+func TestResetLensWatermark(t *testing.T) {
+	s := tempStore(t)
+	_ = s.MarkDistilled("s1", LensDefault, 4)
+	_ = s.MarkDistilled("s2", LensDefault, 6)
+	_ = s.MarkDistilled("s1", "codereview", 4)
+
+	n, err := s.ResetLensWatermark("codereview")
+	if err != nil {
+		t.Fatalf("ResetLensWatermark: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("should have removed 1 codereview row, got %d", n)
+	}
+	// codereview reset to absent (0); default untouched on both sessions.
+	if got := s.DistilledCount("s1", "codereview"); got != 0 {
+		t.Fatalf("codereview watermark should be reset, got %d", got)
+	}
+	if got := s.DistilledCount("s1", LensDefault); got != 4 {
+		t.Fatalf("default watermark must survive a codereview reset, got %d", got)
+	}
+	if got := s.DistilledCount("s2", LensDefault); got != 6 {
+		t.Fatalf("unrelated session's default watermark must survive, got %d", got)
+	}
+}
+
+// DeleteLensData removes one lens's observations + facets (rebuild path, #55),
+// leaving other lenses' derived data and all raw L0 intact.
+func TestDeleteLensData(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AppendRaw(RawRecord{Session: "s", Seq: 0, Role: "user", Text: "x"})
+	_ = s.AppendObservations([]Observation{
+		{ID: "o_def", Lens: LensDefault, Observation: "d", Poignancy: 3},
+		{ID: "o_cr1", Lens: "codereview", Observation: "c1", Poignancy: 3},
+		{ID: "o_cr2", Lens: "codereview", Observation: "c2", Poignancy: 3},
+	})
+	if err := s.WriteFacets([]Facet{
+		{Lens: LensDefault, Dimension: "thinking", Key: "k", Versions: []FacetVersion{{Value: "v", ValidFrom: "t"}}},
+		{Lens: "codereview", Dimension: "rule", Key: "r", Versions: []FacetVersion{{Value: "v", ValidFrom: "t"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, facets, err := s.DeleteLensData("codereview")
+	if err != nil {
+		t.Fatalf("DeleteLensData: %v", err)
+	}
+	if obs != 2 || facets != 1 {
+		t.Fatalf("should drop 2 obs + 1 facet, got %d obs + %d facets", obs, facets)
+	}
+	// codereview data gone; default data + raw survive.
+	if got, _ := s.ReadObservations("codereview"); len(got) != 0 {
+		t.Fatalf("codereview obs should be gone, got %d", len(got))
+	}
+	if got, _ := s.ReadObservations(LensDefault); len(got) != 1 {
+		t.Fatalf("default obs must survive, got %d", len(got))
+	}
+	all, _ := s.ReadFacets()
+	for _, f := range all {
+		if f.Lens == "codereview" {
+			t.Fatalf("codereview facet should be gone: %+v", f)
+		}
+	}
+	if recs, _ := s.ReadRaw("s"); len(recs) != 1 {
+		t.Fatalf("raw L0 must be untouched by a lens rebuild, got %d", len(recs))
 	}
 }
 
@@ -367,7 +504,7 @@ func TestPruneSessionsBefore(t *testing.T) {
 	// An old, fully-distilled session with a derived observation.
 	_ = s.AppendRaw(RawRecord{Session: "old", Seq: 0, TS: "2020-01-01T00:00:00Z", Role: "user", Text: "a"})
 	_ = s.AppendRaw(RawRecord{Session: "old", Seq: 1, TS: "2020-01-01T00:01:00Z", Role: "assistant", Text: "b"})
-	_ = s.MarkDistilled("old", 2)
+	_ = s.MarkDistilled("old", LensDefault, 2)
 	_ = s.AppendObservations([]Observation{{ID: "obs_old", Lens: LensDefault, Session: "old", Observation: "x"}})
 	// A recent session that must survive.
 	_ = s.AppendRaw(RawRecord{Session: "new", Seq: 0, TS: "2030-06-01T00:00:00Z", Role: "user", Text: "c"})
@@ -402,7 +539,7 @@ func TestPruneSessionsBefore(t *testing.T) {
 	if raw, _ := s.ReadRaw("old"); len(raw) != 0 {
 		t.Fatalf("old L0 should be pruned, got %d records", len(raw))
 	}
-	if d := s.DistilledCount("old"); d != 0 {
+	if d := s.DistilledCount("old", LensDefault); d != 0 {
 		t.Fatalf("old session watermark should be removed, got %d", d)
 	}
 	// ...but its derived observation (L1) is KEPT.
