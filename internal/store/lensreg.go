@@ -7,18 +7,14 @@ import (
 	"strings"
 )
 
-// reservedLens is the filename stem of the cross-lens profile summary
-// (profile/unified.md). A lens may not take this name, or its per-lens summary
-// would clobber the unified portrait.
-const reservedLens = "unified"
-
 // ReservedLensName reports whether a lens name is reserved and may not be taken by
-// a registered lens. Two names are reserved:
+// a registered lens. Two names are reserved (both defined in types.go, the single
+// source of truth):
 //   - LensDefault ("default") — the always-on built-in lens's identity. A second
 //     lens under this name would share the built-in's (session,'default') watermark
 //     and observation key, corrupting the backbone lens's data (two prompts writing
 //     Lens='default', one progress row, cross-contaminated dedup).
-//   - reservedLens ("unified") — the cross-lens profile summary's filename stem; a
+//   - ProfileUnified ("unified") — the cross-lens profile summary's filename stem; a
 //     per-lens summary under this name would clobber the unified portrait.
 //
 // This is the ONE piece of legitimate default-lens specialness that lives at the
@@ -33,7 +29,7 @@ const reservedLens = "unified"
 // this guard exists to prevent. Folding closes that bypass on every platform.
 func ReservedLensName(name string) bool {
 	n := strings.ToLower(sanitize(name))
-	return n == reservedLens || n == LensDefault
+	return n == ProfileUnified || n == LensDefault
 }
 
 // LensesDir is the central lens registry: <root>/lenses/<name>/lens.md. Lenses

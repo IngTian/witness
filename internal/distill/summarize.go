@@ -68,7 +68,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("summarize unified: %w", err)
 	}
-	return sm.Store.WriteProfile("unified", umd)
+	return sm.Store.WriteProfile(store.ProfileUnified, umd)
 }
 
 // renderFacetsForSummary formats one lens's active facets as readable input for

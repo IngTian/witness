@@ -15,8 +15,24 @@
 // global (runs on every session); repo lenses are scoped (opt-in per repo).
 package store
 
-// Lens tag constants. Default is the always-on, cross-domain lens.
-const LensDefault = "default"
+// Reserved-name constants — the single source of truth for the two special names,
+// in the data layer (every store-side check and the lens loader route through them).
+// Both are reserved from the registry (see ReservedLensName), but they name DIFFERENT
+// kinds of thing — hence the different prefixes:
+//   - LensDefault IS a lens (the always-on built-in one).
+//   - ProfileUnified is NOT a lens; it is the reserved filename stem of the cross-lens
+//     profile aggregate. Naming it Lens* would be a misnomer — nothing mines "unified".
+const (
+	// LensDefault is the always-on, cross-domain built-in lens.
+	LensDefault = "default"
+	// ProfileUnified is the filename stem of the cross-lens profile summary
+	// (profile/unified.md) — an aggregate VIEW blending every lens, NOT a lens a
+	// session mines. The name is RESERVED (a registered lens may not take it) purely
+	// so a per-lens summary can't clobber this profile file. The summarize writer and
+	// every profile reader must agree on this exact string, or a profile written to
+	// unified.md would be read under a different key.
+	ProfileUnified = "unified"
+)
 
 // RawRecord is one raw turn-half: a user prompt or an assistant reply, captured
 // verbatim from the stable hook fields (UserPromptSubmit.prompt / Stop.last_assistant_message).
