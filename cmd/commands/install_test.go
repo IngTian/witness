@@ -621,3 +621,30 @@ func TestRemoveOpenCodeMCPAcceptsJSONC(t *testing.T) {
 		t.Fatalf("unexpected cleaned config: %s", out)
 	}
 }
+
+// mcpServerRegistered must match the EXACT server name in `claude mcp list` output
+// (one "<name>: <command>" line per server), not a whole-output substring — a
+// substring match treated a foreign server whose name merely contains "witness"
+// (e.g. "eyewitness", "witness-notes") as already-registered and silently skipped
+// registering our own (issue #54 minor).
+func TestMCPServerRegisteredExactName(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"present", "foo: cmd\nwitness: /path/witness.sh mcp\nbar: cmd", true},
+		{"only present", "witness: /path/witness.sh mcp", true},
+		{"absent", "foo: cmd\nbar: cmd", false},
+		{"empty", "", false},
+		{"substring-only must not match", "eyewitness: /x mcp\nwitness-notes: /y mcp", false},
+		{"leading/trailing space tolerated", "  witness : cmd", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mcpServerRegistered(tc.out, "witness"); got != tc.want {
+				t.Fatalf("mcpServerRegistered(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		})
+	}
+}

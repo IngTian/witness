@@ -267,6 +267,25 @@ function acquireLock(dir) {
   }
 }
 
+// restampLockOwner rewrites the lock's recorded pid to THIS process's pid, keeping
+// the token. startModelDownload's acquireLock stamps the PARENT (plugin) pid, then
+// spawns the actual downloader as a child; if that child is SIGKILL'd while the
+// parent lives, lockOwnerDead probes the still-alive parent and never reaps — a
+// 12h wedge of the download (issue #54 I5). Having the --foreground child re-stamp
+// with its own pid on startup makes the liveness probe target the process that is
+// actually doing the work. Token-guarded so a stale-lock reap that already handed
+// the slot to a different downloader is never clobbered; best-effort (a failure
+// just leaves the parent pid, i.e. the pre-fix behavior). Exported (not just via
+// __test) because download-model.js calls it in production.
+export function restampLockOwner(lock, token) {
+  if (!lock || !token) return
+  try {
+    const body = readFileSync(lock, "utf8")
+    if (body.trim().split(/\s+/)[0] !== token) return // reaped + reassigned; not ours
+    writeFileSync(lock, `${token} ${process.pid} ${os.hostname()}\n`, { encoding: "utf8" })
+  } catch {}
+}
+
 export function startModelDownload(packageRoot, options = {}) {
   if (process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(packageRoot)) return null
   const dir = modelDir(packageRoot)
@@ -433,5 +452,7 @@ export const __test = {
   verifiedMarkerPath,
   acquireLock,
   lockStale,
+  lockOwnerDead,
+  restampLockOwner,
   reapForeignParts,
 }

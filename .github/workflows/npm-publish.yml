@@ -44,16 +44,24 @@ jobs:
 
       # Fail fast if the release tag (vX.Y.Z) doesn't match the committed package
       # version — 0.0.1 is already published and immutable, so the tag must bump it.
-      - name: Verify release tag matches package version
+      # Also guard the two Claude-plugin manifests: they carry their own version and
+      # silently drift from the tag if bumped separately (issue #54 minor). Checking
+      # them here keeps a single release surface consistent across npm + marketplace.
+      - name: Verify release tag matches package versions
         if: github.event_name == 'release'
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pkg="$(node -p "require('./npm/opencode/package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "release tag ($tag) != npm/opencode/package.json version ($pkg)" >&2
-            echo "bump npm/opencode/package.json to $tag (or tag v$pkg) and re-release." >&2
-            exit 1
-          fi
+          check() {
+            local label="$1" got="$2"
+            if [ "$tag" != "$got" ]; then
+              echo "release tag ($tag) != $label version ($got)" >&2
+              echo "bump $label to $tag (or tag v$got) and re-release." >&2
+              exit 1
+            fi
+          }
+          check "npm/opencode/package.json" "$(node -p "require('./npm/opencode/package.json').version")"
+          check ".claude-plugin/plugin.json" "$(node -p "require('./.claude-plugin/plugin.json').version")"
+          check ".claude-plugin/marketplace.json" "$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].version")"
 
       - name: Test and stage packages
         run: |

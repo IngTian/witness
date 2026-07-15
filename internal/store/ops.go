@@ -239,6 +239,18 @@ func (s *Store) StagedCount(session string) int {
 	return n
 }
 
+// StagedExists reports whether a specific (session, obs_id) is already staged. It
+// disambiguates the two reasons StageObservationCapped can decline to insert: a
+// benign duplicate (this exact obs is already staged) vs. hitting the per-session
+// cap. Without it, a duplicate recorded while a session happens to be AT the cap
+// was mislabeled as a "too many observations" error (a count>=limit check can't
+// tell the cases apart).
+func (s *Store) StagedExists(session, obsID string) bool {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM staged WHERE session = ? AND obs_id = ? LIMIT 1`, session, obsID).Scan(&one)
+	return err == nil
+}
+
 // ClearStagedThrough removes staged rows up to and including throughID — called
 // ONLY after the worker has committed them to L1 and advanced the watermark, so a
 // crash before the clear just re-drains them (and obsID dedup drops the re-write).
@@ -608,6 +620,18 @@ func (s *Store) PruneSessionsBefore(cutoff string) (sessions, records int, err e
 			return 0, 0, err
 		}
 		if _, e := tx.Exec(`DELETE FROM session_meta WHERE session = ?`, sess); e != nil {
+			err = e
+			return 0, 0, err
+		}
+		// Per-session state parked in `meta` under a "<namespace>:<session>" key (today
+		// only opencode's "opencode_import_keys:<session>") would otherwise be orphaned
+		// when the session's raw/progress rows go — a slow leak of dead meta rows.
+		// Suffix-match ":"+session with substr (NOT LIKE: opencode session ids contain
+		// "_", a LIKE wildcard, which would over-match). Stays generic — the store never
+		// hardcodes the opencode key constant.
+		needle := ":" + sess
+		if _, e := tx.Exec(
+			`DELETE FROM meta WHERE substr(key, length(key) - length(?) + 1) = ?`, needle, needle); e != nil {
 			err = e
 			return 0, 0, err
 		}

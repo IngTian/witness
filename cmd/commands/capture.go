@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -52,7 +51,13 @@ func cmdCapture(args []string) error {
 	}
 	p, ok := platform.ByName(agent)
 	if !ok {
-		return fmt.Errorf("unknown capture agent %q", agent)
+		// Best-effort contract (see the doc above): an unknown agent is logged, never
+		// fatal. Returning an error here would surface a nonzero exit from a hook and
+		// could break the user's session — exactly what capture must not do. Not
+		// reachable via the shipped hooks (they pass a known agent), but a
+		// hand-invoked/misconfigured hook must still exit 0.
+		slog.Warn("capture: unknown agent", "agent", agent)
+		return nil
 	}
 	capturer, ok := p.(platform.Capturer)
 	if !ok {

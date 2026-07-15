@@ -225,6 +225,47 @@ test("acquireLock does not reclaim a fresh lock from another host on pid livenes
   assert.equal(__test.acquireLock(assets), null)
 })
 
+test("restampLockOwner rewrites the pid for our token but leaves a reassigned lock alone (#54 I5)", async () => {
+  const root = tempDir()
+  const assets = path.join(root, "assets")
+  mkdirSync(assets, { recursive: true })
+  const lock = path.join(assets, ".download.lock")
+
+  // The parent stamped its (different) pid under our token; the downloader child
+  // re-stamps with its own pid so liveness probes target the process doing the work.
+  const parentPID = 2147483646
+  writeFileSync(lock, `mine-token ${parentPID} ${os.hostname()}\n`)
+  __test.restampLockOwner(lock, "mine-token")
+  assert.equal(readFileSync(lock, "utf8").trim().split(/\s+/)[1], String(process.pid))
+  assert.equal(readFileSync(lock, "utf8").trim().split(/\s+/)[0], "mine-token", "token must be preserved")
+
+  // A stale-lock reap already handed the slot to a DIFFERENT downloader (new
+  // token): we must not clobber their lock.
+  writeFileSync(lock, `other-token 999 ${os.hostname()}\n`)
+  __test.restampLockOwner(lock, "mine-token")
+  assert.equal(readFileSync(lock, "utf8").trim(), `other-token 999 ${os.hostname()}`)
+})
+
+test("restamped lock makes a dead downloader child reclaimable despite a live parent (#54 I5)", async () => {
+  const root = tempDir()
+  const assets = path.join(root, "assets")
+  mkdirSync(assets, { recursive: true })
+  process.env.WITNESS_ASSETS = assets
+  const lock = path.join(assets, ".download.lock")
+
+  // BEFORE the fix: the lock carries the still-alive PARENT pid (our own), so a
+  // hard-killed download child leaves a lock that lockOwnerDead treats as live —
+  // the 12h wedge. Assert that state first.
+  writeFileSync(lock, `tok ${process.pid} ${os.hostname()}\n`)
+  assert.equal(__test.lockOwnerDead(lock), false, "a live parent pid keeps the lock un-reapable — the bug")
+
+  // AFTER the child re-stamps with its own (now-dead) pid, the crashed child is
+  // detected and the lock is immediately reclaimable.
+  const deadChildPID = 2147483647
+  writeFileSync(lock, `tok ${deadChildPID} ${os.hostname()}\n`)
+  assert.equal(__test.lockOwnerDead(lock), true, "a dead child pid makes the lock reapable — the fix")
+})
+
 test("reapForeignParts removes other pids' .part files but keeps our own and the real files", async () => {
   const root = tempDir()
   const assets = path.join(root, "assets")

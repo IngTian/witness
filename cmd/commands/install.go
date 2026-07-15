@@ -417,7 +417,7 @@ func cmdInstallClaude() error {
 	fmt.Printf("hooks wired into %s\n", settings)
 
 	// Register the MCP server (idempotent: skip if already present).
-	if out, _ := exec.Command("claude", "mcp", "list").CombinedOutput(); !strings.Contains(string(out), "witness") {
+	if out, _ := exec.Command("claude", "mcp", "list").CombinedOutput(); !mcpServerRegistered(string(out), "witness") {
 		if err := exec.Command("claude", "mcp", "add", "-s", "user", "witness", inv.mcpTarget(), "mcp").Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "witness: could not register MCP server (is `claude` on PATH?): %v\n", err)
 		} else {
@@ -431,6 +431,22 @@ func cmdInstallClaude() error {
 	fmt.Println("      agents read it on demand via the witness MCP tools;")
 	fmt.Println("      you can read it yourself with `witness profile`.")
 	return nil
+}
+
+// mcpServerRegistered reports whether `claude mcp list` output already lists a
+// server of exactly `name`. `claude mcp list` prints one server per line as
+// "<name>: <command...>", so we match the token before the first colon per line —
+// NOT a whole-output substring (issue #54 minor): a plain Contains(out, "witness")
+// treated an unrelated server like "eyewitness" or "witness-notes" as already-
+// registered and silently skipped registering our own.
+func mcpServerRegistered(out, name string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		serverName, _, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && strings.TrimSpace(serverName) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // cmdInstallOpenCode installs a global OpenCode plugin that mirrors completed

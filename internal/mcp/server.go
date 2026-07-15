@@ -183,11 +183,13 @@ func newServer(st *store.Store, emb Embedder, version string) *mcpsdk.Server {
 		}
 		if !inserted {
 			// At the cap, or this exact observation was already recorded (a no-op
-			// dedup). Only the cap is worth surfacing as an error.
-			if st.StagedCount(in.Session) >= maxStagedPerSession {
-				return errResult(fmt.Sprintf("too many in-session observations (limit %d per session)", maxStagedPerSession)), nil, nil
+			// dedup). Check the dedup case FIRST: a duplicate recorded while the
+			// session is at the cap must report "already recorded", not a spurious
+			// "too many" error (a count>=limit check alone can't tell them apart).
+			if st.StagedExists(o.Session, o.ID) {
+				return textResult("already recorded (" + in.Lens + "/" + in.Dimension + ")"), nil, nil
 			}
-			return textResult("already recorded (" + in.Lens + "/" + in.Dimension + ")"), nil, nil
+			return errResult(fmt.Sprintf("too many in-session observations (limit %d per session)", maxStagedPerSession)), nil, nil
 		}
 		return textResult("recorded (" + in.Lens + "/" + in.Dimension + ")"), nil, nil
 	})

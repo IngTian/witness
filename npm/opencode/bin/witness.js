@@ -18,9 +18,15 @@ if (command === "install" || command === "uninstall") {
 }
 
 const packageName = platformPackage()
-const bin = platformWitnessBin()
+// Honor an explicit WITNESS_BIN override, just like the plugin (witness.js) does —
+// used verbatim (no existsSync gate) so it can point at a dev build or a binary the
+// platform-package probe can't resolve. Without this the CLI ignored the very
+// override the plugin honored, so `WITNESS_BIN=... witness doctor` was inconsistent
+// with what the plugin runs (issue #54 minor).
+const override = process.env.WITNESS_BIN
+const bin = override || platformWitnessBin()
 
-if (!bin || !existsSync(bin)) {
+if (!bin || (!override && !existsSync(bin))) {
   const reason = packageName ? `optional package ${packageName} is not installed` : `unsupported platform ${process.platform}/${process.arch}`
   console.error(`witness: ${reason}; supported platforms: ${supportedPlatforms()}`)
   process.exit(1)
