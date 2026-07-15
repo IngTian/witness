@@ -52,19 +52,50 @@ func TestLensRegistry(t *testing.T) {
 	}
 }
 
-// "unified" is the cross-lens profile summary's filename stem; a lens must not be
-// allowed to take it, or its per-lens summary would clobber the unified portrait.
-func TestRegisterLensRejectsReservedName(t *testing.T) {
-	s := tempStore(t)
-	src := filepath.Join(t.TempDir(), "src.md")
-	if err := os.WriteFile(src, []byte("# name: unified\n"), 0o644); err != nil {
-		t.Fatal(err)
+// Both reserved names must be refused at register AND enable: "unified" (the
+// cross-lens summary's filename stem — its per-lens summary would clobber the
+// unified portrait) and "default" (the always-on built-in's identity — a second
+// lens under this name would share the built-in's (session,'default') watermark +
+// observation key and corrupt the backbone lens). This is the identity-layer guard
+// that keeps default's NAME protected even though the engine treats every lens's
+// BEHAVIOR identically.
+func TestReservedLensNamesRejected(t *testing.T) {
+	// Include case variants: on case-insensitive filesystems (macOS/Windows) a
+	// "Default" lens's profile file (Default.md) collides with the built-in's
+	// (default.md), so the guard must fold case and reject these too — else the
+	// registered lens's summary silently clobbers the built-in's.
+	for _, name := range []string{"unified", "default", "Default", "UNIFIED", "Unified"} {
+		t.Run(name, func(t *testing.T) {
+			s := tempStore(t)
+			src := filepath.Join(t.TempDir(), "src.md")
+			if err := os.WriteFile(src, []byte("# name: "+name+"\n## EXTRACT\nx\n## REVIEW\ny\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RegisterLens(name, src); err == nil {
+				t.Fatalf("registering a lens named %q must be rejected", name)
+			}
+			if slices.Contains(s.RegisteredLenses(), name) {
+				t.Fatalf("reserved lens %q must not be written to the registry", name)
+			}
+			if err := s.EnableLens(name); err == nil {
+				t.Fatalf("enabling a reserved lens %q must be rejected", name)
+			}
+			if slices.Contains(s.LoadConfig().EnabledLenses, name) {
+				t.Fatalf("reserved lens %q must not enter the enabled set", name)
+			}
+		})
 	}
-	if err := s.RegisterLens("unified", src); err == nil {
-		t.Fatal("registering a lens named 'unified' must be rejected")
+	if !ReservedLensName("default") || !ReservedLensName("unified") {
+		t.Fatal("ReservedLensName must report both reserved names")
 	}
-	if slices.Contains(s.RegisteredLenses(), "unified") {
-		t.Fatal("reserved lens must not be written to the registry")
+	// Case-folded: mixed/upper-case variants of the reserved names are also reserved.
+	for _, v := range []string{"Default", "DEFAULT", "Unified", "UNIFIED", "uNiFiEd"} {
+		if !ReservedLensName(v) {
+			t.Fatalf("ReservedLensName(%q) must be true (case-insensitive)", v)
+		}
+	}
+	if ReservedLensName("math") {
+		t.Fatal("ReservedLensName must not reserve an ordinary lens name")
 	}
 }
 

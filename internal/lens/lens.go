@@ -7,11 +7,13 @@
 package lens
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/IngTian/witness/internal/bundle"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // Lens carries the two prompts the distiller needs plus identity.
@@ -91,6 +93,16 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	l := parseLensFile(string(data))
 	if l.Name == "" {
 		l.Name = name
+	}
+	// Backstop the reserved-name guard at the RESOLVED name. RegisterLens/EnableLens
+	// reject the registry name, but a lens file's `# name:` header overrides that name
+	// (parseLensFile above) — so a file registered under an innocent name could still
+	// resolve to a reserved identity (e.g. `# name: default`) and collide with the
+	// always-on built-in on the shared (session,'default') watermark + observation key.
+	// This is the ultimate boundary where the resolved name is known, so enforce it
+	// here too rather than trust every caller to re-check.
+	if store.ReservedLensName(l.Name) {
+		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its `# name:` header impersonates the built-in/unified identity); rename it", name, l.Name)
 	}
 	l.Global = false
 	return l, nil
