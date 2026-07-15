@@ -196,6 +196,10 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 		return fmt.Errorf("reset lens %q watermark: %w", name, err)
 	}
 	fmt.Printf("reset watermark for lens %q (%d session row(s)); draining in the foreground…\n", name, n)
+	// Snapshot the monotonic drift counter before the drain so the completion line can
+	// report how many prose_drift events THIS backfill produced (#57) — a below-floor
+	// triage model surfaces here, at the moment of the backfill.
+	driftBefore := st.DriftTotal()
 	// Close our handle before the drain opens its own + takes the WorkerLock. The
 	// reset is already committed, so the worker's fresh store snapshot sees it.
 	st.Close()
@@ -257,7 +261,13 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 			return fmt.Errorf("rebuild %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet rebuilt; run `witness review` to finish", name)
 		}
 	}
-	fmt.Printf("lens %q backfill complete\n", name)
+	msg := fmt.Sprintf("lens %q backfill complete", name)
+	// A drifted lens advanced its watermark (not "pending") but distilled to zero
+	// observations — report it so a below-floor triage model is visible now.
+	if drifted := st2.DriftTotal() - driftBefore; drifted > 0 {
+		msg += fmt.Sprintf(" (%d session-lens drifted: model returned no observations — raise triage_model, then re-mine; see `witness doctor`)", drifted)
+	}
+	fmt.Println(msg)
 	return nil
 }
 

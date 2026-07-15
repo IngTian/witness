@@ -117,6 +117,14 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 	if !quiet {
 		fmt.Println("distilling the full backlog in the foreground; this may take a while — run `witness distill status` in another shell to watch")
 	}
+	// Snapshot the monotonic drift counter before the drain so we can report how many
+	// prose_drift events THIS backfill produced (#57) — surfaced at the moment the user
+	// runs it, not only on a later `witness doctor`.
+	driftBefore := 0
+	if st0, err := store.Open(); err == nil {
+		driftBefore = st0.DriftTotal()
+		st0.Close()
+	}
 	ran, err := runWorker(false)
 	if err != nil {
 		return err
@@ -139,7 +147,14 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log; a missing embedding model or provider failure is the usual cause)", stats.Pending, stats.BackedOff)
 	}
 	if !quiet {
-		fmt.Println("backfill complete")
+		msg := "backfill complete"
+		// A drifted lens still advances its watermark (so it's not "pending"), but it
+		// distilled to zero observations — report it here so a below-floor triage model
+		// is visible now, not silently a thin archive.
+		if drifted := st.DriftTotal() - driftBefore; drifted > 0 {
+			msg += fmt.Sprintf(" (%d session-lens drifted: model returned no observations — raise triage_model, then re-mine; see `witness doctor`)", drifted)
+		}
+		fmt.Println(msg)
 	}
 	return nil
 }

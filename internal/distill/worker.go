@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,6 +15,19 @@ import (
 	"github.com/IngTian/witness/internal/store"
 	"github.com/IngTian/witness/internal/vector"
 )
+
+// errNoArray is mine()'s sentinel for "the model replied, but its reply contained
+// NO parseable JSON observation array" — i.e. prose_drift: the runner conversed with
+// the transcript (or refused, or was truncated) instead of emitting the required
+// array. This is DISTINCT from the model emitting an explicit empty `[]` (a legit
+// "nothing to report" — ParseJSONArray returns that as (empty, nil), see parse.go).
+// The empirical work on #57 found a too-weak triage model does this on ~40% of
+// sessions; before this sentinel mine() silently bucketed it as a quiet session,
+// making a below-floor model indistinguishable from a genuinely uneventful history.
+// It is wrapped (kept as an error, not a bool) so MineSession can match it with
+// errors.Is WITHOUT changing mine()'s (obs, error) signature — a transport failure
+// stays a plain error, so the two failure modes never get conflated.
+var errNoArray = errors.New("mine: model reply contained no JSON observation array (prose drift)")
 
 // backoffDelay is the wait before a failed session's delta is retried: 5m, 10m,
 // 20m, ... doubling, capped at 6h. The raw turns are NEVER dropped — a transient
@@ -103,6 +117,17 @@ type LensMining struct {
 	Done       int // this lens's watermark at read time (turns it had already mined)
 	Mined      []store.Observation
 	MineFailed bool // a transport error hit THIS lens — commit backs off this lens only
+	// Drifted marks that this lens saw prose_drift (a reply with no JSON array,
+	// errNoArray) AND produced ZERO observations across ALL of its inputs (#57). It is
+	// set only in that all-inputs-drifted-nothing case: a multi-chunk session where one
+	// chunk yields a real array is NOT drift (the lens produced obs), so this can't
+	// false-positive a partially-successful long session. A drifted lens ADVANCES its
+	// watermark exactly like a legit-quiet lens (the data outcome is identical to the
+	// pre-#57 silent behavior) — the ONLY difference is that commit counts + surfaces
+	// it, so a below-floor triage model becomes visible instead of masquerading as an
+	// uneventful history. It is NOT a MineFailed: drift never backs off (that would
+	// re-hammer a deterministically-drifting model forever and wedge the backfill queue).
+	Drifted bool
 }
 
 // Process runs a full fast-path pass for one session: MineSession then CommitMining
@@ -181,15 +206,34 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 		lm := LensMining{Lens: ln.Name, Done: done}
 		if total > done {
 			anyDelta = true
+			// Track drift across ALL of this lens's inputs (a session may render to
+			// several chunks). We only flag the lens as Drifted if it produced NO obs
+			// anywhere AND at least one input drifted — so a long session where one chunk
+			// extracts fine is never miscounted as drift (see LensMining.Drifted).
+			producedObs, sawDrift := false, false
 			for _, transcript := range distillInputs(w.Store, session, raw[done:]) {
 				obs, err := w.mine(ctx, ln, session, transcript)
 				if err != nil {
+					if errors.Is(err, errNoArray) {
+						// prose drift: the model replied but emitted no array (likely below the
+						// lens's model floor). NOT a transport failure — do not back off; the
+						// watermark advances like a quiet session, and commit surfaces the drift.
+						sawDrift = true
+						slog.Warn("distill: prose drift; model may be below lens floor (advancing, surfaced)",
+							"session", session, "lens", ln.Name, "err", err)
+						continue
+					}
+					// A real transport error (rate limit, network, timeout) — back this lens off.
 					slog.Error("mine failed", "session", session, "lens", ln.Name, "err", err)
 					lm.MineFailed = true
 					continue
 				}
+				if len(obs) > 0 {
+					producedObs = true
+				}
 				lm.Mined = append(lm.Mined, obs...)
 			}
+			lm.Drifted = sawDrift && !producedObs
 		}
 		m.Lenses = append(m.Lenses, lm)
 	}
@@ -303,6 +347,8 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 	// rawHighID), which every lens of this session shares, so all successful lenses
 	// return the same currency verdict; we capture it to gate staged-clearing below.
 	generationCurrent := false
+	driftCount := 0
+	lastDriftLens := ""
 	for _, lm := range m.Lenses {
 		if lm.MineFailed {
 			n := w.Store.IncRetry(m.Session, lm.Lens)
@@ -310,6 +356,15 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 			slog.Warn("distill: lens mining failed; backing off (delta stays pending, never dropped)",
 				"session", m.Session, "lens", lm.Lens, "attempt", n, "backoff", backoffDelay(n).String())
 			continue
+		}
+		// A drifted lens advances just like a successful one (its data outcome — zero obs
+		// for this delta — is identical to the pre-#57 silent behavior). We only tally it
+		// so the drift can be surfaced (doctor + backfill summary): drift is NOT a
+		// transport failure, so it must NOT back off (that would re-hammer a
+		// deterministically-below-floor model forever and wedge the backfill queue).
+		if lm.Drifted {
+			driftCount++
+			lastDriftLens = lm.Lens
 		}
 		w.Store.ResetRetry(m.Session, lm.Lens)
 		advanced, err := w.Store.MarkDistilledIfCurrent(m.Session, lm.Lens, m.Total, m.RawHighID)
@@ -321,6 +376,16 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 		} else {
 			slog.Warn("distill: raw changed under mine; lens watermark held, will re-mine",
 				"session", m.Session, "lens", lm.Lens, "mined_to", m.Total)
+		}
+	}
+	// Record drift AFTER the advance loop, and only when the generation was still current
+	// (a drift over a since-replaced generation didn't really "happen" for the archive —
+	// the session will re-mine the new generation, so counting it would be misleading).
+	if driftCount > 0 && generationCurrent {
+		if err := w.Store.RecordDrift(driftCount, m.Session, lastDriftLens); err != nil {
+			// Surfacing is best-effort bookkeeping; a meta-write hiccup must never fail a
+			// commit whose L1/watermark writes already succeeded.
+			slog.Warn("distill: could not record drift counter", "session", m.Session, "err", err)
 		}
 	}
 
@@ -354,12 +419,15 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 	}
 	raw, perr := ParseJSONArray[minedObs](reply)
 	if perr != nil {
-		// The model replied (no transport error) but produced no parseable array —
-		// a quiet/uneventful session. NOT a failure: yield zero observations so the
-		// watermark advances rather than retrying a session that has nothing to mine.
-		slog.Debug("mine: no observations parsed; treating as quiet session",
-			"session", session, "lens", ln.Name)
-		return nil, nil
+		// The model replied (no transport error) but its reply contained NO parseable
+		// JSON array at all — prose drift (it conversed/refused instead of extracting).
+		// This is NOT the same as an explicit empty `[]` (legit quiet): ParseJSONArray
+		// returns that as ([]T{}, nil) and we fall through below with zero obs. Signal
+		// drift with the errNoArray sentinel so MineSession can count + surface it (the
+		// #57 model-floor signal) instead of silently treating a below-floor model as an
+		// uneventful session. Watermark handling is decided by the caller (advance-on-
+		// drift, same data outcome as before — just loud now).
+		return nil, fmt.Errorf("%w (lens=%s reply_len=%d)", errNoArray, ln.Name, len(strings.TrimSpace(reply)))
 	}
 	var obs []store.Observation
 	for _, m := range raw {

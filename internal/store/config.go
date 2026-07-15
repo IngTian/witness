@@ -369,6 +369,71 @@ func (s *Store) SetMetaString(key, value string) error {
 	return err
 }
 
+// Drift-surfacing meta keys (issue #57). A distillation pass records prose_drift —
+// a lens whose model returned no JSON observation array, likely a below-floor triage
+// model — so `witness doctor` and a backfill's completion line can surface it. These
+// live in the existing worker_*/review_* meta namespace (no schema, no collision).
+// The total is monotonic across the archive's life; the last_* stamps give doctor a
+// "when/where" so a raised model reads as "0 recent", not "broken forever".
+const (
+	metaDriftTotal       = "mine_drift_total"
+	metaDriftLastTS      = "mine_drift_last_ts"
+	metaDriftLastSession = "mine_drift_last_session"
+	metaDriftLastLens    = "mine_drift_last_lens"
+)
+
+// RecordDrift atomically adds n to the drift counter and stamps the most recent drift
+// (ts/session/lens), in ONE transaction so a concurrent reader never sees the counter
+// bumped without its stamps. Called by the sole L1 writer (CommitMining), so there is
+// no cross-process race on the counter beyond what the single-writer model already
+// serializes. Best-effort at the call site: a failure here never fails the commit.
+func (s *Store) RecordDrift(n int, session, lens string) error {
+	if n <= 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	// Atomic increment: read-modify-write inside the tx would still be correct under
+	// MaxOpenConns(1), but expressing it as one UPDATE keeps it a single statement and
+	// robust if the connection model ever loosens.
+	if _, err := tx.Exec(
+		`INSERT INTO meta(key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + excluded.value`,
+		metaDriftTotal, strconv.Itoa(n)); err != nil {
+		tx.Rollback()
+		return err
+	}
+	stamps := [][2]string{
+		{metaDriftLastTS, time.Now().UTC().Format(time.RFC3339)},
+		{metaDriftLastSession, session},
+		{metaDriftLastLens, lens},
+	}
+	for _, kv := range stamps {
+		if _, err := tx.Exec(
+			`INSERT INTO meta(key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, kv[0], kv[1]); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DriftTotal is the monotonic count of prose_drift events recorded so far (0 if never).
+func (s *Store) DriftTotal() int {
+	n, _ := strconv.Atoi(s.metaStr(metaDriftTotal))
+	return n
+}
+
+// DriftLast returns the timestamp and lens of the most recently recorded drift event
+// (both "" if none) — for doctor's "last drift" line so a monotonic counter reads as
+// dated, not perpetually-broken.
+func (s *Store) DriftLast() (ts, lens string) {
+	return s.metaStr(metaDriftLastTS), s.metaStr(metaDriftLastLens)
+}
+
 func (s *Store) metaInt(key string) int64 {
 	n, _ := strconv.ParseInt(strings.TrimSpace(s.metaStr(key)), 10, 64)
 	return n
