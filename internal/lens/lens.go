@@ -45,7 +45,7 @@ func LoadDefault() (*Lens, error) {
 		return nil, err
 	}
 	return &Lens{
-		Name:       "default",
+		Name:       store.LensDefault, // canonical name lives in the data layer (store)
 		Global:     true,
 		Dimensions: DefaultDimensions,
 		Extract:    string(extract),

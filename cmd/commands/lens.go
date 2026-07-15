@@ -124,7 +124,7 @@ func cmdLens(args []string) error {
 		reg := st.RegisteredLenses()
 		// The default lens always runs and isn't in the registry; show it first so
 		// `lens list` reflects what actually runs, not just the registered extras.
-		fmt.Printf("  %s %s  %s\n", green("✓"), "default", dim("(built-in, always on)"))
+		fmt.Printf("  %s %s  %s\n", green("✓"), store.LensDefault, dim("(built-in, always on)"))
 		if len(reg) == 0 {
 			fmt.Println(dim("  no additional lenses registered"))
 			return nil
