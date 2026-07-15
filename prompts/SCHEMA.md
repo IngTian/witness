@@ -56,12 +56,12 @@ Every observation/facet carries a `lens` tag.
   Definitions live in the central registry (`<root>/lenses/<name>/lens.md`), shared across all
   sessions — never read from a repo.
 
-A lens file's header carries `# name:` and `# dimensions:`, plus two optional directives:
+A lens file's header carries `# name:` and `# dimensions:`, plus one optional directive:
 `# kind: arc|atomic` (arc = needs a whole-session arc, chunk-fragile; atomic = per-moment,
-chunk-tolerant; a registered lens defaults to `arc`) and `# model_floor: <tier>` (advisory —
-`witness doctor` warns if the global triage model tier-ranks below it, since a too-weak model
-silently extracts nothing). See `prompts/lens/example.md`. Neither changes which model runs today
-(mining uses one global triage model; per-lens model override is tracked separately).
+chunk-tolerant; a registered lens defaults to `arc`). See `prompts/lens/example.md`. Mining uses
+one global model for every lens — there is no per-lens model today (a lens that needs a stronger
+model just means "set the global runner to a capable one"; per-lens model tuning is tracked
+separately).
 
 The profile is **collect-only / pull-only**: witness captures and distills everywhere, but never
 injects into a session. Agents read it on demand via the MCP tools (`get_facets`, `get_profile`,

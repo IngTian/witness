@@ -3,7 +3,10 @@ package commands
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
@@ -47,6 +50,13 @@ func newLensCmd() *cobra.Command {
 			Short: "List registered lenses and enabled state.",
 			Args:  cobra.NoArgs,
 			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"list"}) },
+		},
+		&cobra.Command{
+			Use:   "show <name>",
+			Short: "Print a registered lens's definition (markdown).",
+			Long:  "Print the raw markdown a lens was registered with (its `# name:`/`# dimensions:`/`# kind:` header + the EXTRACT and REVIEW prompts). Use `default` to print the built-in lens.",
+			Args:  cobra.ExactArgs(1),
+			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"show"}, args...)) },
 		},
 		&cobra.Command{
 			Use:   "backfill <name>",
@@ -136,6 +146,11 @@ func cmdLens(args []string) error {
 				fmt.Printf("  %s %s  %s\n", dim("·"), name, dim("(registered, disabled)"))
 			}
 		}
+	case "show":
+		if len(args) < 2 || args[1] == "" {
+			return fmt.Errorf("usage: witness lens show <name>")
+		}
+		return lensShow(st, args[1])
 	case "backfill":
 		if len(args) < 2 || args[1] == "" {
 			return fmt.Errorf("usage: witness lens backfill <name>")
@@ -147,7 +162,7 @@ func cmdLens(args []string) error {
 		}
 		return lensBackfill(st, args[1], true)
 	default:
-		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|backfill|rebuild)", args[0])
+		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|show|backfill|rebuild)", args[0])
 	}
 	return nil
 }
@@ -269,6 +284,52 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 	}
 	fmt.Println(msg)
 	return nil
+}
+
+// lensShow prints a lens's definition. For a registered lens it prints the raw
+// markdown the user registered (verbatim — the exact bytes on disk, so what you see is
+// what the loader parses). The built-in `default` lens has no single source file (it
+// ships as separate extract.md/review.md), so it is rendered into the same header +
+// `## EXTRACT` / `## REVIEW` shape for a consistent, copyable view.
+func lensShow(st *store.Store, name string) error {
+	if name == store.LensDefault {
+		l, err := lens.LoadDefault()
+		if err != nil {
+			return fmt.Errorf("load default lens: %w", err)
+		}
+		fmt.Print(renderLensMarkdown(l))
+		return nil
+	}
+	if !slices.Contains(st.RegisteredLenses(), name) {
+		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
+	}
+	// Print the on-disk definition verbatim — the source of truth the loader reads.
+	data, err := os.ReadFile(filepath.Join(st.LensesDir(), name, "lens.md"))
+	if err != nil {
+		return fmt.Errorf("read lens %q: %w", name, err)
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	fmt.Print(string(data))
+	return nil
+}
+
+// renderLensMarkdown reconstructs a lens's definition in the standard lens-file shape
+// (header directives + the two prompt sections). Used for the built-in lens, which has
+// no single markdown source; the plain text goes to stdout verbatim (no styling) so it
+// can be piped or copied into a new lens file.
+func renderLensMarkdown(l *lens.Lens) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# name: %s\n", l.Name)
+	if len(l.Dimensions) > 0 {
+		fmt.Fprintf(&b, "# dimensions: %s\n", strings.Join(l.Dimensions, ", "))
+	}
+	if l.Kind != "" {
+		fmt.Fprintf(&b, "# kind: %s\n", l.Kind)
+	}
+	fmt.Fprintf(&b, "\n## EXTRACT\n%s\n\n## REVIEW\n%s\n", l.Extract, l.Review)
+	return b.String()
 }
 
 // activeLenses returns the default lens (always on) + every enabled, registered

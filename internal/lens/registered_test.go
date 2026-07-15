@@ -24,13 +24,10 @@ func TestLoadRegistered(t *testing.T) {
 	if l.Name != "math" || l.Global || l.Extract == "" || l.Review == "" || len(l.Dimensions) != 2 {
 		t.Fatalf("parsed lens wrong: %+v", l)
 	}
-	// A registered lens with no `# kind:` header defaults to arc (recall-safe), and no
-	// `# model_floor:` leaves the floor empty — backward-compat for pre-#57 lens files.
+	// A registered lens with no `# kind:` header defaults to arc (recall-safe) —
+	// backward-compat for pre-#57 lens files.
 	if l.Kind != KindArc {
 		t.Fatalf("kind-less registered lens must default to %q, got %q", KindArc, l.Kind)
-	}
-	if l.ModelFloor != "" {
-		t.Fatalf("floor-less lens must have empty ModelFloor, got %q", l.ModelFloor)
 	}
 
 	if _, err := LoadRegistered("missing", dir); err == nil {
@@ -38,9 +35,9 @@ func TestLoadRegistered(t *testing.T) {
 	}
 }
 
-// The optional `# kind:` / `# model_floor:` headers (#57 PR2) parse when present, and
-// an unknown kind normalizes to the recall-safe arc default.
-func TestLoadRegisteredParsesKindAndFloor(t *testing.T) {
+// The optional `# kind:` header (#57 PR2) parses when present, and an unknown kind
+// normalizes to the recall-safe arc default.
+func TestLoadRegisteredParsesKind(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, def string) *Lens {
 		t.Helper()
@@ -57,13 +54,9 @@ func TestLoadRegisteredParsesKindAndFloor(t *testing.T) {
 		return l
 	}
 
-	// Explicit atomic + a model floor.
-	a := write("atomiclens", "# name: atomiclens\n# kind: atomic\n# model_floor: sonnet\n## EXTRACT\nx\n## REVIEW\ny\n")
-	if a.Kind != KindAtomic {
-		t.Fatalf("explicit `# kind: atomic` must parse as %q, got %q", KindAtomic, a.Kind)
-	}
-	if a.ModelFloor != "sonnet" {
-		t.Fatalf("`# model_floor: sonnet` must parse, got %q", a.ModelFloor)
+	// Explicit atomic.
+	if l := write("atomiclens", "# name: atomiclens\n# kind: atomic\n## EXTRACT\nx\n## REVIEW\ny\n"); l.Kind != KindAtomic {
+		t.Fatalf("explicit `# kind: atomic` must parse as %q, got %q", KindAtomic, l.Kind)
 	}
 
 	// Explicit arc (case-insensitive kind).
@@ -85,11 +78,9 @@ func TestLensDirectivesAreHeaderOnly(t *testing.T) {
 	dir := t.TempDir()
 	def := "# name: real\n" +
 		"# kind: atomic\n" +
-		"# model_floor: sonnet\n" +
 		"<!--\n" +
 		"  Docs for the author. These mentions must be IGNORED:\n" +
 		"  # kind: arc | atomic\n" +
-		"  # model_floor: <tier, e.g. opus>\n" +
 		"  # name: not-the-real-name\n" +
 		"-->\n" +
 		"## EXTRACT\n" +
@@ -112,9 +103,6 @@ func TestLensDirectivesAreHeaderOnly(t *testing.T) {
 	}
 	if l.Kind != KindAtomic {
 		t.Fatalf("comment `# kind: arc` must not override the real `atomic`, got %q", l.Kind)
-	}
-	if l.ModelFloor != "sonnet" {
-		t.Fatalf("comment `# model_floor: <tier...>` must not override the real `sonnet`, got %q", l.ModelFloor)
 	}
 	// The prompt-section `# ...` line is preserved verbatim as prompt text.
 	if !strings.Contains(l.Extract, "# this looks like a directive but it's prompt text") {

@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+// The two valid distillation runners. Defined here (the config layer that owns the
+// `runner` field) so CLI validation and the config template share one source of truth,
+// without importing internal/platform (which would invert the store→platform layering).
+const (
+	RunnerClaude   = "claude"
+	RunnerOpenCode = "opencode"
+)
+
 // Config holds the user-tunable knobs. Parsed from a tiny line-based config.toml
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
 // keys are ignored; missing file = all defaults.
@@ -194,10 +202,41 @@ func parseBool(v string) (bool, bool) {
 // other keys) are preserved verbatim. The value is quoted to match the format
 // EnsureConfigFile writes and to stay consistent with other string fields.
 func (s *Store) SetRunner(runner string) error {
+	if err := s.setConfigKey("runner", runner); err != nil {
+		return err
+	}
+	// Mark that a runner was explicitly chosen via install, so ResolveRunner lets
+	// this persisted value win over any WITNESS_RUNNER env fallback (a dual
+	// CC+OpenCode user who ran `install` is never hijacked by the plugin env).
+	return s.SetMetaString(runnerBoundKey, "1")
+}
+
+// SetConfigString sets a string-valued config.toml key (creating or replacing its
+// line, preserving everything else), the CLI-facing counterpart to hand-editing the
+// file — used by `witness config`. Marks the runner as explicitly bound when key is
+// "runner" so a CLI-set runner wins over the WITNESS_RUNNER env fallback exactly like
+// `install` does. Other keys don't need the marker.
+func (s *Store) SetConfigString(key, value string) error {
+	if err := s.setConfigKey(key, value); err != nil {
+		return err
+	}
+	if key == "runner" {
+		return s.SetMetaString(runnerBoundKey, "1")
+	}
+	return nil
+}
+
+// setConfigKey is the shared line-rewrite for a quoted string key in config.toml:
+// replace the FIRST occurrence of `<key> = ...` in place (dropping any duplicates),
+// else append it; comments, blank lines, and every other key are preserved verbatim.
+// The value is quoted to match EnsureConfigFile's format. Also strips the
+// unbound-runner marker comment once any key is written (the file is now user-managed).
+func (s *Store) setConfigKey(key, value string) error {
 	data, err := os.ReadFile(s.ConfigPath())
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	newLine := fmt.Sprintf("%s = %q", key, value)
 	var kept []string
 	set := false
 	if len(data) > 0 {
@@ -205,12 +244,12 @@ func (s *Store) SetRunner(runner string) error {
 			if strings.TrimSpace(line) == configTemplateUnboundMarker {
 				continue
 			}
-			if isRunnerLine(line) {
+			if isConfigKeyLine(line, key) {
 				if !set {
-					kept = append(kept, fmt.Sprintf("runner = %q", runner))
+					kept = append(kept, newLine)
 					set = true
 				}
-				continue // drop any duplicate runner lines
+				continue // drop any duplicate lines for this key
 			}
 			kept = append(kept, line)
 		}
@@ -219,16 +258,10 @@ func (s *Store) SetRunner(runner string) error {
 		kept = kept[:len(kept)-1]
 	}
 	if !set {
-		kept = append(kept, fmt.Sprintf("runner = %q", runner))
+		kept = append(kept, newLine)
 	}
 	out := strings.Join(kept, "\n") + "\n"
-	if err := writeAtomic(s.ConfigPath(), []byte(out)); err != nil {
-		return err
-	}
-	// Mark that a runner was explicitly chosen via install, so ResolveRunner lets
-	// this persisted value win over any WITNESS_RUNNER env fallback (a dual
-	// CC+OpenCode user who ran `install` is never hijacked by the plugin env).
-	return s.SetMetaString(runnerBoundKey, "1")
+	return writeAtomic(s.ConfigPath(), []byte(out))
 }
 
 // EnsureConfigFile creates config.toml with a full commented template if it does
@@ -283,13 +316,17 @@ mine_concurrency = 4
 
 // isRunnerLine reports whether a config line is a `runner = ...` assignment
 // (comments and blank lines are not).
-func isRunnerLine(line string) bool {
+func isRunnerLine(line string) bool { return isConfigKeyLine(line, "runner") }
+
+// isConfigKeyLine reports whether a config line is a `<key> = ...` assignment for the
+// given key (a real assignment, not a comment or blank line).
+func isConfigKeyLine(line, key string) bool {
 	t := strings.TrimSpace(line)
 	if t == "" || strings.HasPrefix(t, "#") {
 		return false
 	}
 	k, _, ok := strings.Cut(t, "=")
-	return ok && strings.TrimSpace(k) == "runner"
+	return ok && strings.TrimSpace(k) == key
 }
 
 // --- review cadence ----------------------------------------------------------

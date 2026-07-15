@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/IngTian/witness/internal/embed"
-	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -179,21 +178,11 @@ func cmdDoctor(asJSON bool) error {
 			}
 		}
 		fmt.Printf("    %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
-			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; raise triage_model, then `witness lens rebuild <lens>`",
+			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; `witness config set triage_model <stronger>`, then `witness lens rebuild <lens>`",
 			driftTotal, last)))
 	}
-	// Model-floor advisory (#57): a lens can declare `# model_floor:` (e.g. "sonnet").
-	// Mining uses the single global triage model, so we can't enforce a per-lens floor
-	// (that's #69) — but we CAN warn when the configured triage model tier-ranks BELOW a
-	// lens's floor, since a below-floor model prose-drifts (silently extracts nothing).
-	// Best-effort + non-blocking (respects distill-is-best-effort): an unrankable model
-	// (a custom id / Bedrock ARN / the runner default) yields no warning, never an error.
-	activeForFloor, _ := activeLenses(st)
-	for _, w := range modelFloorWarnings(cfg.TriageModel, activeForFloor) {
-		fmt.Printf("    %s %s\n", warnGlyph(), yellow(w))
-	}
 	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
-	fmt.Printf("    %s edit %s  %s\n", dim("↳ set models:  "), st.ConfigPath(), dim("(triage_model, distill_model)"))
+	fmt.Printf("    %s witness config set <triage_model|distill_model> <model>  %s\n", dim("↳ set models:  "), dim("(or edit "+st.ConfigPath()+")"))
 
 	fmt.Println()
 	fmt.Println("  " + bold("Archive"))
@@ -230,55 +219,6 @@ func cmdDoctor(asJSON bool) error {
 		}
 	}
 	return deferredErr
-}
-
-// modelTier ranks a model string by capability using substring matching against the
-// known Claude families, returning (tier, ok). Higher tier = more capable. ok is false
-// when the string names no known family (a custom id, a Bedrock ARN, or "" = the
-// runner's environment default) — an unrankable model must never trigger a warning,
-// only silence, since we genuinely can't judge it. Substrings are matched most-capable
-// first so an id containing two family names ranks by the strongest.
-func modelTier(model string) (int, bool) {
-	m := strings.ToLower(strings.TrimSpace(model))
-	if m == "" {
-		return 0, false
-	}
-	switch {
-	case strings.Contains(m, "opus"):
-		return 3, true
-	case strings.Contains(m, "sonnet"):
-		return 2, true
-	case strings.Contains(m, "haiku"):
-		return 1, true
-	default:
-		return 0, false
-	}
-}
-
-// modelFloorWarnings returns one advisory string per active lens whose declared
-// ModelFloor tier-ranks ABOVE the configured triage model — the case where mining is
-// likely to prose-drift (#57). It is purely informational: mining uses the single
-// global triage model (a per-lens floor can't be enforced today — #69), so this only
-// tells the user to raise triage_model. Returns nothing when either side is unrankable
-// (custom id / ARN / runner default) — we don't warn on a model we can't judge.
-func modelFloorWarnings(triageModel string, lenses []*lens.Lens) []string {
-	triageTier, triageOK := modelTier(triageModel)
-	if !triageOK {
-		return nil // can't rank the configured model → no basis to warn
-	}
-	var out []string
-	for _, l := range lenses {
-		if l == nil || l.ModelFloor == "" {
-			continue
-		}
-		floorTier, floorOK := modelTier(l.ModelFloor)
-		if floorOK && triageTier < floorTier {
-			out = append(out, fmt.Sprintf(
-				"lens %q declares model_floor=%s but triage_model tier-ranks lower — it may prose-drift (extract nothing); raise triage_model to at least %s",
-				l.Name, l.ModelFloor, l.ModelFloor))
-		}
-	}
-	return out
 }
 
 // modelOrDefault renders an empty model setting as an explicit "(<runner>

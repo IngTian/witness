@@ -38,14 +38,10 @@ type Lens struct {
 	// `# kind:` lens-file header; a registered lens that omits it defaults to "arc"
 	// (LoadRegistered) — the recall-safe choice, since treating an arc lens as atomic
 	// loses ~70% of its yield while the reverse only costs a reconciliation pass. The
-	// built-in default lens is "atomic" (LoadDefault).
+	// built-in default lens is "atomic" (LoadDefault). Consumed by the input-shaping
+	// policy (#57 PR3); a per-lens MODEL is a separate concern (mining uses one global
+	// triage model today — per-lens model tuning + its advice surface is tracked in #69).
 	Kind string
-	// ModelFloor is an ADVISORY minimum-model hint (e.g. "sonnet"), declared via the
-	// optional `# model_floor:` header; "" = none. It does NOT change which model runs
-	// (mining uses the single global TriageModel) — `witness doctor` only WARNS when the
-	// configured triage model looks weaker than a lens's floor, since a below-floor model
-	// prose-drifts (#57). Enforcement (per-lens model override) is deferred to #69.
-	ModelFloor string
 }
 
 // promptsDir resolves the bundled prompts directory. Resolution (bundle.Dir):
@@ -145,7 +141,6 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 //	# name: math
 //	# dimensions: speed, independence, proof_capability, ...
 //	# kind: arc                 (optional)
-//	# model_floor: sonnet       (optional)
 //	## EXTRACT
 //	<extract prompt...>
 //	## REVIEW
@@ -154,7 +149,7 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 // Directives (`# key:` lines) are HEADER-ONLY: they are honored only BEFORE the first
 // `##` section and NOT inside an HTML comment. That matters because the header is
 // usually followed by a `<!-- ... -->` block documenting these very directives — those
-// mention lines (`# model_floor: <tier>`) must NOT be parsed as real values and
+// mention lines (`# kind: arc | atomic`) must NOT be parsed as real values and
 // clobber the actual header (last-write-wins would otherwise let a comment win). And a
 // prompt section's body is passed through VERBATIM, so a `# ...` line inside EXTRACT/
 // REVIEW is prompt text, never a directive. The gate makes both cases correct.
@@ -193,8 +188,6 @@ func parseLensFile(s string) *Lens {
 			}
 		case section == "" && strings.HasPrefix(trimmed, "# kind:"):
 			l.Kind = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "# kind:")))
-		case section == "" && strings.HasPrefix(trimmed, "# model_floor:"):
-			l.ModelFloor = strings.TrimSpace(strings.TrimPrefix(trimmed, "# model_floor:"))
 		case trimmed == "## EXTRACT":
 			section = "extract"
 		case trimmed == "## REVIEW":
