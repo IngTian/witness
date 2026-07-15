@@ -18,18 +18,22 @@ import (
 // searchInput is the typed argument for search_observations.
 type searchInput struct {
 	Query string `json:"query" jsonschema:"the growth/pattern question to search for"`
-	Lens  string `json:"lens,omitempty" jsonschema:"which lens to search: 'default' (default), or a repo lens like 'math'"`
+	Lens  string `json:"lens,omitempty" jsonschema:"which lens to search; omit for the always-on 'default' lens (cross-domain), or name a repo lens like 'math'"`
 	K     int    `json:"k,omitempty" jsonschema:"max results (default 8)"`
 }
 
 // getFacetsInput is the typed argument for get_facets (structured L2 facets).
 type getFacetsInput struct {
-	Lens string `json:"lens,omitempty" jsonschema:"which lens to read: 'default' (cross-domain) or a repo lens like 'math'"`
+	Lens string `json:"lens,omitempty" jsonschema:"which lens to read; omit for the always-on 'default' lens (cross-domain), or name a repo lens like 'math'"`
 }
 
 // getProfileInput is the typed argument for get_profile (the L4 narrative).
+// NOTE the asymmetry from search/facets above: those default to the 'default'
+// LENS, but the profile defaults to 'unified' — the cross-lens aggregate VIEW that
+// blends every active lens (default + math + …), which is NOT itself a lens. Pass
+// 'default' to read the default lens's own narrative instead of the blend.
 type getProfileInput struct {
-	Lens string `json:"lens,omitempty" jsonschema:"which lens's narrative to read: omit/'unified' for the cross-lens portrait, or a lens like 'math'"`
+	Lens string `json:"lens,omitempty" jsonschema:"omit for 'unified' (the cross-lens portrait blending ALL lenses — an aggregate view, not a lens); or name one lens: 'default' (the always-on lens's own narrative), 'math', etc."`
 }
 
 // deleteInput is the typed argument for delete_observation.
@@ -201,7 +205,9 @@ func newServer(st *store.Store, emb Embedder, version string) *mcpsdk.Server {
 		Name: "get_facets",
 		Description: "Read the synthesized growth facets (structured attributes) for a lens. " +
 			"Returns current facet values — trajectory arcs, mastery markers, resilience patterns. " +
-			"Use lens='math' in the math repo. For a readable prose overview instead, use get_profile.",
+			"Defaults to the always-on 'default' lens (cross-domain); pass lens='math' etc. for a repo lens. " +
+			"(Facets are per-lens, so there is no cross-lens 'unified' facet set — that aggregate exists only for the narrative; use get_profile for it.) " +
+			"For a readable prose overview instead, use get_profile.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in getFacetsInput) (*mcpsdk.CallToolResult, any, error) {
 		lensName := in.Lens
 		if lensName == "" {
@@ -216,12 +222,16 @@ func newServer(st *store.Store, emb Embedder, version string) *mcpsdk.Server {
 
 	// get_profile: read the L4 narrative summary (prose) for a lens — the human-
 	// readable portrait distilled from the facets. Omit lens for the cross-lens
-	// unified portrait. Regenerated in the background after each review; may not
-	// exist yet on a brand-new archive.
+	// 'unified' portrait (an AGGREGATE VIEW blending every lens — not a lens itself).
+	// Note the asymmetry vs search/get_facets, which default to the 'default' LENS.
+	// Regenerated in the background after each review; may not exist yet on a brand-
+	// new archive.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "get_profile",
 		Description: "Read the narrative growth profile (readable prose) for a lens. " +
-			"Omit lens (or pass 'unified') for the cross-lens portrait; pass e.g. lens='math' for one lens. " +
+			"Omit lens (or pass 'unified') for the cross-lens portrait — an aggregate blending ALL active lenses, not a lens itself. " +
+			"Pass lens='default' for the always-on lens's OWN narrative (distinct from the unified blend), or lens='math' etc. for another lens. " +
+			"(This defaults to the unified aggregate, whereas search_observations/get_facets default to the 'default' lens.) " +
 			"For precise structured attributes instead, use get_facets.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in getProfileInput) (*mcpsdk.CallToolResult, any, error) {
 		lensName := in.Lens

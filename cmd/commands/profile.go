@@ -13,8 +13,10 @@ func newProfileCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "profile [lens]",
 		Short: "Print the narrative profile.",
-		Long:  "Print the L4 markdown profile. With no lens, prints the unified cross-lens profile; pass a lens name to read that lens-specific profile.",
-		Args:  cobra.MaximumNArgs(1),
+		Long: "Print the L4 markdown profile.\n\n" +
+			"With NO argument, prints the 'unified' profile — the cross-lens portrait that blends every active lens (default + any repo lenses) into one whole-person view. 'unified' is an aggregate VIEW, not a lens.\n\n" +
+			"Pass a lens name for that lens's own profile: `witness profile default` is the always-on default lens's narrative (distinct from the unified blend), `witness profile math` a repo lens.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdProfile(args, asJSON)
 		},
