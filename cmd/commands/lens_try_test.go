@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -107,6 +108,69 @@ func TestLensTryRejectsUnknownSession(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no raw turns") {
 		t.Fatalf("expected an unknown-session error, got: %v", err)
 	}
+}
+
+// The REVIEW block flags facets missing key/value (a REVIEW prompt that didn't specify
+// the facet output schema) as a PROMPT problem, instead of rendering blank facet lines
+// that read like a tool bug. Well-formed facets still render.
+func TestLensTryReviewFlagsMalformedFacets(t *testing.T) {
+	review := &reviewPreview{
+		model:  "test-model",
+		obsFed: 3,
+		facets: []distill.PreviewFacet{
+			{Dimension: "attention", Key: "verifies_claims", Value: "double-checks before trusting", Confidence: 0.7},
+			{Dimension: "attention", Key: "", Value: ""},        // malformed: no key/value
+			{Dimension: "momentum", Key: "decisive", Value: ""}, // malformed: no value
+		},
+	}
+	out := captureStdout(t, func() { lensTryRenderReviewHuman(review) })
+	if !strings.Contains(out, "verifies_claims") {
+		t.Fatalf("well-formed facet should render, got:\n%s", out)
+	}
+	if !strings.Contains(out, "2 facet(s) had no dimension/key/value") {
+		t.Fatalf("malformed facets should be flagged as a prompt-schema problem, got:\n%s", out)
+	}
+}
+
+// The REVIEW block flags prose drift distinctly (with actionable guidance), not as a
+// generic "review failed".
+func TestLensTryReviewDriftMessage(t *testing.T) {
+	out := captureStdout(t, func() {
+		lensTryRenderReviewHuman(&reviewPreview{model: "m", obsFed: 2, drifted: true})
+	})
+	if !strings.Contains(out, "prose drift") || !strings.Contains(out, "--review-model") {
+		t.Fatalf("drift should render distinctly with actionable guidance, got:\n%s", out)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what it wrote.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				b.Write(buf[:n])
+			}
+			if err != nil {
+				break
+			}
+		}
+		done <- b.String()
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+	return <-done
 }
 
 // --review on a lens file with no REVIEW section fails EARLY (before any runner work),

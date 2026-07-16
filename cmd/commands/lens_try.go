@@ -447,7 +447,18 @@ func lensTryRenderReviewHuman(review *reviewPreview) {
 		fmt.Printf("   %s\n", dim("(the REVIEW prompt asserted no facets from these observations)"))
 		return
 	}
+	malformed := 0
 	for _, f := range review.facets {
+		// A facet missing its key or value parsed as JSON but doesn't carry the substance a
+		// facet needs (key = the named attribute, value = its assertion) — usually the
+		// REVIEW prompt didn't specify the output schema, so the model emitted objects with
+		// the wrong field names. Flag it as a prompt problem rather than rendering a blank
+		// "[dim/ c0.00]  = " line that looks like a tool bug (the exact signal a lens author
+		// needs while tuning a REVIEW prompt).
+		if strings.TrimSpace(f.Key) == "" || strings.TrimSpace(f.Value) == "" {
+			malformed++
+			continue
+		}
 		change := ""
 		if f.Contradicts {
 			change = yellow(" [contradicts prior]")
@@ -457,6 +468,11 @@ func lensTryRenderReviewHuman(review *reviewPreview) {
 		if len(f.BecauseOf) > 0 {
 			fmt.Printf("       %s\n", dim(fmt.Sprintf("↳ because_of %d obs", len(f.BecauseOf))))
 		}
+	}
+	if malformed > 0 {
+		fmt.Printf("   %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
+			"%d facet(s) had no dimension/key/value — the REVIEW prompt likely doesn't specify the facet "+
+				"output schema (each element needs dimension, key, value, confidence, because_of)", malformed)))
 	}
 }
 
