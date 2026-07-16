@@ -65,8 +65,14 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		t.Fatalf("Open did not create config.toml: %v", err)
 	}
 	body := string(data)
-	if !strings.Contains(body, configTemplateUnboundMarker) {
-		t.Fatalf("auto-created config missing unbound runner marker:\n%s", body)
+	// The fresh template must leave the runner UNBOUND: the runner line stays commented
+	// (so WITNESS_RUNNER can still override for the npm OpenCode user) and the DB flag is
+	// unset. Post-#71 there is no marker comment; bound-ness lives solely in the flag.
+	if st.MetaString("runner_bound") == "1" {
+		t.Fatalf("fresh template must leave runner unbound (runner_bound must be unset)")
+	}
+	if !strings.Contains(body, `# runner = "claude"`) {
+		t.Fatalf("template should keep the runner line COMMENTED (unbound):\n%s", body)
 	}
 	for _, want := range []string{
 		"runner =",
@@ -214,8 +220,8 @@ func TestSetRunnerReplacesExistingLine(t *testing.T) {
 	if !strings.Contains(string(body), "review_every = 7") {
 		t.Errorf("other fields lost:\n%s", body)
 	}
-	if strings.Contains(string(body), configTemplateUnboundMarker) {
-		t.Error("SetRunner left the template marked unbound")
+	if s.MetaString("runner_bound") != "1" {
+		t.Error("SetRunner must mark the runner bound (runner_bound=1)")
 	}
 }
 
@@ -257,8 +263,8 @@ func TestInstallSequenceMatchesBindRunner(t *testing.T) {
 			t.Errorf("config missing %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(string(body), configTemplateUnboundMarker) {
-		t.Error("SetRunner left the generated template marked unbound")
+	if st.MetaString("runner_bound") != "1" {
+		t.Error("install-sequence SetRunner must mark the runner bound (runner_bound=1)")
 	}
 }
 
@@ -301,30 +307,57 @@ func TestResolveRunnerDefaultsToConfig(t *testing.T) {
 	}
 }
 
-func TestResolveRunnerLegacyMarkerlessConfigIsConservativelyBound(t *testing.T) {
-	s := tempStore(t)
-	if err := os.WriteFile(s.ConfigPath(), []byte("runner = \"claude\"\n"), 0o600); err != nil {
+// openWithConfig lays down a config.toml under a fresh WITNESS_HOME, then Open()s —
+// so the config exists BEFORE Open (as it does in production), and Open's one-time
+// adoptRunnerBound runs against it. This is the setup a legacy on-disk config has.
+func openWithConfig(t *testing.T, body string) *Store {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "witness")
+	t.Setenv("WITNESS_HOME", root)
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// Migration (issue #71): a legacy config that bound its runner via an ACTIVE `runner =`
+// line — back when resolution scanned config text — has no runner_bound flag. Open's
+// adoptRunnerBound must stamp it once, so the now-text-free ResolveRunner keeps honoring
+// that choice and does NOT drop the user to the WITNESS_RUNNER fallback.
+func TestOpenAdoptsLegacyActiveRunnerLineAsBound(t *testing.T) {
+	s := openWithConfig(t, "runner = \"claude\"\nreview_every = 7\n")
+	if s.MetaString("runner_bound") != "1" {
+		t.Fatalf("Open must adopt a legacy active runner line as bound (runner_bound=1)")
 	}
 	t.Setenv("WITNESS_RUNNER", "opencode")
 	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
-		t.Fatalf("markerless config should stay bound to config runner: got %q", got)
+		t.Fatalf("adopted legacy config should stay bound to its runner, not the env: got %q", got)
 	}
 }
 
-func TestResolveRunnerHonorsManualRunnerInNewTemplate(t *testing.T) {
-	s := tempStore(t)
-	data, err := os.ReadFile(s.ConfigPath())
+// The inverse: the fresh template's runner line is COMMENTED, so Open must NOT adopt it —
+// the npm OpenCode-plugin user stays unbound and env-resolvable.
+func TestOpenDoesNotAdoptCommentedRunnerLine(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	s, err := Open() // writes the template (runner commented)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = append(data, []byte("runner = \"claude\"\n")...)
-	if err := os.WriteFile(s.ConfigPath(), data, 0o600); err != nil {
-		t.Fatal(err)
+	defer s.Close()
+	if s.MetaString("runner_bound") == "1" {
+		t.Fatalf("a commented `# runner =` line must NOT be adopted as bound")
 	}
 	t.Setenv("WITNESS_RUNNER", "opencode")
-	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
-		t.Fatalf("manual runner should beat the npm fallback: got %q", got)
+	if got := s.ResolveRunner(s.LoadConfig()); got != "opencode" {
+		t.Fatalf("unbound template user should resolve via WITNESS_RUNNER: got %q", got)
 	}
 }
 

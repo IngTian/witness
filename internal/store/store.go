@@ -57,6 +57,12 @@ func Open() (*Store, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	s.db = db
+	// One-time adopt (issue #71): a pre-#71 config that bound its runner via an active
+	// `runner =` line (back when resolution scanned config text) has no runner_bound
+	// meta flag yet. Stamp it once so the now-text-free ResolveRunner keeps honoring
+	// that choice instead of dropping the user to the WITNESS_RUNNER fallback. Needs the
+	// DB (meta), so it runs after openDB; idempotent + best-effort (see adoptRunnerBound).
+	s.adoptRunnerBound()
 	return s, nil
 }
 

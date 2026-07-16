@@ -133,33 +133,32 @@ func (s *Store) LoadConfig() Config {
 	return c
 }
 
-// runnerBoundKey marks that `witness install` explicitly bound a runner. New
-// templates leave the assignment commented, so an active runner line also
-// counts as deliberate without requiring this DB marker.
+// runnerBoundKey is the SOLE source of truth for "has a runner been explicitly
+// chosen?" — set by `witness install` and `witness config set runner`, and adopted
+// once from a legacy active `runner =` line (see adoptRunnerBound). Before #71 this
+// fact was ALSO derived from config.toml text (an active runner line + a template
+// marker comment), so an unrelated config write could silently flip it (a routine
+// `config set triage_model` once rebound an npm user's runner and killed distillation).
+// Now nothing reads config text to answer this — one fact, one place, mutation-proof.
 const runnerBoundKey = "runner_bound"
-const configTemplateUnboundMarker = "# witness template: runner remains unbound until configured."
 
 // ResolveRunner returns the distillation runner to actually use, layering a
-// non-persistent WITNESS_RUNNER env fallback UNDER any explicit config choice.
+// non-persistent WITNESS_RUNNER env fallback UNDER any explicit choice. It reads ONLY
+// the runner_bound meta flag and the env — never config.toml text — so no config write
+// can ever change which runner is chosen (issue #71).
 //
-// Why this exists: the npm OpenCode plugin user never runs `witness install`, so
-// their config.toml carries the template default runner="claude" — but they have
-// no `claude` CLI, and distillation would silently fail. The plugin passes
-// WITNESS_RUNNER=opencode so the worker it kicks distills via OpenCode instead.
+// Why the fallback exists: the npm OpenCode plugin user never runs `witness install`,
+// so their config.toml stays at the template default (runner commented out) and
+// runner_bound is unset — but they have no `claude` CLI. The plugin passes
+// WITNESS_RUNNER=opencode so the worker distills via OpenCode instead.
 //
 // Precedence (safety-first, so a dual CC+OpenCode user is never hijacked):
-//  1. If install bound a runner, or config.toml has an active runner assignment,
-//     the config value ALWAYS wins — WITNESS_RUNNER is ignored.
-//  2. Else, if WITNESS_RUNNER is set, use it (the plugin fallback).
+//  1. runner_bound == "1" → the config value ALWAYS wins (env ignored). An `install`
+//     / `config set runner` choice — or an adopted legacy `runner =` line — is honored.
+//  2. Else, if WITNESS_RUNNER is set, use it (the plugin fallback for the unbound user).
 //  3. Else, the config/default value.
-//
-// Non-persistent: this never writes config.toml. Marker-less configs predate the
-// fallback and are treated as bound, preserving upgrade-time install choices.
 func (s *Store) ResolveRunner(cfg Config) string {
 	if s.MetaString(runnerBoundKey) == "1" {
-		return cfg.Runner
-	}
-	if !s.configRunnerUnbound() {
 		return cfg.Runner
 	}
 	if env := strings.TrimSpace(os.Getenv("WITNESS_RUNNER")); env != "" {
@@ -168,20 +167,32 @@ func (s *Store) ResolveRunner(cfg Config) string {
 	return cfg.Runner
 }
 
-func (s *Store) configRunnerUnbound() bool {
+// adoptRunnerBound is a one-time, in-place migration (issue #71). Before runner_bound
+// became the sole authority, a user could bind their runner simply by having an active
+// `runner =` line in config.toml (resolution scanned the text). Such a config predates
+// the flag, so stamp it ONCE from the active line — otherwise ResolveRunner (now
+// text-free) would drop them to the WITNESS_RUNNER fallback and change their runner.
+//
+// Idempotent + safe for every population: a no-op once the flag is set (install /
+// config-set users, and this migration's own later runs); a config whose ONLY runner
+// line is COMMENTED (the fresh template — `# runner = "claude"`) is NOT adopted, so the
+// npm OpenCode-plugin user stays unbound and env-resolved. Best-effort: called from
+// Open, a read/parse failure just leaves the flag unset (conservative — env fallback).
+// Mirrors the data-dir adopt-in-place pattern: never moves or rewrites, records once.
+func (s *Store) adoptRunnerBound() {
+	if s.MetaString(runnerBoundKey) == "1" {
+		return
+	}
 	data, err := os.ReadFile(s.ConfigPath())
 	if err != nil {
-		return false
-	}
-	if !strings.Contains(string(data), configTemplateUnboundMarker) {
-		return false
+		return // no config (or unreadable) → nothing to adopt; stays unbound
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if isRunnerLine(line) {
-			return false
+		if isConfigKeyLine(line, "runner") { // an ACTIVE (uncommented) runner assignment
+			_ = s.SetMetaString(runnerBoundKey, "1")
+			return
 		}
 	}
-	return true
 }
 
 func parseBool(v string) (bool, bool) {
@@ -229,8 +240,10 @@ func (s *Store) SetConfigString(key, value string) error {
 // setConfigKey is the shared line-rewrite for a quoted string key in config.toml:
 // replace the FIRST occurrence of `<key> = ...` in place (dropping any duplicates),
 // else append it; comments, blank lines, and every other key are preserved verbatim.
-// The value is quoted to match EnsureConfigFile's format. Also strips the
-// unbound-runner marker comment once any key is written (the file is now user-managed).
+// The value is quoted to match EnsureConfigFile's format. It NEVER special-cases any
+// key: since #71, runner-bound-ness lives solely in the runner_bound meta flag (set by
+// SetRunner/SetConfigString), so a config write no longer needs to touch any marker —
+// which is exactly why a `config set triage_model` can't disturb runner resolution.
 func (s *Store) setConfigKey(key, value string) error {
 	data, err := os.ReadFile(s.ConfigPath())
 	if err != nil && !os.IsNotExist(err) {
@@ -241,17 +254,6 @@ func (s *Store) setConfigKey(key, value string) error {
 	set := false
 	if len(data) > 0 {
 		for _, line := range strings.Split(string(data), "\n") {
-			// Drop the unbound-runner marker ONLY when binding the runner itself — that
-			// write also stamps runnerBoundKey (via SetRunner/SetConfigString), so
-			// ResolveRunner ignores the marker anyway. Stripping it for a MODEL key would
-			// silently disable the WITNESS_RUNNER env fallback the npm OpenCode-plugin
-			// user depends on: they never run `witness install`, so their runner stays
-			// unbound and env-resolved, and a routine `config set triage_model` (which
-			// this tool's own doctor remedy recommends) must not flip their runner back
-			// to the "claude" template default and break all distillation. See ResolveRunner.
-			if key == "runner" && strings.TrimSpace(line) == configTemplateUnboundMarker {
-				continue
-			}
 			if isConfigKeyLine(line, key) {
 				if !set {
 					kept = append(kept, newLine)
@@ -286,10 +288,10 @@ func (s *Store) EnsureConfigFile() error {
 	tpl := `# witness configuration — all fields optional, shown with defaults.
 # Docs: https://github.com/IngTian/witness#configuration
 
-` + configTemplateUnboundMarker + `
-
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
+# (uses ` + "`opencode serve`" + `). Uncomment (or run ` + "`witness install`" + ` / ` + "`witness config set runner`" + `)
+# to bind it; while it stays commented, the WITNESS_RUNNER env var (set by the OpenCode
+# plugin) can override the default without editing this file.
 # runner = "claude"
 
 # Models for the per-session miner and the periodic reviewer. Empty = use the
@@ -321,10 +323,6 @@ mine_concurrency = 4
 `
 	return writeAtomic(s.ConfigPath(), []byte(tpl))
 }
-
-// isRunnerLine reports whether a config line is a `runner = ...` assignment
-// (comments and blank lines are not).
-func isRunnerLine(line string) bool { return isConfigKeyLine(line, "runner") }
 
 // isConfigKeyLine reports whether a config line is a `<key> = ...` assignment for the
 // given key (a real assignment, not a comment or blank line).
