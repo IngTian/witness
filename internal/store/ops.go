@@ -138,8 +138,9 @@ func (s *Store) SampleSessions(n int) ([]string, error) {
 // a prompt against what they were just working on, not the biggest sessions in the
 // archive. Read-only; touches no watermark.
 //
-// A session whose raw rows all carry an empty ts (ts is TEXT NOT NULL DEFAULT ”, and
-// an import with unknown/zeroed timestamps can yield "") has MAX(ts)="", which sorts
+// A session whose raw rows all carry an empty ts (the ts column is TEXT NOT NULL with
+// an empty-string default, and an import with unknown/zeroed timestamps can yield "")
+// has MAX(ts)="", which sorts
 // LAST under DESC — i.e. treated as least-recent. That is the intended reading: a
 // session with no known time can't claim to be recent. It only matters for the rare
 // all-empty-ts session, and only affects which sample a read-only preview picks.
