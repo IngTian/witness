@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -106,9 +107,10 @@ type lensTryFacetJSON struct {
 
 // lensTryReviewJSON is the REVIEW-preview block (present only with --review).
 type lensTryReviewJSON struct {
-	Model  string             `json:"model"`           // the review (distill) model used
-	Error  string             `json:"error,omitempty"` // set if the review call failed
-	Facets []lensTryFacetJSON `json:"facets"`
+	Model   string             `json:"model"`           // the review (distill) model used
+	Drifted bool               `json:"drifted"`         // REVIEW returned no facet array (prose drift)
+	Error   string             `json:"error,omitempty"` // set if the review call failed (non-drift)
+	Facets  []lensTryFacetJSON `json:"facets"`
 }
 
 type lensTryJSON struct {
@@ -162,7 +164,11 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	if opts.model != "" {
 		cfg.TriageModel = opts.model
 	}
-	if opts.reviewModel != "" {
+	// Only apply --review-model when review actually runs. Otherwise, on an OpenCode
+	// runner, Open validates cfg.DistillModel up front and a bad --review-model would
+	// abort an extract-only preview on a model that is never used (on Claude it'd be
+	// silently ignored) — a confusing runner-dependent side effect for a review-only knob.
+	if opts.review && opts.reviewModel != "" {
 		cfg.DistillModel = opts.reviewModel
 	}
 
@@ -231,27 +237,46 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 
 // reviewPreview is the outcome of the optional --review pass.
 type reviewPreview struct {
-	model  string
-	obsFed int // how many mined observations were synthesized (context for the reader)
-	facets []distill.PreviewFacet
-	err    error
+	model   string
+	obsFed  int  // how many mined observations were synthesized (context for the reader)
+	drifted bool // the REVIEW reply had no JSON array (prose drift) — likely a too-weak review model
+	facets  []distill.PreviewFacet
+	err     error
 }
 
 // runReviewPreview collects the observations mined across all sessions and runs the
 // REVIEW prompt over them once (matching production, which reviews the whole L1 corpus
 // per lens, not per session). prior is empty: a candidate lens has no accumulated
 // facets, so change-detection has nothing to contradict — an inherent preview caveat.
-func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Config, ln *lens.Lens, results []tryResult) *reviewPreview {
+//
+// A panic in the review call is caught and turned into rp.err (mirroring the extract
+// fan-out's recover barrier): a review failure must degrade to a reported error, never
+// crash the command and discard the already-computed extract output.
+func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Config, ln *lens.Lens, results []tryResult) (rp *reviewPreview) {
 	var obs []store.Observation
 	for _, r := range results {
 		obs = append(obs, r.obs...)
 	}
-	rp := &reviewPreview{model: modelLabel(store.Config{TriageModel: cfg.DistillModel}), obsFed: len(obs)}
+	rp = &reviewPreview{model: modelLabel(store.Config{TriageModel: cfg.DistillModel}), obsFed: len(obs)}
 	if len(obs) == 0 {
 		return rp // nothing mined → nothing to synthesize; not an error
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			rp.err = fmt.Errorf("panic during review: %v", r)
+		}
+	}()
 	facets, err := distill.PreviewReview(ctx, runFn, cfg, ln, obs, nil /* no prior facets for a candidate */)
-	rp.facets, rp.err = facets, err
+	rp.facets = facets
+	// Classify a no-array reply as DRIFT (a too-weak review model conversed instead of
+	// emitting facets) vs a transport failure — so the render can give the same
+	// actionable "raise the model" guidance the extract path does, rather than a generic
+	// "review failed" that reads like an internal parse bug.
+	if errors.Is(err, distill.ErrNoJSONArray) {
+		rp.drifted = true
+	} else {
+		rp.err = err
+	}
 	return rp
 }
 
@@ -402,6 +427,14 @@ func lensTryRenderReviewHuman(review *reviewPreview) {
 	fmt.Printf("\n%s %s   %s %s\n", label("review"),
 		dim(fmt.Sprintf("synthesizing %d mined observation(s)", review.obsFed)), dim("review model:"), review.model)
 	fmt.Printf("   %s\n", dim("(over the sampled sessions only — register + backfill for full-history change detection)"))
+	if review.drifted {
+		// Mirror the extract-drift message: distinct from a transport failure, with the
+		// actionable fix (a stronger review model), not a generic "review failed".
+		fmt.Printf("   %s %s\n", warnGlyph(), yellow(
+			"REVIEW returned no facet array (prose drift) — the review model may be too weak for this prompt; "+
+				"raise it with `witness config set distill_model <stronger>` or pass --review-model"))
+		return
+	}
 	if review.err != nil {
 		fmt.Printf("   %s %s\n", badGlyph(), red("review failed: "+review.err.Error()))
 		return
@@ -463,7 +496,7 @@ func lensTryEmitJSON(st *store.Store, cfg store.Config, ln *lens.Lens, candidate
 		out.Sessions = append(out.Sessions, sj)
 	}
 	if review != nil {
-		rj := &lensTryReviewJSON{Model: review.model, Facets: []lensTryFacetJSON{}}
+		rj := &lensTryReviewJSON{Model: review.model, Drifted: review.drifted, Facets: []lensTryFacetJSON{}}
 		if review.err != nil {
 			rj.Error = review.err.Error()
 		}

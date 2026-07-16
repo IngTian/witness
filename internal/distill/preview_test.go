@@ -3,6 +3,7 @@ package distill
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -258,8 +259,10 @@ func TestPreviewReviewSynthesizesWithoutWriting(t *testing.T) {
 	}
 }
 
-// TestPreviewReviewDriftSurfaces: a REVIEW reply with no JSON array is an error the
-// caller can surface (prose drift on the review model), not a silent empty.
+// TestPreviewReviewDriftSurfaces: a REVIEW reply with no JSON array surfaces the
+// ErrNoJSONArray sentinel (prose drift on the review model), so a caller can classify
+// it as drift (and give actionable guidance) rather than a silent empty or a generic
+// parse error.
 func TestPreviewReviewDriftSurfaces(t *testing.T) {
 	prose := func(_ context.Context, _, _, _ string) (string, error) {
 		return "The person seems thoughtful. (no JSON here)", nil
@@ -268,6 +271,9 @@ func TestPreviewReviewDriftSurfaces(t *testing.T) {
 	_, err := PreviewReview(context.Background(), prose, store.Config{}, previewLens(), obs, nil)
 	if err == nil {
 		t.Fatalf("a no-array REVIEW reply should surface an error, not a silent empty facet set")
+	}
+	if !errors.Is(err, ErrNoJSONArray) {
+		t.Fatalf("a no-array reply must surface as ErrNoJSONArray (so callers can classify drift), got: %v", err)
 	}
 }
 
