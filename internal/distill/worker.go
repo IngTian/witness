@@ -451,6 +451,62 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 	return obs, nil
 }
 
+// PreviewMine mines ONE session through ONE lens WITHOUT touching the archive — the
+// read-only engine behind `witness lens try`. It is a deliberately stripped-down twin
+// of MineSession's inner loop, and its differences are the whole point:
+//
+//   - Whole session, not the delta. It renders the ENTIRE raw history (done=0), never
+//     the per-lens watermark's un-mined tail. Reusing MineSession would preview only
+//     raw[done:], so an already-enabled lens would show nothing — silently gutting the
+//     feature. It also ignores LensBackedOff, so a lens sleeping off a failure still
+//     previews.
+//   - No embedder. It calls mine() directly (which never embeds), so the 470MB model
+//     is never loaded and Worker.Embedder may be nil.
+//   - No writes. It calls NEITHER CommitMining, AppendObservations, the watermark
+//     (MarkDistilled*), staged (DrainStaged/ClearStagedThrough), backoff, NOR
+//     RecordDrift. The archive is untouched; a preview is safe to run repeatedly.
+//
+// It returns the observations mine() would have produced, the chunk count (how many
+// inputs the session rendered to — >1 flags an arc-fragile split for the caller), and
+// whether the lens DRIFTED (prose_drift: at least one input returned no JSON array AND
+// the lens produced zero observations across ALL inputs — the same all-inputs rule as
+// LensMining.Drifted, so a preview's drift reading matches the engine's). A transport
+// error (rate limit, timeout) is returned as-is — that is a real failure, not drift.
+//
+// run is the MineFunc the caller wired from an open Runner (RunnerMine); PreviewMine
+// owns no runner lifecycle. cfg supplies the triage model. st is used only to read raw.
+func PreviewMine(ctx context.Context, run MineFunc, cfg store.Config, st *store.Store, session string, ln *lens.Lens) (obs []store.Observation, chunkCount int, drifted bool, err error) {
+	raw, err := st.ReadRaw(session)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("read L0: %w", err)
+	}
+	// A bare Worker is enough for mine(): it reads only Run, Config, and the lens arg —
+	// never Store, Embedder, or Lenses. Embedder stays nil (mine never embeds), Store is
+	// nil to make it structurally impossible for this preview to reach a write path.
+	w := &Worker{Config: cfg, Run: run}
+	inputs := distillInputs(st, session, raw) // whole session — no watermark slice
+	chunkCount = len(inputs)
+	producedObs, sawDrift := false, false
+	for _, transcript := range inputs {
+		mined, mErr := w.mine(ctx, ln, session, transcript)
+		if mErr != nil {
+			if errors.Is(mErr, errNoArray) {
+				sawDrift = true // prose drift on this input; keep going — another chunk may extract
+				continue
+			}
+			return nil, chunkCount, false, mErr // real transport error — surface it
+		}
+		if len(mined) > 0 {
+			producedObs = true
+		}
+		obs = append(obs, mined...)
+	}
+	// Same rule as LensMining.Drifted: flag drift only when the lens produced NOTHING
+	// anywhere AND at least one input drifted, so a session where one chunk extracts
+	// fine is never miscounted.
+	return obs, chunkCount, sawDrift && !producedObs, nil
+}
+
 func obsID(session, lens, text string) string {
 	h := sha1.Sum([]byte(session + "|" + lens + "|" + text))
 	return "obs_" + fmt.Sprintf("%x", h[:6])

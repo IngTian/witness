@@ -151,6 +151,44 @@ func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Ob
 	return ParseJSONArray[reviewedFacet](reply)
 }
 
+// PreviewFacet is one facet the REVIEW prompt asserted in a read-only preview — the
+// L2 counterpart to a mined Observation in a preview. Never persisted.
+type PreviewFacet struct {
+	Dimension  string
+	Key        string
+	Value      string
+	Confidence float64
+	BecauseOf  []string // observation IDs this facet cites
+	// Contradicts is the model's claim that this is a SUSTAINED change vs the stored
+	// current value. In a candidate-lens preview `prior` is usually empty (an
+	// unregistered lens has no accumulated facets), so change-detection has nothing to
+	// contradict — a caveat inherent to previewing before backfill, not a bug.
+	Contradicts bool
+}
+
+// PreviewReview runs a lens's REVIEW (L1→L2) prompt over a set of observations WITHOUT
+// writing any facets — the read-only synthesis half of `witness lens try`. It is a
+// twin of reviewLens (same input shaping, same DistillModel, same parse), built on a
+// Store-nil Reviewer so it is STRUCTURALLY unable to touch the archive: it never calls
+// ReadFacets/WriteFacets/StampReview/applyFacet. `prior` is the current facet set to
+// diff against (nil for an unregistered candidate); `obs` are the observations to
+// synthesize (in the tuning loop, the ones the EXTRACT preview just produced in-memory).
+func PreviewReview(ctx context.Context, run MineFunc, cfg store.Config, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]PreviewFacet, error) {
+	rv := &Reviewer{Config: cfg, Runner: run} // Store nil: reviewLens reads only Config+Runner
+	reviewed, err := rv.reviewLens(ctx, ln, obs, prior)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PreviewFacet, 0, len(reviewed))
+	for _, rf := range reviewed {
+		out = append(out, PreviewFacet{
+			Dimension: rf.Dimension, Key: rf.Key, Value: rf.Value,
+			Confidence: rf.Confidence, BecauseOf: rf.BecauseOf, Contradicts: rf.Contradicts,
+		})
+	}
+	return out, nil
+}
+
 // --- helpers ----------------------------------------------------------------
 
 func indexFacets(facets []store.Facet) map[string]*store.Facet {

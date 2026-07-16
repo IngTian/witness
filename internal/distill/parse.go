@@ -4,9 +4,18 @@ package distill
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"strings"
 )
+
+// ErrNoJSONArray is returned by ParseJSONArray when a reply contains NO parseable JSON
+// array at all — the prose_drift signal (the model conversed/refused instead of
+// emitting the required array), as distinct from an explicit empty "[]" (a legit quiet
+// result, returned as an empty slice). Exported + a sentinel so callers can classify it
+// with errors.Is and surface actionable "the model may be too weak" guidance rather
+// than a generic parse error. (mine() wraps this into its own errNoArray for the
+// per-lens drift bookkeeping; the reviewer/preview paths match ErrNoJSONArray directly.)
+var ErrNoJSONArray = errors.New("no JSON array found in reply")
 
 // ParseJSONArray extracts the intended JSON array from a model reply. Real models
 // wrap output in prose and/or a ```json fence, may emit a stray "[]" or
@@ -57,7 +66,7 @@ func ParseJSONArray[T any](reply string) ([]T, error) {
 	if sawEmpty {
 		return []T{}, nil
 	}
-	return nil, fmt.Errorf("no JSON array found in reply")
+	return nil, ErrNoJSONArray
 }
 
 func decodeArray[T any](span string) (arr []T, ok bool, empty bool) {

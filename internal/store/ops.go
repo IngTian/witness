@@ -105,6 +105,78 @@ func (s *Store) LastRawTS() string {
 	return ts
 }
 
+// SampleSessions returns up to n session ids ordered by total raw text size,
+// LARGEST first (tie-broken by id for a stable order). Used by `witness lens try`
+// to pick a representative sample for a read-only prompt preview: size-descending
+// is deterministic across prompt edits (so v1-vs-v2 runs compare the SAME sessions)
+// and deliberately surfaces the meatiest, most chunk-prone sessions — the ones a
+// lens prompt is most likely to mishandle. Read-only; touches no watermark.
+func (s *Store) SampleSessions(n int) ([]string, error) {
+	if n < 1 {
+		n = 1
+	}
+	rows, err := s.db.Query(
+		`SELECT session FROM raw GROUP BY session ORDER BY SUM(LENGTH(text)) DESC, session LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sess string
+		if err := rows.Scan(&sess); err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// SampleRecentSessions returns up to n session ids ordered by their most recent raw
+// turn, NEWEST first (tie-broken by session for a stable order). The `--recent`
+// counterpart to SampleSessions's size-ordering: a lens author often wants to preview
+// a prompt against what they were just working on, not the biggest sessions in the
+// archive. Read-only; touches no watermark.
+//
+// A session whose raw rows all carry an empty ts (the ts column is TEXT NOT NULL with
+// an empty-string default, and an import with unknown/zeroed timestamps can yield "")
+// has MAX(ts)="", which sorts
+// LAST under DESC — i.e. treated as least-recent. That is the intended reading: a
+// session with no known time can't claim to be recent. It only matters for the rare
+// all-empty-ts session, and only affects which sample a read-only preview picks.
+func (s *Store) SampleRecentSessions(n int) ([]string, error) {
+	if n < 1 {
+		n = 1
+	}
+	rows, err := s.db.Query(
+		`SELECT session FROM raw GROUP BY session ORDER BY MAX(ts) DESC, session LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sess string
+		if err := rows.Scan(&sess); err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// RawChars is the total CHARACTER length of a session's raw text — the same size
+// metric SampleSessions orders by (SQLite LENGTH() counts characters, not bytes, so
+// this is chars, not bytes; the naming is deliberate to avoid the ~3× under-report a
+// "bytes" label would imply for multibyte/CJK transcripts). Exposed so a preview can
+// show how large (and thus how chunk-prone) a session is. Returns 0 for an unknown
+// session (errors swallowed, matching RawCount — a size readout is cosmetic).
+func (s *Store) RawChars(session string) int64 {
+	var n int64
+	_ = s.db.QueryRow(`SELECT COALESCE(SUM(LENGTH(text)), 0) FROM raw WHERE session = ?`, session).Scan(&n)
+	return n
+}
+
 // LastDistilledRawTS is the timestamp of the latest raw turn any lens has distilled
 // past — a cosmetic "how fresh is distillation" indicator for status/profile.
 // Progress is now per-(session,lens), so collapse it to one watermark per session

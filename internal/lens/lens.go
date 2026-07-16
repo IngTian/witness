@@ -108,6 +108,55 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	return l, nil
 }
 
+// LoadFromFileUnchecked loads a candidate lens from an ARBITRARY file path (not the
+// registry) for preview/testing — the `witness lens try` path. It parses the file the
+// same way as a registered lens, but is intentionally LENIENT about identity: the name
+// falls back to the file's basename (sans extension), then the literal "candidate", so
+// a work-in-progress prompt file missing a `# name:` header still previews. It does NOT
+// apply the reserved-name gate (see LoadFromFile for the strict variant) — a preview
+// never writes to the archive, so an impersonating name can't collide with anything.
+// It still requires a non-empty EXTRACT (that is the prompt being previewed); a file
+// with no EXTRACT section is a usage error, not a silent empty run. Global is forced
+// false — a candidate is never the always-on built-in.
+func LoadFromFileUnchecked(path string) (*Lens, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	l := parseLensFile(string(data))
+	if l.Name == "" {
+		base := filepath.Base(path)
+		l.Name = strings.TrimSpace(strings.TrimSuffix(base, filepath.Ext(base)))
+	}
+	if l.Name == "" {
+		l.Name = "candidate"
+	}
+	if strings.TrimSpace(l.Extract) == "" {
+		return nil, fmt.Errorf("lens file %q has no EXTRACT section (nothing to preview)", path)
+	}
+	l.Global = false
+	return l, nil
+}
+
+// LoadFromFile is the STRICT arbitrary-path loader: LoadFromFileUnchecked plus the
+// reserved-name gate LoadRegistered enforces (a file whose resolved `# name:` is a
+// reserved identity — "default"/"unified", case-folded — is rejected). Callers that
+// only PREVIEW (never write) may catch the reserved-name error and fall back to the
+// Unchecked variant with a display name of "candidate"; callers that would persist
+// under the resolved name must use this one. Keeping the gate here (not relaxing the
+// shared loader) means the strict path stays the default and the lenient path is an
+// explicit, preview-only opt-in.
+func LoadFromFile(path string) (*Lens, error) {
+	l, err := LoadFromFileUnchecked(path)
+	if err != nil {
+		return nil, err
+	}
+	if store.ReservedLensName(l.Name) {
+		return nil, fmt.Errorf("lens file %q resolves to reserved name %q (the built-in/unified identity); rename its `# name:` header", path, l.Name)
+	}
+	return l, nil
+}
+
 // parseLensFile parses a simple front-matter-ish lens definition:
 //
 //	# name: math

@@ -48,6 +48,33 @@ type RunnerProvider interface {
 	NewRunner(cfg store.Config) Runner
 }
 
+// SweepsOnCloser is the OPTIONAL capability of a Runner whose Open/Close runs a
+// PROCESS-GLOBAL cleanup sweep — one that reaches beyond this runner's own work and
+// can disturb a concurrently-running witness worker. The OpenCode runner implements
+// it (true): its Close() calls cleanupDistillSessions, deleting witness-distill
+// sessions from the shared OpenCode DB, which would delete a background worker's
+// in-flight distill session. The Claude runner does NOT implement it (each Run is an
+// isolated `claude -p` process; Close is a no-op).
+//
+// This is a SEPARATE axis from ConcurrentRunSafe: that says "can the engine call Run
+// on THIS runner concurrently" (true for both today); SweepsOnClose says "does
+// closing this runner touch OTHER processes' state". A read-only tool that opens its
+// own runner alongside a possible background worker (e.g. `witness lens try`) must
+// hold the single-flight WorkerLock while a sweeping runner is open, but needs no
+// lock for a non-sweeping one.
+type SweepsOnCloser interface {
+	SweepsOnClose() bool
+}
+
+// RunnerSweepsOnClose reports whether r runs a process-global sweep on Open/Close —
+// nil-safe: a runner that doesn't implement SweepsOnCloser is treated as false (no
+// sweep). Centralizing the type assertion here means callers can't accidentally use
+// the wrong predicate (ConcurrentRunSafe) or mis-handle the not-implemented case.
+func RunnerSweepsOnClose(r Runner) bool {
+	s, ok := r.(SweepsOnCloser)
+	return ok && s.SweepsOnClose()
+}
+
 // RunnerFor resolves the GLOBAL runner for a drain. It applies the store's runner
 // precedence (bound-meta > config line > WITNESS_RUNNER env > default — unchanged)
 // to get ONE name, then mints that platform's Runner. Fails closed on an unknown

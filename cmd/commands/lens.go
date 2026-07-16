@@ -72,6 +72,7 @@ func newLensCmd() *cobra.Command {
 			Args:  cobra.ExactArgs(1),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"rebuild"}, args...)) },
 		},
+		newLensTryCmd(),
 	)
 	return lensCmd
 }
