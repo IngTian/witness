@@ -173,6 +173,43 @@ func captureStdout(t *testing.T, fn func()) string {
 	return <-done
 }
 
+// registeredLensPath maps a registered lens NAME to its on-disk lens.md, and leaves a
+// file path (or an unregistered name) alone — the `lens try codereview` convenience.
+func TestRegisteredLensPathResolution(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	s, err := store.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	// Register a lens named "codereview".
+	src := writeLensFile(t, "# name: codereview\n## EXTRACT\nmine\n## REVIEW\nsynth\n")
+	if err := s.RegisterLens("codereview", src); err != nil {
+		t.Fatalf("RegisterLens: %v", err)
+	}
+
+	// A bare registered name resolves to its lens.md.
+	got, ok := registeredLensPath(s, "codereview")
+	if !ok {
+		t.Fatalf("a registered name should resolve to its lens.md")
+	}
+	if filepath.Base(got) != "lens.md" || !strings.Contains(got, "codereview") {
+		t.Fatalf("resolved path looks wrong: %q", got)
+	}
+
+	// An unregistered name does not resolve (falls through to file handling).
+	if _, ok := registeredLensPath(s, "nope"); ok {
+		t.Fatalf("an unregistered name must not resolve")
+	}
+	// A path-like or extensioned arg is always treated as a file, never a name — even
+	// if a lens by that stem exists.
+	for _, arg := range []string{"./codereview.md", "codereview.md", "dir/codereview", "/abs/codereview"} {
+		if _, ok := registeredLensPath(s, arg); ok {
+			t.Fatalf("path-like/extensioned arg %q must stay a file, not resolve as a name", arg)
+		}
+	}
+}
+
 // --review on a lens file with no REVIEW section fails EARLY (before any runner work),
 // rather than silently skipping the half the user asked to preview.
 func TestLensTryReviewRequiresReviewSection(t *testing.T) {

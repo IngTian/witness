@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,11 +33,13 @@ var (
 // into cmdLens), `try` carries its own flags, so it is a full command with a closure.
 func newLensTryCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "try <file>",
+		Use:   "try <file|lens-name>",
 		Short: "Preview a lens's EXTRACT prompt on real sessions (read-only, writes nothing).",
-		Long: "Mine real sessions from your archive through a CANDIDATE lens file and print the raw " +
+		Long: "Mine real sessions from your archive through a candidate lens and print the raw " +
 			"observations it would produce — WITHOUT registering the lens or writing anything to the " +
-			"archive. This is the prompt-tuning loop: edit the EXTRACT prompt, run `try`, see what " +
+			"archive. The argument is a lens FILE path, or the NAME of an already-registered lens (so " +
+			"you can re-preview a registered lens's definition without its on-disk path). " +
+			"This is the prompt-tuning loop: edit the EXTRACT prompt, run `try`, see what " +
 			"changes. Sessions are sampled largest-first by default (deterministic, and the meatiest " +
 			"sessions are the ones a prompt is most likely to mishandle); use --recent for the latest.\n\n" +
 			"Works on both runners. On an OpenCode runner it briefly holds the worker lock while it runs " +
@@ -135,14 +139,24 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	}
 	defer st.Close()
 
+	// The arg is a lens FILE path, or the NAME of an already-registered lens — the
+	// convenience so you can `lens try codereview` (re-preview a registered lens's own
+	// definition) without knowing its on-disk path. A registered name wins over a
+	// same-named file in cwd: names have no path separators/extension, so the ambiguity
+	// is negligible, and "I typed my lens's name" is the overwhelmingly likely intent.
+	path := file
+	if resolved, ok := registeredLensPath(st, file); ok {
+		path = resolved
+	}
+
 	// Load the candidate. Strict first; on a reserved-name collision fall back to the
 	// lenient loader (preview never writes, so an impersonating name is harmless) and
 	// mark it so the display makes the fallback obvious.
 	candidate := false
-	ln, err := lens.LoadFromFile(file)
+	ln, err := lens.LoadFromFile(path)
 	if err != nil {
 		var uErr error
-		if ln, uErr = lens.LoadFromFileUnchecked(file); uErr != nil {
+		if ln, uErr = lens.LoadFromFileUnchecked(path); uErr != nil {
 			return uErr // a genuine load error (missing file / no EXTRACT) — surface it
 		}
 		// LoadFromFileUnchecked succeeded where LoadFromFile failed => reserved name.
@@ -152,7 +166,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// --review needs a REVIEW section to run. Fail early (before any runner work) rather
 	// than silently skipping the half the user explicitly asked for.
 	if opts.review && strings.TrimSpace(ln.Review) == "" {
-		return fmt.Errorf("--review needs a REVIEW section in %q, but the lens file has none", file)
+		return fmt.Errorf("--review needs a REVIEW section in %q, but the lens has none", path)
 	}
 
 	cfg := st.LoadConfig()
@@ -278,6 +292,23 @@ func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Con
 		rp.err = err
 	}
 	return rp
+}
+
+// registeredLensPath maps a `lens try` arg to the on-disk lens.md of a registered lens
+// when the arg is one of that lens's registered NAMES — the convenience that lets a user
+// `lens try codereview` instead of typing the archive path. It matches only a name with
+// no path separator or extension (so an actual "./foo.md" or "dir/lens.md" always stays
+// a file path), and only when that name is in RegisteredLenses. Returns ok=false to fall
+// through to file-path handling. `default` isn't in RegisteredLenses (it's the built-in),
+// so `lens try default` stays a file arg — previewing the built-in isn't the point here.
+func registeredLensPath(st *store.Store, arg string) (string, bool) {
+	if strings.ContainsRune(arg, filepath.Separator) || strings.Contains(arg, "/") || filepath.Ext(arg) != "" {
+		return "", false
+	}
+	if !slices.Contains(st.RegisteredLenses(), arg) {
+		return "", false
+	}
+	return filepath.Join(st.LensesDir(), arg, "lens.md"), true
 }
 
 // resolveTrySessions picks the sessions to preview: one specific --session (validated
