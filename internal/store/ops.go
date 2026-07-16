@@ -137,6 +137,12 @@ func (s *Store) SampleSessions(n int) ([]string, error) {
 // counterpart to SampleSessions's size-ordering: a lens author often wants to preview
 // a prompt against what they were just working on, not the biggest sessions in the
 // archive. Read-only; touches no watermark.
+//
+// A session whose raw rows all carry an empty ts (ts is TEXT NOT NULL DEFAULT ”, and
+// an import with unknown/zeroed timestamps can yield "") has MAX(ts)="", which sorts
+// LAST under DESC — i.e. treated as least-recent. That is the intended reading: a
+// session with no known time can't claim to be recent. It only matters for the rare
+// all-empty-ts session, and only affects which sample a read-only preview picks.
 func (s *Store) SampleRecentSessions(n int) ([]string, error) {
 	if n < 1 {
 		n = 1
