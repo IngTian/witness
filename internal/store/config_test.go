@@ -361,6 +361,81 @@ func TestOpenDoesNotAdoptCommentedRunnerLine(t *testing.T) {
 	}
 }
 
+// Adoption tolerates a hand-edited legacy config whose active runner line is indented
+// or padded (valid TOML). isConfigKeyLine TrimSpaces before classifying, so it adopts.
+func TestOpenAdoptsIndentedRunnerLine(t *testing.T) {
+	s := openWithConfig(t, "  runner = \"opencode\"  \nreview_every = 5\n")
+	if s.MetaString("runner_bound") != "1" {
+		t.Fatalf("an indented/padded active runner line must still be adopted as bound")
+	}
+	t.Setenv("WITNESS_RUNNER", "claude")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "opencode" {
+		t.Fatalf("adopted indented runner should stay bound (opencode), not env: got %q", got)
+	}
+}
+
+// Adoption is idempotent AND does not re-derive across re-opens: once bound, a second
+// Open is a clean no-op (exercises the short-circuit), and — critically — a config
+// whose active runner line is later REMOVED stays bound (the flag is now authoritative,
+// not re-derived from text). Guards the "one fact, one place" property across restarts.
+func TestOpenAdoptionIdempotentAndStable(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "witness")
+	t.Setenv("WITNESS_HOME", root)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(cfg, []byte("runner = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s1, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s1.MetaString("runner_bound") != "1" {
+		t.Fatalf("first Open should adopt the active runner line")
+	}
+	_ = s1.Close()
+
+	// Now REMOVE the active runner line entirely and re-open. A text-scanning resolver
+	// would drop to the env fallback; the flag-authoritative design must stay bound.
+	if err := os.WriteFile(cfg, []byte("review_every = 5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if s2.MetaString("runner_bound") != "1" {
+		t.Fatalf("bound-ness must persist across re-open even after the runner line is removed")
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s2.ResolveRunner(s2.LoadConfig()); got != "claude" {
+		t.Fatalf("still-bound config must beat the env fallback: got %q", got)
+	}
+}
+
+// Class property (issue #71): once resolution is flag-only, an enabled-lens config
+// write (rewriteEnabledLens, the OTHER config mutator besides setConfigKey) cannot
+// disturb runner resolution — the npm unbound user stays env-resolvable.
+func TestEnableLensDoesNotDisturbRunnerResolution(t *testing.T) {
+	s := tempStore(t) // fresh template: unbound
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "opencode" {
+		t.Fatalf("precondition: unbound user resolves via env, got %q", got)
+	}
+	if err := s.EnableLens("math"); err != nil { // rewrites config.toml
+		t.Fatalf("EnableLens: %v", err)
+	}
+	if s.MetaString("runner_bound") == "1" {
+		t.Fatalf("enabling a lens must not bind the runner")
+	}
+	if got := s.ResolveRunner(s.LoadConfig()); got != "opencode" {
+		t.Fatalf("enabling a lens disturbed runner resolution: got %q, want opencode", got)
+	}
+}
+
 // SetRunner must stamp runner_bound so the very next ResolveRunner honors it.
 func TestSetRunnerStampsBound(t *testing.T) {
 	s := tempStore(t)
