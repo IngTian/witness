@@ -65,6 +65,35 @@ func TestSampleSessionsTieBreakDeterministic(t *testing.T) {
 	}
 }
 
+// SampleRecentSessions orders by most-recent raw turn, newest first (session
+// tie-break), and honors the limit — the `--recent` counterpart to size ordering.
+func TestSampleRecentSessions(t *testing.T) {
+	s := tempStore(t)
+	// Distinct MAX(ts) per session, inserted out of recency order.
+	mustRawTS(t, s, "old", "2020-01-01T00:00:00Z", "a")
+	mustRawTS(t, s, "new", "2030-06-01T00:00:00Z", "b")
+	mustRawTS(t, s, "mid", "2025-03-01T00:00:00Z", "c")
+
+	got, err := s.SampleRecentSessions(3)
+	if err != nil {
+		t.Fatalf("SampleRecentSessions: %v", err)
+	}
+	want := []string{"new", "mid", "old"} // ts DESC
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("recency order wrong: want %v, got %v", want, got)
+		}
+	}
+	// Limit honored, and it's the MOST recent.
+	top, err := s.SampleRecentSessions(1)
+	if err != nil {
+		t.Fatalf("SampleRecentSessions(1): %v", err)
+	}
+	if len(top) != 1 || top[0] != "new" {
+		t.Fatalf("SampleRecentSessions(1) should return the newest session, got %v", top)
+	}
+}
+
 // SampleSessions on an empty archive returns an empty slice, not an error.
 func TestSampleSessionsEmpty(t *testing.T) {
 	s := tempStore(t)
@@ -93,6 +122,13 @@ func TestRawChars(t *testing.T) {
 func mustRaw(t *testing.T, s *Store, session, text string) {
 	t.Helper()
 	if err := s.AppendRaw(RawRecord{Session: session, Seq: s.NextSeq(session), Role: "user", Text: text}); err != nil {
+		t.Fatalf("AppendRaw: %v", err)
+	}
+}
+
+func mustRawTS(t *testing.T, s *Store, session, ts, text string) {
+	t.Helper()
+	if err := s.AppendRaw(RawRecord{Session: session, Seq: s.NextSeq(session), TS: ts, Role: "user", Text: text}); err != nil {
 		t.Fatalf("AppendRaw: %v", err)
 	}
 }

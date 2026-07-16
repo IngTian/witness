@@ -72,6 +72,16 @@ func (*runner) InvocationHint() string { return "opencode serve" }
 // — that is a provider property, not a witness serialization constraint.
 func (*runner) ConcurrentRunSafe() bool { return true }
 
+// SweepsOnClose is true: Close() runs cleanupDistillSessions (see Close above), a
+// PROCESS-GLOBAL sweep of the shared OpenCode DB that deletes witness-distill
+// sessions created before now+1s — which would delete a concurrent background
+// worker's in-flight distill session. A tool that opens its own OpenCode runner
+// alongside a possible worker (e.g. `witness lens try`) must therefore hold the
+// single-flight WorkerLock for the runner's whole open→Close lifetime. Distinct from
+// ConcurrentRunSafe (which is about calling Run concurrently, not about Close's
+// cross-process reach). Claude does not implement this — its Close is a no-op.
+func (*runner) SweepsOnClose() bool { return true }
+
 // cleanupDistillSessions removes witness's own distill sessions from the OpenCode
 // DB so they aren't re-ingested as user sessions. Lives beside the runner so both
 // the worker and the manual review path get it via Runner.Close().

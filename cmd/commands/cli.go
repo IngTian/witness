@@ -3,7 +3,6 @@
 package commands
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,31 +10,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/IngTian/witness/internal/distill"
-	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
-
-// openRunner resolves the global distillation runner for cfg, Opens it, and returns
-// the runner alongside the MineFunc seam the engine calls. It is the shared
-// RunnerFor→Open→RunnerMine sequence that the worker, `review`, and `lens try` all
-// need. The CALLER owns two things this helper deliberately does NOT: (1) Close (defer
-// runner.Close() at the call site), and (2) the single-flight lock decision. That
-// separation matters — a runner's Close() runs the OpenCode cleanup sweep, so a WRITE
-// path must hold st.WorkerLock() around the whole open→use→Close span, while a
-// read-only Claude preview needs no lock (Claude Close is a no-op). Baking a lock in
-// here would either over-lock the preview or under-lock the writers; keeping it at the
-// call site keeps each caller's contract explicit.
-func openRunner(ctx context.Context, st *store.Store, cfg store.Config) (platform.Runner, distill.MineFunc, error) {
-	runner, err := platform.RunnerFor(st, cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := runner.Open(ctx); err != nil {
-		return nil, nil, err
-	}
-	return runner, distill.RunnerMine(runner), nil
-}
 
 // emitJSON marshals v as indented JSON to stdout. Used by read commands in --json
 // mode; failures (always a marshaling issue, never a domain error) bubble up so

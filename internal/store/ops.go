@@ -132,6 +132,32 @@ func (s *Store) SampleSessions(n int) ([]string, error) {
 	return out, rows.Err()
 }
 
+// SampleRecentSessions returns up to n session ids ordered by their most recent raw
+// turn, NEWEST first (tie-broken by session for a stable order). The `--recent`
+// counterpart to SampleSessions's size-ordering: a lens author often wants to preview
+// a prompt against what they were just working on, not the biggest sessions in the
+// archive. Read-only; touches no watermark.
+func (s *Store) SampleRecentSessions(n int) ([]string, error) {
+	if n < 1 {
+		n = 1
+	}
+	rows, err := s.db.Query(
+		`SELECT session FROM raw GROUP BY session ORDER BY MAX(ts) DESC, session LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sess string
+		if err := rows.Scan(&sess); err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
 // RawChars is the total CHARACTER length of a session's raw text — the same size
 // metric SampleSessions orders by (SQLite LENGTH() counts characters, not bytes, so
 // this is chars, not bytes; the naming is deliberate to avoid the ~3× under-report a
