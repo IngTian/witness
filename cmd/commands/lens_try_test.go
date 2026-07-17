@@ -327,3 +327,39 @@ func TestRunPreviewsPanicIsolated(t *testing.T) {
 		}
 	}
 }
+
+// tryRunnerCfg must, for a lens on a DIFFERENT runner than the global, both point cfg at
+// the lens's runner AND clear the wrong-runtime global models — else `lens try` on a
+// cross-runtime lens hands a global (e.g. claude) model name to the other runtime's Open
+// and aborts the preview (the slice-2 audit bug). A same-runtime lens keeps the globals.
+func TestTryRunnerCfgClearsCrossRuntimeGlobals(t *testing.T) {
+	// global=claude with a claude triage/distill model set; lens routes to opencode.
+	cfg := store.Config{Runner: "claude", TriageModel: "claude-sonnet", DistillModel: "claude-opus"}
+	cross := &lens.Lens{Name: "cr", Runner: "opencode"}
+	got := tryRunnerCfg(cfg, cross)
+	if got.Runner != "opencode" {
+		t.Fatalf("cross-runtime lens must preview on its own runner, got %q", got.Runner)
+	}
+	if got.TriageModel != "" || got.DistillModel != "" {
+		t.Fatalf("wrong-runtime global models must be cleared, got triage=%q distill=%q", got.TriageModel, got.DistillModel)
+	}
+	// And ModelFor then falls back to the runtime default (""), not the claude global.
+	if m := distill.ModelFor(got, cross, distill.PhaseExtract); m != "" {
+		t.Fatalf("cross-runtime lens with no per-lens model must ride the runtime default, got %q", m)
+	}
+
+	// A lens on the SAME runner as the global keeps the globals (no clearing).
+	same := &lens.Lens{Name: "s"} // no runner → global
+	got2 := tryRunnerCfg(cfg, same)
+	if got2.Runner != "claude" || got2.TriageModel != "claude-sonnet" {
+		t.Fatalf("same-runtime lens must keep the global runner+models, got runner=%q triage=%q", got2.Runner, got2.TriageModel)
+	}
+
+	// A cross-runtime lens WITH its own per-lens model keeps that model (globals still cleared,
+	// but ModelFor uses the per-lens one).
+	tuned := &lens.Lens{Name: "t", Runner: "opencode", ExtractModel: "opencode/free"}
+	got3 := tryRunnerCfg(cfg, tuned)
+	if m := distill.ModelFor(got3, tuned, distill.PhaseExtract); m != "opencode/free" {
+		t.Fatalf("cross-runtime lens with a per-lens model must use it, got %q", m)
+	}
+}

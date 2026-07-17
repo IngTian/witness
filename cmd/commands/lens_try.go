@@ -172,15 +172,10 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
-	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime —
-	// previewing a lens should reflect how the lens is actually configured. A single candidate
-	// = one runner, so we just point cfg.Runner at it and the existing single-runner mint→
-	// lock→Open flow below carries through unchanged. Setting cfg.Runner (not just reading
-	// ln.Runner) also makes distill.ModelFor treat this as the global runtime, so the lens's
-	// per-lens models resolve normally rather than being cleared as "cross-runtime".
-	if r := distill.RunnerFor(cfg, ln); r != "" {
-		cfg.Runner = r
-	}
+	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
+	// (a single candidate = one runner) and clear the wrong-runtime global models. See
+	// tryRunnerCfg.
+	cfg = tryRunnerCfg(cfg, ln)
 	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
 	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
 	// override would silently not reach the server. --model overrides EXTRACT (triage);
@@ -399,6 +394,25 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 	}
 	wg.Wait()
 	return results
+}
+
+// tryRunnerCfg points a preview's cfg at the candidate lens's own runner (#75 slice 2) so
+// `lens try` previews a lens AS CONFIGURED, and clears the configured global stage models
+// when that runner differs from the resolved global. Those globals belong to the global
+// runtime; on a different runtime they are a bad model name that would abort OpenCode's
+// Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
+// runtime's own default, mirroring production's applyModelUnion. cfg.Runner must already be
+// the RESOLVED global runner. Pure (returns a modified copy) so it is unit-testable.
+func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
+	globalRunner := cfg.Runner
+	if r := distill.RunnerFor(cfg, ln); r != "" {
+		cfg.Runner = r
+	}
+	if strings.TrimSpace(cfg.Runner) != strings.TrimSpace(globalRunner) {
+		cfg.TriageModel = ""
+		cfg.DistillModel = ""
+	}
+	return cfg
 }
 
 // modelLabel renders a model name for display ("runner default" when unset, so the
