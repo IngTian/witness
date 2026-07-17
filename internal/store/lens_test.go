@@ -191,30 +191,75 @@ func TestRegisterLensLeavesNoStagingTurds(t *testing.T) {
 	}
 }
 
-// LegacyFormatLenses surfaces pre-#75 dirs (a lone lens.md, no extract.md) so an
-// upgraded user isn't silently dropped. A new-format lens must NOT be flagged.
-func TestLegacyFormatLenses(t *testing.T) {
+// writeLegacyLensDir lays down a pre-#75 single-file lens.md registry dir (for migration
+// tests). Returns the dir.
+func writeLegacyLensDir(t *testing.T, s *Store, name, body string) string {
+	t.Helper()
+	dir := filepath.Join(s.LensesDir(), name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lens.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// migrateLegacyLenses converts a pre-#75 lens.md dir into the new lens.json + extract.md +
+// review.md format, non-destructively (lens.md stays), and idempotently. After migration
+// the lens is a normal registered lens — no downstream code needs an old-format branch.
+func TestMigrateLegacyLenses(t *testing.T) {
 	s := tempStore(t)
-	// A new-format lens (has extract.md) — must NOT be flagged.
-	if err := s.RegisterLens("newfmt", writeLensSrcDir(t, "newfmt", "mine", "rev")); err != nil {
-		t.Fatal(err)
+	dir := writeLegacyLensDir(t, s, "codereview",
+		"# name: codereview\n# dimensions: rigor, taste\n## EXTRACT\nmine code review\n## REVIEW\nsynthesize facets\n")
+
+	// Precondition: not visible as registered (no extract.md yet).
+	if slices.Contains(s.RegisteredLenses(), "codereview") {
+		t.Fatal("precondition: a lens.md-only dir should not be registered before migration")
 	}
-	// An old-format dir: only lens.md, no extract.md.
-	oldDir := filepath.Join(s.LensesDir(), "oldfmt")
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatal(err)
+
+	if n := s.migrateLegacyLenses(); n != 1 {
+		t.Fatalf("want 1 lens migrated, got %d", n)
 	}
-	if err := os.WriteFile(filepath.Join(oldDir, "lens.md"),
-		[]byte("# name: oldfmt\n## EXTRACT\nmine\n## REVIEW\nrev\n"), 0o600); err != nil {
-		t.Fatal(err)
+
+	// The new files exist and the old one is left in place (non-destructive).
+	for _, fn := range []string{"extract.md", "review.md", "lens.json", "lens.md"} {
+		if _, err := os.Stat(filepath.Join(dir, fn)); err != nil {
+			t.Fatalf("after migration %s should exist: %v", fn, err)
+		}
 	}
-	got := s.LegacyFormatLenses()
-	if len(got) != 1 || got[0] != "oldfmt" {
-		t.Fatalf("want [oldfmt] flagged as legacy, got %v", got)
+	// It now appears as a normal registered lens (store-level check; the lens package's
+	// LoadRegistered is exercised in internal/lens tests — store must not import lens).
+	if !slices.Contains(s.RegisteredLenses(), "codereview") {
+		t.Fatal("migrated lens must appear in RegisteredLenses")
 	}
-	// The old-format dir must ALSO be absent from RegisteredLenses (it has no extract.md).
-	if slices.Contains(s.RegisteredLenses(), "oldfmt") {
-		t.Fatalf("an old-format dir must not appear in RegisteredLenses")
+	// The prompt bodies and the header's dimensions were carried across.
+	ext, _ := os.ReadFile(filepath.Join(dir, "extract.md"))
+	rev, _ := os.ReadFile(filepath.Join(dir, "review.md"))
+	cfg, _ := os.ReadFile(filepath.Join(dir, "lens.json"))
+	if !strings.Contains(string(ext), "mine code review") || !strings.Contains(string(rev), "synthesize facets") {
+		t.Fatalf("migrated prompts not carried across: extract=%q review=%q", ext, rev)
+	}
+	if !strings.Contains(string(cfg), "rigor") || !strings.Contains(string(cfg), "taste") {
+		t.Fatalf("migrated dimensions not in lens.json: %s", cfg)
+	}
+
+	// Idempotent: a second pass converts nothing (extract.md now present → skipped).
+	if n := s.migrateLegacyLenses(); n != 0 {
+		t.Fatalf("second migration pass must be a no-op, converted %d", n)
+	}
+}
+
+// An unconvertible legacy file (no EXTRACT section) is left untouched, not written as a
+// broken new-format lens.
+func TestMigrateLegacyLensesSkipsUnconvertible(t *testing.T) {
+	s := tempStore(t)
+	dir := writeLegacyLensDir(t, s, "broken", "# name: broken\n(no sections here)\n")
+	if n := s.migrateLegacyLenses(); n != 0 {
+		t.Fatalf("an EXTRACT-less legacy file must not convert, got %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "extract.md")); !os.IsNotExist(err) {
+		t.Fatalf("no extract.md should be written for an unconvertible legacy file")
 	}
 }
 

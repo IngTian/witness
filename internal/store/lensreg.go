@@ -195,33 +195,6 @@ func isLensStagingDir(name string) bool {
 	return strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".bak")
 }
 
-// LegacyFormatLenses lists registry directories that hold the OLD single-file lens.md
-// (pre-#75) but NOT the new extract.md — i.e. lenses that a pre-#75 install registered
-// and that upgraded silently out of RegisteredLenses() (which now probes extract.md). A
-// user (especially one who had an ENABLED old-format lens) needs a loud, actionable
-// pointer to re-register, since we deliberately do NOT auto-migrate (parsing the old
-// ## EXTRACT/## REVIEW split is exactly what #75 removed). Returns nil when there are
-// none (the overwhelmingly common case), so callers can cheaply gate their warning.
-func (s *Store) LegacyFormatLenses() []string {
-	entries, err := os.ReadDir(s.LensesDir())
-	if err != nil {
-		return nil
-	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() || isLensStagingDir(e.Name()) {
-			continue
-		}
-		dir := filepath.Join(s.LensesDir(), e.Name())
-		_, newErr := os.Stat(filepath.Join(dir, lensExtractFile))
-		_, oldErr := os.Stat(filepath.Join(dir, "lens.md"))
-		if os.IsNotExist(newErr) && oldErr == nil {
-			names = append(names, e.Name())
-		}
-	}
-	return names
-}
-
 // SetLensModel updates a registered lens's per-lens model in its lens.json (issue #75),
 // creating the file if absent. phase selects the field: "extract" → extract_model,
 // "review" → review_model. An empty value CLEARS the field (the lens then rides the

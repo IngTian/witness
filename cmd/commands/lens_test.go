@@ -9,19 +9,16 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// `lens list` must surface a pre-#75 old-format lens (a lone lens.md, no extract.md) even
-// when it is the ONLY thing in the registry — that legacy-only case is exactly the
-// upgraded-user population the warning exists for, and an early `len(reg)==0` return used
-// to swallow it. Regression for the re-audit finding.
-func TestLensListWarnsOnLegacyOnlyRegistry(t *testing.T) {
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	// A registry holding ONLY an old-format dir (lens.md, no extract.md), and it's enabled.
-	oldDir := filepath.Join(st.LensesDir(), "codereview")
+// A pre-#75 old-format lens (a lone lens.md) is migrated at store.Open (issue #75), so by
+// the time any command runs it is a normal registered lens — it appears in `lens list`
+// with no "old format" noise and, if it was enabled, keeps running. This replaces the
+// earlier "warn about un-migrated legacy" behavior: migration means there is nothing to
+// warn about.
+func TestLensListShowsMigratedLegacyLens(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "witness")
+	t.Setenv("WITNESS_HOME", root)
+	// Seed a legacy lens.md registry dir BEFORE any Open, so Open's migration converts it.
+	oldDir := filepath.Join(root, "lenses", "codereview")
 	if err := os.MkdirAll(oldDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -29,9 +26,15 @@ func TestLensListWarnsOnLegacyOnlyRegistry(t *testing.T) {
 		[]byte("# name: codereview\n## EXTRACT\nmine\n## REVIEW\nrev\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Open runs the migration; enable the (now-migrated) lens.
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := st.EnableLens("codereview"); err != nil {
 		t.Fatal(err)
 	}
+	st.Close()
 
 	out := captureStdout(t, func() {
 		if err := cmdLens([]string{"list"}); err != nil {
@@ -39,13 +42,12 @@ func TestLensListWarnsOnLegacyOnlyRegistry(t *testing.T) {
 		}
 	})
 	if strings.Contains(out, "no additional lenses registered") {
-		t.Fatalf("legacy-only registry wrongly reported as empty:\n%s", out)
+		t.Fatalf("a migrated legacy lens must appear in `lens list`, got:\n%s", out)
 	}
-	if !strings.Contains(out, "OLD FORMAT") || !strings.Contains(out, "codereview") {
-		t.Fatalf("legacy lens must be loudly flagged in `lens list`, got:\n%s", out)
+	if !strings.Contains(out, "codereview") || !strings.Contains(out, "enabled") {
+		t.Fatalf("migrated legacy lens should list as enabled, got:\n%s", out)
 	}
-	// It was enabled, so the flag must say so (silent-stop is the worst case).
-	if !strings.Contains(out, "ENABLED but NOT running") {
-		t.Fatalf("an enabled legacy lens must be flagged as enabled-but-not-running, got:\n%s", out)
+	if strings.Contains(out, "OLD FORMAT") {
+		t.Fatalf("a migrated lens must NOT be flagged as old format, got:\n%s", out)
 	}
 }
