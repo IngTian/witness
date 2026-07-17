@@ -67,6 +67,11 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 	// NON-global per-lens runtime being broken is NOT fatal: it's circuit-broken and only
 	// its own lenses back off, so a healthy Claude drain isn't wedged by a down OpenCode.
 	if g := rs.byName[rs.globalR]; g == nil || g.runner == nil {
+		// We're returning nil (so the caller's `defer rs.Close()` never runs) — close every
+		// runtime we DID open here, or a successfully-opened opencode serve would leak when
+		// the global runner is what failed. Map iteration is unordered, so OpenCode may have
+		// opened before the global was even checked.
+		rs.Close()
 		if g != nil && g.err != nil {
 			return nil, g.err
 		}
