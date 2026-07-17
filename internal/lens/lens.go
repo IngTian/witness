@@ -42,7 +42,7 @@ import (
 //     are meaningful only together with (or under a matching) Runner.
 type Lens struct {
 	Name         string // tag written onto observations/facets
-	Global       bool   // default=true (the always-on built-in); registered lenses=false
+	Default      bool   // true=the always-on built-in "default" lens; registered lenses=false. (NB: distinct from the machine-scope "lenses are global, never repo-scoped" invariant — that's about where a lens is defined, this is about which lens is the built-in one.)
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
@@ -80,7 +80,7 @@ func promptsDir() string {
 	return bundle.Dir("prompts", "WITNESS_PROMPTS")
 }
 
-// LoadDefault loads the always-on global lens from prompts/default/. Its identity and
+// LoadDefault loads the always-on built-in "default" lens from prompts/default/. Its identity and
 // dimensions are hardcoded (not a lens.json) because it is the built-in backbone; only
 // its two prompts live on disk, in the same extract.md/review.md shape a registered
 // lens uses. The default rides the default stage models (no per-lens override), which
@@ -93,7 +93,7 @@ func LoadDefault() (*Lens, error) {
 	}
 	return &Lens{
 		Name:       store.LensDefault, // canonical name lives in the data layer (store)
-		Global:     true,
+		Default:    true,
 		Dimensions: DefaultDimensions,
 		Extract:    extract,
 		Review:     review,
@@ -117,7 +117,7 @@ func LoadSummarizePrompts() (lensPrompt, unifiedPrompt string, err error) {
 	return string(l), string(u), nil
 }
 
-// DefaultDimensions is the fixed scaffold for the global lens. Facets within
+// DefaultDimensions is the fixed scaffold for the built-in "default" lens. Facets within
 // each dimension are emergent (named by the distiller), not pre-enumerated.
 var DefaultDimensions = []string{
 	"thinking",  // decision frameworks, how problems get approached
@@ -207,7 +207,7 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	if store.ReservedLensName(l.Name) {
 		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its lens.json name impersonates the built-in/unified identity); rename it", name, l.Name)
 	}
-	l.Global = false
+	l.Default = false
 	return l, nil
 }
 
@@ -218,7 +218,7 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 // work-in-progress lens missing a lens.json name still previews. It does NOT apply the
 // reserved-name gate (see LoadFromDir for the strict variant) — a preview never writes
 // to the archive, so an impersonating name can't collide with anything. It still
-// requires a non-empty extract.md (that is the prompt being previewed). Global is
+// requires a non-empty extract.md (that is the prompt being previewed). Default is
 // forced false — a candidate is never the always-on built-in.
 func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	base := strings.TrimSpace(filepath.Base(strings.TrimRight(dir, string(filepath.Separator))))
@@ -229,7 +229,7 @@ func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	if strings.TrimSpace(l.Name) == "" {
 		l.Name = "candidate"
 	}
-	l.Global = false
+	l.Default = false
 	return l, nil
 }
 

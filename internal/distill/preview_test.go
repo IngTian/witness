@@ -16,7 +16,7 @@ import (
 
 // previewLens is a minimal candidate lens for the preview tests.
 func previewLens() *lens.Lens {
-	return &lens.Lens{Name: "cand", Global: false, Extract: "extract-cand", Review: "r", Dimensions: []string{"thinking"}}
+	return &lens.Lens{Name: "cand", Default: false, Extract: "extract-cand", Review: "r", Dimensions: []string{"thinking"}}
 }
 
 // obsReply is a helper: a JSON array of one observation echoing the input.
