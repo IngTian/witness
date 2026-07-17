@@ -17,7 +17,7 @@ self-contained, INCLUDING its output JSON schema. The tool appends the transcrip
 (extract) or the accumulated observations (review) as the user message; it injects no
 schema for you.
 
-A lens is runner-agnostic: by default it rides the global model. To pin a stronger
+A lens is runner-agnostic: by default it rides the default model. To pin a stronger
 model just for this lens (without paying for it on every session), add an optional
 `"extract_model"` / `"review_model"` to `lens.json`, or run
 `witness lens set math --extract-model <model>` (empty value clears it).

@@ -137,7 +137,7 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 	w := &distill.Worker{
 		Store:    st,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", Default: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{Runner: "fake"},
 		Run:      distill.RunnerMine(runner),
 	}

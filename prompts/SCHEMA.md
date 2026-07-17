@@ -58,7 +58,7 @@ Every observation/facet carries a `lens` tag.
 
 A lens is a **directory** of `lens.json` (settings: `name`, `dimensions`, optional per-lens models)
 plus `extract.md` and `review.md` (each whole file is the prompt for its pass). See
-`prompts/lens/example/`. Mining uses the global model by default, but a lens may pin its own via
+`prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own via
 `witness lens set <name> --extract-model <m>` / `--review-model <m>` (written to its `lens.json`),
 so a rare heavy lens can run a stronger model without paying for it on every session.
 

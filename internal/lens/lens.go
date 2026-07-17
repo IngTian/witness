@@ -42,7 +42,7 @@ import (
 //     are meaningful only together with (or under a matching) Runner.
 type Lens struct {
 	Name         string // tag written onto observations/facets
-	Default      bool   // true=the always-on built-in "default" lens; registered lenses=false. (NB: distinct from the machine-scope "lenses are global, never repo-scoped" invariant — that's about where a lens is defined, this is about which lens is the built-in one.)
+	BuiltIn      bool   // true=the always-on lens that ships in the binary (the "default" lens); registered lenses=false
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
@@ -93,7 +93,7 @@ func LoadDefault() (*Lens, error) {
 	}
 	return &Lens{
 		Name:       store.LensDefault, // canonical name lives in the data layer (store)
-		Default:    true,
+		BuiltIn:    true,
 		Dimensions: DefaultDimensions,
 		Extract:    extract,
 		Review:     review,
@@ -207,7 +207,7 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	if store.ReservedLensName(l.Name) {
 		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its lens.json name impersonates the built-in/unified identity); rename it", name, l.Name)
 	}
-	l.Default = false
+	l.BuiltIn = false
 	return l, nil
 }
 
@@ -229,7 +229,7 @@ func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	if strings.TrimSpace(l.Name) == "" {
 		l.Name = "candidate"
 	}
-	l.Default = false
+	l.BuiltIn = false
 	return l, nil
 }
 

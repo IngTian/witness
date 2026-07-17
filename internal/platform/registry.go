@@ -25,7 +25,7 @@ func unknownRunnerError(name string) error {
 // Two axes, deliberately kept separate (see the two registry lookups below):
 //   - PER-SESSION owner: which platform PRODUCED a session (by id prefix / the
 //     persisted session_meta.platform). Governs how L0 is shaped into model input.
-//   - default runner: which engine DISTILLS (one for the whole process). Not here.
+//   - GLOBAL runner: which engine DISTILLS (one for the whole process). Not here.
 type Platform interface {
 	Identity
 	InputRenderer
