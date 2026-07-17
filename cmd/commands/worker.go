@@ -174,19 +174,34 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	// runtime whose Open fails is circuit-broken (its lenses back off) rather than failing
 	// the whole drain; only the GLOBAL runner failing is fatal (see newRunnerSet). The
 	// combined Close tears every opened runner down + runs each one's post-cleanup sweep.
+	// The runner set is opened LAZILY on first actual need (ensureRunners), not merely
+	// from a pre-loop hasPending snapshot. `capture` writes L0 without WorkerLock, so work
+	// can land in the gap between that snapshot and the re-check loop's fresh pending() — if
+	// rs were only opened on the snapshot, that late arrival would mine through a nil runner
+	// set and spuriously back off (a slice-2 regression vs slice-1, which wrapped the runner
+	// unconditionally). Opening on first need closes that gap while still paying the
+	// OpenCode-serve/embedder cost only on a run that genuinely mines/reviews. The Close is
+	// guarded unconditionally so a lazily-opened runner never leaks.
 	var rs *runnerSet
-	hasPending := len(pending()) > 0
-	if hasPending || st.ReviewDue(cfg) {
-		rs, err = newRunnerSet(ctx, st, cfg, lenses)
-		if err != nil {
-			slog.Error("open runners", "runner", cfg.Runner, "err", err)
-			return true, err
+	var rsErr error
+	defer func() {
+		if rs != nil {
+			rs.Close()
 		}
-		defer rs.Close()
+	}()
+	ensureRunners := func() bool {
+		if rs == nil && rsErr == nil {
+			rs, rsErr = newRunnerSet(ctx, st, cfg, lenses)
+			if rsErr != nil {
+				slog.Error("open runners", "runner", cfg.Runner, "err", rsErr)
+			}
+		}
+		return rs != nil
 	}
 	// runFn is the GLOBAL runner's MineFunc — used by the reviewer's/summarizer's unified
-	// pass and as the Worker's default Run; per-lens routing goes through rs.RunFor. When
-	// there's no work (rs nil), these are never called.
+	// pass and as the Worker's default Run; per-lens routing goes through rs.RunFor. It is
+	// only reached after ensureRunners() opened the set (the drain/review gates below), so
+	// rs is non-nil here; the guard is a belt-and-suspenders against a misroute.
 	runFn := func(ctx context.Context, model, prompt, input string) (string, error) {
 		if rs == nil {
 			return "", &runnerDownError{name: cfg.Runner}
@@ -217,9 +232,9 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	var miner *distill.Worker
 	attempted := map[string]bool{}
 	// runForLens is the per-lens runner resolver threaded into the engine (issue #75
-	// slice 2): a lens declaring its own runtime mines/reviews against that runner. nil-safe
-	// when there's no work (rs nil) — never called in that case (getMiner returns without
-	// mining, review only runs when rs is open).
+	// slice 2): a lens declaring its own runtime mines/reviews against that runner. Only
+	// reached after ensureRunners() (getMiner/runReview gate on it), so rs is non-nil; the
+	// runFn fallback is a belt-and-suspenders that would back off rather than nil-deref.
 	runForLens := func(ln *lens.Lens) distill.MineFunc {
 		if rs == nil {
 			return runFn
@@ -228,6 +243,12 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	}
 	getMiner := func() *distill.Worker {
 		if miner == nil {
+			// Open the runner set before mining — closes the "work arrived after the pre-loop
+			// snapshot, rs still nil" gap. A failed open (fatal global) means we can't mine
+			// this run; return nil so the loop breaks and the next wakeup retries.
+			if !ensureRunners() {
+				return nil
+			}
 			emb, err := embed.New()
 			if err != nil {
 				slog.Error("embedder", "err", err) // can't mine this run; review may still run
@@ -237,19 +258,15 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		}
 		return miner
 	}
-	// The session-window cap must be safe for EVERY opened runtime (different sessions run
-	// in parallel and may each touch any runtime). AND across the set; falls back to the
-	// global runner's fact when there's no set yet (review-only / no work).
-	concurrentSafe := true
-	if rs != nil {
-		concurrentSafe = rs.concurrentRunSafe()
-	}
-	conc := distill.EffectiveConcurrency(cfg.MineConcurrency, concurrentSafe)
 	drainAll := func() {
-		w := getMiner()
+		w := getMiner() // opens the runner set (ensureRunners) as a side effect; nil if it can't
 		if w == nil {
 			return
 		}
+		// Compute the session-window cap AFTER the runners are open: it must be safe for
+		// EVERY opened runtime (different sessions run in parallel and may each touch any
+		// runtime), so AND across the set. rs is non-nil here (getMiner ensured it).
+		conc := distill.EffectiveConcurrency(cfg.MineConcurrency, rs.concurrentRunSafe())
 		for !stopRequested() {
 			n := w.Drain(ctx, distill.DrainOpts{
 				Conc:      conc,
@@ -273,6 +290,12 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		drainAll:      drainAll,
 		reviewDue:     func() bool { return st.ReviewDue(cfg) },
 		runReview: func() {
+			// Review also needs the runner set (its own per-lens routing + the unified
+			// summary's global runner). Open it here so a review-only run (no mining) still
+			// has live runners; a failed open skips the review this pass.
+			if !ensureRunners() {
+				return
+			}
 			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runForLens}
 			if err := r.Run(ctx, time.Now()); err != nil {
 				slog.Error("review", "err", err)

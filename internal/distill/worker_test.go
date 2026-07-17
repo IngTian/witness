@@ -70,6 +70,50 @@ func testWorker(s *store.Store, m *fakeMiner) *Worker {
 	}
 }
 
+// Worker.mine must DISPATCH each lens to its per-lens runner (#75 slice 2), not just to
+// the global Run. Two lenses — one on the global runner, one declaring runner=opencode —
+// must have their extract calls routed to different MineFuncs. Guards the runFor seam:
+// this test fails if worker.mine is reverted to call w.Run directly.
+func TestWorkerRoutesMineToPerLensRunner(t *testing.T) {
+	s := newStore(t)
+	capture(t, s, "sess", "user", "hello there")
+
+	minedBy := map[string]string{} // extract prompt → which runner ran it
+	tag := func(runnerName string) MineFunc {
+		return func(_ context.Context, _, prompt, _ string) (string, error) {
+			minedBy[prompt] = runnerName
+			arr := []minedObs{{Dimension: "thinking", Observation: "o", Evidence: "e", Poignancy: 3}}
+			b, _ := json.Marshal(arr)
+			return string(b), nil
+		}
+	}
+	w := &Worker{
+		Store:    s,
+		Embedder: fakeEmbedder{},
+		Lenses: []*lens.Lens{
+			{Name: "default", Global: true, Extract: "extract-default", Dimensions: []string{"thinking"}},
+			{Name: "cr", Extract: "extract-cr", Runner: "opencode", Dimensions: []string{"thinking"}},
+		},
+		Config: store.Config{Runner: "claude"},
+		Run:    tag("global"),
+		RunFor: func(ln *lens.Lens) MineFunc {
+			if ln != nil && ln.Runner == "opencode" {
+				return tag("opencode")
+			}
+			return nil // fall back to Run (global)
+		},
+	}
+	if err := w.Process(context.Background(), "sess"); err != nil {
+		t.Fatal(err)
+	}
+	if minedBy["extract-default"] != "global" {
+		t.Fatalf("default lens must mine on the global runner, got %q", minedBy["extract-default"])
+	}
+	if minedBy["extract-cr"] != "opencode" {
+		t.Fatalf("a lens with runner=opencode must mine on the opencode runner, got %q", minedBy["extract-cr"])
+	}
+}
+
 func TestOpenCodeSessionsAreChunked(t *testing.T) {
 	s := newStore(t)
 	m := &fakeMiner{}

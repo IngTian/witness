@@ -34,6 +34,47 @@ func facetReply(dimension, key, value string) string {
 		`","value":"` + value + `","confidence":0.9,"because_of":["x"],"contradicts_prior":false}]`
 }
 
+// Reviewer.reviewLens must DISPATCH each lens to its per-lens runner (#75 slice 2), not
+// just to the global Runner. Guards the runnerFor seam: fails if reviewLens is reverted to
+// call r.Runner directly.
+func TestReviewerRoutesReviewToPerLensRunner(t *testing.T) {
+	s := newStore(t)
+	stageObsForReview(t, s, "default")
+	stageObsForReview(t, s, "cr")
+
+	reviewedBy := map[string]string{} // review prompt → which runner ran it
+	tag := func(runnerName string) MineFunc {
+		return func(_ context.Context, _, prompt, _ string) (string, error) {
+			reviewedBy[prompt] = runnerName
+			return facetReply("thinking", "k", "v"), nil
+		}
+	}
+	r := &Reviewer{
+		Store: s,
+		Lenses: []*lens.Lens{
+			{Name: "default", Review: "REVIEW-default"},
+			{Name: "cr", Review: "REVIEW-cr", Runner: "opencode"},
+		},
+		Config: store.Config{Runner: "claude"},
+		Runner: tag("global"),
+		RunnerFor: func(ln *lens.Lens) MineFunc {
+			if ln != nil && ln.Runner == "opencode" {
+				return tag("opencode")
+			}
+			return nil // fall back to Runner (global)
+		},
+	}
+	if err := r.Run(context.Background(), time.Now()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if reviewedBy["REVIEW-default"] != "global" {
+		t.Fatalf("default lens must review on the global runner, got %q", reviewedBy["REVIEW-default"])
+	}
+	if reviewedBy["REVIEW-cr"] != "opencode" {
+		t.Fatalf("a lens with runner=opencode must review on the opencode runner, got %q", reviewedBy["REVIEW-cr"])
+	}
+}
+
 // #16 C1: a lens whose review CALL fails must NOT advance the review watermark and
 // must surface as an error, even though other lenses reviewed cleanly. The old code
 // `continue`d past the error then stamped + returned nil — silently reporting
