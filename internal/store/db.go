@@ -21,8 +21,12 @@ import (
 // v5 re-keys the distillation watermark from PK(session) to PK(session, lens) so a
 // single lens can be backfilled without re-mining every lens (issue #55) — a
 // guarded table rebuild in migrate() that seeds the pre-migration rows as the
-// 'default' lens's watermark (the lens they actually reflect).
-const schemaVersion = 5
+// 'default' lens's watermark (the lens they actually reflect); v6 adds two
+// hot-path indexes on the progress table (idx_progress_lens_next,
+// idx_progress_distilled_at, issue #73-S3) — pure additive CREATE INDEX IF NOT
+// EXISTS in schemaV1, so the only migrate() work is that a stored-v5 DB re-runs
+// the (idempotent) schema apply to gain them. No guarded step needed.
+const schemaVersion = 6
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -187,6 +191,16 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v5 per-lens progress: %w", err)
 	}
 
+	// 5. v5 -> v6: hot-path indexes on the (session, lens)-keyed progress table
+	// (issue #73-S3). MUST come AFTER step 4: they reference the `lens` column, which
+	// on a pre-v5 DB only exists once migrateProgressPerLens has rebuilt the table
+	// (and that rebuild's DROP TABLE would drop indexes created earlier anyway).
+	// Idempotent CREATE INDEX IF NOT EXISTS, so it's a no-op once they exist.
+	if err := addProgressIndexes(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v6 progress indexes: %w", err)
+	}
+
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("set user_version: %w", err)
@@ -284,6 +298,34 @@ func migrateProgressPerLens(tx *sql.Tx) error {
 	return nil
 }
 
+// addProgressIndexes is the v5->v6 step: two hot-path indexes on the per-lens
+// progress table (issue #73-S3). Runs after migrateProgressPerLens so the `lens`
+// column is guaranteed present. The PK (session, lens) already serves every
+// per-(session,lens) point lookup and the PendingSessions CROSS/LEFT JOIN on
+// (p.session, p.lens); these add the two remaining drain/review hot-loop predicates
+// that were full scans:
+//   - (lens, next_attempt): NextBackoffAttempt joins on lens then MINs over
+//     next_attempt > ?, and ResetLensWatermark's DELETE WHERE lens=? rides the
+//     leftmost lens prefix — one index (covering for the former) serves both.
+//   - (distilled_at, session): SessionsSinceReview does COUNT(DISTINCT session)
+//     WHERE distilled_at > ? on every ReviewDue check — a covering index answers it
+//     straight from the b-tree.
+//
+// Two composite (covering) indexes, not three single-column ones, keep write
+// overhead on the per-mine progress upsert minimal while covering every named
+// query. Idempotent: CREATE INDEX IF NOT EXISTS is a no-op once they exist.
+func addProgressIndexes(tx *sql.Tx) error {
+	for _, q := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_progress_lens_next ON progress(lens, next_attempt)`,
+		`CREATE INDEX IF NOT EXISTS idx_progress_distilled_at ON progress(distilled_at, session)`,
+	} {
+		if _, err := tx.Exec(q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // schemaV1 is the full current schema. `raw` is the append-only ground-truth
 // transcript (surrogate rowid; seq is a plain ordinal, not a uniqueness
 // constraint, matching the old JSONL append). observations dedup on obs_id
@@ -364,6 +406,11 @@ CREATE TABLE IF NOT EXISTS progress (
   next_attempt TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (session, lens)
 );
+-- The progress hot-path indexes (issue #73-S3) are NOT here: they reference the
+-- lens column and would fail on a v4 DB whose progress table still predates it
+-- (schemaV1 runs before migrateProgressPerLens rebuilds the table), and the v5
+-- rebuild's DROP TABLE would drop them anyway. They are created as their own
+-- idempotent step in migrate() AFTER the rebuild -- see addProgressIndexes.
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
