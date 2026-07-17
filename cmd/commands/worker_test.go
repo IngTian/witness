@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,57 @@ import (
 
 	"github.com/IngTian/witness/internal/store"
 )
+
+// The status sub-state is DERIVED, not stored (issue #75): no worker holding the lock
+// → "idle"; a live worker (lock held) → "running", or "stopping" if a graceful stop was
+// requested. This drives cmdDistillStatus's JSON path across all three, holding
+// WorkerLock in-test to stand in for a live worker. Guards the worker_status removal:
+// the derivation must reproduce exactly what the stored key used to say.
+func TestDistillStatusDerivesWorkerState(t *testing.T) {
+	readStatus := func(t *testing.T, st *store.Store) string {
+		t.Helper()
+		out := captureStdout(t, func() {
+			if err := cmdDistillStatus(true); err != nil {
+				t.Fatalf("cmdDistillStatus: %v", err)
+			}
+		})
+		var got distillStatusJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("status JSON: %v\n%s", err, out)
+		}
+		return got.Worker.Status
+	}
+
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// No lock held → idle, regardless of any leftover meta.
+	_ = st.SetMetaString("worker_stop_requested", "1") // must be ignored while idle
+	if got := readStatus(t, st); got != "idle" {
+		t.Fatalf("no live worker must read idle, got %q", got)
+	}
+
+	// A live worker (lock held) with no stop pending → running.
+	_ = st.SetMetaString("worker_stop_requested", "")
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		t.Fatal("could not take worker lock")
+	}
+	defer unlock()
+	if got := readStatus(t, st); got != "running" {
+		t.Fatalf("live worker, no stop pending → running, got %q", got)
+	}
+
+	// Same live worker, stop requested → stopping (derived from the flag, not a stored key).
+	_ = st.SetMetaString("worker_stop_requested", "1")
+	if got := readStatus(t, st); got != "stopping" {
+		t.Fatalf("live worker + stop requested → stopping, got %q", got)
+	}
+}
 
 func TestRunWorkerReportsSkippedWhenLockHeld(t *testing.T) {
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
@@ -191,6 +243,45 @@ func TestAutoWorkerShouldNotStartWhenDisabledOrIdleOrNoModel(t *testing.T) {
 	}
 }
 
+// A worker already draining must block a second auto-spawn — the gate now consults
+// the flock (st.WorkerActive) as the sole liveness authority (issue #75), replacing
+// the old worker_status+pid+`ps` predicate. Holding WorkerLock makes WorkerActive
+// true from any probe against the same root, so the gate returns false even though
+// there is pending work and a ready model.
+func TestAutoWorkerShouldNotStartWhenWorkerLockHeld(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		t.Fatal("could not take worker lock")
+	}
+	defer unlock()
+	if autoWorkerShouldStart(st, store.Config{AutoDistill: true}, []string{"sess"}, true) {
+		t.Fatal("must not spawn a second worker while one holds the lock (flock is the liveness authority)")
+	}
+}
+
+// The crash-recovery property (issue #75): stale worker_status="running" + a dead
+// pid left by a SIGKILL/OOM'd worker must NOT block a fresh spawn — with no live
+// flock holder the gate sees "not active" and starts. The old predicate needed a
+// `ps` probe to reach this conclusion; the flock reaches it for free.
+func TestAutoWorkerStartsDespiteStaleRunningMeta(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_ = st.SetMetaString("worker_pid", "999999") // crash residue: a dead worker's stale pid
+	if !autoWorkerShouldStart(st, store.Config{AutoDistill: true}, []string{"sess"}, true) {
+		t.Fatal("stale worker meta with no live worker must not block a spawn")
+	}
+}
+
 // Review-only work (poignancy threshold crossed) should start even without the
 // model, because reviewing needs no embedder.
 func TestAutoWorkerShouldStartForReviewWithoutModel(t *testing.T) {
@@ -326,6 +417,24 @@ func TestDistillStopAutoOnlyCancelsWorkerBeforeItStarts(t *testing.T) {
 	}
 }
 
+// cmdDistillStop with no live worker (flock free) must report "not running" cleanly
+// and NOT error, even when stale worker_status="running" meta is present (issue #75:
+// flock is the liveness authority, not the meta). Guards the removed self-heal block
+// B — a crashed worker's residue must not make `distill stop` fail.
+func TestDistillStopWhenNoWorkerRunning(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.SetMetaString("worker_pid", "999999") // crash residue: a dead worker's stale pid
+	st.Close()
+
+	if err := cmdDistillStop(false); err != nil {
+		t.Fatalf("distill stop with no live worker must not error, got %v", err)
+	}
+}
+
 func TestAutoWorkerHonorsStopBeforeStarting(t *testing.T) {
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
@@ -347,7 +456,11 @@ func TestAutoWorkerHonorsStopBeforeStarting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if got := st.MetaString("worker_status"); got == "running" {
-		t.Fatal("cancelled auto worker entered running state")
+	// The cancelled auto worker must bail at the early return (worker.go) BEFORE stamping
+	// its pid — so worker_pid stays empty. (There's no worker_status to check anymore: the
+	// running/stopping sub-state is derived from the flock, which this exited worker has
+	// released.) An empty pid proves it never entered the drain path.
+	if got := st.MetaString("worker_pid"); got != "" {
+		t.Fatalf("cancelled auto worker stamped a pid (entered running state): %q", got)
 	}
 }

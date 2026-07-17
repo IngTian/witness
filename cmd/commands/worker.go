@@ -105,17 +105,24 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		_ = st.SetMetaString("worker_stop_requested", "")
 	}
 	started := time.Now().UTC().Format(time.RFC3339)
-	_ = st.SetMetaString("worker_status", "running")
+	// No worker_status/worker_started_at: liveness is the flock (issue #75) and the
+	// running/stopping sub-state is DERIVED (see cmdDistillStatus) from the flock plus
+	// worker_stop_requested — storing it too was the redundant third source. The keys
+	// below are the ones still doing work: worker_pid is `distill stop`'s kill target,
+	// worker_mode drives `distill stop --auto-only`, and worker_current/heartbeat are
+	// diagnostic display (read only while the flock says a worker is live).
 	_ = st.SetMetaString("worker_pid", strconv.Itoa(os.Getpid()))
 	if auto {
 		_ = st.SetMetaString("worker_mode", "auto")
 	} else {
 		_ = st.SetMetaString("worker_mode", "manual")
 	}
-	_ = st.SetMetaString("worker_started_at", started)
 	_ = st.SetMetaString("worker_heartbeat", started)
+	// Clear the diagnostic detail on graceful exit so the store doesn't carry a dead
+	// worker's pid/mode/current. Not required for correctness — cmdDistillStatus gates
+	// every read on WorkerActive(), and the next worker overwrites these on start — but
+	// it keeps an idle store clean.
 	defer func() {
-		_ = st.SetMetaString("worker_status", "idle")
 		_ = st.SetMetaString("worker_pid", "")
 		_ = st.SetMetaString("worker_mode", "")
 		_ = st.SetMetaString("worker_current", "")

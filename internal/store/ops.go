@@ -723,12 +723,57 @@ func (s *Store) Stats(lenses []string) Stats {
 	return st
 }
 
+// workerLockName is the single filesystem-flock file that elects the one live
+// distillation worker. WorkerLock (the worker takes it for its whole run) and
+// WorkerActive (a spawn/stop probe) share this one name so "the worker lock" has
+// exactly one identity.
+const workerLockName = ".worker.lock"
+
 // WorkerLock serializes worker runs (leader election, not L0/L2 mutual exclusion).
 // Returns an unlock func and whether the lock was acquired; if not, another
 // worker is already draining the queue. Kept as a filesystem flock (independent
 // of the DB) so it works the same regardless of storage backend.
 func (s *Store) WorkerLock() (unlock func(), ok bool) {
-	return s.lockFile(".worker.lock")
+	return s.lockFile(workerLockName)
+}
+
+// WorkerActive reports whether a distillation worker is currently live. It is the
+// SOLE authority for that fact (issue #75 / #73-C2): the OS releases an flock when
+// its holder dies — normal exit, SIGKILL, OOM, or power loss alike — so a failed
+// acquisition means a genuinely-live holder, with no stale state to reconcile and no
+// process probe. This replaces the old (worker_status meta + pid + `ps`) tri-source
+// reconciliation, whose only job was to detect the crash case the OS already handles.
+//
+// Mechanism: try the lock non-blocking and, on success, immediately release it —
+// acquisition proves no one else holds it. This is ADVISORY (for spawn/stop
+// decisions), never the mutual-exclusion gate: the definitive single-flight is each
+// worker holding WorkerLock for its whole run, so a redundantly-spawned worker just
+// no-ops. The benign TOCTOU (state can change between this probe and a later spawn)
+// therefore costs at most one detached process that exits immediately, never two
+// concurrent drains. Do NOT call from inside the worker process that holds the lock:
+// lockFile opens a fresh descriptor, which flock denies against the process's own
+// held lock, so it would report "active" against itself.
+//
+// Two benign edge cases, both deliberately un-guarded (guarding them would add branch
+// logic for outcomes that don't matter):
+//   - Self-hold race: this briefly HOLDS the lock between acquire and release, so a
+//     genuine worker's WorkerLock() can spuriously lose that microsecond race and
+//     no-op. Harmless — the same probe then returns false and the spawn path re-spawns
+//     (autoworker), while stop/status defer to the next trigger; the on-disk queue +
+//     delta watermark guarantee no lost or doubled work.
+//   - Open-failure conflation: lockFile returns ok=false BOTH for a held lock and for
+//     an os.OpenFile failure (unwritable data dir), so a broken FS reads as "active".
+//     Near-unreachable — store.Open() fails at the WAL pragma first, and .worker.lock
+//     persists once created — and inert: WorkerLock is the same file, so a worker
+//     no-ops there anyway. Worst case is a misleading status string in an already-
+//     broken archive, never a functional regression.
+func (s *Store) WorkerActive() bool {
+	unlock, ok := s.lockFile(workerLockName)
+	if ok {
+		unlock()
+		return false
+	}
+	return true
 }
 
 // ImportLock serializes a platform's import from its external source. The importer

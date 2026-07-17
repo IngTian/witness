@@ -42,16 +42,11 @@ func autoWorkerShouldStart(st *store.Store, cfg store.Config, pending []string, 
 	if !hasPending && !st.ReviewDue(cfg) {
 		return false
 	}
-	if workerRunning(st) {
+	if st.WorkerActive() {
 		return false
 	}
 	if hasPending && !modelReady {
 		return false
 	}
 	return true
-}
-
-func workerRunning(st *store.Store) bool {
-	status := st.MetaString("worker_status")
-	return (status == "running" || status == "stopping") && workerPIDAlive(st.MetaString("worker_pid"))
 }

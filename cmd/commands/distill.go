@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -224,27 +223,26 @@ func cmdDistillStatus(asJSON bool) error {
 	}
 	defer st.Close()
 	stat := st.Stats(activeLensNames(st))
-	status := st.MetaString("worker_status")
-	if status == "" {
-		status = "idle"
-	}
-	pid := st.MetaString("worker_pid")
-	mode := st.MetaString("worker_mode")
-	heartbeat := st.MetaString("worker_heartbeat")
-	current := st.MetaString("worker_current")
-	if (status == "running" || status == "stopping") && !workerPIDAlive(pid) {
-		status = "idle"
-		pid = ""
-		current = ""
-		_ = st.SetMetaString("worker_status", "idle")
-		_ = st.SetMetaString("worker_pid", "")
-		_ = st.SetMetaString("worker_mode", "")
-		_ = st.SetMetaString("worker_current", "")
-	}
-	if status == "idle" {
-		pid = ""
-		mode = ""
-		current = ""
+	// The flock is the SOLE liveness authority (issue #75): the OS drops it when the
+	// holder dies — normal exit, SIGKILL, OOM, or power loss alike — so a crashed
+	// worker reads as idle here with no `ps` probe and no stale-state self-heal. The
+	// running/stopping sub-state is DERIVED, not stored: a live worker with a pending
+	// worker_stop_requested is "stopping", otherwise "running". The remaining worker_*
+	// meta is diagnostic only (pid/mode/heartbeat/current), trusted ONLY while a worker
+	// is genuinely live; when idle the values may be stale from a past crash — the next
+	// worker start overwrites them — so we surface nothing but "idle".
+	active := st.WorkerActive()
+	status := "idle"
+	var pid, mode, heartbeat, current string
+	if active {
+		status = "running"
+		if st.MetaString("worker_stop_requested") == "1" {
+			status = "stopping"
+		}
+		pid = st.MetaString("worker_pid")
+		mode = st.MetaString("worker_mode")
+		heartbeat = st.MetaString("worker_heartbeat")
+		current = st.MetaString("worker_current")
 	}
 	lastRaw := st.LastRawTS()
 	lastDistilled := st.LastDistilledRawTS()
@@ -361,50 +359,29 @@ func cmdDistillStop(autoOnly bool) error {
 	if autoOnly && mode != "auto" {
 		return nil // cancels an auto worker that has been spawned but has not claimed the lock yet
 	}
-	pid := st.MetaString("worker_pid")
-	if !workerPIDAlive(pid) {
-		_ = st.SetMetaString("worker_status", "idle")
-		_ = st.SetMetaString("worker_pid", "")
-		_ = st.SetMetaString("worker_current", "")
+	// The flock is the liveness authority (issue #75): if no worker holds it, none is
+	// running — no `ps` probe, no stale-meta self-heal (a crashed worker's flock was
+	// already released by the OS).
+	if !st.WorkerActive() {
 		fmt.Println("distill worker is not running")
 		return nil
 	}
+	// A worker is live. worker_pid is the kill TARGET, not the liveness authority:
+	// signal it to tear down in-flight `claude -p`/`opencode` children now. The
+	// worker_stop_requested flag set above is the durable backstop — so if pid is
+	// missing or stale (a worker that just claimed the lock but hasn't stamped its pid
+	// yet), the worker still honors the flag at its next checkpoint. We therefore
+	// report the stop request rather than error when the signal can't be delivered.
+	// worker_stop_requested=1 (set above) IS the "stopping" state now — cmdDistillStatus
+	// derives it from that flag while the worker is live, so there's no separate status
+	// key to update here.
+	pid := st.MetaString("worker_pid")
 	if err := terminateWorker(pid); err != nil {
-		return err
+		fmt.Println("distill stop requested; the running worker will exit at its next checkpoint")
+		return nil
 	}
-	_ = st.SetMetaString("worker_status", "stopping")
 	fmt.Printf("distill stop requested; sent TERM to worker pid=%s\n", pid)
 	return nil
-}
-
-func workerPIDAlive(pid string) bool {
-	n, err := strconv.Atoi(strings.TrimSpace(pid))
-	if err != nil || n <= 0 {
-		return false
-	}
-	return isWitnessWorkerProcess(n)
-}
-
-func isWitnessWorkerProcess(pid int) bool {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-	if err != nil {
-		return false
-	}
-	cmd := strings.TrimSpace(string(out))
-	if !strings.Contains(cmd, "witness") {
-		return false
-	}
-	// Match the `worker` subcommand but NOT its `worker-wakeup` sibling — a bare
-	// `strings.Contains(cmd, " worker")` also matches "worker-wakeup", which would
-	// make a liveness check treat a transient wakeup process as the worker (issue
-	// #24). Accept `worker` only as a whole token: end of string, or followed by a
-	// space (a flag/arg), never `worker-…`.
-	for _, field := range strings.Fields(cmd) {
-		if field == "worker" {
-			return true
-		}
-	}
-	return false
 }
 
 func terminateWorker(pid string) error {
