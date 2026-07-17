@@ -200,6 +200,61 @@ func TestMigrateProgressToPerLens(t *testing.T) {
 	}
 }
 
+// hasIndex reports whether a named index exists in sqlite_master.
+func hasIndex(t *testing.T, s *Store, name string) bool {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil {
+		t.Fatalf("probe index %q: %v", name, err)
+	}
+	return n > 0
+}
+
+// v6 (issue #73-S3) adds two hot-path progress indexes. Because they live in
+// schemaV1 as CREATE INDEX IF NOT EXISTS, a fresh DB has them AND a stored-v5 DB
+// re-runs the (idempotent) schema apply on the version bump to gain them — the
+// whole point of bumping schemaVersion 5->6. A stored-v6 DB would early-return, so
+// the version bump is load-bearing: without it these never reach existing archives.
+func TestMigrateAddsProgressIndexes(t *testing.T) {
+	s := tempStore(t) // fully migrated
+	for _, idx := range []string{"idx_progress_lens_next", "idx_progress_distilled_at"} {
+		if !hasIndex(t, s, idx) {
+			t.Fatalf("fresh DB missing hot-path index %q", idx)
+		}
+	}
+
+	// Simulate a stored-v5 archive: drop the indexes and force the version back. A
+	// re-migrate must recreate them (proving the version bump lands the additive
+	// schema on existing archives, not just fresh ones).
+	for _, stmt := range []string{
+		`DROP INDEX idx_progress_lens_next`,
+		`DROP INDEX idx_progress_distilled_at`,
+		`PRAGMA user_version=5`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v5 (%q): %v", stmt, err)
+		}
+	}
+	if hasIndex(t, s, "idx_progress_lens_next") {
+		t.Fatal("precondition: index should be dropped before re-migrate")
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v5->v6 migrate: %v", err)
+	}
+	for _, idx := range []string{"idx_progress_lens_next", "idx_progress_distilled_at"} {
+		if !hasIndex(t, s, idx) {
+			t.Fatalf("v5->v6 migrate did not create %q", idx)
+		}
+	}
+	var v int
+	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
+	}
+}
+
 // SetSessionPlatform upserts even when no session_meta row exists yet (CC sessions
 // have none until now), and SessionPlatform reads it back.
 func TestSetSessionPlatformUpsert(t *testing.T) {
