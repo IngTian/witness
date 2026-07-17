@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -22,6 +23,7 @@ type SummarizeFunc = MineFunc
 type Summarizer struct {
 	Store         *store.Store
 	Config        store.Config
+	Lenses        []*lens.Lens  // active lenses, so a per-lens summary uses that lens's ReviewModel (#75); a facet whose lens isn't here (orphan) falls back to the global DistillModel
 	LensPrompt    string        // prompts/summarize/lens.md
 	UnifiedPrompt string        // prompts/summarize/unified.md
 	Run           SummarizeFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
@@ -52,9 +54,18 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		return nil // no facets yet — nothing to summarize
 	}
 
+	// Index the active lenses by name so each per-lens summary uses that lens's own
+	// review model (#75). A facet whose lens isn't in the active set (an orphan from a
+	// since-deregistered lens) maps to nil → ModelFor falls back to the global model.
+	byName := map[string]*lens.Lens{}
+	for _, l := range sm.Lenses {
+		byName[l.Name] = l
+	}
+
 	var portrait strings.Builder
 	for _, l := range lenses {
-		md, err := sm.Run(ctx, sm.Config.DistillModel, sm.LensPrompt, renderFacetsForSummary(l, byLens[l]))
+		model := ModelFor(sm.Config, byName[l], PhaseReview)
+		md, err := sm.Run(ctx, model, sm.LensPrompt, renderFacetsForSummary(l, byLens[l]))
 		if err != nil {
 			return fmt.Errorf("summarize lens %s: %w", l, err)
 		}
@@ -64,7 +75,9 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, md)
 	}
 
-	umd, err := sm.Run(ctx, sm.Config.DistillModel, sm.UnifiedPrompt, portrait.String())
+	// The unified portrait spans all lenses → no single lens → the global DistillModel
+	// (ModelFor with a nil lens).
+	umd, err := sm.Run(ctx, ModelFor(sm.Config, nil, PhaseReview), sm.UnifiedPrompt, portrait.String())
 	if err != nil {
 		return fmt.Errorf("summarize unified: %w", err)
 	}

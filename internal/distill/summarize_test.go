@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -58,6 +59,63 @@ func TestSummarizerWritesPerLensAndUnified(t *testing.T) {
 	// The unified pass sees the per-lens summaries (which echo the facet values).
 	if !strings.Contains(unifiedInput, "recovers with arithmetic") || !strings.Contains(unifiedInput, "stops at good enough") {
 		t.Fatalf("unified input should contain the per-lens summaries, got: %q", unifiedInput)
+	}
+}
+
+// End-to-end per-lens model routing (#75): each per-lens summary must run on THAT
+// lens's ReviewModel (via ModelFor); a facet whose lens isn't in the active set (an
+// orphan) and the unified cross-lens pass both fall back to the global DistillModel.
+func TestSummarizerUsesPerLensReviewModel(t *testing.T) {
+	s := newStore(t)
+	// Facets for three lenses: math (per-lens override), default (rides global), and
+	// "orphan" (no matching active lens → global fallback).
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "math", Dimension: "d", Key: "k", Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+		{Lens: "default", Dimension: "d", Key: "k", Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+		{Lens: "orphan", Dimension: "d", Key: "k", Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatalf("seed facets: %v", err)
+	}
+
+	modelByLensInput := map[string]string{} // lens value (echoed in input) -> model used
+	var unifiedModel string
+	fake := func(_ context.Context, model, prompt, input string) (string, error) {
+		if prompt == "UNIFIED" {
+			unifiedModel = model
+			return "# portrait\n", nil
+		}
+		// renderFacetsForSummary starts with "LENS: <name>", so recover which lens this is.
+		for _, l := range []string{"math", "default", "orphan"} {
+			if strings.Contains(input, "LENS: "+l+"\n") {
+				modelByLensInput[l] = model
+			}
+		}
+		return "SUMMARY", nil
+	}
+	sm := &Summarizer{
+		Store:  s,
+		Config: store.Config{TriageModel: "global-triage", DistillModel: "global-distill"},
+		Lenses: []*lens.Lens{
+			{Name: "math", ReviewModel: "math-strong"}, // per-lens override
+			{Name: "default"},                          // rides the global
+			// note: "orphan" is intentionally NOT in the active set
+		},
+		LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: fake,
+	}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if got := modelByLensInput["math"]; got != "math-strong" {
+		t.Fatalf("math summary should use its per-lens review model, got %q", got)
+	}
+	if got := modelByLensInput["default"]; got != "global-distill" {
+		t.Fatalf("default (no override) should use the global distill model, got %q", got)
+	}
+	if got := modelByLensInput["orphan"]; got != "global-distill" {
+		t.Fatalf("an orphan lens (not in the active set) should fall back to global, got %q", got)
+	}
+	if unifiedModel != "global-distill" {
+		t.Fatalf("the unified cross-lens pass has no single lens → global distill model, got %q", unifiedModel)
 	}
 }
 

@@ -1,28 +1,58 @@
 package lens
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
+// writeLensDir lays down a lens directory in the new format (issue #75): an optional
+// lens.json (nil skips it) plus extract.md and review.md. Returns the lens dir.
+func writeLensDir(t *testing.T, root, name string, cfg *LensConfig, extract, review string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if cfg != nil {
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ConfigFile), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, ExtractFile), []byte(extract), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if review != "" {
+		if err := os.WriteFile(filepath.Join(dir, ReviewFile), []byte(review), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 func TestLoadRegistered(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "math"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	def := "# name: math\n# dimensions: speed, proof\n## EXTRACT\nmine growth\n## REVIEW\nsynthesize\n"
-	if err := os.WriteFile(filepath.Join(dir, "math", "lens.md"), []byte(def), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeLensDir(t, dir, "math",
+		&LensConfig{Name: "math", Dimensions: []string{"speed", "proof"}, ExtractModel: "openai/gpt-5.5-mini"},
+		"mine growth", "synthesize")
 
 	l, err := LoadRegistered("math", dir)
 	if err != nil || l == nil {
 		t.Fatalf("LoadRegistered: l=%v err=%v", l, err)
 	}
 	if l.Name != "math" || l.Global || l.Extract == "" || l.Review == "" || len(l.Dimensions) != 2 {
-		t.Fatalf("parsed lens wrong: %+v", l)
+		t.Fatalf("loaded lens wrong: %+v", l)
+	}
+	if l.ExtractModel != "openai/gpt-5.5-mini" {
+		t.Fatalf("per-lens extract_model not loaded from lens.json, got %q", l.ExtractModel)
+	}
+	if l.ReviewModel != "" {
+		t.Fatalf("unset review_model should be empty (ride the global), got %q", l.ReviewModel)
 	}
 
 	if _, err := LoadRegistered("missing", dir); err == nil {
@@ -30,103 +60,66 @@ func TestLoadRegistered(t *testing.T) {
 	}
 }
 
-// Regression: a `# key:` line INSIDE an HTML comment (the usual place a lens file
-// documents its own directives) must NOT be parsed as a real directive and clobber the
-// actual header. Also: a `# ...` line inside a prompt SECTION is verbatim prompt text,
-// never a directive. Both are the header-only gate in parseLensFile.
-func TestLensDirectivesAreHeaderOnly(t *testing.T) {
+// lens.json is OPTIONAL: a directory with only the two prompt files loads, with the
+// name falling back to the directory name and no per-lens models.
+func TestLoadRegisteredWithoutConfigJSON(t *testing.T) {
 	dir := t.TempDir()
-	def := "# name: real\n" +
-		"# dimensions: a, b\n" +
-		"<!--\n" +
-		"  Docs for the author. These mentions must be IGNORED:\n" +
-		"  # name: not-the-real-name\n" +
-		"  # dimensions: x, y, z\n" +
-		"-->\n" +
-		"## EXTRACT\n" +
-		"Emit observations.\n" +
-		"# this looks like a directive but it's prompt text\n" +
-		"## REVIEW\n" +
-		"Synthesize.\n"
-	if err := os.MkdirAll(filepath.Join(dir, "real"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "real", "lens.md"), []byte(def), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	l, err := LoadRegistered("real", dir)
+	writeLensDir(t, dir, "codereview", nil, "mine code review", "synth")
+	l, err := LoadRegistered("codereview", dir)
 	if err != nil {
-		t.Fatalf("LoadRegistered: %v", err)
+		t.Fatalf("LoadRegistered without lens.json: %v", err)
 	}
-	if l.Name != "real" {
-		t.Fatalf("comment `# name:` must not override the real name, got %q", l.Name)
+	if l.Name != "codereview" {
+		t.Fatalf("name should fall back to the dir name, got %q", l.Name)
 	}
-	if len(l.Dimensions) != 2 {
-		t.Fatalf("comment `# dimensions:` must not append to the real header, got %v", l.Dimensions)
-	}
-	// The prompt-section `# ...` line is preserved verbatim as prompt text.
-	if !strings.Contains(l.Extract, "# this looks like a directive but it's prompt text") {
-		t.Fatalf("a `#` line inside EXTRACT must be kept as prompt text, got:\n%s", l.Extract)
+	if l.ExtractModel != "" || l.ReviewModel != "" {
+		t.Fatalf("a lens with no lens.json must have no per-lens models: %+v", l)
 	}
 }
 
-// Regression (audit finding): a lens whose header comment is never closed before the
-// section markers must NOT silently swallow `## EXTRACT`/`## REVIEW` and yield empty
-// prompts — the section markers are structural delimiters that end the header and any
-// open comment. A lens with empty Extract/Review would distill on empty system prompts,
-// a silent failure surfacing only much later as prose drift.
-func TestUnclosedHeaderCommentDoesNotEatSections(t *testing.T) {
+// An empty extract.md is a hard error — the mining prompt is required, and a missing/
+// empty prompt is a loud failure now (never a silently-empty section, the failure the
+// old sectioned split-parser could produce).
+func TestLoadRegisteredRequiresNonEmptyExtract(t *testing.T) {
 	dir := t.TempDir()
-	def := "# name: real\n" +
-		"# dimensions: a, b\n" +
-		"<!--\n" +
-		"  the author forgot to close this comment\n" +
-		"## EXTRACT\n" +
-		"Emit observations.\n" +
-		"## REVIEW\n" +
-		"Synthesize.\n"
-	if err := os.MkdirAll(filepath.Join(dir, "real"), 0o755); err != nil {
+	writeLensDir(t, dir, "empty", &LensConfig{Name: "empty"}, "   \n", "rev")
+	if _, err := LoadRegistered("empty", dir); err == nil {
+		t.Fatalf("an empty extract.md must error (the mining prompt is required)")
+	}
+}
+
+// A legacy directory holding ONLY the old single lens.md (pre-#75 sectioned format) is
+// rejected with an actionable error, not silently mis-loaded.
+func TestLoadRegisteredRejectsLegacyLensMD(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "legacy")
+	if err := os.MkdirAll(old, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "real", "lens.md"), []byte(def), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(old, "lens.md"),
+		[]byte("# name: legacy\n## EXTRACT\nmine\n## REVIEW\nrev\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	l, err := LoadRegistered("real", dir)
-	if err != nil {
-		t.Fatalf("LoadRegistered: %v", err)
-	}
-	if !strings.Contains(l.Extract, "Emit observations.") {
-		t.Fatalf("unclosed header comment ate the EXTRACT section, got Extract=%q", l.Extract)
-	}
-	if !strings.Contains(l.Review, "Synthesize.") {
-		t.Fatalf("unclosed header comment ate the REVIEW section, got Review=%q", l.Review)
+	if _, err := LoadRegistered("legacy", dir); err == nil {
+		t.Fatalf("a legacy single-file lens.md must be rejected with a re-register hint")
 	}
 }
 
 // The reserved-name guard's ultimate backstop: a lens registered under an innocent
-// directory name whose `# name:` header resolves to a reserved identity ("default"
-// or "unified") must be REJECTED at load — else it would impersonate the always-on
-// built-in / the unified summary and collide on the shared lens key. RegisterLens/
-// EnableLens guard the registry NAME, but only the resolved header name is known
-// here, so this is where the impersonation is caught.
-func TestLoadRegisteredRejectsReservedHeaderName(t *testing.T) {
-	// Case variants too: the reserved-name check folds case (a "Default" profile file
-	// collides with the built-in's on case-insensitive filesystems), so a header that
-	// resolves to a case-variant of a reserved name must also be rejected at load.
+// directory name whose lens.json `name` resolves to a reserved identity ("default" or
+// "unified") must be REJECTED at load — else it would impersonate the always-on built-in
+// / the unified summary and collide on the shared lens key. RegisterLens/EnableLens guard
+// the registry NAME, but only the resolved json name is known here, so this is where the
+// impersonation is caught. Case variants too (the reserved-name check folds case).
+func TestLoadRegisteredRejectsReservedJSONName(t *testing.T) {
 	for _, reserved := range []string{"default", "unified", "Default", "UNIFIED"} {
 		t.Run(reserved, func(t *testing.T) {
 			dir := t.TempDir()
-			// Registered under an innocent dir name "foo", but the header claims a
-			// reserved identity — the exact bypass the registry-name guard can't see.
-			if err := os.MkdirAll(filepath.Join(dir, "foo"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			def := "# name: " + reserved + "\n## EXTRACT\nmine\n## REVIEW\nrev\n"
-			if err := os.WriteFile(filepath.Join(dir, "foo", "lens.md"), []byte(def), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			// Registered under an innocent dir name "foo", but lens.json claims a reserved
+			// identity — the exact bypass the registry-name guard can't see.
+			writeLensDir(t, dir, "foo", &LensConfig{Name: reserved}, "mine", "rev")
 			if _, err := LoadRegistered("foo", dir); err == nil {
-				t.Fatalf("a lens whose header resolves to reserved %q must be rejected at load", reserved)
+				t.Fatalf("a lens whose lens.json name resolves to reserved %q must be rejected at load", reserved)
 			}
 		})
 	}

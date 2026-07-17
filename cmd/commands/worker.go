@@ -252,7 +252,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 				slog.Error("review", "err", err)
 			} else {
 				slog.Info("review complete")
-				regenerateProfile(ctx, st, cfg, runFn)
+				regenerateProfile(ctx, st, cfg, lenses, runFn)
 			}
 		},
 		ensureMiner:    func() bool { return getMiner() != nil },
@@ -322,13 +322,13 @@ func runDistillLoop(d distillLoopDeps) {
 // Best-effort: any failure (missing prompts, a claude -p hiccup) is logged and
 // swallowed, leaving the prior summaries in place — the profile is derived and
 // non-critical, and must never break the worker.
-func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, runFn distill.MineFunc) {
+func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc) {
 	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts()
 	if err != nil {
 		slog.Warn("profile: summarizer prompts unavailable; skipping", "err", err)
 		return
 	}
-	sm := &distill.Summarizer{Store: st, Config: cfg, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn}
+	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn}
 	if err := sm.Summarize(ctx); err != nil {
 		slog.Warn("profile: summary regeneration failed; keeping prior", "err", err)
 		return

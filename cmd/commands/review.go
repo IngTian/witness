@@ -88,6 +88,6 @@ func forceReview(st *store.Store) (bool, error) {
 	if err := r.Run(ctx, time.Now()); err != nil {
 		return false, err
 	}
-	regenerateProfile(ctx, st, cfg, runFn)
+	regenerateProfile(ctx, st, cfg, lenses, runFn)
 	return true, nil
 }

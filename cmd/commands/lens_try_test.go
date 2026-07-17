@@ -13,14 +13,34 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// writeLensFile writes a candidate lens file and returns its path.
-func writeLensFile(t *testing.T, body string) string {
+// writeLensDir writes a candidate lens DIRECTORY (issue #75: lens.json + extract.md +
+// review.md) and returns its path. name/extract/review empty are simply omitted, so a
+// test can build a lens missing any piece.
+func writeLensDir(t *testing.T, name, extract, review string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "cand.md")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	if name != "" {
+		if err := os.WriteFile(filepath.Join(dir, "lens.json"), []byte(`{"name":"`+name+`"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return p
+	if extract != "" {
+		if err := os.WriteFile(filepath.Join(dir, "extract.md"), []byte(extract), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if review != "" {
+		if err := os.WriteFile(filepath.Join(dir, "review.md"), []byte(review), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// validLensDir is a candidate lens directory with both prompts — the common fixture.
+func validLensDir(t *testing.T) string {
+	t.Helper()
+	return writeLensDir(t, "cand", "mine growth", "synth")
 }
 
 // seedTryStore opens a store in a fresh WITNESS_HOME, sets the runner, and appends raw
@@ -43,8 +63,6 @@ func seedTryStore(t *testing.T, runner string) *store.Store {
 	return s
 }
 
-const validLensBody = "# name: cand\n## EXTRACT\nmine growth\n## REVIEW\nsynth\n"
-
 // On a sweeping (OpenCode) runner, a preview must take the WorkerLock and bail if a
 // worker holds it — BEFORE opening the runner (so no `opencode serve` starts and no
 // cleanup sweep can fire). We simulate a busy worker by holding the lock ourselves.
@@ -56,7 +74,7 @@ func TestLensTryBailsWhenWorkerBusyOnSweepingRunner(t *testing.T) {
 	}
 	defer unlock()
 
-	err := cmdLensTry(writeLensFile(t, validLensBody), lensTryOpts{nSessions: 1})
+	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1})
 	if err == nil {
 		t.Fatalf("expected `lens try` to bail when a worker holds the lock on a sweeping runner")
 	}
@@ -78,33 +96,34 @@ func TestLensTryOnClaudeIsLockFree(t *testing.T) {
 
 	// Use an unknown --session so we hit the pre-mining validation error (no real claude
 	// call), which is only reachable if the lock did NOT block the claude path.
-	err := cmdLensTry(writeLensFile(t, validLensBody), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
+	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
 	if err == nil || !strings.Contains(err.Error(), "no raw turns") {
 		t.Fatalf("claude preview should be lock-free and reach --session validation, got: %v", err)
 	}
 }
 
-// A missing EXTRACT section is a usage error surfaced before any runner work.
+// A directory missing extract.md is a usage error surfaced before any runner work.
 func TestLensTryRejectsNoExtractFile(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
-	err := cmdLensTry(writeLensFile(t, "# name: x\n## REVIEW\nonly review\n"), lensTryOpts{nSessions: 1})
-	if err == nil || !strings.Contains(err.Error(), "EXTRACT") {
-		t.Fatalf("expected an EXTRACT-required error, got: %v", err)
+	// review.md only — no extract.md.
+	err := cmdLensTry(writeLensDir(t, "x", "", "only review"), lensTryOpts{nSessions: 1})
+	if err == nil {
+		t.Fatalf("expected an error for a lens dir with no extract.md, got nil")
 	}
 }
 
-// A missing file surfaces the read error (not a nil-lens panic).
+// A missing directory surfaces the read error (not a nil-lens panic).
 func TestLensTryMissingFile(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
-	if err := cmdLensTry(filepath.Join(t.TempDir(), "nope.md"), lensTryOpts{nSessions: 1}); err == nil {
-		t.Fatalf("expected an error for a missing file")
+	if err := cmdLensTry(filepath.Join(t.TempDir(), "nope"), lensTryOpts{nSessions: 1}); err == nil {
+		t.Fatalf("expected an error for a missing directory")
 	}
 }
 
 // --session validation: an unknown session id is rejected before mining.
 func TestLensTryRejectsUnknownSession(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
-	err := cmdLensTry(writeLensFile(t, validLensBody), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
+	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
 	if err == nil || !strings.Contains(err.Error(), "no raw turns") {
 		t.Fatalf("expected an unknown-session error, got: %v", err)
 	}
@@ -173,8 +192,8 @@ func captureStdout(t *testing.T, fn func()) string {
 	return <-done
 }
 
-// registeredLensPath maps a registered lens NAME to its on-disk lens.md, and leaves a
-// file path (or an unregistered name) alone — the `lens try codereview` convenience.
+// registeredLensPath maps a registered lens NAME to its on-disk DIRECTORY, and leaves a
+// path (or an unregistered name) alone — the `lens try codereview` convenience.
 func TestRegisteredLensPathResolution(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	s, err := store.Open()
@@ -182,41 +201,39 @@ func TestRegisteredLensPathResolution(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer s.Close()
-	// Register a lens named "codereview".
-	src := writeLensFile(t, "# name: codereview\n## EXTRACT\nmine\n## REVIEW\nsynth\n")
-	if err := s.RegisterLens("codereview", src); err != nil {
+	// Register a lens named "codereview" from a source directory.
+	if err := s.RegisterLens("codereview", writeLensDir(t, "codereview", "mine", "synth")); err != nil {
 		t.Fatalf("RegisterLens: %v", err)
 	}
 
-	// A bare registered name resolves to its lens.md.
+	// A bare registered name resolves to its registry directory.
 	got, ok := registeredLensPath(s, "codereview")
 	if !ok {
-		t.Fatalf("a registered name should resolve to its lens.md")
+		t.Fatalf("a registered name should resolve to its directory")
 	}
-	if filepath.Base(got) != "lens.md" || !strings.Contains(got, "codereview") {
+	if filepath.Base(got) != "codereview" || !strings.Contains(got, "lenses") {
 		t.Fatalf("resolved path looks wrong: %q", got)
 	}
 
-	// An unregistered name does not resolve (falls through to file handling).
+	// An unregistered name does not resolve (falls through to path handling).
 	if _, ok := registeredLensPath(s, "nope"); ok {
 		t.Fatalf("an unregistered name must not resolve")
 	}
-	// A path-like or extensioned arg is always treated as a file, never a name — even
+	// A path-like or extensioned arg is always treated as a path, never a name — even
 	// if a lens by that stem exists.
 	for _, arg := range []string{"./codereview.md", "codereview.md", "dir/codereview", "/abs/codereview"} {
 		if _, ok := registeredLensPath(s, arg); ok {
-			t.Fatalf("path-like/extensioned arg %q must stay a file, not resolve as a name", arg)
+			t.Fatalf("path-like/extensioned arg %q must stay a path, not resolve as a name", arg)
 		}
 	}
 }
 
-// --review on a lens file with no REVIEW section fails EARLY (before any runner work),
+// --review on a lens dir with no review.md fails EARLY (before any runner work),
 // rather than silently skipping the half the user asked to preview.
 func TestLensTryReviewRequiresReviewSection(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
-	// A valid EXTRACT but empty REVIEW section.
-	body := "# name: cand\n## EXTRACT\nmine growth\n## REVIEW\n"
-	err := cmdLensTry(writeLensFile(t, body), lensTryOpts{nSessions: 1, review: true})
+	// A valid extract.md but no review.md.
+	err := cmdLensTry(writeLensDir(t, "cand", "mine growth", ""), lensTryOpts{nSessions: 1, review: true})
 	if err == nil || !strings.Contains(err.Error(), "REVIEW section") {
 		t.Fatalf("--review with an empty REVIEW section should error early, got: %v", err)
 	}

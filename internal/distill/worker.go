@@ -413,7 +413,7 @@ type minedObs struct {
 }
 
 func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript string) ([]store.Observation, error) {
-	reply, err := w.Run(ctx, w.Config.TriageModel, ln.Extract, transcript)
+	reply, err := w.Run(ctx, ModelFor(w.Config, ln, PhaseExtract), ln.Extract, transcript)
 	if err != nil {
 		return nil, err
 	}

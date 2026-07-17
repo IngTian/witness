@@ -62,7 +62,13 @@ func cmdDoctor(asJSON bool) error {
 		deferredErr = rerr
 	} else {
 		runnerCmd = runner.InvocationHint()
-		if err := runner.ValidateModels(context.Background(), cfg.TriageModel, cfg.DistillModel); err != nil {
+		// Validate the global stage models PLUS every active lens's per-lens model override
+		// (#75): a bad per-lens model would otherwise only surface late, as a per-lens
+		// mining failure/backoff. The runner prewarms just the two globals, so this doctor
+		// check is where the union gets an up-front gate. (On Claude ValidateModels is a
+		// no-op, so a bogus-for-claude per-lens model isn't machine-catchable here — it
+		// shows in `lens show` and surfaces at runtime via backoff.)
+		if err := runner.ValidateModels(context.Background(), lensModelUnion(st, cfg)...); err != nil {
 			modelStatus = "INVALID: " + err.Error()
 			deferredErr = err
 		} else {
@@ -267,4 +273,31 @@ type doctorEmbedderJSON struct {
 	Dimension   int     `json:"dimension,omitempty"`
 	ENZHCosine  float64 `json:"en_zh_cosine,omitempty"`
 	ENUnrelated float64 `json:"en_unrelated_cosine,omitempty"`
+}
+
+// lensModelUnion returns the deduplicated set of models doctor should validate: the two
+// global stage models (triage/distill) plus every active lens's per-lens overrides
+// (#75). Empty strings are kept out (ValidateModels treats "" as the runner default, but
+// there's no point validating it repeatedly). A lens that fails to load is simply
+// skipped — activeLenses already logs that, and its model can't be checked anyway.
+func lensModelUnion(st *store.Store, cfg store.Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(m string) {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			return
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	add(cfg.TriageModel)
+	add(cfg.DistillModel)
+	if lenses, err := activeLenses(st); err == nil {
+		for _, l := range lenses {
+			add(l.ExtractModel)
+			add(l.ReviewModel)
+		}
+	}
+	return out
 }

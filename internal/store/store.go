@@ -27,8 +27,9 @@ var dataDirNames = []string{"witness", "claude-witness"}
 // The data layers (raw turns, observations, bi-temporal facets) plus the
 // distillation queue live in a single SQLite database (witness.db). The derived
 // profile summaries (profile/*.md), user-authored config (config.toml), and lens
-// definitions (lenses/<name>/lens.md) stay as plain files, since they are meant to
-// be read (and, for config/lenses, edited) directly.
+// definitions (lenses/<name>/ — a lens.json plus extract.md/review.md, issue #75)
+// stay as plain files, since they are meant to be read (and, for config/lenses,
+// edited) directly.
 type Store struct {
 	Root string
 	db   *sql.DB

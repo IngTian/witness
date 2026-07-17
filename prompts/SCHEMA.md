@@ -51,15 +51,16 @@ Every observation/facet carries a `lens` tag.
 
 - **`default`** — global, runs on every session, cross-domain. This is the thing no single-domain
   tracker can be.
-- **registered lenses** (e.g. `math`) — registered centrally (`witness lens register <name> <file>`)
+- **registered lenses** (e.g. `math`) — registered centrally (`witness lens register <name> <dir>`)
   and enabled globally (`witness lens enable <name>`); an enabled lens runs on every session.
-  Definitions live in the central registry (`<root>/lenses/<name>/lens.md`), shared across all
-  sessions — never read from a repo.
+  Definitions live in the central registry (`<root>/lenses/<name>/`), shared across all sessions —
+  never read from a repo.
 
-A lens file's header carries `# name:` and `# dimensions:`. See `prompts/lens/example.md`. Mining
-uses one global model for every lens — there is no per-lens model today (a lens that needs a
-stronger model just means "set the global runner to a capable one" via `witness config set
-triage_model <model>`; per-lens model tuning is tracked separately).
+A lens is a **directory** of `lens.json` (settings: `name`, `dimensions`, optional per-lens models)
+plus `extract.md` and `review.md` (each whole file is the prompt for its pass). See
+`prompts/lens/example/`. Mining uses the global model by default, but a lens may pin its own via
+`witness lens set <name> --extract-model <m>` / `--review-model <m>` (written to its `lens.json`),
+so a rare heavy lens can run a stronger model without paying for it on every session.
 
 The profile is **collect-only / pull-only**: witness captures and distills everywhere, but never
 injects into a session. Agents read it on demand via the MCP tools (`get_facets`, `get_profile`,

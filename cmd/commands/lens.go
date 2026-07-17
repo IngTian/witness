@@ -3,8 +3,6 @@ package commands
 import (
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -21,9 +19,9 @@ func newLensCmd() *cobra.Command {
 	}
 	lensCmd.AddCommand(
 		&cobra.Command{
-			Use:   "register <name> <file>",
+			Use:   "register <name> <dir>",
 			Short: "Register or replace a lens definition.",
-			Long:  "Copy a lens markdown definition into the witness store. Later edits to the source file do not affect the registered snapshot until you register it again.",
+			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models afterward with `witness lens set`.",
 			Args:  cobra.ExactArgs(2),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"register"}, args...)) },
 		},
@@ -53,11 +51,12 @@ func newLensCmd() *cobra.Command {
 		},
 		&cobra.Command{
 			Use:   "show <name>",
-			Short: "Print a registered lens's definition (markdown).",
-			Long:  "Print the raw markdown a lens was registered with (its `# name:`/`# dimensions:` header + the EXTRACT and REVIEW prompts). Use `default` to print the built-in lens.",
+			Short: "Print a registered lens's definition.",
+			Long:  "Print a lens's settings (lens.json) and its EXTRACT + REVIEW prompts. Use `default` to print the built-in lens.",
 			Args:  cobra.ExactArgs(1),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"show"}, args...)) },
 		},
+		newLensSetCmd(),
 		&cobra.Command{
 			Use:   "backfill <name>",
 			Short: "Mine one lens over the whole history (catch up a newly-enabled lens).",
@@ -287,48 +286,108 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 	return nil
 }
 
-// lensShow prints a lens's definition. For a registered lens it prints the raw
-// markdown the user registered (verbatim — the exact bytes on disk, so what you see is
-// what the loader parses). The built-in `default` lens has no single source file (it
-// ships as separate extract.md/review.md), so it is rendered into the same header +
-// `## EXTRACT` / `## REVIEW` shape for a consistent, copyable view.
-func lensShow(st *store.Store, name string) error {
-	if name == store.LensDefault {
-		l, err := lens.LoadDefault()
-		if err != nil {
-			return fmt.Errorf("load default lens: %w", err)
-		}
-		fmt.Print(renderLensMarkdown(l))
-		return nil
+// newLensSetCmd builds `witness lens set <name> [--extract-model M] [--review-model M]`,
+// the safe way to tune a registered lens's per-lens models (issue #75). It writes only
+// lens.json fields via a struct round-trip (store.SetLensModel) — never text surgery on
+// the prompt files — so it can't corrupt a lens. An empty value clears the field, so the
+// lens rides the global stage model again.
+func newLensSetCmd() *cobra.Command {
+	var extractModel, reviewModel string
+	c := &cobra.Command{
+		Use:   "set <name>",
+		Short: "Set a registered lens's per-lens model overrides.",
+		Long:  "Tune a registered lens's models (written to its lens.json). --extract-model overrides the mining (L0→L1) model; --review-model overrides the review (L1→L2) + summary model. Pass an empty value (--extract-model \"\") to clear an override so the lens rides the global model again. This is the always-on `default` lens's counterpart to the global triage_model/distill_model — a rare heavy lens can run a stronger model without paying for it on every session.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return lensSet(args[0], cmd.Flags().Changed("extract-model"), extractModel, cmd.Flags().Changed("review-model"), reviewModel)
+		},
 	}
-	if !slices.Contains(st.RegisteredLenses(), name) {
-		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
+	c.Flags().StringVar(&extractModel, "extract-model", "", "per-lens model for mining (L0→L1); empty clears the override")
+	c.Flags().StringVar(&reviewModel, "review-model", "", "per-lens model for review + summary (L1→L2); empty clears the override")
+	return c
+}
+
+// lensSet applies the --extract-model/--review-model flags that were actually PASSED
+// (cobra's Changed) so an unpassed flag leaves that field untouched, while an explicit
+// empty value clears it.
+func lensSet(name string, setExtract bool, extractModel string, setReview bool, reviewModel string) error {
+	if !setExtract && !setReview {
+		return fmt.Errorf("nothing to set: pass --extract-model and/or --review-model")
 	}
-	// Print the on-disk definition verbatim — the source of truth the loader reads.
-	data, err := os.ReadFile(filepath.Join(st.LensesDir(), name, "lens.md"))
+	st, err := store.Open()
 	if err != nil {
-		return fmt.Errorf("read lens %q: %w", name, err)
+		return err
 	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		data = append(data, '\n')
+	defer st.Close()
+	if setExtract {
+		if err := st.SetLensModel(name, "extract", extractModel); err != nil {
+			return err
+		}
 	}
-	fmt.Print(string(data))
+	if setReview {
+		if err := st.SetLensModel(name, "review", reviewModel); err != nil {
+			return err
+		}
+	}
+	// Re-read so the confirmation reflects what's now on disk (incl. a cleared field).
+	l, err := lens.LoadRegistered(name, st.LensesDir())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("lens %q: extract-model=%s review-model=%s\n", name, modelOrGlobal(l.ExtractModel), modelOrGlobal(l.ReviewModel))
 	return nil
 }
 
-// renderLensMarkdown reconstructs a lens's definition in the standard lens-file shape
-// (header directives + the two prompt sections). Used for the built-in lens, which has
-// no single markdown source; the plain text goes to stdout verbatim (no styling) so it
-// can be read, piped, or used as a STARTING POINT for a new lens. Note the emitted
-// `# name: default` line resolves to a reserved identity, so a copy must be renamed
-// (change the `# name:` line) before `witness lens register` will accept it.
-func renderLensMarkdown(l *lens.Lens) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# name: %s\n", l.Name)
-	if len(l.Dimensions) > 0 {
-		fmt.Fprintf(&b, "# dimensions: %s\n", strings.Join(l.Dimensions, ", "))
+func modelOrGlobal(m string) string {
+	if strings.TrimSpace(m) == "" {
+		return dim("(global)")
 	}
-	fmt.Fprintf(&b, "\n## EXTRACT\n%s\n\n## REVIEW\n%s\n", l.Extract, l.Review)
+	return m
+}
+
+// lensShow prints a lens's settings + its two prompts. Both a registered lens and the
+// built-in `default` render the same way (default's settings are hardcoded, not a
+// lens.json, but the view is identical), so the output is a consistent, copyable
+// definition regardless of source.
+func lensShow(st *store.Store, name string) error {
+	var l *lens.Lens
+	var err error
+	if name == store.LensDefault {
+		l, err = lens.LoadDefault()
+		if err != nil {
+			return fmt.Errorf("load default lens: %w", err)
+		}
+	} else {
+		if !slices.Contains(st.RegisteredLenses(), name) {
+			return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
+		}
+		l, err = lens.LoadRegistered(name, st.LensesDir())
+		if err != nil {
+			return fmt.Errorf("read lens %q: %w", name, err)
+		}
+	}
+	fmt.Print(renderLensDefinition(l))
+	return nil
+}
+
+// renderLensDefinition renders a lens as its settings header + the two prompts, in a
+// plain, copyable shape (no styling → pipeable). It reflects the on-disk directory: a
+// lens.json-style settings block, then extract.md and review.md. Emitted verbatim so it
+// can be read or used as a STARTING POINT for a new lens directory.
+func renderLensDefinition(l *lens.Lens) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "name: %s\n", l.Name)
+	if len(l.Dimensions) > 0 {
+		fmt.Fprintf(&b, "dimensions: %s\n", strings.Join(l.Dimensions, ", "))
+	}
+	if strings.TrimSpace(l.ExtractModel) != "" {
+		fmt.Fprintf(&b, "extract-model: %s\n", l.ExtractModel)
+	}
+	if strings.TrimSpace(l.ReviewModel) != "" {
+		fmt.Fprintf(&b, "review-model: %s\n", l.ReviewModel)
+	}
+	fmt.Fprintf(&b, "\n--- extract.md ---\n%s\n", strings.TrimRight(l.Extract, "\n"))
+	fmt.Fprintf(&b, "\n--- review.md ---\n%s\n", strings.TrimRight(l.Review, "\n"))
 	return b.String()
 }
 

@@ -54,60 +54,65 @@ Every observation/facet carries a **lens** tag:
 - **`default`** — global, runs on every session, cross-domain. This is the part no single-domain
   tracker can be: it sees that "diagnoses gaps precisely" fires in math *and* coding *and* career.
 - **registered lenses** (e.g. `math`) — domain-specific lenses you **register once** and **enable
-  globally**. `witness lens register math ./math-lens.md` adds the definition to a central registry;
-  `witness lens enable math` makes it run on every session (alongside `default`). Lenses are shared,
-  not tied to any repo, so the same `math` lens covers all your math work.
-- **`opencode` example lens** — [`prompts/lens/opencode.md`](prompts/lens/opencode.md) observes
+  globally**. `witness lens register math ./math/` adds the definition (a directory) to a central
+  registry; `witness lens enable math` makes it run on every session (alongside `default`). Lenses
+  are shared, not tied to any repo, so the same `math` lens covers all your math work.
+- **`opencode` example lens** — [`prompts/lens/opencode/`](prompts/lens/opencode) observes
   agent-collaboration workflow: tool discipline, verification, context management, and autonomy
   calibration.
 
 #### Writing a lens
 
-A lens is a small markdown file with two prompts: **`## EXTRACT`** (per-session — mines
-observations) and **`## REVIEW`** (periodic — synthesizes them into facets), plus an optional
-`name`/`dimensions` header:
+A lens is a **directory** of three files:
 
-```markdown
-# name: math
-# dimensions: speed, independence, proof_rigor, abstraction, confusion_tolerance
-
-## EXTRACT
-You are observing one session through a MATH-LEARNING lens. Notice things about the
-person as a mathematician — how they reason, get stuck, and climb out…
-…
-Return ONLY a JSON array. Each element:
-[{ "dimension": "proof_rigor", "observation": "…", "evidence": "…", "poignancy": 6 }]
-
-## REVIEW
-You are the reviewer for the MATH lens… synthesize observations into few, sharp,
-falsifiable facets; flag only sustained change…
-Return ONLY a JSON array. Each element:
-[{ "dimension": "…", "key": "…", "value": "…", "confidence": 0.7, "because_of": ["obs_…"], "contradicts_prior": false }]
+```
+math/
+  lens.json     settings: name, dimensions, optional per-lens models
+  extract.md    per-session — mines observations (the whole file is the prompt)
+  review.md     periodic — synthesizes observations into facets (the whole file is the prompt)
 ```
 
-The one rule to remember: each section is used **verbatim as the system prompt** and *replaces*
+```json
+// math/lens.json
+{ "name": "math", "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
+```
+
+```markdown
+<!-- math/extract.md -->
+You are observing one session through a MATH-LEARNING lens. Notice things about the
+person as a mathematician — how they reason, get stuck, and climb out…
+Return ONLY a JSON array. Each element:
+[{ "dimension": "proof_rigor", "observation": "…", "evidence": "…", "poignancy": 6 }]
+```
+
+The one rule to remember: each prompt file is used **verbatim as the system prompt** and *replaces*
 the built-in `default` prompts — it doesn't extend them — so each must be **self-contained,
 including its output JSON schema** (the tool appends the transcript / observations as the user
 message, but injects no schema for you).
 
-A **complete, copy-paste-ready** lens lives at
-[`prompts/lens/example.md`](prompts/lens/example.md) — the fastest way to start is to copy it and
-rewrite the dimensions and prose for your domain:
+A **complete, copy-paste-ready** lens lives at [`prompts/lens/example/`](prompts/lens/example) —
+the fastest way to start is to copy the directory and rewrite the dimensions and prose for your
+domain:
 
 ```sh
-cp "$CLAUDE_PLUGIN_ROOT/prompts/lens/example.md" ./math-lens.md   # edit it, then:
-witness lens register math ./math-lens.md    # copies the definition into your store (a snapshot)
-witness lens enable  math                     # start running it on every session
+cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/example" ./math   # edit the files, then:
+witness lens register math ./math      # copies the definition into your store (a snapshot)
+witness lens enable  math               # start running it on every session
 ```
 
 `register` stores a **copy** — editing the original afterward has no effect until you re-register.
 `enable` is the separate switch that makes it actually run.
 
-The source file may live anywhere. As a recommended canonical location, witness keeps the
-registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/lens.md` (normally
-`~/.local/share/witness/lenses/<name>/lens.md`, or `$WITNESS_HOME/lenses/<name>/lens.md`). You can
-edit that registered copy directly, but this location is a convention rather than a restriction on
-the file passed to `lens register`.
+**Per-lens models (optional).** By default every lens rides the global models (`witness config set
+triage_model / distill_model`). A rare heavy lens can pin a stronger model just for itself —
+without paying for it on every session — with `witness lens set math --extract-model <m>`
+(and `--review-model <m>`); pass an empty value to clear it and ride the global again.
+
+The source directory may live anywhere. As a recommended canonical location, witness keeps the
+registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/` (normally
+`~/.local/share/witness/lenses/<name>/`, or `$WITNESS_HOME/lenses/<name>/`). You can edit that
+registered copy directly, but this location is a convention rather than a restriction on the
+directory passed to `lens register`.
 
 ## Example: one moment, end to end
 
@@ -328,7 +333,7 @@ published package version, publishes any missing platform versions first, then p
 Manual verification path:
 
 ```sh
-witness lens register opencode prompts/lens/opencode.md
+witness lens register opencode prompts/lens/opencode
 witness lens enable opencode
 witness import --agent opencode    # reconciles ~/.local/share/opencode/opencode.db and returns
 witness distill status             # watch non-blocking distillation progress
