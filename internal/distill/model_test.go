@@ -55,3 +55,54 @@ func TestModelFor(t *testing.T) {
 		t.Fatalf("nil lens review: want global-distill, got %q", got)
 	}
 }
+
+// RunnerFor routes a lens to its own runner if set, else the global (cfg.Runner); a nil
+// lens rides the global (#75 slice 2).
+func TestRunnerFor(t *testing.T) {
+	cfg := store.Config{Runner: "claude"}
+	if got := RunnerFor(cfg, &lens.Lens{Name: "x"}); got != "claude" {
+		t.Fatalf("lens with no runner rides the global, got %q", got)
+	}
+	if got := RunnerFor(cfg, &lens.Lens{Name: "x", Runner: "opencode"}); got != "opencode" {
+		t.Fatalf("per-lens runner must win, got %q", got)
+	}
+	if got := RunnerFor(cfg, &lens.Lens{Name: "x", Runner: "  opencode  "}); got != "opencode" {
+		t.Fatalf("per-lens runner must be trimmed, got %q", got)
+	}
+	if got := RunnerFor(cfg, nil); got != "claude" {
+		t.Fatalf("nil lens rides the global, got %q", got)
+	}
+}
+
+// ModelFor is runner-aware (#75 slice 2): a lens on a DIFFERENT runner than the global,
+// with no per-lens model, must fall back to "" (its runtime's own default) — NOT the
+// global stage model, which belongs to the wrong runtime. A per-lens model still wins
+// regardless of runner.
+func TestModelForCrossRuntime(t *testing.T) {
+	cfg := store.Config{Runner: "claude", TriageModel: "claude-triage", DistillModel: "claude-distill"}
+
+	// A lens routed to a DIFFERENT runner with no per-lens model → "" (opencode's default),
+	// not the claude global (which would be a wrong-runtime model name).
+	cross := &lens.Lens{Name: "cr", Runner: "opencode"}
+	if got := ModelFor(cfg, cross, PhaseExtract); got != "" {
+		t.Fatalf("cross-runtime lens with no model must ride its runtime default (\"\"), got %q", got)
+	}
+	if got := ModelFor(cfg, cross, PhaseReview); got != "" {
+		t.Fatalf("cross-runtime lens review with no model must be \"\", got %q", got)
+	}
+
+	// A cross-runtime lens WITH a per-lens model uses that model.
+	crossTuned := &lens.Lens{Name: "ct", Runner: "opencode", ExtractModel: "openai/free", ReviewModel: "openai/strong"}
+	if got := ModelFor(cfg, crossTuned, PhaseExtract); got != "openai/free" {
+		t.Fatalf("cross-runtime per-lens extract model ignored, got %q", got)
+	}
+	if got := ModelFor(cfg, crossTuned, PhaseReview); got != "openai/strong" {
+		t.Fatalf("cross-runtime per-lens review model ignored, got %q", got)
+	}
+
+	// A lens on the SAME runner as the global (explicitly) still inherits the globals.
+	same := &lens.Lens{Name: "s", Runner: "claude"}
+	if got := ModelFor(cfg, same, PhaseExtract); got != "claude-triage" {
+		t.Fatalf("a lens on the global runner must inherit the global model, got %q", got)
+	}
+}

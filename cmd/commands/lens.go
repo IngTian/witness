@@ -286,39 +286,47 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 	return nil
 }
 
-// newLensSetCmd builds `witness lens set <name> [--extract-model M] [--review-model M]`,
-// the safe way to tune a registered lens's per-lens models (issue #75). It writes only
-// lens.json fields via a struct round-trip (store.SetLensModel) — never text surgery on
-// the prompt files — so it can't corrupt a lens. An empty value clears the field, so the
-// lens rides the global stage model again.
+// newLensSetCmd builds `witness lens set <name> [--runner R] [--extract-model M]
+// [--review-model M]`, the safe way to tune a registered lens's per-lens runner + models
+// (issue #75). It writes only lens.json fields via a struct round-trip (store.SetLens*)
+// — never text surgery on the prompt files — so it can't corrupt a lens. An empty value
+// clears the field, so the lens rides the global runner/model again.
 func newLensSetCmd() *cobra.Command {
-	var extractModel, reviewModel string
+	var runner, extractModel, reviewModel string
 	c := &cobra.Command{
 		Use:   "set <name>",
-		Short: "Set a registered lens's per-lens model overrides.",
-		Long:  "Tune a registered lens's models (written to its lens.json). --extract-model overrides the mining (L0→L1) model; --review-model overrides the review (L1→L2) + summary model. Pass an empty value (--extract-model \"\") to clear an override so the lens rides the global model again. This is the always-on `default` lens's counterpart to the global triage_model/distill_model — a rare heavy lens can run a stronger model without paying for it on every session.",
+		Short: "Set a registered lens's per-lens runner + model overrides.",
+		Long:  "Tune a registered lens (written to its lens.json). --runner routes this lens's mine+review to a specific runtime (claude/opencode) instead of the global runner; --extract-model overrides the mining (L0→L1) model; --review-model overrides the review (L1→L2) + summary model. Pass an empty value (e.g. --runner \"\") to clear an override so the lens rides the global again. This is what lets a rare heavy lens run a stronger model — or a cheap lens run a free model on another runtime — without paying for it on every session.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return lensSet(args[0], cmd.Flags().Changed("extract-model"), extractModel, cmd.Flags().Changed("review-model"), reviewModel)
+			return lensSet(args[0],
+				cmd.Flags().Changed("runner"), runner,
+				cmd.Flags().Changed("extract-model"), extractModel,
+				cmd.Flags().Changed("review-model"), reviewModel)
 		},
 	}
+	c.Flags().StringVar(&runner, "runner", "", "per-lens runtime (claude/opencode); empty clears → ride the global runner")
 	c.Flags().StringVar(&extractModel, "extract-model", "", "per-lens model for mining (L0→L1); empty clears the override")
 	c.Flags().StringVar(&reviewModel, "review-model", "", "per-lens model for review + summary (L1→L2); empty clears the override")
 	return c
 }
 
-// lensSet applies the --extract-model/--review-model flags that were actually PASSED
-// (cobra's Changed) so an unpassed flag leaves that field untouched, while an explicit
-// empty value clears it.
-func lensSet(name string, setExtract bool, extractModel string, setReview bool, reviewModel string) error {
-	if !setExtract && !setReview {
-		return fmt.Errorf("nothing to set: pass --extract-model and/or --review-model")
+// lensSet applies the flags that were actually PASSED (cobra's Changed) so an unpassed
+// flag leaves that field untouched, while an explicit empty value clears it.
+func lensSet(name string, setRunner bool, runner string, setExtract bool, extractModel string, setReview bool, reviewModel string) error {
+	if !setRunner && !setExtract && !setReview {
+		return fmt.Errorf("nothing to set: pass --runner, --extract-model and/or --review-model")
 	}
 	st, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	if setRunner {
+		if err := st.SetLensRunner(name, runner); err != nil {
+			return err
+		}
+	}
 	if setExtract {
 		if err := st.SetLensModel(name, "extract", extractModel); err != nil {
 			return err
@@ -334,7 +342,8 @@ func lensSet(name string, setExtract bool, extractModel string, setReview bool, 
 	if err != nil {
 		return err
 	}
-	fmt.Printf("lens %q: extract-model=%s review-model=%s\n", name, modelOrGlobal(l.ExtractModel), modelOrGlobal(l.ReviewModel))
+	fmt.Printf("lens %q: runner=%s extract-model=%s review-model=%s\n",
+		name, modelOrGlobal(l.Runner), modelOrGlobal(l.ExtractModel), modelOrGlobal(l.ReviewModel))
 	return nil
 }
 
@@ -379,6 +388,9 @@ func renderLensDefinition(l *lens.Lens) string {
 	fmt.Fprintf(&b, "name: %s\n", l.Name)
 	if len(l.Dimensions) > 0 {
 		fmt.Fprintf(&b, "dimensions: %s\n", strings.Join(l.Dimensions, ", "))
+	}
+	if strings.TrimSpace(l.Runner) != "" {
+		fmt.Fprintf(&b, "runner: %s\n", l.Runner)
 	}
 	if strings.TrimSpace(l.ExtractModel) != "" {
 		fmt.Fprintf(&b, "extract-model: %s\n", l.ExtractModel)

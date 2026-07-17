@@ -18,26 +18,47 @@ const (
 	PhaseReview               // L1→L2 review + L4 summary (batched)
 )
 
-// ModelFor resolves the model for a phase on a given lens (issue #75, slice 1): a
-// lens's per-lens override wins, else the global stage model. Empty lens fields mean
-// "ride the global", so a lens that declares nothing behaves exactly as before this
-// change. ln may be nil (e.g. the cross-lens unified summary, which has no lens) — then
-// only the global applies. This is the sole seam translating a phase into a config
-// field, keeping that knowledge out of both the lens package and the call sites.
+// RunnerFor resolves which RUNTIME a lens runs on (issue #75 slice 2): the lens's own
+// Runner if it declares one, else the global runner (cfg.Runner, which the worker sets to
+// the resolved runner for this drain). A nil lens (the cross-lens unified summary) runs on
+// the global runner. This is the sole place the lens→runtime routing decision lives.
+func RunnerFor(cfg store.Config, ln *lens.Lens) string {
+	if ln != nil && strings.TrimSpace(ln.Runner) != "" {
+		return strings.TrimSpace(ln.Runner)
+	}
+	return strings.TrimSpace(cfg.Runner)
+}
+
+// ModelFor resolves the model for a phase on a given lens (issue #75). A lens's per-lens
+// model override always wins. Otherwise the fallback depends on WHICH RUNNER the lens
+// runs on:
+//   - lens on the GLOBAL runner (no per-lens Runner, or one equal to cfg.Runner) → the
+//     global stage model (TriageModel for extract, DistillModel for review) — the slice-1
+//     behavior, unchanged.
+//   - lens on a DIFFERENT runner (slice 2) → "" (the runner's OWN default). The global
+//     stage model belongs to the global runtime; handing e.g. a claude model name to an
+//     OpenCode lens would be a bad model. So a cross-runtime lens with no per-lens model
+//     rides its runtime's default rather than inheriting a wrong-runtime name.
+//
+// ln may be nil (unified summary) → the global stage model on the global runner.
 func ModelFor(cfg store.Config, ln *lens.Lens, phase Phase) string {
-	global := cfg.TriageModel
-	if phase == PhaseReview {
-		global = cfg.DistillModel
-	}
-	if ln == nil {
-		return global
-	}
-	override := ln.ExtractModel
-	if phase == PhaseReview {
-		override = ln.ReviewModel
+	override := ""
+	if ln != nil {
+		override = ln.ExtractModel
+		if phase == PhaseReview {
+			override = ln.ReviewModel
+		}
 	}
 	if strings.TrimSpace(override) != "" {
-		return override
+		return strings.TrimSpace(override)
 	}
-	return global
+	// No per-lens model. The global stage model only applies when the lens runs on the
+	// global runner; a cross-runtime lens falls back to its own runtime's default ("").
+	if RunnerFor(cfg, ln) != strings.TrimSpace(cfg.Runner) {
+		return ""
+	}
+	if phase == PhaseReview {
+		return cfg.DistillModel
+	}
+	return cfg.TriageModel
 }

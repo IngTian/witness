@@ -202,7 +202,34 @@ func isLensStagingDir(name string) bool {
 // header directives: read → set one field → marshal → atomic write, so no text surgery
 // can corrupt the file. It does NOT touch extract.md/review.md.
 func (s *Store) SetLensModel(name, phase, model string) error {
-	// Same registry lock as RegisterLens: a model write must not race a concurrent
+	var field string
+	switch phase {
+	case "extract":
+		field = "extract_model"
+	case "review":
+		field = "review_model"
+	default:
+		return fmt.Errorf("unknown lens model phase %q (want extract|review)", phase)
+	}
+	return s.setLensJSONField(name, field, model)
+}
+
+// SetLensRunner sets a registered lens's per-lens runtime in its lens.json (issue #75
+// slice 2): "claude"/"opencode" routes the lens's mine+review to that runner; an empty
+// value CLEARS it so the lens rides the global runner. Same safe struct round-trip as
+// SetLensModel — no text surgery. It does NOT validate the runner name here (an unknown
+// name surfaces at drain time via the runner-set's circuit breaker + at `witness doctor`),
+// matching how per-lens models are handled.
+func (s *Store) SetLensRunner(name, runner string) error {
+	return s.setLensJSONField(name, "runner", runner)
+}
+
+// setLensJSONField is the shared, locked read-modify-write for a single lens.json field:
+// preserve every other field, set the given one (or DELETE it when value is empty so the
+// lens falls back to the global), and atomically write. This is the one place lens.json is
+// mutated by the CLI — a struct/map round-trip, never text surgery (the #71 bug class).
+func (s *Store) setLensJSONField(name, field, value string) error {
+	// Same registry lock as RegisterLens: a lens.json write must not race a concurrent
 	// register that is mid-swap on this lens's dir (which would read/write a lens.json
 	// that's being renamed out from under it).
 	unlock, ok := s.lensRegistryLock()
@@ -213,8 +240,7 @@ func (s *Store) SetLensModel(name, phase, model string) error {
 	if !slices.Contains(s.RegisteredLenses(), name) {
 		return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", name, name)
 	}
-	dir := filepath.Join(s.LensesDir(), sanitize(name))
-	path := filepath.Join(dir, lensConfigFile)
+	path := filepath.Join(s.LensesDir(), sanitize(name), lensConfigFile)
 	// Read-modify-write the existing lens.json (preserving other fields); an absent file
 	// starts from an empty config.
 	var raw map[string]any
@@ -228,19 +254,10 @@ func (s *Store) SetLensModel(name, phase, model string) error {
 	if raw == nil {
 		raw = map[string]any{}
 	}
-	var field string
-	switch phase {
-	case "extract":
-		field = "extract_model"
-	case "review":
-		field = "review_model"
-	default:
-		return fmt.Errorf("unknown lens model phase %q (want extract|review)", phase)
-	}
-	if strings.TrimSpace(model) == "" {
-		delete(raw, field) // clear → ride the global stage model
+	if strings.TrimSpace(value) == "" {
+		delete(raw, field) // clear → fall back to the global
 	} else {
-		raw[field] = strings.TrimSpace(model)
+		raw[field] = strings.TrimSpace(value)
 	}
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {

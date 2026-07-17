@@ -305,6 +305,46 @@ func TestSetLensModelRoundTrip(t *testing.T) {
 	}
 }
 
+// SetLensRunner round-trips the per-lens runner through lens.json (#75 slice 2) without
+// touching prompts or other fields, and an empty value clears it (ride the global runner).
+func TestSetLensRunnerRoundTrip(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("cr", writeLensSrcDir(t, "cr", "mine", "rev")); err != nil {
+		t.Fatal(err)
+	}
+	// Also set a model, so we can prove runner + model coexist and clears are independent.
+	if err := s.SetLensModel("cr", "extract", "openai/free"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLensRunner("cr", "opencode"); err != nil {
+		t.Fatalf("SetLensRunner: %v", err)
+	}
+	path := filepath.Join(s.LensesDir(), "cr", "lens.json")
+	data, _ := os.ReadFile(path)
+	body := string(data)
+	if !strings.Contains(body, `"runner"`) || !strings.Contains(body, "opencode") {
+		t.Fatalf("lens.json missing the runner:\n%s", body)
+	}
+	if !strings.Contains(body, "openai/free") || !strings.Contains(body, `"name"`) {
+		t.Fatalf("SetLensRunner clobbered other fields:\n%s", body)
+	}
+	// Clearing the runner removes only it; the model stays.
+	if err := s.SetLensRunner("cr", ""); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if strings.Contains(string(data), `"runner"`) {
+		t.Fatalf("cleared runner should be gone:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "openai/free") {
+		t.Fatalf("clearing runner must not touch the model:\n%s", string(data))
+	}
+	// Unregistered lens errors.
+	if err := s.SetLensRunner("nope", "opencode"); err == nil {
+		t.Fatalf("SetLensRunner on an unregistered lens must error")
+	}
+}
+
 // Both reserved names must be refused at register AND enable: "unified" (the
 // cross-lens summary's filename stem — its per-lens summary would clobber the
 // unified portrait) and "default" (the always-on built-in's identity — a second

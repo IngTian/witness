@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
-	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -71,23 +70,20 @@ func forceReview(st *store.Store) (bool, error) {
 		return false, err
 	}
 	ctx := context.Background()
-	// Same runner lifecycle as the worker: Open before use, Close after. Close runs
-	// the OpenCode self-traffic cleanup sweep — which this path previously OMITTED
-	// (it deferred only the server's Close), leaking witness-distill sessions back
-	// into the pending queue. Routing through the Runner makes that impossible.
-	runner, err := platform.RunnerFor(st, cfg)
+	// Same runner lifecycle as the worker: open the SET of runtimes the active lenses need
+	// (issue #75 slice 2), review through the per-lens resolver, Close all after. Close runs
+	// each OpenCode runner's self-traffic cleanup sweep — held under WorkerLock above so it
+	// can't delete a concurrent worker's live distill session.
+	rs, err := newRunnerSet(ctx, st, cfg, lenses)
 	if err != nil {
 		return false, err
 	}
-	if err := runner.Open(ctx); err != nil {
-		return false, err
-	}
-	defer runner.Close()
-	runFn := distill.RunnerMine(runner)
-	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
+	defer rs.Close()
+	runFn := rs.RunFor(nil) // the global runner (unified summary + default fallback)
+	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor}
 	if err := r.Run(ctx, time.Now()); err != nil {
 		return false, err
 	}
-	regenerateProfile(ctx, st, cfg, lenses, runFn)
+	regenerateProfile(ctx, st, cfg, lenses, runFn, rs.RunFor)
 	return true, nil
 }

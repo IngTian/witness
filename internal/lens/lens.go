@@ -31,20 +31,24 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// Lens carries the two prompts the distiller needs plus identity and per-lens model
-// overrides. ExtractModel/ReviewModel are empty by default — an empty field means
-// "ride the global stage model" (TriageModel for extract, DistillModel for review),
-// resolved by distill.ModelFor. A model name is only valid on its runtime, so a
-// per-lens model is meaningful only under a matching runner (per-lens runner is
-// slice 2 of #75; slice 1 keeps the one global runner).
+// Lens carries the two prompts the distiller needs plus identity and per-lens
+// runner/model overrides. Runner/ExtractModel/ReviewModel are empty by default:
+//   - Runner "" → the lens rides the GLOBAL runner (the single runner a slice-1 install
+//     uses). A non-empty Runner ("claude"/"opencode") routes this lens's mine+review
+//     calls to that runtime instead — so a cheap free-model lens can run on OpenCode
+//     while the always-on default stays on the global runner (issue #75 slice 2).
+//   - ExtractModel/ReviewModel "" → ride the global stage model for the RESOLVED runner,
+//     resolved by distill.ModelFor. A model name is only valid on its runtime, so these
+//     are meaningful only together with (or under a matching) Runner.
 type Lens struct {
 	Name         string // tag written onto observations/facets
 	Global       bool   // default=true (the always-on built-in); registered lenses=false
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
-	ExtractModel string // per-lens override for the mine (L0→L1) model; "" = global TriageModel
-	ReviewModel  string // per-lens override for the review (L1→L2) model; "" = global DistillModel
+	Runner       string // per-lens runtime ("claude"/"opencode"); "" = global runner
+	ExtractModel string // per-lens override for the mine (L0→L1) model; "" = runner default
+	ReviewModel  string // per-lens override for the review (L1→L2) model; "" = runner default
 }
 
 // LensConfig is the on-disk lens.json schema — the structured settings half of a lens
@@ -55,6 +59,7 @@ type Lens struct {
 type LensConfig struct {
 	Name         string   `json:"name,omitempty"`
 	Dimensions   []string `json:"dimensions,omitempty"`
+	Runner       string   `json:"runner,omitempty"`
 	ExtractModel string   `json:"extract_model,omitempty"`
 	ReviewModel  string   `json:"review_model,omitempty"`
 }
@@ -175,6 +180,7 @@ func loadDir(dir, fallbackName string) (*Lens, error) {
 			l.Name = strings.TrimSpace(cfg.Name)
 		}
 		l.Dimensions = cfg.Dimensions
+		l.Runner = strings.TrimSpace(cfg.Runner)
 		l.ExtractModel = strings.TrimSpace(cfg.ExtractModel)
 		l.ReviewModel = strings.TrimSpace(cfg.ReviewModel)
 	} else if !os.IsNotExist(jerr) {

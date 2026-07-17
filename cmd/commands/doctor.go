@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -56,19 +57,22 @@ func cmdDoctor(asJSON bool) error {
 	var deferredErr error
 	runnerCmd := "unknown"
 	modelStatus := "unknown"
-	runner, rerr := platform.RunnerFor(st, cfg)
+	globalRunner, rerr := platform.RunnerFor(st, cfg)
 	if rerr != nil {
 		modelStatus = "INVALID: " + rerr.Error()
 		deferredErr = rerr
 	} else {
-		runnerCmd = runner.InvocationHint()
-		// Validate the global stage models PLUS every active lens's per-lens model override
-		// (#75): a bad per-lens model would otherwise only surface late, as a per-lens
-		// mining failure/backoff. The runner prewarms just the two globals, so this doctor
-		// check is where the union gets an up-front gate. (On Claude ValidateModels is a
-		// no-op, so a bogus-for-claude per-lens model isn't machine-catchable here — it
-		// shows in `lens show` and surfaces at runtime via backoff.)
-		if err := runner.ValidateModels(context.Background(), lensModelUnion(st, cfg)...); err != nil {
+		runnerCmd = globalRunner.InvocationHint()
+		// Validate each RUNTIME's models against ITS OWN runner (#75 slice 2): the global
+		// stage models on the global runner, and every per-lens model on the runtime that
+		// lens routes to. A per-lens OpenCode model must be checked by the OpenCode runner,
+		// not the global (Claude) one — validating it against the wrong runtime would either
+		// falsely pass (Claude's no-op) or falsely fail. So we mint one runner per runtime
+		// the active lenses use and validate that runtime's model set. A bad per-lens model
+		// otherwise only surfaces late as a per-lens mining backoff. (On Claude ValidateModels
+		// is a no-op, so a bogus-for-claude model isn't machine-catchable — it shows in
+		// `lens show` and surfaces at runtime via backoff.)
+		if err := validateRuntimeModels(context.Background(), st, cfg); err != nil {
 			modelStatus = "INVALID: " + err.Error()
 			deferredErr = err
 		} else {
@@ -275,29 +279,55 @@ type doctorEmbedderJSON struct {
 	ENUnrelated float64 `json:"en_unrelated_cosine,omitempty"`
 }
 
-// lensModelUnion returns the deduplicated set of models doctor should validate: the two
-// global stage models (triage/distill) plus every active lens's per-lens overrides
-// (#75). Empty strings are kept out (ValidateModels treats "" as the runner default, but
-// there's no point validating it repeatedly). A lens that fails to load is simply
-// skipped — activeLenses already logs that, and its model can't be checked anyway.
-func lensModelUnion(st *store.Store, cfg store.Config) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(m string) {
+// validateRuntimeModels validates every runtime's models against ITS OWN runner (#75
+// slice 2). It partitions the models by the runtime that will actually use them — the
+// global stage models on the global runner, each per-lens model on the runtime its lens
+// routes to — then mints each runtime's runner and calls its ValidateModels with that
+// runtime's set. This is why a per-lens OpenCode model gets checked by `opencode models`
+// and not the global (Claude) runner. Returns the first runtime's validation error (with
+// the runtime named) so doctor's single model line stays meaningful.
+func validateRuntimeModels(ctx context.Context, st *store.Store, cfg store.Config) error {
+	// runtime name → deduped non-empty models to validate on it.
+	perRuntime := map[string]map[string]bool{}
+	add := func(runtime, m string) {
 		m = strings.TrimSpace(m)
-		if m == "" || seen[m] {
+		if m == "" {
 			return
 		}
-		seen[m] = true
-		out = append(out, m)
+		if perRuntime[runtime] == nil {
+			perRuntime[runtime] = map[string]bool{}
+		}
+		perRuntime[runtime][m] = true
 	}
-	add(cfg.TriageModel)
-	add(cfg.DistillModel)
+	globalRunner := strings.TrimSpace(cfg.Runner)
+	// Global stage models belong to the global runner.
+	add(globalRunner, cfg.TriageModel)
+	add(globalRunner, cfg.DistillModel)
+	// Each lens's per-lens models belong to the runtime the lens routes to.
 	if lenses, err := activeLenses(st); err == nil {
 		for _, l := range lenses {
-			add(l.ExtractModel)
-			add(l.ReviewModel)
+			rt := distill.RunnerFor(cfg, l)
+			add(rt, l.ExtractModel)
+			add(rt, l.ReviewModel)
 		}
 	}
-	return out
+	// Ensure the global runner is validated even with no models (it mints + is the report's
+	// InvocationHint source; an unknown global name is a real config error).
+	if _, ok := perRuntime[globalRunner]; !ok {
+		perRuntime[globalRunner] = map[string]bool{}
+	}
+	for runtime, set := range perRuntime {
+		runner, err := platform.RunnerForName(runtime, cfg)
+		if err != nil {
+			return fmt.Errorf("runner %q: %w", runtime, err)
+		}
+		models := make([]string, 0, len(set))
+		for m := range set {
+			models = append(models, m)
+		}
+		if err := runner.ValidateModels(ctx, models...); err != nil {
+			return fmt.Errorf("runner %q: %w", runtime, err)
+		}
+	}
+	return nil
 }

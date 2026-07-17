@@ -34,10 +34,11 @@ type Runner interface {
 	// ConcurrentRunSafe reports whether it is safe for the engine to call Run
 	// concurrently (several sessions mining at once) against this runner. This is a
 	// platform FACT (mechanism), NOT a policy: the engine owns the pool size and the
-	// ceiling; the platform only states whether overlap is safe at all. Claude is
-	// true — each Run is an independent `claude -p` process sharing nothing. OpenCode
-	// is false today because Run holds a whole-request mutex; a benchmarked follow-up
-	// narrows that mutex and flips this to true (issue #22).
+	// ceiling; the platform only states whether overlap is safe at all. Both runtimes
+	// are true today: Claude — each Run is an independent `claude -p` process sharing
+	// nothing; OpenCode — Run holds its mutex only for a closed-check and drives an
+	// isolated session per call over the shared serve process, which a benchmark showed
+	// accepts many concurrent sessions (issue #22 narrowed the mutex to flip this true).
 	ConcurrentRunSafe() bool
 }
 
@@ -85,7 +86,18 @@ func RunnerSweepsOnClose(r Runner) bool {
 // each session's ForSession=OpenCode still shapes its input. One engine, per-source
 // input shaping — the two axes never derive from each other.
 func RunnerFor(st *store.Store, cfg store.Config) (Runner, error) {
-	name := strings.TrimSpace(st.ResolveRunner(cfg))
+	return RunnerForName(strings.TrimSpace(st.ResolveRunner(cfg)), cfg)
+}
+
+// RunnerForName mints the Runner for an explicit runner NAME, applying the same
+// empty→default + fail-closed-on-typo rules as RunnerFor. It is the per-lens-runner seam
+// (issue #75 slice 2): the worker resolves each active lens's runtime (distill.RunnerFor)
+// and mints one runner per distinct name via this, so lenses on different runtimes each
+// get their own Runner. cfg is passed through for the runner's model prewarm/validate; a
+// caller with per-lens models on this runtime should pass a cfg carrying the union (see
+// the worker's per-runtime open).
+func RunnerForName(name string, cfg store.Config) (Runner, error) {
+	name = strings.TrimSpace(name)
 	// An empty runner means "unset" — fall back to the default platform (Claude),
 	// matching the config default and the old NewRunner's `case "", "claude"`. A
 	// NON-empty but unrecognized name still fails closed (a real typo).

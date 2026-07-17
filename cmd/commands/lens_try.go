@@ -172,6 +172,15 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
+	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime —
+	// previewing a lens should reflect how the lens is actually configured. A single candidate
+	// = one runner, so we just point cfg.Runner at it and the existing single-runner mint→
+	// lock→Open flow below carries through unchanged. Setting cfg.Runner (not just reading
+	// ln.Runner) also makes distill.ModelFor treat this as the global runtime, so the lens's
+	// per-lens models resolve normally rather than being cleared as "cross-runtime".
+	if r := distill.RunnerFor(cfg, ln); r != "" {
+		cfg.Runner = r
+	}
 	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
 	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
 	// override would silently not reach the server. --model overrides EXTRACT (triage);

@@ -119,6 +119,66 @@ func TestSummarizerUsesPerLensReviewModel(t *testing.T) {
 	}
 }
 
+// End-to-end per-lens RUNNER routing (#75 slice 2): a lens declaring its own runner has
+// its summary run through THAT runner's SummarizeFunc; a lens with no runner (and the
+// unified pass) go through the global Run. Proves the RunFor seam actually dispatches.
+func TestSummarizerUsesPerLensRunner(t *testing.T) {
+	s := newStore(t)
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "cheap", Dimension: "d", Key: "k", Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+		{Lens: "default", Dimension: "d", Key: "k", Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatalf("seed facets: %v", err)
+	}
+
+	runnerByLens := map[string]string{} // lens → which runner ran its summary
+	var unifiedRunner string
+	tagRun := func(runnerName string) SummarizeFunc {
+		return func(_ context.Context, _, prompt, input string) (string, error) {
+			if prompt == "UNIFIED" {
+				unifiedRunner = runnerName
+				return "# portrait\n", nil
+			}
+			for _, l := range []string{"cheap", "default"} {
+				if strings.Contains(input, "LENS: "+l+"\n") {
+					runnerByLens[l] = runnerName
+				}
+			}
+			return "SUMMARY", nil
+		}
+	}
+	globalRun := tagRun("global")
+	opencodeRun := tagRun("opencode")
+
+	sm := &Summarizer{
+		Store:  s,
+		Config: store.Config{Runner: "claude", DistillModel: "d"},
+		Lenses: []*lens.Lens{
+			{Name: "cheap", Runner: "opencode"}, // routes to the opencode SummarizeFunc
+			{Name: "default"},                   // rides the global
+		},
+		LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: globalRun,
+		RunFor: func(ln *lens.Lens) SummarizeFunc {
+			if ln != nil && ln.Runner == "opencode" {
+				return opencodeRun
+			}
+			return nil // fall back to Run
+		},
+	}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if got := runnerByLens["cheap"]; got != "opencode" {
+		t.Fatalf("a lens declaring runner=opencode must summarize via the opencode runner, got %q", got)
+	}
+	if got := runnerByLens["default"]; got != "global" {
+		t.Fatalf("a lens with no runner must use the global runner, got %q", got)
+	}
+	if unifiedRunner != "global" {
+		t.Fatalf("the unified cross-lens pass has no single lens → global runner, got %q", unifiedRunner)
+	}
+}
+
 // A failed claude -p during regeneration must leave the prior summary intact —
 // the profile is derived, so a stale summary is fine until the next review.
 func TestSummarizerFailureLeavesPriorFiles(t *testing.T) {

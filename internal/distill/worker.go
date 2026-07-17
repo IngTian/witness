@@ -88,6 +88,23 @@ type Worker struct {
 	Lenses   []*lens.Lens // default (always) + any config-enabled lenses; all global, applied to every session regardless of source (CC or OpenCode)
 	Config   store.Config
 	Run      MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
+	// RunFor, when set, picks the MineFunc for a specific lens — the per-lens RUNNER seam
+	// (issue #75 slice 2): a lens declaring its own runtime mines against that runner
+	// instead of the global one. nil → every lens uses Run (the single-runner path, and
+	// what every test that injects only Run relies on). See runFor.
+	RunFor func(ln *lens.Lens) MineFunc
+}
+
+// runFor returns the MineFunc for a lens: the per-lens runner via RunFor when wired,
+// else the single global Run. Centralizes the fallback so mine() (and any future call
+// site) never has to special-case a nil RunFor.
+func (w *Worker) runFor(ln *lens.Lens) MineFunc {
+	if w.RunFor != nil {
+		if fn := w.RunFor(ln); fn != nil {
+			return fn
+		}
+	}
+	return w.Run
 }
 
 // SessionMining is the result of the MAP half of a distillation pass: everything
@@ -413,7 +430,7 @@ type minedObs struct {
 }
 
 func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript string) ([]store.Observation, error) {
-	reply, err := w.Run(ctx, ModelFor(w.Config, ln, PhaseExtract), ln.Extract, transcript)
+	reply, err := w.runFor(ln)(ctx, ModelFor(w.Config, ln, PhaseExtract), ln.Extract, transcript)
 	if err != nil {
 		return nil, err
 	}

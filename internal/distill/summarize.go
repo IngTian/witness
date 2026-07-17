@@ -27,6 +27,22 @@ type Summarizer struct {
 	LensPrompt    string        // prompts/summarize/lens.md
 	UnifiedPrompt string        // prompts/summarize/unified.md
 	Run           SummarizeFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
+	// RunFor, when set, picks the SummarizeFunc for a specific lens — the per-lens RUNNER
+	// seam (issue #75 slice 2). A per-lens summary then runs on that lens's own runtime,
+	// like its review. nil → every summary uses Run. The unified cross-lens portrait has no
+	// single lens, so it always uses Run (the global runner).
+	RunFor func(ln *lens.Lens) SummarizeFunc
+}
+
+// runFor returns the SummarizeFunc for a lens: the per-lens runner via RunFor when wired,
+// else the global Run.
+func (sm *Summarizer) runFor(ln *lens.Lens) SummarizeFunc {
+	if sm.RunFor != nil {
+		if fn := sm.RunFor(ln); fn != nil {
+			return fn
+		}
+	}
+	return sm.Run
 }
 
 // Summarize regenerates every per-lens summary from current facets, then the
@@ -55,8 +71,8 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	}
 
 	// Index the active lenses by name so each per-lens summary uses that lens's own
-	// review model (#75). A facet whose lens isn't in the active set (an orphan from a
-	// since-deregistered lens) maps to nil → ModelFor falls back to the global model.
+	// runner + review model (#75). A facet whose lens isn't in the active set (an orphan
+	// from a since-deregistered lens) maps to nil → global runner + global model.
 	byName := map[string]*lens.Lens{}
 	for _, l := range sm.Lenses {
 		byName[l.Name] = l
@@ -64,8 +80,9 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 	var portrait strings.Builder
 	for _, l := range lenses {
-		model := ModelFor(sm.Config, byName[l], PhaseReview)
-		md, err := sm.Run(ctx, model, sm.LensPrompt, renderFacetsForSummary(l, byLens[l]))
+		ln := byName[l]
+		model := ModelFor(sm.Config, ln, PhaseReview)
+		md, err := sm.runFor(ln)(ctx, model, sm.LensPrompt, renderFacetsForSummary(l, byLens[l]))
 		if err != nil {
 			return fmt.Errorf("summarize lens %s: %w", l, err)
 		}

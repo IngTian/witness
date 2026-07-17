@@ -28,6 +28,20 @@ type Reviewer struct {
 	Lenses []*lens.Lens
 	Config store.Config
 	Runner MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
+	// RunnerFor, when set, picks the MineFunc for a specific lens — the per-lens RUNNER
+	// seam (issue #75 slice 2), mirroring Worker.RunFor. nil → every lens reviews on Runner.
+	RunnerFor func(ln *lens.Lens) MineFunc
+}
+
+// runnerFor returns the MineFunc for a lens's review: the per-lens runner via RunnerFor
+// when wired, else the single global Runner.
+func (r *Reviewer) runnerFor(ln *lens.Lens) MineFunc {
+	if r.RunnerFor != nil {
+		if fn := r.RunnerFor(ln); fn != nil {
+			return fn
+		}
+	}
+	return r.Runner
 }
 
 // reviewedFacet is what the review prompt returns per facet it asserts.
@@ -144,7 +158,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]reviewedFacet, error) {
 	input := "OBSERVATIONS (L1):\n" + mustJSON(slimObs(obs)) +
 		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name))
-	reply, err := r.Runner(ctx, ModelFor(r.Config, ln, PhaseReview), ln.Review, input)
+	reply, err := r.runnerFor(ln)(ctx, ModelFor(r.Config, ln, PhaseReview), ln.Review, input)
 	if err != nil {
 		return nil, err
 	}

@@ -13,7 +13,6 @@ import (
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/lens"
-	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -133,12 +132,13 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	}
 
 	cfg := st.LoadConfig()
-	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so the single
-	// Runner built below (platform.RunnerFor) inherits it with no per-site dispatch.
-	// This is what lets an npm OpenCode user — who never ran `install`, so config
-	// says the default "claude" — distill via OpenCode: their plugin passes
-	// WITNESS_RUNNER=opencode. An explicit `install` choice (runner_bound) still wins
-	// (see ResolveRunner).
+	// Resolve the effective GLOBAL runner ONCE and overwrite cfg.Runner: it is the runtime
+	// a lens with no explicit `# runner` rides, and the target the per-lens router
+	// (distill.RunnerFor) compares against. This is what lets an npm OpenCode user — who
+	// never ran `install`, so config says the default "claude" — distill via OpenCode:
+	// their plugin passes WITNESS_RUNNER=opencode. An explicit `install` choice
+	// (runner_bound) still wins (see ResolveRunner). Per-lens runners layer on top via
+	// newRunnerSet below.
 	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
@@ -167,23 +167,32 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		p, _ := st.PendingSessionsUpdatedBetween(lensNames, timeRange.since, timeRange.until)
 		return p
 	}
-	// Resolve the global distillation runner once and, if there's work, Open it for
-	// the whole drain (OpenCode: one `opencode serve` + a pre-cleanup sweep; Claude:
-	// no-op). Close runs the paired post-cleanup — so nothing leaks distill sessions.
-	runner, err := platform.RunnerFor(st, cfg)
-	if err != nil {
-		slog.Error("resolve runner", "err", err)
-		return true, err
-	}
+	// Resolve the SET of distillation runners the active lenses need and, if there's work,
+	// Open each for the whole drain (issue #75 slice 2). Slice 1 opened one global runner;
+	// now a lens may route to its own runtime, so the drain opens every distinct runtime
+	// (OpenCode: one `opencode serve` + a pre-cleanup sweep; Claude: no-op). A non-global
+	// runtime whose Open fails is circuit-broken (its lenses back off) rather than failing
+	// the whole drain; only the GLOBAL runner failing is fatal (see newRunnerSet). The
+	// combined Close tears every opened runner down + runs each one's post-cleanup sweep.
+	var rs *runnerSet
 	hasPending := len(pending()) > 0
 	if hasPending || st.ReviewDue(cfg) {
-		if err := runner.Open(ctx); err != nil {
-			slog.Error("open runner", "runner", cfg.Runner, "err", err)
+		rs, err = newRunnerSet(ctx, st, cfg, lenses)
+		if err != nil {
+			slog.Error("open runners", "runner", cfg.Runner, "err", err)
 			return true, err
 		}
+		defer rs.Close()
 	}
-	defer runner.Close()
-	runFn := distill.RunnerMine(runner)
+	// runFn is the GLOBAL runner's MineFunc — used by the reviewer's/summarizer's unified
+	// pass and as the Worker's default Run; per-lens routing goes through rs.RunFor. When
+	// there's no work (rs nil), these are never called.
+	runFn := func(ctx context.Context, model, prompt, input string) (string, error) {
+		if rs == nil {
+			return "", &runnerDownError{name: cfg.Runner}
+		}
+		return rs.RunFor(nil)(ctx, model, prompt, input)
+	}
 
 	// Drain pending sessions. The embedder is heavy (~448MB) and loaded once per
 	// short-lived worker process ONLY when there is mining to do; it is shared
@@ -207,6 +216,16 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	// model isn't ready (review-only work can still proceed).
 	var miner *distill.Worker
 	attempted := map[string]bool{}
+	// runForLens is the per-lens runner resolver threaded into the engine (issue #75
+	// slice 2): a lens declaring its own runtime mines/reviews against that runner. nil-safe
+	// when there's no work (rs nil) — never called in that case (getMiner returns without
+	// mining, review only runs when rs is open).
+	runForLens := func(ln *lens.Lens) distill.MineFunc {
+		if rs == nil {
+			return runFn
+		}
+		return rs.RunFor(ln)
+	}
 	getMiner := func() *distill.Worker {
 		if miner == nil {
 			emb, err := embed.New()
@@ -214,11 +233,18 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 				slog.Error("embedder", "err", err) // can't mine this run; review may still run
 				return nil
 			}
-			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn}
+			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens}
 		}
 		return miner
 	}
-	conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
+	// The session-window cap must be safe for EVERY opened runtime (different sessions run
+	// in parallel and may each touch any runtime). AND across the set; falls back to the
+	// global runner's fact when there's no set yet (review-only / no work).
+	concurrentSafe := true
+	if rs != nil {
+		concurrentSafe = rs.concurrentRunSafe()
+	}
+	conc := distill.EffectiveConcurrency(cfg.MineConcurrency, concurrentSafe)
 	drainAll := func() {
 		w := getMiner()
 		if w == nil {
@@ -247,12 +273,12 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		drainAll:      drainAll,
 		reviewDue:     func() bool { return st.ReviewDue(cfg) },
 		runReview: func() {
-			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
+			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runForLens}
 			if err := r.Run(ctx, time.Now()); err != nil {
 				slog.Error("review", "err", err)
 			} else {
 				slog.Info("review complete")
-				regenerateProfile(ctx, st, cfg, lenses, runFn)
+				regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens)
 			}
 		},
 		ensureMiner:    func() bool { return getMiner() != nil },
@@ -322,13 +348,13 @@ func runDistillLoop(d distillLoopDeps) {
 // Best-effort: any failure (missing prompts, a claude -p hiccup) is logged and
 // swallowed, leaving the prior summaries in place — the profile is derived and
 // non-critical, and must never break the worker.
-func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc) {
+func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc) {
 	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts()
 	if err != nil {
 		slog.Warn("profile: summarizer prompts unavailable; skipping", "err", err)
 		return
 	}
-	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn}
+	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
 	if err := sm.Summarize(ctx); err != nil {
 		slog.Warn("profile: summary regeneration failed; keeping prior", "err", err)
 		return
