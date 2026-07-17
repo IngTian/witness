@@ -23,9 +23,10 @@ import (
 // guarded table rebuild in migrate() that seeds the pre-migration rows as the
 // 'default' lens's watermark (the lens they actually reflect); v6 adds two
 // hot-path indexes on the progress table (idx_progress_lens_next,
-// idx_progress_distilled_at, issue #73-S3) — pure additive CREATE INDEX IF NOT
-// EXISTS in schemaV1, so the only migrate() work is that a stored-v5 DB re-runs
-// the (idempotent) schema apply to gain them. No guarded step needed.
+// idx_progress_distilled_at, issue #73-S3) via addProgressIndexes — a guarded,
+// idempotent migrate() step that runs AFTER the v5 rebuild (the indexes reference
+// the `lens` column that rebuild creates; putting them in schemaV1 would fail on a
+// pre-v5 DB and the rebuild's DROP TABLE would drop them anyway).
 const schemaVersion = 6
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
