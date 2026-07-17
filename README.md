@@ -57,9 +57,6 @@ Every observation/facet carries a **lens** tag:
   globally**. `witness lens register math ./math/` adds the definition (a directory) to a central
   registry; `witness lens enable math` makes it run on every session (alongside `default`). Lenses
   are shared, not tied to any repo, so the same `math` lens covers all your math work.
-- **`opencode` example lens** — [`prompts/lens/opencode/`](prompts/lens/opencode) observes
-  agent-collaboration workflow: tool discipline, verification, context management, and autonomy
-  calibration.
 
 #### Writing a lens
 
@@ -333,8 +330,8 @@ published package version, publishes any missing platform versions first, then p
 Manual verification path:
 
 ```sh
-witness lens register opencode prompts/lens/opencode
-witness lens enable opencode
+witness lens register math prompts/lens/example   # optional: register an extra lens
+witness lens enable math
 witness import --agent opencode    # reconciles ~/.local/share/opencode/opencode.db and returns
 witness distill status             # watch non-blocking distillation progress
 witness review                     # forces L2 facets + L4 markdown profiles

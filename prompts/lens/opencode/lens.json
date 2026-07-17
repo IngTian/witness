@@ -1,4 +1,0 @@
-{
-  "name": "opencode",
-  "dimensions": ["agent_collaboration", "tool_discipline", "verification", "context_management", "autonomy_calibration", "opencode_usage_preference"]
-}
