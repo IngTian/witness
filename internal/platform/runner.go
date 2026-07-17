@@ -76,9 +76,10 @@ func RunnerSweepsOnClose(r Runner) bool {
 }
 
 // RunnerFor resolves the GLOBAL runner for a drain. It applies the store's runner
-// precedence (bound-meta > config line > WITNESS_RUNNER env > default — unchanged)
-// to get ONE name, then mints that platform's Runner. Fails closed on an unknown
-// name so a typo surfaces instead of silently defaulting.
+// precedence (ResolveRunner: runner_bound meta flag wins → else WITNESS_RUNNER env →
+// else the config/default value; issue #71) to get ONE name, then mints that
+// platform's Runner. Fails closed on an unknown name so a typo surfaces instead of
+// silently defaulting.
 //
 // This is deliberately independent of ForSession: a Claude-runner user distilling
 // imported OpenCode sessions resolves RunnerFor=Claude (shells to claude -p) while
