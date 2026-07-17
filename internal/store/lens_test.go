@@ -147,6 +147,50 @@ func TestRegisterLensSelfRegisterIsLossless(t *testing.T) {
 	}
 }
 
+// RegisterLens rejects a non-slug name so the stored dir name always equals the handle
+// the CLI gates (set/enable/backfill/show) look up — else a "my lens" lens would live at
+// "my_lens" on disk and be unaddressable under the name the tool accepted.
+func TestRegisterLensRejectsNonSlugName(t *testing.T) {
+	s := tempStore(t)
+	src := writeLensSrcDir(t, "", "mine", "rev") // no lens.json name; register-name is the handle
+	for _, bad := range []string{"my lens", "a/b", "weird!", "trailing "} {
+		if err := s.RegisterLens(bad, src); err == nil {
+			t.Fatalf("register with non-slug name %q must be rejected", bad)
+		}
+		if slices.Contains(s.RegisteredLenses(), sanitize(bad)) {
+			t.Fatalf("a rejected non-slug name %q must not have been written to the registry", bad)
+		}
+	}
+	// A clean slug is accepted.
+	if err := s.RegisterLens("my_lens-2", src); err != nil {
+		t.Fatalf("a valid slug name must register: %v", err)
+	}
+}
+
+// A failed swap must never leave the user with NO lens: RegisterLens moves the old
+// definition aside and restores it if the rename fails. We can't easily force a rename
+// failure in-process, so this asserts the recoverable-by-design property indirectly — a
+// SUCCESSFUL re-register leaves no .bak/.tmp turds and the lens intact.
+func TestRegisterLensLeavesNoStagingTurds(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("cr", writeLensSrcDir(t, "cr", "mine", "rev")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterLens("cr", writeLensSrcDir(t, "cr", "mine2", "rev2")); err != nil {
+		t.Fatal(err) // re-register
+	}
+	entries, _ := os.ReadDir(s.LensesDir())
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") || strings.HasSuffix(e.Name(), ".bak") {
+			t.Fatalf("re-register left a staging turd: %s", e.Name())
+		}
+	}
+	// And the staging dirs, even if present, never appear as registered lenses.
+	if got := s.RegisteredLenses(); len(got) != 1 || got[0] != "cr" {
+		t.Fatalf("want exactly [cr] registered, got %v", got)
+	}
+}
+
 // LegacyFormatLenses surfaces pre-#75 dirs (a lone lens.md, no extract.md) so an
 // upgraded user isn't silently dropped. A new-format lens must NOT be flagged.
 func TestLegacyFormatLenses(t *testing.T) {

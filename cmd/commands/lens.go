@@ -132,10 +132,15 @@ func cmdLens(args []string) error {
 	case "list":
 		enabled := st.LoadConfig().EnabledLenses
 		reg := st.RegisteredLenses()
+		legacy := st.LegacyFormatLenses()
 		// The default lens always runs and isn't in the registry; show it first so
 		// `lens list` reflects what actually runs, not just the registered extras.
 		fmt.Printf("  %s %s  %s\n", green("✓"), store.LensDefault, dim("(built-in, always on)"))
-		if len(reg) == 0 {
+		// Short-circuit only when there is NOTHING extra to report — neither registered nor
+		// legacy. Gating on reg alone would swallow the legacy warning for a registry that
+		// holds ONLY old-format dirs (an upgraded user with one custom lens), which is the
+		// exact population that warning exists to reach.
+		if len(reg) == 0 && len(legacy) == 0 {
 			fmt.Println(dim("  no additional lenses registered"))
 			return nil
 		}
@@ -151,7 +156,7 @@ func cmdLens(args []string) error {
 		// upgrade — a lens that was ENABLED simply stopped mining. Point at the fix (we do
 		// NOT auto-migrate; that would revive the parser #75 removed). `enabled` still lists
 		// the name, so flag whether the silent stop actually affected a running lens.
-		for _, name := range st.LegacyFormatLenses() {
+		for _, name := range legacy {
 			hint := "OLD FORMAT (pre-#75) — re-register: witness lens register " + name + " <dir>"
 			if slices.Contains(enabled, name) {
 				hint = "OLD FORMAT (pre-#75), still ENABLED but NOT running — re-register: witness lens register " + name + " <dir>"

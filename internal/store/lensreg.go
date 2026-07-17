@@ -39,6 +39,18 @@ func ReservedLensName(name string) bool {
 // the same definition is shared across all sessions.
 func (s *Store) LensesDir() string { return filepath.Join(s.Root, "lenses") }
 
+// errLensBusy is returned when a registry-mutating op can't take the registry lock
+// because another one holds it (a rare interactive collision; retry).
+var errLensBusy = fmt.Errorf("another lens registry operation is in progress; retry")
+
+// lensRegistryLock single-flights registry-directory MUTATIONS (RegisterLens,
+// SetLensModel) so two concurrent ops can't interleave through the shared staging
+// path and lose a lens. It is a filesystem flock independent of WorkerLock (a worker
+// drain and a lens edit are unrelated), non-blocking (LOCK_EX|LOCK_NB) like the others.
+func (s *Store) lensRegistryLock() (unlock func(), ok bool) {
+	return s.lockFile(".lens-registry.lock")
+}
+
 // lensFileNames are the on-disk files of a lens directory. Duplicated from
 // internal/lens (which the store must not import — store is the bottom of the stack)
 // as small string literals; keep them in sync. lensConfigFile is the presence probe
@@ -61,8 +73,26 @@ const (
 // file. And it stages into a sibling .tmp dir then atomically renames into place, so a
 // concurrent worker read never sees a half-built lens directory.
 func (s *Store) RegisterLens(name, srcDir string) error {
+	// Serialize registry mutations (this + SetLensModel) so two concurrent
+	// `witness lens register <same-name>` can't interleave through the shared staging
+	// path and silently destroy the lens. Non-blocking: contention returns a retryable
+	// error rather than corrupting — acceptable for a rare interactive admin op.
+	unlock, ok := s.lensRegistryLock()
+	if !ok {
+		return errLensBusy
+	}
+	defer unlock()
 	if ReservedLensName(name) {
 		return fmt.Errorf("lens name %q is reserved (the always-on built-in lens or the cross-lens summary); choose another name", name)
+	}
+	// Reject a name that isn't already a slug. The registry dir is sanitize(name)
+	// (non-[A-Za-z0-9_-] → '_'), but every CLI gate (set/enable/backfill/show) and
+	// LoadRegistered look the lens up by the RAW typed name — so a name like "my lens"
+	// would be stored as "my_lens" yet be unaddressable under the name the tool accepted
+	// and echoed. Requiring name == sanitize(name) keeps the stored name identical to the
+	// handle, closing that gap at the single source instead of sanitizing at every gate.
+	if sanitize(name) != name {
+		return fmt.Errorf("lens name %q must be a slug — letters, digits, '-', '_' only (no spaces or special characters)", name)
 	}
 	info, err := os.Stat(srcDir)
 	if err != nil {
@@ -88,12 +118,11 @@ func (s *Store) RegisterLens(name, srcDir string) error {
 			return fmt.Errorf("read %s: %w", fn, rerr)
 		}
 	}
-	// Stage into a sibling .tmp dir, fully build it, then swap. Removing the target
-	// immediately before the rename means Rename lands on a non-existent path (atomic on
-	// POSIX and Windows), so a concurrent reader sees either the old dir or the new one —
-	// never a half-built one.
+	// Stage into a sibling .tmp dir, fully build it, then swap. A reader sees either the
+	// old dir or the new one, never a half-built one.
 	dir := filepath.Join(s.LensesDir(), sanitize(name))
 	tmp := dir + ".tmp"
+	bak := dir + ".bak"
 	if err := os.RemoveAll(tmp); err != nil {
 		return err
 	}
@@ -106,14 +135,28 @@ func (s *Store) RegisterLens(name, srcDir string) error {
 			return err
 		}
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		_ = os.RemoveAll(tmp)
-		return err
+	// Move the OLD definition aside (not delete) so a swap fault can't leave the user with
+	// nothing: if the Rename below fails, we restore it. Only after the new dir is in place
+	// do we drop the backup. (A pre-swap failure here leaves the old lens untouched.)
+	_ = os.RemoveAll(bak)
+	hadOld := false
+	if _, statErr := os.Stat(dir); statErr == nil {
+		if err := os.Rename(dir, bak); err != nil {
+			_ = os.RemoveAll(tmp)
+			return err
+		}
+		hadOld = true
 	}
 	if err := os.Rename(tmp, dir); err != nil {
-		_ = os.RemoveAll(tmp)
-		return err
+		// Swap failed: restore the previous definition and keep the staged copy for manual
+		// recovery, with a self-explanatory error (never silently leave the lens gone).
+		if hadOld {
+			_ = os.Rename(bak, dir)
+		}
+		return fmt.Errorf("register lens %q failed during swap; previous definition %s, new definition staged at %s: %w",
+			name, map[bool]string{true: "restored", false: "was absent"}[hadOld], tmp, err)
 	}
+	_ = os.RemoveAll(bak)
 	return nil
 }
 
@@ -133,7 +176,7 @@ func (s *Store) RegisteredLenses() []string {
 	}
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || isLensStagingDir(e.Name()) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(s.LensesDir(), e.Name(), lensExtractFile)); err == nil {
@@ -141,6 +184,15 @@ func (s *Store) RegisteredLenses() []string {
 		}
 	}
 	return names
+}
+
+// isLensStagingDir reports whether a registry entry is one of RegisterLens's transient
+// staging/backup dirs (<name>.tmp / <name>.bak) rather than a real lens. A crash mid-swap
+// can leave one behind; since a real lens name is a slug (RegisterLens rejects dots), no
+// legitimate lens dir ends in these suffixes, so skipping them can never hide a real lens
+// — it just keeps a crash artifact out of listings.
+func isLensStagingDir(name string) bool {
+	return strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".bak")
 }
 
 // LegacyFormatLenses lists registry directories that hold the OLD single-file lens.md
@@ -157,7 +209,7 @@ func (s *Store) LegacyFormatLenses() []string {
 	}
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || isLensStagingDir(e.Name()) {
 			continue
 		}
 		dir := filepath.Join(s.LensesDir(), e.Name())
@@ -177,6 +229,14 @@ func (s *Store) LegacyFormatLenses() []string {
 // header directives: read → set one field → marshal → atomic write, so no text surgery
 // can corrupt the file. It does NOT touch extract.md/review.md.
 func (s *Store) SetLensModel(name, phase, model string) error {
+	// Same registry lock as RegisterLens: a model write must not race a concurrent
+	// register that is mid-swap on this lens's dir (which would read/write a lens.json
+	// that's being renamed out from under it).
+	unlock, ok := s.lensRegistryLock()
+	if !ok {
+		return errLensBusy
+	}
+	defer unlock()
 	if !slices.Contains(s.RegisteredLenses(), name) {
 		return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", name, name)
 	}
