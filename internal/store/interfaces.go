@@ -24,6 +24,12 @@ type RawWriter interface {
 	AppendRaw(r RawRecord) error
 }
 
+// RawReader reads a session's full L0 transcript. PreviewMine uses it (read-only,
+// touches no watermark) to shape a session for a lens-prompt preview.
+type RawReader interface {
+	ReadRaw(session string) ([]RawRecord, error)
+}
+
 // SessionClassifier writes which platform owns a session (the per-session axis,
 // issue #21). Both capture adapters stamp it at first sight.
 type SessionClassifier interface {
@@ -98,7 +104,13 @@ type MCPStore interface {
 // This is the interface that lets the worker run against a fake with NO real *sql.DB
 // — the concrete deliverable of #73-C1. It is exactly the method set worker.go +
 // drain.go call, nothing wider.
+//
+// It embeds SessionPlatformReader because the Worker's drain shapes each session via
+// distillInputs → platform.ForSession, which reads the owning-platform column. Folding
+// it in keeps the Worker's single Store field one interface, and a fake Queue is then
+// automatically a valid ForSession reader too.
 type Queue interface {
+	SessionPlatformReader
 	// inputs
 	ReadRawSnapshot(session string) (recs []RawRecord, rawHighID int64, err error)
 	RawCount(session string) int
@@ -151,6 +163,7 @@ var (
 	_ ObservationReader     = (*Store)(nil)
 	_ MetaKV                = (*Store)(nil)
 	_ RawWriter             = (*Store)(nil)
+	_ RawReader             = (*Store)(nil)
 	_ SessionClassifier     = (*Store)(nil)
 	_ SessionPlatformReader = (*Store)(nil)
 	_ ActiveObservationSink = (*Store)(nil)

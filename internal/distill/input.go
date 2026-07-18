@@ -16,7 +16,7 @@ import (
 // session, a positive value splits an oversized one. The budget is source-agnostic —
 // the same value governs whichever platform owns the session — so Claude and OpenCode
 // shape identically and neither under-extracts a long session.
-func distillInputs(st *store.Store, cfg store.Config, session string, raw []store.RawRecord) []string {
+func distillInputs(st store.SessionPlatformReader, cfg store.Config, session string, raw []store.RawRecord) []string {
 	policy := platform.ChunkPolicy{MaxChars: cfg.ChunkMaxChars}
 	return platform.ForSession(st, session).RenderInputs(raw, policy)
 }
