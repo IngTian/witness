@@ -65,8 +65,12 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		t.Fatalf("Open did not create config.toml: %v", err)
 	}
 	body := string(data)
-	if !strings.Contains(body, configTemplateUnboundMarker) {
-		t.Fatalf("auto-created config missing unbound runner marker:\n%s", body)
+	// The runner line ships COMMENTED so a fresh (never-installed) config stays
+	// unbound → the npm plugin's WITNESS_RUNNER fallback applies (issue #71). No
+	// separate marker comment exists anymore; the commented runner line IS the
+	// unbound signal, and the absence of the runner_bound flag is what resolution reads.
+	if !strings.Contains(body, `# runner = "claude"`) {
+		t.Fatalf("auto-created config should ship the runner line commented (unbound):\n%s", body)
 	}
 	for _, want := range []string{
 		"runner =",
@@ -214,8 +218,9 @@ func TestSetRunnerReplacesExistingLine(t *testing.T) {
 	if !strings.Contains(string(body), "review_every = 7") {
 		t.Errorf("other fields lost:\n%s", body)
 	}
-	if strings.Contains(string(body), configTemplateUnboundMarker) {
-		t.Error("SetRunner left the template marked unbound")
+	// SetRunner binds the runner (issue #71: the flag is the sole authority).
+	if s.MetaString(runnerBoundKey) != "1" {
+		t.Error("SetRunner did not bind the runner")
 	}
 }
 
@@ -257,8 +262,9 @@ func TestInstallSequenceMatchesBindRunner(t *testing.T) {
 			t.Errorf("config missing %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(string(body), configTemplateUnboundMarker) {
-		t.Error("SetRunner left the generated template marked unbound")
+	// The install sequence binds the runner (issue #71: flag is the sole authority).
+	if st.MetaString(runnerBoundKey) != "1" {
+		t.Error("install sequence (SetRunner) did not bind the runner")
 	}
 }
 
@@ -301,30 +307,114 @@ func TestResolveRunnerDefaultsToConfig(t *testing.T) {
 	}
 }
 
-func TestResolveRunnerLegacyMarkerlessConfigIsConservativelyBound(t *testing.T) {
-	s := tempStore(t)
-	if err := os.WriteFile(s.ConfigPath(), []byte("runner = \"claude\"\n"), 0o600); err != nil {
+// A legacy install wrote an active `runner = "claude"` line but predates the
+// runner_bound flag. adoptRunnerBound (at Open) must fold that active line into the
+// flag, so the config choice still beats a stray WITNESS_RUNNER. Exercises the real
+// Open path — adoption is what makes a config-choice authoritative now (issue #71).
+func TestResolveRunnerLegacyActiveLineIsAdoptedAsBound(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	t.Setenv("WITNESS_HOME", home)
+	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("WITNESS_RUNNER", "opencode")
-	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
-		t.Fatalf("markerless config should stay bound to config runner: got %q", got)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("runner = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestResolveRunnerHonorsManualRunnerInNewTemplate(t *testing.T) {
-	s := tempStore(t)
-	data, err := os.ReadFile(s.ConfigPath())
+	s, err := Open() // adoptRunnerBound folds the active runner line into the flag
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = append(data, []byte("runner = \"claude\"\n")...)
-	if err := os.WriteFile(s.ConfigPath(), data, 0o600); err != nil {
-		t.Fatal(err)
+	defer s.Close()
+	if s.MetaString(runnerBoundKey) != "1" {
+		t.Fatal("Open should adopt an active runner line as bound")
 	}
 	t.Setenv("WITNESS_RUNNER", "opencode")
 	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
+		t.Fatalf("an adopted active-line config should beat the env fallback: got %q", got)
+	}
+}
+
+// A user who manually uncommented the template's runner line (an active line) is
+// adopted as bound at Open, so it beats the npm WITNESS_RUNNER fallback.
+func TestResolveRunnerHonorsManualRunnerInNewTemplate(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	t.Setenv("WITNESS_HOME", home)
+	if _, err := Open(); err != nil { // lay down the template (runner commented)
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, []byte("runner = \"claude\"\n")...) // user uncomments/adds active line
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open() // a later Open adopts the now-active line
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "claude" {
 		t.Fatalf("manual runner should beat the npm fallback: got %q", got)
+	}
+}
+
+// The npm OpenCode-plugin case (issue #71): a fresh template ships the runner line
+// COMMENTED and never runs install. adoptRunnerBound must NOT adopt a commented line,
+// so the flag stays unset across Open and the WITNESS_RUNNER fallback keeps working.
+// This is the safety property the whole fix protects.
+func TestAdoptRunnerBoundDoesNotAdoptCommentedTemplate(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	t.Setenv("WITNESS_HOME", home)
+	s, err := Open() // lays down the template (runner commented) + runs adoption
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.MetaString(runnerBoundKey) == "1" {
+		t.Fatal("a commented template runner line must NOT be adopted as bound")
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s.ResolveRunner(s.LoadConfig()); got != "opencode" {
+		t.Fatalf("unbound template must resolve via the env fallback, got %q", got)
+	}
+}
+
+// Once bound (via install or adoption), the flag is AUTHORITATIVE: deleting the
+// active runner line from config does not un-bind on a later Open. Proves ResolveRunner
+// reads the flag, not config text — the single-source-of-truth guarantee (issue #71).
+func TestRunnerBoundFlagIsAuthoritativeOverConfigText(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	t.Setenv("WITNESS_HOME", home)
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("runner = \"claude\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s1, err := Open() // adopts the active line → flag = 1
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1.Close()
+	// Delete the runner line entirely; the flag must remain authoritative.
+	if err := os.WriteFile(cfgPath, []byte("triage_model = \"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if s2.MetaString(runnerBoundKey) != "1" {
+		t.Fatal("bound flag must survive removal of the config runner line")
+	}
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	if got := s2.ResolveRunner(s2.LoadConfig()); got != "claude" {
+		t.Fatalf("a bound store must ignore the env fallback even with no runner line, got %q", got)
 	}
 }
 

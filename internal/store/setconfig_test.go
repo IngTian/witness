@@ -12,9 +12,9 @@ func TestSetConfigString(t *testing.T) {
 	s := tempStore(t) // Open() writes the full commented template
 
 	// Count ALL comment lines. Setting a NON-runner key (a model) must preserve every
-	// comment verbatim — including the unbound-runner marker, whose survival keeps the
-	// npm OpenCode-plugin user's WITNESS_RUNNER fallback intact (see the runner-fallback
-	// regression test below). Only binding the runner itself may strip that marker.
+	// comment verbatim. (Runner resolution no longer rides on any comment — issue #71
+	// made the runner_bound flag the sole authority — but comments are still part of
+	// the user-managed template and shouldn't be silently churned by a model write.)
 	countComments := func(t *testing.T) int {
 		t.Helper()
 		data, err := os.ReadFile(s.ConfigPath())
@@ -37,10 +37,10 @@ func TestSetConfigString(t *testing.T) {
 	if got := s.LoadConfig().TriageModel; got != "claude-sonnet-5" {
 		t.Fatalf("triage_model not persisted, got %q", got)
 	}
-	// A model-key write must NOT touch the unbound-runner marker.
-	data0, _ := os.ReadFile(s.ConfigPath())
-	if !strings.Contains(string(data0), configTemplateUnboundMarker) {
-		t.Fatalf("setting a model key stripped the unbound-runner marker; it must survive")
+	// A model-key write must NOT bind the runner (issue #71): the runner_bound flag
+	// is the sole resolution authority, and a model tweak must leave it untouched.
+	if s.MetaString(runnerBoundKey) == "1" {
+		t.Fatalf("setting a model key bound the runner; runner resolution must be independent of model writes")
 	}
 
 	// Setting again REPLACES in place — exactly one active triage_model line.
@@ -88,14 +88,16 @@ func TestSetConfigStringRunnerBinds(t *testing.T) {
 	}
 }
 
-// Regression (audit finding): the npm OpenCode-plugin user never runs `witness install`,
-// so their runner stays UNBOUND (template marker present, no active runner line, no
-// runner_bound meta) and resolves via WITNESS_RUNNER=opencode. Setting an unrelated
-// MODEL key — which the tool's own doctor drift-remedy recommends — must NOT strip the
-// marker, else configRunnerUnbound() flips to false and ResolveRunner silently returns
-// the "claude" template default, breaking all distillation for a user with no claude CLI.
+// Regression (issue #71, audit finding): the npm OpenCode-plugin user never runs
+// `witness install`, so their runner stays UNBOUND (no runner_bound meta, only a
+// commented runner line) and resolves via WITNESS_RUNNER=opencode. Setting an
+// unrelated MODEL key — which the tool's own doctor drift-remedy recommends — must
+// NOT bind the runner, else ResolveRunner would return the "claude" template
+// default and break all distillation for a user with no claude CLI. With the flag
+// as the sole authority this is structural (a model write never stamps the flag),
+// but the test stays as the guard that the coupling can't return.
 func TestModelSetPreservesOpenCodeRunnerFallback(t *testing.T) {
-	s := tempStore(t) // Open() writes the template: marker present, runner commented out
+	s := tempStore(t) // Open() writes the template: runner commented out, flag unset
 	t.Setenv("WITNESS_RUNNER", RunnerOpenCode)
 
 	// Precondition: the fallback works before any config set.

@@ -58,6 +58,12 @@ func Open() (*Store, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	s.db = db
+	// One-shot (issue #71): fold a config that already carries a deliberate runner
+	// choice (a legacy markerless install, or a manually-uncommented runner line)
+	// into the runner_bound flag — the SINGLE source of truth ResolveRunner reads.
+	// Idempotent + best-effort (see adoptRunnerBound); needs s.db, so it runs after
+	// openDB. Keeps the "is a runner bound?" decision out of every config read.
+	s.adoptRunnerBound()
 	// One-shot: convert any pre-#75 single-file lens.md registry dirs to the new
 	// lens.json + extract.md + review.md format (issue #75). Idempotent + non-destructive
 	// (see migrateLegacyLenses); best-effort like the config template — a filesystem
