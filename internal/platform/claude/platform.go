@@ -22,11 +22,15 @@ func (Platform) Name() string { return "claude" }
 // asymmetric "unmarked == Claude" rule (ForSession's default) depends on it.
 func (Platform) SessionPrefix() string { return "" }
 
-// RenderInputs flattens the whole session into a single transcript. Claude only
-// gives witness flattened hook text (no structured parts), so there is nothing to
-// chunk — one input per session.
-func (Platform) RenderInputs(raw []store.RawRecord) []string {
-	return []string{platform.RenderTranscript(raw)}
+// RenderInputs shapes the session by the shared, source-agnostic policy. Claude is
+// hook-fed flat text (no structured parts) and was ALWAYS sent whole; that is still
+// the default (policy.MaxChars <= 0), and the measured #57 conclusion says it should
+// be — whole-session mining is what preserves arc rules. The only behavior change is
+// that a Claude session now ALSO honors a positive chunk budget, so a user with a
+// giant session that times out whole can opt into the same last-resort split OpenCode
+// gets, instead of the CC path being hard-wired to one oversized call (#56 B1).
+func (Platform) RenderInputs(raw []store.RawRecord, policy platform.ChunkPolicy) []string {
+	return platform.RenderChunks(raw, policy)
 }
 
 // Capture unmarshals the Claude Code hook payload and writes one L0 record. The

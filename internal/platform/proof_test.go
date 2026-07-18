@@ -33,7 +33,7 @@ func (fakePlatform) SessionPrefix() string { return fakePrefix }
 // RenderInputs: one transcript per record pair — a shaping rule distinct from both
 // Claude (single) and OpenCode (chunked), to prove the engine uses whatever the
 // owning platform returns.
-func (fakePlatform) RenderInputs(raw []store.RawRecord) []string {
+func (fakePlatform) RenderInputs(raw []store.RawRecord, _ platform.ChunkPolicy) []string {
 	var b strings.Builder
 	for _, r := range raw {
 		b.WriteString(r.Role + ": " + r.Text + "\n")

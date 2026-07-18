@@ -234,7 +234,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			// anywhere AND at least one input drifted — so a long session where one chunk
 			// extracts fine is never miscounted as drift (see LensMining.Drifted).
 			producedObs, sawDrift := false, false
-			for _, transcript := range distillInputs(w.Store, session, raw[done:]) {
+			for _, transcript := range distillInputs(w.Store, w.Config, session, raw[done:]) {
 				obs, err := w.mine(ctx, ln, session, transcript)
 				if err != nil {
 					if errors.Is(err, errNoArray) {
@@ -507,7 +507,7 @@ func PreviewMine(ctx context.Context, run MineFunc, cfg store.Config, st *store.
 	// never Store, Embedder, or Lenses. Embedder stays nil (mine never embeds), Store is
 	// nil to make it structurally impossible for this preview to reach a write path.
 	w := &Worker{Config: cfg, Run: run}
-	inputs := distillInputs(st, session, raw) // whole session — no watermark slice
+	inputs := distillInputs(st, cfg, session, raw) // whole session — no watermark slice
 	chunkCount = len(inputs)
 	producedObs, sawDrift := false, false
 	for _, transcript := range inputs {

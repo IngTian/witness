@@ -23,7 +23,7 @@ type leakFakePlatform struct{}
 
 func (leakFakePlatform) Name() string          { return "fakeleak" }
 func (leakFakePlatform) SessionPrefix() string { return "fakeleak:" }
-func (leakFakePlatform) RenderInputs(r []store.RawRecord) []string {
+func (leakFakePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
 	return []string{""}
 }
 func (leakFakePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }

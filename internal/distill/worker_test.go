@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
-	_ "github.com/IngTian/witness/internal/platform/claude" // register the default platform for ForSession
-	opencodeplatform "github.com/IngTian/witness/internal/platform/opencode"
+	_ "github.com/IngTian/witness/internal/platform/claude"   // register the default platform for ForSession
+	_ "github.com/IngTian/witness/internal/platform/opencode" // register the opencode platform (prefixed sessions)
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -114,11 +114,15 @@ func TestWorkerRoutesMineToPerLensRunner(t *testing.T) {
 	}
 }
 
-func TestOpenCodeSessionsAreChunked(t *testing.T) {
+// TestDefaultPolicyMinesWhole is the "flip chunking OFF by default" guard (#57): with
+// the default config (ChunkMaxChars 0), even a long OpenCode session — the one the OLD
+// code chunked unconditionally — is mined as ONE whole input. This is the headline
+// behavior change: whole-session mining preserves the arc rules that per-window mining
+// loses. If someone re-introduces a nonzero default budget, this fails.
+func TestDefaultPolicyMinesWhole(t *testing.T) {
 	s := newStore(t)
 	m := &fakeMiner{}
-	w := testWorker(s, m)
-	defer opencodeplatform.SetChunkMaxCharsForTest(18)()
+	w := testWorker(s, m) // Config{} => ChunkMaxChars 0 => never chunk
 
 	capture(t, s, "opencode:s", "user", "alpha alpha alpha")
 	capture(t, s, "opencode:s", "assistant", "beta beta beta")
@@ -126,25 +130,36 @@ func TestOpenCodeSessionsAreChunked(t *testing.T) {
 	if err := w.Process(context.Background(), "opencode:s"); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.inputs) <= 1 {
-		t.Fatalf("OpenCode long transcript should be chunked, got %d input(s): %#v", len(m.inputs), m.inputs)
+	if len(m.inputs) != 1 {
+		t.Fatalf("default policy must mine the whole session (no chunking), got %d input(s): %#v", len(m.inputs), m.inputs)
 	}
 }
 
-func TestNonOpenCodeSessionsUseSingleLegacyTranscript(t *testing.T) {
-	s := newStore(t)
-	m := &fakeMiner{}
-	w := testWorker(s, m)
-	defer opencodeplatform.SetChunkMaxCharsForTest(18)()
+// TestPositiveBudgetChunksSourceAgnostic pins the #57 / #56-B1 fix at the worker level:
+// a POSITIVE chunk budget splits a long session into several inputs REGARDLESS of source
+// — OpenCode AND Claude alike. Pre-#57 only OpenCode chunked and Claude was hard-wired to
+// one call; now the budget (not the platform) decides, so a Claude user with a giant
+// session can opt into the same last-resort split. Runs the identical long transcript
+// under both session prefixes and asserts both fan out to >1 input.
+func TestPositiveBudgetChunksSourceAgnostic(t *testing.T) {
+	for _, prefix := range []string{"opencode:", "claude:"} {
+		t.Run(strings.TrimSuffix(prefix, ":"), func(t *testing.T) {
+			s := newStore(t)
+			m := &fakeMiner{}
+			w := testWorker(s, m)
+			w.Config.ChunkMaxChars = 18 // tiny budget forces a split
 
-	capture(t, s, "claude:s", "user", "alpha alpha alpha")
-	capture(t, s, "claude:s", "assistant", "beta beta beta")
-	capture(t, s, "claude:s", "user", "gamma gamma gamma")
-	if err := w.Process(context.Background(), "claude:s"); err != nil {
-		t.Fatal(err)
-	}
-	if len(m.inputs) != 1 {
-		t.Fatalf("non-OpenCode transcript should preserve legacy single input, got %d", len(m.inputs))
+			session := prefix + "s"
+			capture(t, s, session, "user", "alpha alpha alpha")
+			capture(t, s, session, "assistant", "beta beta beta")
+			capture(t, s, session, "user", "gamma gamma gamma")
+			if err := w.Process(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(m.inputs) <= 1 {
+				t.Fatalf("a positive chunk budget should split %s long session, got %d input(s): %#v", prefix, len(m.inputs), m.inputs)
+			}
+		})
 	}
 }
 
@@ -524,8 +539,7 @@ func TestLegitEmptyArrayIsNotDrift(t *testing.T) {
 // is the rule that stops a long OpenCode (chunked) session from false-positiving.
 func TestPartialChunkSuccessIsNotDrift(t *testing.T) {
 	s := newStore(t)
-	defer opencodeplatform.SetChunkMaxCharsForTest(18)() // force multiple chunks
-	// A long OpenCode session so RenderInputs produces >1 chunk.
+	// A long OpenCode session under a tiny budget so RenderInputs produces >1 chunk.
 	capture(t, s, "opencode:s", "user", "alpha alpha alpha")
 	capture(t, s, "opencode:s", "assistant", "beta beta beta")
 	capture(t, s, "opencode:s", "user", "gamma gamma gamma")
@@ -533,6 +547,7 @@ func TestPartialChunkSuccessIsNotDrift(t *testing.T) {
 	// First chunk mined returns a real array; every later chunk prose-drifts.
 	calls := 0
 	w := testWorker(s, &fakeMiner{})
+	w.Config.ChunkMaxChars = 18 // force multiple chunks
 	w.Run = func(_ context.Context, _, _, _ string) (string, error) {
 		calls++
 		if calls == 1 {

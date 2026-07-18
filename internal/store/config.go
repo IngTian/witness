@@ -28,6 +28,15 @@ type Config struct {
 	ReviewPoignancy int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
 	AutoDistill     bool   // whether hooks/plugins may start the worker automatically
 	MineConcurrency int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and to 1 when the runner is not ConcurrentRunSafe (issue #22). <=0 means DefaultMineConcurrency.
+	// ChunkMaxChars is the per-input character budget for shaping a session into model
+	// input (issue #57). 0 (the default) = NEVER chunk: mine each session whole, which
+	// the measured data shows is the best-quality path (splitting a session into
+	// independent windows loses ~70% of arc-lens observations and inflates prose-drift
+	// ~20×). A POSITIVE value is a last-resort guard for a genuinely oversized session
+	// that would otherwise time out / OOM in one call: sessions that fit still render to
+	// one chunk, so only the few giants are split. Source-agnostic — the same budget
+	// governs Claude and OpenCode alike, so neither runtime under-extracts long sessions.
+	ChunkMaxChars int
 	// EnabledLenses is the set of registered lens names that run on EVERY session
 	// (alongside the always-on "default" lens). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
@@ -54,6 +63,10 @@ func DefaultConfig() Config {
 		// embed model never stays resident.
 		AutoDistill:     true,
 		MineConcurrency: DefaultMineConcurrency,
+		// 0 = never chunk (mine whole). This is the deliberate default per #57: chunking
+		// is a timeout guard, not a quality feature, and it degrades arc lenses badly.
+		// A user with giant sessions opts in by setting a positive chunk_max_chars.
+		ChunkMaxChars: 0,
 	}
 }
 
@@ -121,6 +134,15 @@ func (s *Store) LoadConfig() Config {
 				} else {
 					c.MineConcurrency = n
 				}
+			}
+		case "chunk_max_chars":
+			// Unlike mine_concurrency, 0 is a MEANINGFUL value here (the default: never
+			// chunk / mine whole), so it is accepted verbatim rather than clamped back to
+			// a default. A negative value is likewise fine — RenderChunks treats any <= 0
+			// as "send whole" — so we store the parsed int as-is; a positive value opts a
+			// user with oversized sessions into last-resort splitting (issue #57).
+			if n, err := strconv.Atoi(v); err == nil {
+				c.ChunkMaxChars = n
 			}
 		case "lens":
 			// One enabled lens per line: "lens = <name>". Global — runs on every
@@ -332,6 +354,15 @@ auto_distill = true
 # and is shared; each concurrent distillation call adds ~0.35GB. Clamped to the
 # CPU count and to 1 for a runner that can't run concurrently. <=0 = default (4).
 mine_concurrency = 4
+
+# Per-input character budget for mining. 0 (default) = mine each session WHOLE — the
+# best-quality path: splitting a session into independent windows loses most of the
+# insight that spans it (a decision made early and confirmed late has no single window
+# holding the whole arc) and makes the model ramble instead of extract. Set a POSITIVE
+# value (e.g. 200000) ONLY if you have giant sessions whose single whole-session call
+# times out; sessions that fit are unaffected, so this just splits the few offenders.
+# Applies equally to Claude Code and OpenCode sessions.
+chunk_max_chars = 0
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math

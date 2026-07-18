@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/IngTian/witness/internal/lens"
-	_ "github.com/IngTian/witness/internal/platform/claude" // register default platform for ForSession
-	opencodeplatform "github.com/IngTian/witness/internal/platform/opencode"
+	_ "github.com/IngTian/witness/internal/platform/claude"   // register default platform for ForSession
+	_ "github.com/IngTian/witness/internal/platform/opencode" // register opencode so "opencode:" sessions resolve
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -152,7 +152,6 @@ func TestPreviewMineDriftRule(t *testing.T) {
 // and report chunkCount>1. This exercises the multi-input loop that a single-chunk
 // Claude session never reaches.
 func TestPreviewMineMultiChunkAggregates(t *testing.T) {
-	defer opencodeplatform.SetChunkMaxCharsForTest(18)() // force several chunks
 	s := newStore(t)
 	session := "opencode:multi"
 	capture(t, s, session, "user", "alpha alpha alpha")
@@ -160,7 +159,8 @@ func TestPreviewMineMultiChunkAggregates(t *testing.T) {
 	capture(t, s, session, "user", "gamma gamma gamma")
 
 	miner := func(_ context.Context, _, _, input string) (string, error) { return obsReply(input), nil }
-	obs, chunks, drifted, err := PreviewMine(context.Background(), miner, store.Config{}, s, session, previewLens())
+	cfg := store.Config{ChunkMaxChars: 18} // force several chunks
+	obs, chunks, drifted, err := PreviewMine(context.Background(), miner, cfg, s, session, previewLens())
 	if err != nil {
 		t.Fatalf("PreviewMine: %v", err)
 	}
@@ -180,7 +180,6 @@ func TestPreviewMineMultiChunkAggregates(t *testing.T) {
 // rule: drift only when zero obs across ALL chunks). This is the exact case a
 // single-chunk test can't reach.
 func TestPreviewMineMultiChunkDriftRule(t *testing.T) {
-	defer opencodeplatform.SetChunkMaxCharsForTest(18)()
 	s := newStore(t)
 	session := "opencode:mixed"
 	capture(t, s, session, "user", "alpha alpha alpha")
@@ -196,7 +195,8 @@ func TestPreviewMineMultiChunkDriftRule(t *testing.T) {
 		}
 		return obsReply(input), nil
 	}
-	obs, chunks, drifted, err := PreviewMine(context.Background(), miner, store.Config{}, s, session, previewLens())
+	cfg := store.Config{ChunkMaxChars: 18} // force several chunks
+	obs, chunks, drifted, err := PreviewMine(context.Background(), miner, cfg, s, session, previewLens())
 	if err != nil {
 		t.Fatalf("PreviewMine: %v", err)
 	}

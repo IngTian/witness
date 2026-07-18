@@ -119,6 +119,7 @@ func cmdDoctor(asJSON bool) error {
 				ReviewPoignancy: cfg.ReviewPoignancy,
 				AutoDistill:     cfg.AutoDistill,
 				MineConcurrency: cfg.MineConcurrency,
+				ChunkMaxChars:   cfg.ChunkMaxChars,
 			},
 			ModelCheck: modelStatus,
 			Archive: doctorArchiveJSON{
@@ -176,7 +177,7 @@ func cmdDoctor(asJSON bool) error {
 		fmt.Printf("    %s %s\n", label("models ok"), modelStatus)
 	}
 	fmt.Printf("    %s review_every=%d  poignancy=%d\n", label("review"), cfg.ReviewEvery, cfg.ReviewPoignancy)
-	fmt.Printf("    %s enabled=%t  mine_concurrency=%d\n", label("auto"), cfg.AutoDistill, cfg.MineConcurrency)
+	fmt.Printf("    %s enabled=%t  mine_concurrency=%d  chunking=%s\n", label("auto"), cfg.AutoDistill, cfg.MineConcurrency, chunkingLabel(cfg.ChunkMaxChars))
 	// Surface prose_drift: the triage model returned no JSON observation array on some
 	// pass, so those sessions distilled to zero observations even though they may not be
 	// uneventful. The remedy is a stronger triage model then a re-mine (#57).
@@ -242,6 +243,16 @@ func modelOrDefault(model, runnerCmd string) string {
 	return model
 }
 
+// chunkingLabel renders the ChunkMaxChars knob for the doctor report: the default
+// (<=0) reads "whole" (each session mined in one call — the best-quality path per
+// #57), a positive budget shows the char cap a session is split at.
+func chunkingLabel(maxChars int) string {
+	if maxChars <= 0 {
+		return "whole"
+	}
+	return fmt.Sprintf("%d chars", maxChars)
+}
+
 type doctorJSON struct {
 	DataRoot   string             `json:"data_root"`
 	Config     doctorConfigJSON   `json:"config"`
@@ -258,6 +269,7 @@ type doctorConfigJSON struct {
 	ReviewPoignancy int    `json:"review_poignancy"`
 	AutoDistill     bool   `json:"auto_distill"`
 	MineConcurrency int    `json:"mine_concurrency"`
+	ChunkMaxChars   int    `json:"chunk_max_chars"`
 }
 
 type doctorArchiveJSON struct {

@@ -58,15 +58,43 @@ type Identity interface {
 	SessionPrefix() string
 }
 
-// InputRenderer shapes a session's raw L0 records into the one-or-more model
-// inputs a distillation pass mines. This is a PER-SESSION capability resolved by
-// ForSession — deliberately independent of which engine runs the mining, so a
-// Claude runner distilling imported OpenCode sessions still chunks them correctly.
+// ChunkPolicy is how a distillation pass tells a platform to shape a session's L0
+// into model input. It is the whole cross-runtime chunking contract in one value:
+//
+//   - MaxChars is a per-input character budget (the local input model is plain text,
+//     not token-metered). MaxChars <= 0 means NEVER chunk — render the whole session
+//     as one transcript. This is the DEFAULT (store.Config.ChunkMaxChars = 0), and
+//     the measured #57 conclusion is why: on arc/reasoning lenses, splitting a
+//     session into independent windows loses ~70% of the observations (a bug found
+//     early and fixed late spans the whole session; no single window holds the arc)
+//     and inflates prose-drift ~20× (a context-less fragment induces the model to
+//     converse instead of extract). So chunking is NOT a quality knob — it is a
+//     LAST-RESORT timeout/OOM guard for a genuinely oversized session, opt-in via a
+//     positive budget.
+//
+// It is a STRUCT rather than a bare int on purpose: it is the seam where lens-kind
+// awareness (arc vs atomic) and chunk-then-merge reconciliation plug in later
+// (#57's queued design) with no interface churn — a future field is added here and
+// the two platforms read it, nothing else moves.
+type ChunkPolicy struct {
+	MaxChars int // per-input char budget; <=0 = send the whole session (default, best quality)
+}
+
+// InputRenderer shapes a session's raw L0 records into the one-or-more model inputs
+// a distillation pass mines, under a ChunkPolicy. It is a PER-SESSION capability
+// resolved by ForSession — deliberately independent of which engine runs the mining,
+// so a Claude runner distilling imported OpenCode sessions shapes them by the same
+// rule. Post-#57 the rule is SOURCE-AGNOSTIC: both hook-fed (Claude) and
+// structured-log (OpenCode) sources mine whole by default and split only when a
+// session overflows the policy budget. That parity is the fix for the CC-vs-OpenCode
+// divergence (#56 B1) where OpenCode's unconditional chunking structurally
+// under-extracted long arc-heavy sessions. The interface stays per-platform so a
+// third runtime — or the future arc-aware merge path — can still shape differently.
 type InputRenderer interface {
-	// RenderInputs returns the model input(s) for a session's raw records: a single
-	// transcript for hook-fed sources, or several overlapping chunks for sources
-	// with long structured logs.
-	RenderInputs(raw []store.RawRecord) []string
+	// RenderInputs returns the model input(s) for a session's raw records: one whole
+	// transcript when the policy budget is off or the session fits, or several
+	// overlapping windows when it overflows a positive budget.
+	RenderInputs(raw []store.RawRecord, policy ChunkPolicy) []string
 }
 
 // RenderTranscript renders raw records as "ROLE: text\n\n". It is the shared,
@@ -84,6 +112,66 @@ func RenderTranscript(raw []store.RawRecord) string {
 		b.WriteString("\n\n")
 	}
 	return b.String()
+}
+
+// chunkOverlapRecords is how many trailing records each split window re-includes at
+// the head of the next, so a rule that straddles a boundary has a chance to appear
+// whole in one window. It only matters when the policy budget forces a split.
+const chunkOverlapRecords = 2
+
+// RenderChunks is the ONE source-agnostic shaper every platform's RenderInputs
+// delegates to (it lives here, beside RenderTranscript, so a new runtime gets both
+// for free rather than importing another runtime as a de-facto base). It applies the
+// #57 policy uniformly:
+//
+//   - policy.MaxChars <= 0  → the whole session as ONE transcript (the default and
+//     the best-quality path; see ChunkPolicy for why chunking degrades arc lenses).
+//   - policy.MaxChars > 0   → split into overlapping windows each under the budget,
+//     a last-resort guard so a genuinely oversized session doesn't force a single
+//     model call that times out / OOMs. A session that already fits still renders to
+//     exactly one chunk, so turning the budget on is a no-op for normal sessions and
+//     only bites the few giants (the measured 19-of-24 fit-whole finding).
+//
+// Splitting is greedy: accumulate records until the next one would exceed maxChars,
+// emit that window, then rewind chunkOverlapRecords for the next. A single record
+// larger than the budget is emitted alone (never dropped, never infinite-loops).
+func RenderChunks(raw []store.RawRecord, policy ChunkPolicy) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	if policy.MaxChars <= 0 {
+		return []string{RenderTranscript(raw)}
+	}
+	var chunks []string
+	start := 0
+	for start < len(raw) {
+		end := start
+		chars := 0
+		for end < len(raw) {
+			entryChars := len(raw[end].Role) + len(raw[end].Text) + 4
+			if end > start && chars+entryChars > policy.MaxChars {
+				break
+			}
+			chars += entryChars
+			end++
+		}
+		if end == start {
+			end++
+		}
+		chunks = append(chunks, RenderTranscript(raw[start:end]))
+		if end >= len(raw) {
+			break
+		}
+		next := end
+		if chunkOverlapRecords > 0 && end-start > chunkOverlapRecords {
+			next = end - chunkOverlapRecords
+		}
+		if next <= start {
+			next = end
+		}
+		start = next
+	}
+	return chunks
 }
 
 // registry holds the registered platforms, keyed by Name(). It is populated by

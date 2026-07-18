@@ -26,9 +26,11 @@ func TestRegisterNormalizesNameLikeByName(t *testing.T) {
 
 type mixedCasePlatform struct{}
 
-func (mixedCasePlatform) Name() string                              { return " MixedCasePlat " }
-func (mixedCasePlatform) SessionPrefix() string                     { return "mixedcaseplat:" }
-func (mixedCasePlatform) RenderInputs(r []store.RawRecord) []string { return []string{""} }
+func (mixedCasePlatform) Name() string          { return " MixedCasePlat " }
+func (mixedCasePlatform) SessionPrefix() string { return "mixedcaseplat:" }
+func (mixedCasePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
+	return []string{""}
+}
 func (mixedCasePlatform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{}, nil
 }
@@ -92,19 +94,47 @@ func TestForSessionColumnOverridesPrefix(t *testing.T) {
 	}
 }
 
+// TestRenderInputsPerPlatform pins the SOURCE-AGNOSTIC shaping contract (#57): under
+// the default policy (MaxChars 0 = off) BOTH runtimes send the whole session as one
+// transcript, and under a tiny positive budget BOTH split the same long session into
+// several windows. Pre-#57 OpenCode chunked unconditionally while Claude never did;
+// that asymmetry (the root of the "OpenCode quality is low" report, #56 B1) is gone —
+// the only thing that decides chunking now is the policy, not the platform.
 func TestRenderInputsPerPlatform(t *testing.T) {
-	raw := []store.RawRecord{
+	short := []store.RawRecord{
 		{Role: "user", Text: "hello"},
 		{Role: "assistant", Text: "hi"},
 	}
-	cc, _ := platform.ByName("claude")
-	if got := cc.RenderInputs(raw); len(got) != 1 {
-		t.Fatalf("claude should render one transcript, got %d", len(got))
+	long := []store.RawRecord{
+		{Role: "user", Text: "alpha alpha alpha"},
+		{Role: "assistant", Text: "beta beta beta"},
+		{Role: "user", Text: "gamma gamma gamma"},
 	}
-	// OpenCode with the default (large) budget also fits in one chunk here; the
-	// chunking-splits-many case is covered by the distill worker integration test.
+	off := platform.ChunkPolicy{} // MaxChars 0 -> whole
+	// A budget that fits the whole `short` session (~28 chars incl. role+framing) in one
+	// window but is smaller than `long` (~77 chars), so `long` must split and `short`
+	// must not — proving the split is size-gated, not unconditional.
+	budget := platform.ChunkPolicy{MaxChars: 40}
+	cc, _ := platform.ByName("claude")
 	oc, _ := platform.ByName("opencode")
-	if got := oc.RenderInputs(raw); len(got) != 1 {
-		t.Fatalf("opencode short transcript should be one chunk, got %d", len(got))
+
+	// Default policy: every platform sends ONE whole transcript, regardless of source.
+	for name, p := range map[string]platform.Platform{"claude": cc, "opencode": oc} {
+		if got := p.RenderInputs(short, off); len(got) != 1 {
+			t.Fatalf("%s under default policy should render one whole transcript, got %d", name, len(got))
+		}
+		if got := p.RenderInputs(long, off); len(got) != 1 {
+			t.Fatalf("%s under default policy must NOT chunk even a longer session, got %d", name, len(got))
+		}
+	}
+	// Positive budget: every platform splits the SAME long session into >1 window
+	// (source-agnostic), while a session that fits the budget stays one chunk.
+	for name, p := range map[string]platform.Platform{"claude": cc, "opencode": oc} {
+		if got := p.RenderInputs(long, budget); len(got) <= 1 {
+			t.Fatalf("%s under a 40-char budget should split the long session, got %d", name, len(got))
+		}
+		if got := p.RenderInputs(short, budget); len(got) != 1 {
+			t.Fatalf("%s: a session that fits the budget should stay one chunk, got %d", name, len(got))
+		}
 	}
 }
