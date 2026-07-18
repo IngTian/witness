@@ -1,7 +1,7 @@
 {
   "name": "witness",
   "description": "Local memory & self-improvement engine for Claude Code: quietly captures your coding sessions and distills how your thinking, habits, and knowledge evolve over time — a person-centric growth archive (file/PDF support coming), with provenance. A pure capture-and-serve tool (not a coach), served over MCP + plain files, with global shareable lenses.",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "author": {
     "name": "Zeying Tian",
     "url": "https://github.com/IngTian"
