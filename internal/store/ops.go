@@ -396,6 +396,52 @@ func (s *Store) DistilledCount(session, lens string) int {
 	return n
 }
 
+// PendingInputChars returns the character size of a session's LARGEST undistilled
+// per-lens delta among the ACTIVE lenses: SUM(LENGTH(text)) over the raw rows past
+// the MINIMUM watermark those lenses hold on the session (an absent (session,lens)
+// row = watermark 0). The engine sizes mining concurrency against this so many tiny
+// sessions run wide but a few 200K-token ones don't all mine at once and OOM (issue
+// #56 B2).
+//
+// Why the MIN over active lenses, treating absent as 0: MineSession mines each active
+// lens over ITS OWN delta (raw[DistilledCount(session,lens):], sequentially), and
+// DistilledCount reads 0 for a lens with no progress row. So the biggest single
+// runner input for this session is raw past the most-behind active lens's watermark —
+// which is exactly this MIN. That makes it a sound UPPER bound on the per-lens input
+// this session will feed a runner:
+//   - day-one backfill: no progress rows → MIN 0 → the whole session (the 566-turn
+//     giant the issue describes);
+//   - `lens backfill codereview` after default is caught up: codereview has no row →
+//     its 0 pulls the MIN to 0 → still the whole session, so the per-lens backfill of
+//     a giant is throttled too (the issue calls this path out explicitly);
+//   - steady state (small deltas on caught-up sessions): MIN is high → just the new
+//     tail, so ordinary re-distills are never over-throttled.
+//
+// A stale watermark on a since-DISABLED lens is excluded (it's not in `lenses`), so it
+// can't skew the estimate — matching which lenses MineSession will actually run.
+//
+// `lenses` follows the same active-set contract as PendingSessions (empty → default).
+// LENGTH counts UTF-8 characters (consistent with the OpenCode chunker's char
+// budget), a fine proxy for the runner child's footprint. Read-only; 0 for a
+// fully-distilled or absent session.
+func (s *Store) PendingInputChars(session string, lenses []string) int {
+	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
+	args := append([]any{}, lensArgs...)
+	args = append(args, session, session)
+	var n int
+	_ = s.db.QueryRow(
+		`WITH active_lens(lens) AS (`+lensValues+`)
+		 SELECT COALESCE(SUM(LENGTH(text)), 0) FROM (
+		   SELECT text FROM raw WHERE session = ? ORDER BY id
+		   LIMIT -1 OFFSET (
+		     SELECT COALESCE(MIN(COALESCE(p.distilled, 0)), 0)
+		       FROM active_lens x
+		       LEFT JOIN progress p ON p.session = ? AND p.lens = x.lens
+		   )
+		 )`, args...).Scan(&n)
+	return n
+}
+
 // MarkDistilled records the watermark (count of L0 records this lens has mined) and
 // stamps when it advanced (for review cadence). Written LAST in Process so a
 // crash mid-distill re-runs the delta; obsID dedup keeps that from duplicating.

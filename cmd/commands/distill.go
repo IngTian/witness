@@ -1,9 +1,13 @@
 package commands
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/IngTian/witness/internal/store"
@@ -20,14 +24,18 @@ func newDistillCmd() *cobra.Command {
 	var since string
 	var until string
 	var all bool
+	var waitBackoffs bool
 	start := &cobra.Command{
 		Use:   "start",
 		Short: "Kick the worker in the background (or run a foreground backfill with --all).",
-		Long:  "Kick the distillation worker in the background. Optional bounds select pending sessions by their latest raw timestamp; values accept RFC3339, YYYY-MM-DD (UTC), or an age such as 7d or 24h. If another worker already holds the lock, the new process exits and queued work remains durable on disk.\n\nWith --all, run the whole backlog in the FOREGROUND instead: this process drains every pending session (mining in parallel), loads the embedding model once, and blocks until done — the day-one \"distill my whole history\" path. --all cannot be combined with --since/--until.",
+		Long:  "Kick the distillation worker in the background. Optional bounds select pending sessions by their latest raw timestamp; values accept RFC3339, YYYY-MM-DD (UTC), or an age such as 7d or 24h. If another worker already holds the lock, the new process exits and queued work remains durable on disk.\n\nWith --all, run the whole backlog in the FOREGROUND instead: this process drains every pending session (mining in parallel), loads the embedding model once, and blocks until done — the day-one \"distill my whole history\" path. --all cannot be combined with --since/--until.\n\nWith --all --wait-backoffs, also wait out any per-session mining backoffs (a timed-out or rate-limited session sleeps 5m, 10m, ... before retry) and re-drain, so \"all\" self-heals transient failures instead of returning \"backfill incomplete\" the moment the queue is momentarily empty of ready work. It gives up (and reports incomplete) once even the soonest retry is further out than a bounded wait — a session still failing by then is deterministic; re-run later to resume.",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if all {
-				return cmdDistillBackfill(quiet, since, until)
+				return cmdDistillBackfill(quiet, since, until, waitBackoffs)
+			}
+			if waitBackoffs {
+				return fmt.Errorf("--wait-backoffs applies only to the foreground backfill; use it with --all")
 			}
 			return cmdDistillStart(quiet, since, until)
 		},
@@ -36,6 +44,7 @@ func newDistillCmd() *cobra.Command {
 	start.Flags().StringVar(&since, "since", "", "latest session update at or after this time (for example 7d or 2026-07-01)")
 	start.Flags().StringVar(&until, "until", "", "latest session update at or before this time")
 	start.Flags().BoolVar(&all, "all", false, "drain the entire backlog in the foreground (blocks until done); the day-one backfill path")
+	start.Flags().BoolVar(&waitBackoffs, "wait-backoffs", false, "with --all, wait out mining backoffs and retry timed-out/rate-limited sessions until the backlog drains or a retry is too far out")
 	distillCmd.AddCommand(start)
 	var statusJSON bool
 	statusCmd := &cobra.Command{
@@ -109,7 +118,18 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 // inspect the END STATE after the drain and fail (nonzero exit) if any pending or
 // backed-off work remains — so automation can detect an incomplete migration
 // regardless of which internal layer failed.
-func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
+//
+// waitBackoffs (issue #56 B4) opts into self-healing transient mining failures: a
+// timed-out/rate-limited session backs off 5m, 10m, ... and drops out of the READY
+// queue, so a plain `--all` returns "backfill incomplete" the instant the queue is
+// momentarily empty even though the session would succeed on retry. With the flag we
+// sleep to the soonest NextBackoffAttempt and re-drain, looping until the backlog is
+// clean OR the soonest retry is further out than backfillMaxWait (a session still
+// failing by then is deterministic — e.g. a too-large session that times out every
+// pass, whose real fix is chunking, #56 B1 blocked on #57 — so we stop and report
+// incomplete rather than block the foreground indefinitely). The end-state check
+// below stays the authority on success either way.
+func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs bool) error {
 	if strings.TrimSpace(sinceValue) != "" || strings.TrimSpace(untilValue) != "" {
 		return fmt.Errorf("--all drains the entire backlog and cannot be combined with --since/--until")
 	}
@@ -124,6 +144,9 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 		driftBefore = st0.DriftTotal()
 		st0.Close()
 	}
+
+	// A drain pass = one full foreground worker run (mine + review + re-check to empty).
+	// It reports ran=false only when another worker already holds the lock.
 	ran, err := runWorker(false)
 	if err != nil {
 		return err
@@ -131,6 +154,22 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 	if !ran {
 		fmt.Println("another distillation worker is already running; it is draining the backlog — nothing to do")
 		return nil
+	}
+
+	if waitBackoffs {
+		// Ctrl-C during a between-passes sleep aborts the wait and falls through to the
+		// end-state check, which reports the honest (still-incomplete) state.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := backfillDrainWithRetry(ctx, backfillRetryDeps{
+			rerun:            func() error { _, e := runWorker(false); return e },
+			waitForNextRetry: waitForNextBackfillRetry,
+			sleep:            interruptibleSleep,
+			maxWait:          backfillMaxWait,
+			logWaiting:       func(d time.Duration) { backfillLogWaiting(quiet, d) },
+		}); err != nil {
+			return err
+		}
 	}
 
 	// Verify the end state: nothing should be pending or backed off after a full
@@ -143,7 +182,11 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 	defer st.Close()
 	stats := st.Stats(activeLensNames(st))
 	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
-		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log; a missing embedding model or provider failure is the usual cause)", stats.Pending, stats.BackedOff)
+		hint := "a missing embedding model or provider failure is the usual cause"
+		if stats.BackedOff > 0 && !waitBackoffs {
+			hint = "re-run with `--all --wait-backoffs` to wait out transient mining backoffs"
+		}
+		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log; %s)", stats.Pending, stats.BackedOff, hint)
 	}
 	if !quiet {
 		msg := "backfill complete"
@@ -156,6 +199,99 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
 		fmt.Println(msg)
 	}
 	return nil
+}
+
+// backfillMaxWait bounds how far out a mining backoff the foreground `--all
+// --wait-backoffs` loop will wait between re-drains. Mining backoff doubles (5m, 10m,
+// 20m, ... — backoffDelay in internal/distill), so 15m waits out the first two retries
+// (attempt 1 → 5m, attempt 2 → 10m: transient outages) but stops once the soonest
+// retry is 20m+ out, treating a session that has failed 3+ times as deterministically
+// broken (its real fix isn't waiting longer). Because each failed session's backoff
+// strictly grows and only clears on SUCCESS, the soonest retry time strictly advances
+// every pass, so the loop provably terminates — either the queue drains or the min
+// retry crosses this bound.
+const backfillMaxWait = 15 * time.Minute
+
+// backfillRetryDeps are the seams backfillDrainWithRetry needs, injected so the retry
+// policy + termination are unit-testable without a real store, embedder, or clock
+// (the same seam pattern as distillLoopDeps). waitForNextRetry returns the DURATION
+// until the soonest outstanding backoff — a duration, not an absolute time, so the
+// loop carries NO hidden dependency on the real clock (a test drives it with plain
+// numbers).
+type backfillRetryDeps struct {
+	rerun            func() error                               // run one more full foreground drain pass
+	waitForNextRetry func() (time.Duration, bool)               // time until the soonest backed-off retry; false = none outstanding
+	sleep            func(ctx context.Context, d time.Duration) // wait (interruptibly) between passes
+	maxWait          time.Duration                              // give up once the soonest retry is further out than this
+	logWaiting       func(d time.Duration)                      // narrate a wait to the user
+}
+
+// backfillDrainWithRetry is the pure --wait-backoffs loop: while some session is still
+// sleeping out a mining backoff AND its retry is within maxWait, sleep until it's due
+// and drain again. Terminates when no backoff is outstanding (queue clean or only
+// non-backoff work remains, which the end-state check judges) or the soonest retry is
+// beyond maxWait (deterministic failure — stop and let the caller report incomplete).
+// Returns only a rerun error; "still incomplete" is not an error here (the end-state
+// check owns that verdict).
+func backfillDrainWithRetry(ctx context.Context, d backfillRetryDeps) error {
+	for {
+		if ctx.Err() != nil {
+			return nil // interrupted; the end-state check reports the honest state
+		}
+		wait, ok := d.waitForNextRetry()
+		if !ok {
+			return nil // nothing backed off → nothing to wait for
+		}
+		if wait > d.maxWait {
+			return nil // soonest retry too far out → treat as deterministic; stop waiting
+		}
+		if wait > 0 {
+			d.logWaiting(wait)
+			d.sleep(ctx, wait)
+			if ctx.Err() != nil {
+				return nil
+			}
+		}
+		if err := d.rerun(); err != nil {
+			return err
+		}
+	}
+}
+
+// waitForNextBackfillRetry reports the DURATION until the soonest outstanding
+// mining-backoff retry across the active lenses (the same active-set contract as the
+// end-state Stats check), or ok=false if none is outstanding. A retry already due
+// (next_attempt in the past) yields a non-positive duration, which the loop treats as
+// "rerun now".
+func waitForNextBackfillRetry() (time.Duration, bool) {
+	st, err := store.Open()
+	if err != nil {
+		return 0, false
+	}
+	defer st.Close()
+	next, ok := st.NextBackoffAttempt(activeLensNames(st), time.Now())
+	if !ok {
+		return 0, false
+	}
+	return time.Until(next), true
+}
+
+// interruptibleSleep waits d, returning early if ctx is cancelled (Ctrl-C).
+func interruptibleSleep(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
+}
+
+func backfillLogWaiting(quiet bool, d time.Duration) {
+	if quiet {
+		return
+	}
+	// Round to the second so the message is readable ("waiting 4m59s" not nanoseconds).
+	fmt.Printf("backlog has backed-off sessions; waiting %s for the next retry (Ctrl-C to stop and report progress)\n", d.Round(time.Second))
 }
 
 func parseSessionTimeRange(sinceValue, untilValue string, now time.Time) (sessionTimeRange, error) {

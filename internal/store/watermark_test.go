@@ -2,6 +2,7 @@ package store
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -272,6 +273,63 @@ func TestNextBackoffAttempt(t *testing.T) {
 	at, ok := s.NextBackoffAttempt(nil, now)
 	if !ok || !at.Equal(now.Add(2*time.Minute)) {
 		t.Fatalf("NextBackoffAttempt = %s, %v; want sooner", at, ok)
+	}
+}
+
+// PendingInputChars sizes the drain's in-flight budget (issue #56 B2). It must
+// report the chars of the session's LARGEST undistilled per-lens delta among the
+// ACTIVE lenses, treating an absent (session,lens) row as watermark 0 — so a
+// day-one backfill and a newly-enabled lens both size to the whole session, while a
+// caught-up lens sizes to just the new tail.
+func TestPendingInputChars(t *testing.T) {
+	s := tempStore(t)
+	appendText := func(session, text string) {
+		t.Helper()
+		if err := s.AppendRaw(RawRecord{Session: session, Seq: s.NextSeq(session), Role: "user", Text: text}); err != nil {
+			t.Fatalf("AppendRaw: %v", err)
+		}
+	}
+	// Session with 3 turns of known sizes: 10 + 20 + 5 = 35 chars.
+	appendText("a", strings.Repeat("x", 10))
+	appendText("a", strings.Repeat("y", 20))
+	appendText("a", strings.Repeat("z", 5))
+
+	// Nothing distilled → the whole session (35), for the default lens.
+	if got := s.PendingInputChars("a", []string{LensDefault}); got != 35 {
+		t.Fatalf("fresh session: want 35 chars, got %d", got)
+	}
+	// nil lenses falls back to default → same answer.
+	if got := s.PendingInputChars("a", nil); got != 35 {
+		t.Fatalf("nil lenses should default to default lens: want 35, got %d", got)
+	}
+
+	// default distilled past the first 2 turns → only the 5-char tail remains.
+	s.MarkDistilled("a", LensDefault, 2)
+	if got := s.PendingInputChars("a", []string{LensDefault}); got != 5 {
+		t.Fatalf("caught-up default: want the 5-char tail, got %d", got)
+	}
+
+	// Enable a NEW lens (no progress row → watermark 0). The MIN over the active set
+	// drops to 0, so the estimate is the WHOLE session again (35) — the per-lens
+	// backfill of a giant must be throttled, not sized to default's advanced watermark.
+	if got := s.PendingInputChars("a", []string{LensDefault, "codereview"}); got != 35 {
+		t.Fatalf("newly-enabled lens must size to the whole session: want 35, got %d", got)
+	}
+
+	// A stale watermark on a since-DISABLED lens must not skew the estimate: with only
+	// default active (caught up to 2), the disabled codereview's absence is irrelevant.
+	s.MarkDistilled("a", "codereview", 3) // codereview fully caught up
+	if got := s.PendingInputChars("a", []string{LensDefault}); got != 5 {
+		t.Fatalf("disabled lens must be excluded: want the 5-char tail, got %d", got)
+	}
+	// Both caught up (default→3) → nothing pending → 0.
+	s.MarkDistilled("a", LensDefault, 3)
+	if got := s.PendingInputChars("a", []string{LensDefault, "codereview"}); got != 0 {
+		t.Fatalf("fully-distilled session: want 0, got %d", got)
+	}
+	// Absent session → 0, never a panic.
+	if got := s.PendingInputChars("nope", []string{LensDefault}); got != 0 {
+		t.Fatalf("absent session: want 0, got %d", got)
 	}
 }
 
