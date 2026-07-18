@@ -17,8 +17,8 @@ import (
 // changed and adding typed validation here isn't worth it yet.
 var configKeys = map[string]string{
 	"runner":        "distillation runtime: `claude` or `opencode` (also settable via `witness install`)",
-	"triage_model":  "model for per-session mining (empty = the runner's environment default)",
-	"distill_model": "model for the reviewer + profile summarizer (empty = the runner's default)",
+	"triage_model":  "MINING model — L0 turns → L1 observations, per session (the frequent, dominant cost). Empty = the runner's environment default.",
+	"distill_model": "REVIEW model — L1 observations → L2 facets + L4 profile, batched. Empty = falls back to triage_model, so one setting covers the whole pipeline.",
 }
 
 func newConfigCmd() *cobra.Command {

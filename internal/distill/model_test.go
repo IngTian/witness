@@ -56,6 +56,35 @@ func TestModelFor(t *testing.T) {
 	}
 }
 
+// Review falls back to TriageModel when DistillModel is unset, so a single
+// `triage_model` covers the whole pipeline and the review never silently inherits the
+// runner's ambient default (for `claude -p`, the operator's heavy interactive model —
+// which stalled the review during v0.3.0 live-test). An explicit DistillModel still wins.
+func TestModelForReviewFallsBackToTriageWhenDistillEmpty(t *testing.T) {
+	// Only triage_model set; distill_model empty.
+	cfg := store.Config{Runner: "claude", TriageModel: "haiku", DistillModel: ""}
+	if got := ModelFor(cfg, nil, PhaseReview); got != "haiku" {
+		t.Fatalf("empty DistillModel review must fall back to TriageModel, got %q", got)
+	}
+	if got := ModelFor(cfg, &lens.Lens{Name: "d"}, PhaseReview); got != "haiku" {
+		t.Fatalf("per-lens (no override) review must fall back to TriageModel, got %q", got)
+	}
+	// An explicit DistillModel still overrides the review stage.
+	cfg2 := store.Config{Runner: "claude", TriageModel: "haiku", DistillModel: "sonnet"}
+	if got := ModelFor(cfg2, nil, PhaseReview); got != "sonnet" {
+		t.Fatalf("explicit DistillModel must win for review, got %q", got)
+	}
+	// Both empty → "" (the runner's own default), unchanged.
+	cfg3 := store.Config{Runner: "claude"}
+	if got := ModelFor(cfg3, nil, PhaseReview); got != "" {
+		t.Fatalf("both empty → runner default (\"\"), got %q", got)
+	}
+	// Extract is unaffected by the fallback (still TriageModel directly).
+	if got := ModelFor(cfg, nil, PhaseExtract); got != "haiku" {
+		t.Fatalf("extract still uses TriageModel, got %q", got)
+	}
+}
+
 // RunnerFor routes a lens to its own runner if set, else the default (cfg.Runner); a nil
 // lens rides the default (#75 slice 2).
 func TestRunnerFor(t *testing.T) {

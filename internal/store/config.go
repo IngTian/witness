@@ -303,9 +303,15 @@ func (s *Store) EnsureConfigFile() error {
 # (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
 # runner = "claude"
 
-# Models for the per-session miner and the periodic reviewer. Empty = use the
-# ` + "`claude -p`" + ` / ` + "`opencode run`" + ` default. With runner = opencode, use OpenCode
-# model names such as "openai/gpt-5.5".
+# Two distillation stages, two models:
+#   triage_model  — MINING: L0 turns -> L1 observations, once per session (frequent).
+#   distill_model — REVIEW: L1 observations -> L2 facets + L4 profile (batched).
+# Empty distill_model falls back to triage_model, so setting just triage_model gives
+# the whole pipeline one model. Empty triage_model uses the runner's own default
+# (` + "`claude -p`" + ` / ` + "`opencode run`" + `) — but note that for claude that is your
+# ambient interactive model, which may be heavy; set triage_model to pin a light one.
+# With runner = opencode, use OpenCode model names such as "openai/gpt-5.5".
+# (A lens may override these per-lens via its lens.json extract_model / review_model.)
 triage_model  = ""
 distill_model = ""
 
