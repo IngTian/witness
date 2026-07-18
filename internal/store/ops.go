@@ -90,6 +90,43 @@ func (s *Store) ReadRaw(session string) ([]RawRecord, error) {
 	return out, rows.Err()
 }
 
+// ReadRawSnapshot returns a session's full raw log (capture order) AND the highest
+// raw.id in that same result set — read in ONE query, so the content/count and the
+// raw "generation" id are a single atomic snapshot.
+//
+// Why this exists (issue #67-1): the mine used to read content via ReadRaw and the
+// generation id via MaxRawID as TWO separate statements. MaxOpenConns(1) serializes
+// each statement but NOT the pair — the connection is released between them. A replace-
+// import (ApplyRawImport replace=true: DELETE raw + re-INSERT, under a DIFFERENT lock
+// than the worker) or `witness cleanup` committing in that gap pairs an OLD-generation
+// count/content with the NEW generation's high id. The CAS in MarkDistilledIfCurrent
+// then finds that new id live, passes its guard, and blind-advances the watermark over
+// turns that were never mined — a silent lost delta. Reading both from one result set
+// makes rawHighID provably the max id of exactly the rows returned, so the pair can
+// never straddle a generation boundary. Because rows are ORDER BY id ASC, the max is
+// the last row's id; an empty session yields (nil, 0, nil), matching MaxRawID's
+// COALESCE(MAX(id), 0) == 0.
+func (s *Store) ReadRawSnapshot(session string) (recs []RawRecord, rawHighID int64, err error) {
+	rows, err := s.db.Query(
+		`SELECT id, ts, session, seq, role, effort, text FROM raw WHERE session = ? ORDER BY id`, session)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var r RawRecord
+		if err := rows.Scan(&id, &r.TS, &r.Session, &r.Seq, &r.Role, &r.Effort, &r.Text); err != nil {
+			return nil, 0, err
+		}
+		recs = append(recs, r)
+		if id > rawHighID {
+			rawHighID = id
+		}
+	}
+	return recs, rawHighID, rows.Err()
+}
+
 // RawCount returns the number of raw records in a session. This is the unit the
 // distillation watermark counts in — the same unit MarkDistilled stores, since
 // the worker writes len(ReadRaw). (No line-vs-record skew like the old JSONL.)
