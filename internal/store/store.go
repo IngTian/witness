@@ -49,6 +49,7 @@ type Store struct {
 	procLocks // cross-process advisory flocks (worker/import) (issue #73-C1)
 	lensReg   // on-disk lens registry under <root>/lenses/ (issue #73-C1)
 	facetIO   // L2 bi-temporal facets (reviewer is sole writer) (issue #73-C1)
+	rawIO     // L0 append-only transcript + size/sample/prune helpers (issue #73-C1)
 }
 
 // Open returns the Store rooted at WITNESS_HOME, else the resolved default under
@@ -87,6 +88,7 @@ func Open() (*Store, error) {
 	// runner-bound flag via the metaKV-backed MetaString).
 	s.metaKV = metaKV{db: db}
 	s.facetIO = facetIO{db: db}
+	s.rawIO = rawIO{db: db}
 	// One-shot (issue #71): fold a config that already carries a deliberate runner
 	// choice (a legacy markerless install, or a manually-uncommented runner line)
 	// into the runner_bound flag — the SINGLE source of truth ResolveRunner reads.
