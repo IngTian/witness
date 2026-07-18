@@ -1,8 +1,10 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,6 +52,24 @@ type Config struct {
 // runner that is not ConcurrentRunSafe.
 const DefaultMineConcurrency = 4
 
+// configFile is the user-authored config.toml concern plus the DB-backed review
+// cadence and runner-bound flag that config resolution consults. Unlike the other
+// concerns it needs BOTH the data root (to read/rewrite config.toml) and the shared
+// *sql.DB (StampReview/SessionsSinceReview/PoignancySinceReview read the review
+// offsets in `meta` and progress; adoptRunnerBound/ResolveRunner read the runner-bound
+// flag). root is immutable post-Open, so this copy can't drift from Store.Root.
+type configFile struct {
+	db   *sql.DB
+	root string
+}
+
+// configTomlPath is the config.toml location under a data root. A free function so
+// both configFile and Store.ConfigPath resolve the same path from just the root.
+func configTomlPath(root string) string { return filepath.Join(root, "config.toml") }
+
+// configPath is configFile's own accessor for its backing file.
+func (c *configFile) configPath() string { return configTomlPath(c.root) }
+
 func DefaultConfig() Config {
 	return Config{
 		Runner:          "claude",
@@ -71,11 +91,11 @@ func DefaultConfig() Config {
 }
 
 // LoadConfig reads config.toml if present, layering over defaults.
-func (s *Store) LoadConfig() Config {
-	c := DefaultConfig()
-	data, err := os.ReadFile(s.ConfigPath())
+func (c *configFile) LoadConfig() Config {
+	cfg := DefaultConfig()
+	data, err := os.ReadFile(c.configPath())
 	if err != nil {
-		return c
+		return cfg
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -91,12 +111,12 @@ func (s *Store) LoadConfig() Config {
 		switch k {
 		case "runner":
 			if v != "" {
-				c.Runner = v
+				cfg.Runner = v
 			}
 		case "triage_model":
-			c.TriageModel = v
+			cfg.TriageModel = v
 		case "distill_model":
-			c.DistillModel = v
+			cfg.DistillModel = v
 		case "review_every":
 			// Clamp <=0 back to the default rather than accepting it verbatim (issue
 			// #49 I1). ReviewDue tests `SessionsSinceReview() >= ReviewEvery`, so a 0
@@ -107,18 +127,18 @@ func (s *Store) LoadConfig() Config {
 			// number; the poignancy trigger is the one with off-via-0 semantics.)
 			if n, err := strconv.Atoi(v); err == nil {
 				if n <= 0 {
-					c.ReviewEvery = DefaultConfig().ReviewEvery
+					cfg.ReviewEvery = DefaultConfig().ReviewEvery
 				} else {
-					c.ReviewEvery = n
+					cfg.ReviewEvery = n
 				}
 			}
 		case "review_poignancy":
 			if n, err := strconv.Atoi(v); err == nil {
-				c.ReviewPoignancy = n
+				cfg.ReviewPoignancy = n
 			}
 		case "auto_distill":
 			if b, ok := parseBool(v); ok {
-				c.AutoDistill = b
+				cfg.AutoDistill = b
 			}
 		// auto_distill_interval_minutes / auto_distill_session_budget were the
 		// pre-#22 throughput throttles (a start cooldown + a per-run session cap).
@@ -130,9 +150,9 @@ func (s *Store) LoadConfig() Config {
 			// would drain nothing); the engine still clamps the effective value.
 			if n, err := strconv.Atoi(v); err == nil {
 				if n <= 0 {
-					c.MineConcurrency = DefaultMineConcurrency
+					cfg.MineConcurrency = DefaultMineConcurrency
 				} else {
-					c.MineConcurrency = n
+					cfg.MineConcurrency = n
 				}
 			}
 		case "chunk_max_chars":
@@ -142,17 +162,17 @@ func (s *Store) LoadConfig() Config {
 			// as "send whole" — so we store the parsed int as-is; a positive value opts a
 			// user with oversized sessions into last-resort splitting (issue #57).
 			if n, err := strconv.Atoi(v); err == nil {
-				c.ChunkMaxChars = n
+				cfg.ChunkMaxChars = n
 			}
 		case "lens":
 			// One enabled lens per line: "lens = <name>". Global — runs on every
 			// session. Deduped so repeated lines don't multiply.
-			if v != "" && !slices.Contains(c.EnabledLenses, v) {
-				c.EnabledLenses = append(c.EnabledLenses, v)
+			if v != "" && !slices.Contains(cfg.EnabledLenses, v) {
+				cfg.EnabledLenses = append(cfg.EnabledLenses, v)
 			}
 		}
 	}
-	return c
+	return cfg
 }
 
 // runnerBoundKey is the SINGLE source of truth for "did the user explicitly bind a
@@ -185,8 +205,8 @@ const runnerBoundKey = "runner_bound"
 // write (e.g. `config set triage_model`) can ever change what runner resolves.
 // adoptRunnerBound (at Open) is what stamps the flag for a config that already
 // carries a deliberate runner choice.
-func (s *Store) ResolveRunner(cfg Config) string {
-	if metaGet(s.db, runnerBoundKey) == "1" {
+func (c *configFile) ResolveRunner(cfg Config) string {
+	if metaGet(c.db, runnerBoundKey) == "1" {
 		return cfg.Runner
 	}
 	if env := strings.TrimSpace(os.Getenv("WITNESS_RUNNER")); env != "" {
@@ -209,17 +229,17 @@ func (s *Store) ResolveRunner(cfg Config) string {
 // applies); and a stamp WRITE failure (only reachable under a >5s busy-timeout or a
 // dead disk, which fail Open outright) simply retries on the next Open, so a legacy
 // active-line archive self-heals to bound — no persistent misresolution.
-func (s *Store) adoptRunnerBound() {
-	if metaGet(s.db, runnerBoundKey) == "1" {
+func (c *configFile) adoptRunnerBound() {
+	if metaGet(c.db, runnerBoundKey) == "1" {
 		return // already bound (via install/config set, or a prior adoption)
 	}
-	data, err := os.ReadFile(s.ConfigPath())
+	data, err := os.ReadFile(c.configPath())
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if isConfigKeyLine(line, "runner") {
-			_ = metaSet(s.db, runnerBoundKey, "1")
+			_ = metaSet(c.db, runnerBoundKey, "1")
 			return
 		}
 	}
@@ -242,14 +262,14 @@ func parseBool(v string) (bool, bool) {
 // the user does not have to hand-edit config. Other lines (comments, lenses,
 // other keys) are preserved verbatim. The value is quoted to match the format
 // EnsureConfigFile writes and to stay consistent with other string fields.
-func (s *Store) SetRunner(runner string) error {
-	if err := s.setConfigKey("runner", runner); err != nil {
+func (c *configFile) SetRunner(runner string) error {
+	if err := c.setConfigKey("runner", runner); err != nil {
 		return err
 	}
 	// Mark that a runner was explicitly chosen via install, so ResolveRunner lets
 	// this persisted value win over any WITNESS_RUNNER env fallback (a dual
 	// CC+OpenCode user who ran `install` is never hijacked by the plugin env).
-	return metaSet(s.db, runnerBoundKey, "1")
+	return metaSet(c.db, runnerBoundKey, "1")
 }
 
 // SetConfigString sets a string-valued config.toml key (creating or replacing its
@@ -257,12 +277,12 @@ func (s *Store) SetRunner(runner string) error {
 // file — used by `witness config`. Marks the runner as explicitly bound when key is
 // "runner" so a CLI-set runner wins over the WITNESS_RUNNER env fallback exactly like
 // `install` does. Other keys don't need the marker.
-func (s *Store) SetConfigString(key, value string) error {
-	if err := s.setConfigKey(key, value); err != nil {
+func (c *configFile) SetConfigString(key, value string) error {
+	if err := c.setConfigKey(key, value); err != nil {
 		return err
 	}
 	if key == "runner" {
-		return metaSet(s.db, runnerBoundKey, "1")
+		return metaSet(c.db, runnerBoundKey, "1")
 	}
 	return nil
 }
@@ -277,8 +297,8 @@ func (s *Store) SetConfigString(key, value string) error {
 // reads only that flag — never config text — so a model-key write here cannot
 // perturb which runner resolves. (Previously this had to special-case a marker
 // comment to avoid exactly that coupling.)
-func (s *Store) setConfigKey(key, value string) error {
-	data, err := os.ReadFile(s.ConfigPath())
+func (c *configFile) setConfigKey(key, value string) error {
+	data, err := os.ReadFile(c.configPath())
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -304,7 +324,7 @@ func (s *Store) setConfigKey(key, value string) error {
 		kept = append(kept, newLine)
 	}
 	out := strings.Join(kept, "\n") + "\n"
-	return writeAtomic(s.ConfigPath(), []byte(out))
+	return writeAtomic(c.configPath(), []byte(out))
 }
 
 // EnsureConfigFile creates config.toml with a full commented template if it does
@@ -312,8 +332,8 @@ func (s *Store) setConfigKey(key, value string) error {
 // and the user can see what to edit. Existing files are never overwritten —
 // later installs only refresh `runner` via SetRunner, leaving user edits intact.
 // Forward-compatible: old configs without some fields simply fall back to defaults.
-func (s *Store) EnsureConfigFile() error {
-	if _, err := os.Stat(s.ConfigPath()); err == nil {
+func (c *configFile) EnsureConfigFile() error {
+	if _, err := os.Stat(c.configPath()); err == nil {
 		return nil // already present; never clobber user edits
 	} else if !os.IsNotExist(err) {
 		return err
@@ -367,7 +387,7 @@ chunk_max_chars = 0
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math
 `
-	return writeAtomic(s.ConfigPath(), []byte(tpl))
+	return writeAtomic(c.configPath(), []byte(tpl))
 }
 
 // isConfigKeyLine reports whether a config line is a `<key> = ...` assignment for the
@@ -392,9 +412,9 @@ func isConfigKeyLine(line, key string) bool {
 //     whose distilled_at is later (RFC3339 UTC sorts lexically).
 
 // StampReview records that a review just ran by advancing both review offsets.
-func (s *Store) StampReview() error {
+func (c *configFile) StampReview() error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	tx, err := s.db.Begin()
+	tx, err := c.db.Begin()
 	if err != nil {
 		return err
 	}
@@ -419,10 +439,10 @@ func (s *Store) StampReview() error {
 // SessionsSinceReview counts sessions distilled since the last review stamp.
 // Progress is per-(session,lens), so COUNT DISTINCT session — else a session mined
 // by N lenses would count N times and trip the review cadence N× too early.
-func (s *Store) SessionsSinceReview() int {
-	last := metaGet(s.db, "review_ts")
+func (c *configFile) SessionsSinceReview() int {
+	last := metaGet(c.db, "review_ts")
 	var n int
-	_ = s.db.QueryRow(
+	_ = c.db.QueryRow(
 		`SELECT COUNT(DISTINCT session) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
 	return n
 }
@@ -430,10 +450,10 @@ func (s *Store) SessionsSinceReview() int {
 // PoignancySinceReview sums the poignancy of observations recorded since the last
 // review. This is the salience signal: a few high-poignancy sessions can trigger
 // a review sooner than the plain session-count cap would.
-func (s *Store) PoignancySinceReview() int {
-	off := metaGetInt(s.db, "review_obs_rowid")
+func (c *configFile) PoignancySinceReview() int {
+	off := metaGetInt(c.db, "review_obs_rowid")
 	var sum int
-	_ = s.db.QueryRow(
+	_ = c.db.QueryRow(
 		`SELECT COALESCE(SUM(poignancy), 0) FROM observations WHERE rowid > ?`, off).Scan(&sum)
 	return sum
 }
@@ -447,11 +467,11 @@ func (s *Store) PoignancySinceReview() int {
 // ReviewDue reports whether the reviewer should run: either enough distilled
 // sessions since the last review (the cap), OR enough accumulated poignancy
 // (salience) — whichever comes first.
-func (s *Store) ReviewDue(cfg Config) bool {
-	if s.SessionsSinceReview() >= cfg.ReviewEvery {
+func (c *configFile) ReviewDue(cfg Config) bool {
+	if c.SessionsSinceReview() >= cfg.ReviewEvery {
 		return true
 	}
-	return cfg.ReviewPoignancy > 0 && s.PoignancySinceReview() >= cfg.ReviewPoignancy
+	return cfg.ReviewPoignancy > 0 && c.PoignancySinceReview() >= cfg.ReviewPoignancy
 }
 
 // --- enabled-lens writers (global) -------------------------------------------
@@ -461,21 +481,21 @@ func (s *Store) ReviewDue(cfg Config) bool {
 // A reserved name (the always-on built-in / the unified summary) is refused:
 // belt-and-suspenders alongside RegisterLens, so even a config hand-edit that
 // slipped a reserved name into the registry can't enable it into the active set.
-func (s *Store) EnableLens(name string) error {
+func (c *configFile) EnableLens(name string) error {
 	if ReservedLensName(name) {
 		return fmt.Errorf("lens name %q is reserved and cannot be enabled (the built-in %q lens always runs)", name, LensDefault)
 	}
-	return s.rewriteEnabledLens(name, true)
+	return c.rewriteEnabledLens(name, true)
 }
 
 // DisableLens removes a lens from the enabled set (no-op if absent).
-func (s *Store) DisableLens(name string) error { return s.rewriteEnabledLens(name, false) }
+func (c *configFile) DisableLens(name string) error { return c.rewriteEnabledLens(name, false) }
 
 // rewriteEnabledLens drops any existing `lens = <name>` line for name, then (if
 // enabling) appends one. Read-modify-write of the whole file, atomic on rename —
 // fine at config scale. Comments and other settings are preserved verbatim.
-func (s *Store) rewriteEnabledLens(name string, enable bool) error {
-	data, err := os.ReadFile(s.ConfigPath())
+func (c *configFile) rewriteEnabledLens(name string, enable bool) error {
+	data, err := os.ReadFile(c.configPath())
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -498,7 +518,7 @@ func (s *Store) rewriteEnabledLens(name string, enable bool) error {
 	if out != "" {
 		out += "\n"
 	}
-	return writeAtomic(s.ConfigPath(), []byte(out))
+	return writeAtomic(c.configPath(), []byte(out))
 }
 
 // lensLineName returns the lens name in a `lens = <name>` config line, or
