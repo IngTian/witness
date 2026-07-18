@@ -29,6 +29,80 @@ func TestBuildOpenCodeServeCmdIsolation(t *testing.T) {
 	}
 }
 
+// TestIsStrayServeLine locks the reap fingerprint (issue #54 I2): it must match a
+// witness-launched `opencode serve` regardless of how the executable path is
+// printed, and must NOT match a user's own `opencode serve`, any other opencode
+// subcommand, or an unrelated process. This is one half of the safety gate; the
+// other (orphan-only) is enforced in TestStrayServePIDs.
+func TestIsStrayServeLine(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"witness serve absolute path", "/Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR", true},
+		{"witness serve bare basename", "opencode serve --pure --hostname 127.0.0.1 --port 40001", true},
+		{"user serve without --pure", "/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 4096", false},
+		{"user serve on a public hostname", "opencode serve --pure --hostname 0.0.0.0 --port 4096", false},
+		{"other opencode subcommand", "opencode models --pure openai", false},
+		{"not opencode at all", "claude -p --model haiku", false},
+		{"empty line", "", false},
+		{"opencode substring in another binary is fine (still needs serve+flags)", "/opt/my-opencode-helper/tool run", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStrayServeLine(tc.line); got != tc.want {
+				t.Fatalf("isStrayServeLine(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPsField(t *testing.T) {
+	cases := []struct {
+		line     string
+		wantN    int
+		wantRest string
+		wantOK   bool
+	}{
+		{"  4321   1 opencode serve --pure", 4321, "1 opencode serve --pure", true},
+		{"1 opencode serve", 1, "opencode serve", true},
+		{"\t99\tclaude -p", 99, "claude -p", true},
+		{"notanumber rest", 0, "", false},
+		{"", 0, "", false},
+		{"12345", 0, "", false}, // no command column
+	}
+	for _, tc := range cases {
+		n, rest, ok := psField(tc.line)
+		if ok != tc.wantOK || n != tc.wantN || rest != tc.wantRest {
+			t.Fatalf("psField(%q) = (%d, %q, %v), want (%d, %q, %v)", tc.line, n, rest, ok, tc.wantN, tc.wantRest, tc.wantOK)
+		}
+	}
+}
+
+// TestStrayServePIDs is the core safety test: only an ORPHANED witness serve
+// (ppid==1, matching fingerprint) may be selected for reaping. A live sibling serve
+// (ppid != 1 — still owned by its worker), a user's own serve, a non-serve process,
+// the scanner's own pid, and init itself must all be skipped.
+func TestStrayServePIDs(t *testing.T) {
+	const self = 700
+	psOut := strings.Join([]string{
+		"  4321     1 /Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR", // orphan → reap
+		"  4400  4399 /Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5322 --log-level ERROR", // LIVE sibling (ppid!=1) → skip
+		"  4500     1 /usr/local/bin/opencode serve --hostname 127.0.0.1 --port 6000",                                  // user's own serve (no --pure) → skip
+		"  4600     1 opencode models --pure openai",                                                                   // other subcommand → skip
+		"   700     1 opencode serve --pure --hostname 127.0.0.1 --port 9999",                                          // self → skip
+		"     1     0 /sbin/launchd",         // init → skip
+		"  garbage line that does not parse", // skip
+	}, "\n")
+
+	got := strayServePIDs(psOut, self)
+	want := []int{4321}
+	if !slices.Equal(got, want) {
+		t.Fatalf("strayServePIDs = %v, want %v", got, want)
+	}
+}
+
 func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 	var created, prompted, deleted bool
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
