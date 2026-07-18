@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -63,6 +65,14 @@ func StartOpenCodeServer(ctx context.Context, models ...string) (*OpenCodeServer
 	if err := ValidateOpenCodeModels(ctx, models...); err != nil {
 		return nil, err
 	}
+	// Best-effort reap of any orphaned serve from a previous worker that was
+	// SIGKILL'd/OOM-killed before its Go cleanup (Close/ctx-cancel) could run
+	// (issue #54 I2). On Linux Pdeathsig handles this instantly and reapStrayServes
+	// is a no-op; on macOS/Windows (no Pdeathsig) this is the only cleanup for a
+	// hard-killed parent. Safe to run under every serve-start path because they all
+	// hold WorkerLock first — see reapStrayServes for why a live sibling is never a
+	// candidate.
+	reapStrayServes()
 	port, err := freeTCPPort()
 	if err != nil {
 		return nil, err
@@ -412,7 +422,103 @@ func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec
 		"OPENCODE_SERVER_PASSWORD="+password,
 		"OPENCODE_CONFIG_CONTENT="+openCodeConfigContent(),
 	)
+	// serveSysProcAttr is GOOS-split (server_linux.go / server_other.go): on Linux
+	// it sets Pdeathsig=SIGKILL so the kernel kills this serve child the instant the
+	// worker dies, even on a SIGKILL/OOM the worker's Go cleanup can't survive (issue
+	// #54 I2). No such primitive exists on macOS/Windows, where it's nil and the
+	// startup reapStrayServes is the fallback.
+	cmd.SysProcAttr = serveSysProcAttr()
 	return cmd
+}
+
+// openCodeServeMarker is a stable, distinctive token in every witness-launched
+// `opencode serve` command line. `--pure` + a 127.0.0.1 bind + our ERROR log level
+// is a signature a human's own `opencode serve` is very unlikely to reproduce, and
+// it is checked ONLY against processes already confirmed orphaned (see
+// isStrayServeLine), so it never needs to be unique — just witness-shaped.
+const openCodeServeMarker = "opencode"
+
+// isStrayServeLine reports whether a `ps`-style command line belongs to an
+// orphaned witness `opencode serve` process. It is deliberately conservative: it
+// matches the opencode executable (basename, since ps prints an absolute path) plus
+// the exact private-serve flags witness passes and NOTHING a user's interactive
+// `opencode serve` would carry (`--pure` + a 127.0.0.1 hostname). Callers must have
+// ALREADY established the process is orphaned (parent gone) before killing — a live
+// witness serve is a child of a live worker and must never be a candidate.
+func isStrayServeLine(cmdline string) bool {
+	fields := strings.Fields(cmdline)
+	if len(fields) == 0 {
+		return false
+	}
+	if !strings.Contains(filepath.Base(fields[0]), openCodeServeMarker) {
+		return false
+	}
+	// Require the full private-serve shape so a user's own `opencode serve` (or any
+	// other opencode subcommand) is never matched.
+	want := []string{"serve", "--pure", "--hostname", "127.0.0.1"}
+	for _, tok := range want {
+		if !containsField(fields, tok) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsField(fields []string, want string) bool {
+	for _, f := range fields {
+		if f == want {
+			return true
+		}
+	}
+	return false
+}
+
+// psField parses one whitespace-separated leading integer column (pid or ppid)
+// off a `ps -o pid=,ppid=,command=` line, returning the value and the remainder of
+// the line. It is the shared parser for the macOS/Windows reap so the column
+// handling is unit-testable without spawning processes.
+func psField(line string) (int, string, bool) {
+	line = strings.TrimSpace(line)
+	sp := strings.IndexFunc(line, func(r rune) bool { return r == ' ' || r == '\t' })
+	if sp < 0 {
+		return 0, "", false
+	}
+	n, err := strconv.Atoi(line[:sp])
+	if err != nil {
+		return 0, "", false
+	}
+	return n, strings.TrimSpace(line[sp+1:]), true
+}
+
+// strayServePIDs scans `ps`-style output (one process per line, columns
+// `pid ppid command...`) and returns the pids of ORPHANED witness serve processes
+// — those whose command matches isStrayServeLine AND whose parent is init (ppid==1),
+// meaning the worker that launched them is gone. Gating on ppid==1 is what makes the
+// reap safe to run under WorkerLock: any live witness serve (this archive's, another
+// archive's, or a user's own) is still parented by its live launcher and is skipped.
+// self is the current pid, excluded defensively though a serve never shares it.
+func strayServePIDs(psOutput string, self int) []int {
+	var pids []int
+	for _, line := range strings.Split(psOutput, "\n") {
+		pid, rest, ok := psField(line)
+		if !ok {
+			continue
+		}
+		ppid, cmdline, ok := psField(rest)
+		if !ok {
+			continue
+		}
+		if pid == self || pid <= 1 {
+			continue
+		}
+		if ppid != 1 {
+			continue // still owned by a live launcher — not an orphan
+		}
+		if isStrayServeLine(cmdline) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 func openCodeConfigContent() string {
