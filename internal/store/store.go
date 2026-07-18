@@ -30,9 +30,21 @@ var dataDirNames = []string{"witness", "claude-witness"}
 // definitions (lenses/<name>/ — a lens.json plus extract.md/review.md, issue #75)
 // stay as plain files, since they are meant to be read (and, for config/lenses,
 // edited) directly.
+//
+// Internally Store is a thin facade over a set of focused, independently-testable
+// concern types (issue #73-C1) — metaKV, and the others added alongside it — each
+// holding only the shared *sql.DB (and, for the filesystem concerns, Root). Store
+// EMBEDS them, so all of the original methods stay promoted onto *Store and every
+// existing caller keeps compiling unchanged; the split is pure reorganization over
+// one connection (MaxOpenConns(1)+WAL is unchanged — see openDB). Callers that only
+// need a slice of the API can, at the decoupling seam, depend on a narrow interface
+// instead of the whole Store. Root and db remain fields because Close/Export and the
+// path helpers (ConfigPath/LogPath/dbPath) live directly on Store.
 type Store struct {
 	Root string
 	db   *sql.DB
+
+	metaKV // small-scalar `meta` + `session_meta` bookkeeping (issue #73-C1)
 }
 
 // Open returns the Store rooted at WITNESS_HOME, else the resolved default under
@@ -58,6 +70,11 @@ func Open() (*Store, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	s.db = db
+	// Every DB-backed concern shares this single handle (the deliberate
+	// MaxOpenConns(1)+WAL model). Wire them here, after openDB, and before the
+	// one-shot steps below that call promoted methods (adoptRunnerBound reads the
+	// runner-bound flag via the metaKV-backed MetaString).
+	s.metaKV = metaKV{db: db}
 	// One-shot (issue #71): fold a config that already carries a deliberate runner
 	// choice (a legacy markerless install, or a manually-uncommented runner line)
 	// into the runner_bound flag — the SINGLE source of truth ResolveRunner reads.

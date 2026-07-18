@@ -186,7 +186,7 @@ const runnerBoundKey = "runner_bound"
 // adoptRunnerBound (at Open) is what stamps the flag for a config that already
 // carries a deliberate runner choice.
 func (s *Store) ResolveRunner(cfg Config) string {
-	if s.MetaString(runnerBoundKey) == "1" {
+	if metaGet(s.db, runnerBoundKey) == "1" {
 		return cfg.Runner
 	}
 	if env := strings.TrimSpace(os.Getenv("WITNESS_RUNNER")); env != "" {
@@ -210,7 +210,7 @@ func (s *Store) ResolveRunner(cfg Config) string {
 // dead disk, which fail Open outright) simply retries on the next Open, so a legacy
 // active-line archive self-heals to bound — no persistent misresolution.
 func (s *Store) adoptRunnerBound() {
-	if s.MetaString(runnerBoundKey) == "1" {
+	if metaGet(s.db, runnerBoundKey) == "1" {
 		return // already bound (via install/config set, or a prior adoption)
 	}
 	data, err := os.ReadFile(s.ConfigPath())
@@ -219,7 +219,7 @@ func (s *Store) adoptRunnerBound() {
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if isConfigKeyLine(line, "runner") {
-			_ = s.SetMetaString(runnerBoundKey, "1")
+			_ = metaSet(s.db, runnerBoundKey, "1")
 			return
 		}
 	}
@@ -249,7 +249,7 @@ func (s *Store) SetRunner(runner string) error {
 	// Mark that a runner was explicitly chosen via install, so ResolveRunner lets
 	// this persisted value win over any WITNESS_RUNNER env fallback (a dual
 	// CC+OpenCode user who ran `install` is never hijacked by the plugin env).
-	return s.SetMetaString(runnerBoundKey, "1")
+	return metaSet(s.db, runnerBoundKey, "1")
 }
 
 // SetConfigString sets a string-valued config.toml key (creating or replacing its
@@ -262,7 +262,7 @@ func (s *Store) SetConfigString(key, value string) error {
 		return err
 	}
 	if key == "runner" {
-		return s.SetMetaString(runnerBoundKey, "1")
+		return metaSet(s.db, runnerBoundKey, "1")
 	}
 	return nil
 }
@@ -420,7 +420,7 @@ func (s *Store) StampReview() error {
 // Progress is per-(session,lens), so COUNT DISTINCT session — else a session mined
 // by N lenses would count N times and trip the review cadence N× too early.
 func (s *Store) SessionsSinceReview() int {
-	last := s.metaStr("review_ts")
+	last := metaGet(s.db, "review_ts")
 	var n int
 	_ = s.db.QueryRow(
 		`SELECT COUNT(DISTINCT session) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
@@ -431,102 +431,18 @@ func (s *Store) SessionsSinceReview() int {
 // review. This is the salience signal: a few high-poignancy sessions can trigger
 // a review sooner than the plain session-count cap would.
 func (s *Store) PoignancySinceReview() int {
-	off := s.metaInt("review_obs_rowid")
+	off := metaGetInt(s.db, "review_obs_rowid")
 	var sum int
 	_ = s.db.QueryRow(
 		`SELECT COALESCE(SUM(poignancy), 0) FROM observations WHERE rowid > ?`, off).Scan(&sum)
 	return sum
 }
 
-// --- small scalar bookkeeping (meta table) -----------------------------------
-
-func (s *Store) metaStr(key string) string {
-	var v string
-	_ = s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
-	return v
-}
-
-// MetaString exposes small scalar bookkeeping to importers that need their own
-// durable watermarks without owning schema migrations.
-func (s *Store) MetaString(key string) string { return s.metaStr(key) }
-
-// SetMetaString stores a small scalar watermark under key.
-func (s *Store) SetMetaString(key, value string) error {
-	_, err := s.db.Exec(
-		`INSERT INTO meta(key, value) VALUES (?, ?)
-		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
-	return err
-}
-
-// Drift-surfacing meta keys (issue #57). A distillation pass records prose_drift —
-// a lens whose model returned no JSON observation array, likely a below-floor triage
-// model — so `witness doctor` and a backfill's completion line can surface it. These
-// live in the existing worker_*/review_* meta namespace (no schema, no collision).
-// The total is monotonic across the archive's life; the last_* stamps give doctor a
-// "when/where" so a raised model reads as "0 recent", not "broken forever".
-const (
-	metaDriftTotal       = "mine_drift_total"
-	metaDriftLastTS      = "mine_drift_last_ts"
-	metaDriftLastSession = "mine_drift_last_session"
-	metaDriftLastLens    = "mine_drift_last_lens"
-)
-
-// RecordDrift atomically adds n to the drift counter and stamps the most recent drift
-// (ts/session/lens), in ONE transaction so a concurrent reader never sees the counter
-// bumped without its stamps. Called by the sole L1 writer (CommitMining), so there is
-// no cross-process race on the counter beyond what the single-writer model already
-// serializes. Best-effort at the call site: a failure here never fails the commit.
-func (s *Store) RecordDrift(n int, session, lens string) error {
-	if n <= 0 {
-		return nil
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	// Atomic increment: read-modify-write inside the tx would still be correct under
-	// MaxOpenConns(1), but expressing it as one UPDATE keeps it a single statement and
-	// robust if the connection model ever loosens.
-	if _, err := tx.Exec(
-		`INSERT INTO meta(key, value) VALUES (?, ?)
-		 ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + excluded.value`,
-		metaDriftTotal, strconv.Itoa(n)); err != nil {
-		tx.Rollback()
-		return err
-	}
-	stamps := [][2]string{
-		{metaDriftLastTS, time.Now().UTC().Format(time.RFC3339)},
-		{metaDriftLastSession, session},
-		{metaDriftLastLens, lens},
-	}
-	for _, kv := range stamps {
-		if _, err := tx.Exec(
-			`INSERT INTO meta(key, value) VALUES (?, ?)
-			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, kv[0], kv[1]); err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// DriftTotal is the monotonic count of prose_drift events recorded so far (0 if never).
-func (s *Store) DriftTotal() int {
-	n, _ := strconv.Atoi(s.metaStr(metaDriftTotal))
-	return n
-}
-
-// DriftLast returns the timestamp and lens of the most recently recorded drift event
-// (both "" if none) — for doctor's "last drift" line so a monotonic counter reads as
-// dated, not perpetually-broken.
-func (s *Store) DriftLast() (ts, lens string) {
-	return s.metaStr(metaDriftLastTS), s.metaStr(metaDriftLastLens)
-}
-
-func (s *Store) metaInt(key string) int64 {
-	n, _ := strconv.ParseInt(strings.TrimSpace(s.metaStr(key)), 10, 64)
-	return n
-}
+// Small-scalar `meta` bookkeeping (MetaString/SetMetaString) and the prose-drift
+// counters (RecordDrift/DriftTotal/DriftLast) live on the metaKV concern — see
+// meta.go (issue #73-C1). Store embeds metaKV, so those methods stay promoted onto
+// *Store; the review-cadence readers above go straight through the metaGet/metaGetInt
+// primitives rather than the promoted methods.
 
 // ReviewDue reports whether the reviewer should run: either enough distilled
 // sessions since the last review (the cap), OR enough accumulated poignancy

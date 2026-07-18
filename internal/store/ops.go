@@ -233,56 +233,9 @@ func (s *Store) LastDistilledRawTS() string {
 // NextSeq returns the next per-session ordinal (== current record count).
 func (s *Store) NextSeq(session string) int { return s.RawCount(session) }
 
-// RecordMeta writes session meta once (idempotent: only on first sight).
-//
-// NOTE: retained-but-currently-unused on the Claude Code path — CC capture never
-// calls this, so session_meta.cwd stays empty for CC sessions (only the OpenCode
-// import/capture path, via ApplyRawImport, populates it). The `cwd` column was
-// introduced for repo-scoped lenses ("which repo is this session in → apply that
-// repo's lens"), but that idea was deliberately dropped: lenses are global and
-// nothing is read from a repo, so a cloned repo can't inject a prompt (see
-// internal/lens/lens.go). Kept for the OpenCode writer + a possible future
-// consumer; nothing reads cwd downstream today (ReadMeta has no callers).
-func (s *Store) RecordMeta(m SessionMeta) {
-	_, _ = s.db.Exec(
-		`INSERT OR IGNORE INTO session_meta(session, cwd, started) VALUES (?, ?, ?)`,
-		m.Session, m.Cwd, m.Started)
-}
-
-// ReadMeta returns a session's meta (zero value if absent). Currently has no
-// callers — see the RecordMeta note above (cwd/session_meta is retained for the
-// OpenCode writer and possible future use, not read on any live path).
-func (s *Store) ReadMeta(session string) SessionMeta {
-	m := SessionMeta{Session: session}
-	_ = s.db.QueryRow(`SELECT cwd, started FROM session_meta WHERE session = ?`, session).
-		Scan(&m.Cwd, &m.Started)
-	return m
-}
-
-// SetSessionPlatform records which platform OWNS a session (the per-session axis,
-// issue #21) — distinct from the default distillation runner. Upsert, since a CC
-// session has no session_meta row until now: INSERT the row if absent, else set
-// only the platform column (leaving cwd/started untouched). Best-effort at the
-// capture/import boundary; ForSession falls back to the id prefix when unset, so a
-// missed write degrades to the same answer rather than misclassifying.
-func (s *Store) SetSessionPlatform(session, platform string) {
-	if session == "" || platform == "" {
-		return
-	}
-	_, _ = s.db.Exec(
-		`INSERT INTO session_meta(session, platform) VALUES (?, ?)
-		 ON CONFLICT(session) DO UPDATE SET platform = excluded.platform`,
-		session, platform)
-}
-
-// SessionPlatform returns the recorded owning platform for a session, or "" if no
-// row exists or it was never classified. ForSession layers the prefix/default rule
-// on top of this — this method only reports the persisted column.
-func (s *Store) SessionPlatform(session string) string {
-	var p string
-	_ = s.db.QueryRow(`SELECT platform FROM session_meta WHERE session = ?`, session).Scan(&p)
-	return p
-}
+// session-meta bookkeeping (RecordMeta/ReadMeta/SetSessionPlatform/SessionPlatform)
+// lives on the metaKV concern — see meta.go (issue #73-C1). Store embeds metaKV, so
+// those methods stay promoted onto *Store.
 
 // --- active observation staging (in-session via MCP) ------------------------
 
@@ -842,7 +795,7 @@ func (s *Store) Stats(lenses []string) Stats {
 	// A plain COUNT(DISTINCT) is cheap at this scale (no dedicated index — the drift_at
 	// != '' predicate is a rare-true filter over the small progress table).
 	_ = s.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM progress WHERE drift_at != ''`).Scan(&st.Drifted)
-	st.LastReview = s.metaStr("review_ts")
+	st.LastReview = metaGet(s.db, "review_ts")
 	return st
 }
 
