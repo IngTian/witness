@@ -14,14 +14,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/proc"
 )
+
+// procCtl is the process-control port (issue #43): the GOOS-split OS glue for
+// binding the serve child's lifetime to the worker and reaping orphaned serves now
+// lives behind proc.Control instead of the old serveSysProcAttr/reapStrayServes
+// //go:build files. A package var so tests can swap in a proc.Fake to prove the
+// wiring without spawning real processes.
+var procCtl proc.Control = proc.System()
 
 var openCodeModelsCache sync.Map // provider -> openCodeModelList
 
@@ -67,12 +74,13 @@ func StartOpenCodeServer(ctx context.Context, models ...string) (*OpenCodeServer
 	}
 	// Best-effort reap of any orphaned serve from a previous worker that was
 	// SIGKILL'd/OOM-killed before its Go cleanup (Close/ctx-cancel) could run
-	// (issue #54 I2). On Linux Pdeathsig handles this instantly and reapStrayServes
-	// is a no-op; on macOS/Windows (no Pdeathsig) this is the only cleanup for a
-	// hard-killed parent. Safe to run under every serve-start path because they all
-	// hold WorkerLock first — see reapStrayServes for why a live sibling is never a
-	// candidate.
-	reapStrayServes()
+	// (issue #54 I2). On Linux proc.BindToParent's Pdeathsig handles this instantly
+	// and ReapOrphans is a no-op; on macOS/Windows (no Pdeathsig) this is the only
+	// cleanup for a hard-killed parent. Safe to run under every serve-start path
+	// because they all hold WorkerLock first — the ppid==1 orphan gate in ReapOrphans
+	// guarantees a live sibling (still parented by its worker) is never a candidate.
+	// isStrayServeLine is our private-serve fingerprint (see below).
+	procCtl.ReapOrphans(isStrayServeLine)
 	port, err := freeTCPPort()
 	if err != nil {
 		return nil, err
@@ -422,12 +430,12 @@ func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec
 		"OPENCODE_SERVER_PASSWORD="+password,
 		"OPENCODE_CONFIG_CONTENT="+openCodeConfigContent(),
 	)
-	// serveSysProcAttr is GOOS-split (server_linux.go / server_other.go): on Linux
-	// it sets Pdeathsig=SIGKILL so the kernel kills this serve child the instant the
-	// worker dies, even on a SIGKILL/OOM the worker's Go cleanup can't survive (issue
-	// #54 I2). No such primitive exists on macOS/Windows, where it's nil and the
-	// startup reapStrayServes is the fallback.
-	cmd.SysProcAttr = serveSysProcAttr()
+	// Bind the serve child's lifetime to the worker (issue #54 I2) through the
+	// process-control port: on Linux proc.BindToParent sets Pdeathsig=SIGKILL so the
+	// kernel kills this serve child the instant the worker dies, even on a SIGKILL/OOM
+	// the worker's Go cleanup can't survive. No such primitive exists on macOS/Windows,
+	// where it's a no-op and the startup ReapOrphans sweep is the fallback.
+	procCtl.BindToParent(cmd)
 	return cmd
 }
 
@@ -473,53 +481,9 @@ func containsField(fields []string, want string) bool {
 	return false
 }
 
-// psField parses one whitespace-separated leading integer column (pid or ppid)
-// off a `ps -o pid=,ppid=,command=` line, returning the value and the remainder of
-// the line. It is the shared parser for the macOS/Windows reap so the column
-// handling is unit-testable without spawning processes.
-func psField(line string) (int, string, bool) {
-	line = strings.TrimSpace(line)
-	sp := strings.IndexFunc(line, func(r rune) bool { return r == ' ' || r == '\t' })
-	if sp < 0 {
-		return 0, "", false
-	}
-	n, err := strconv.Atoi(line[:sp])
-	if err != nil {
-		return 0, "", false
-	}
-	return n, strings.TrimSpace(line[sp+1:]), true
-}
-
-// strayServePIDs scans `ps`-style output (one process per line, columns
-// `pid ppid command...`) and returns the pids of ORPHANED witness serve processes
-// — those whose command matches isStrayServeLine AND whose parent is init (ppid==1),
-// meaning the worker that launched them is gone. Gating on ppid==1 is what makes the
-// reap safe to run under WorkerLock: any live witness serve (this archive's, another
-// archive's, or a user's own) is still parented by its live launcher and is skipped.
-// self is the current pid, excluded defensively though a serve never shares it.
-func strayServePIDs(psOutput string, self int) []int {
-	var pids []int
-	for _, line := range strings.Split(psOutput, "\n") {
-		pid, rest, ok := psField(line)
-		if !ok {
-			continue
-		}
-		ppid, cmdline, ok := psField(rest)
-		if !ok {
-			continue
-		}
-		if pid == self || pid <= 1 {
-			continue
-		}
-		if ppid != 1 {
-			continue // still owned by a live launcher — not an orphan
-		}
-		if isStrayServeLine(cmdline) {
-			pids = append(pids, pid)
-		}
-	}
-	return pids
-}
+// (The ps-column parser and the orphan-gate scan that used isStrayServeLine now
+// live in internal/proc as psField/OrphanPIDs — the reap primitive is
+// platform-agnostic; only this fingerprint predicate is opencode-specific.)
 
 func openCodeConfigContent() string {
 	cfg := map[string]any{

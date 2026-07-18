@@ -10,8 +10,16 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
+
+// procCtl is the process-control port (issue #43): spawning the detached worker,
+// terminating it, and the worker's signal-aware stop context all route through
+// proc.Control instead of the old detach_*/procsignal_* //go:build files that
+// reached into syscall directly. A package var so tests can swap in a proc.Fake to
+// drive these paths without spawning real processes.
+var procCtl proc.Control = proc.System()
 
 // emitJSON marshals v as indented JSON to stdout. Used by read commands in --json
 // mode; failures (always a marshaling issue, never a domain error) bubble up so
@@ -58,10 +66,9 @@ func spawnDetached(args ...string) {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	// Put the worker in its own session/process group so a SessionEnd-on-tab-close
-	// doesn't kill it mid-distillation. detachSysProcAttr is GOOS-split (setsid on
-	// Unix; DETACHED_PROCESS|NEW_PROCESS_GROUP on Windows) — see detach_unix.go /
-	// detach_windows.go.
-	cmd.SysProcAttr = detachSysProcAttr()
+	// doesn't kill it mid-distillation. proc.Detach is GOOS-split behind the port
+	// (setsid on Unix; DETACHED_PROCESS|NEW_PROCESS_GROUP on Windows).
+	procCtl.Detach(cmd)
 	_ = cmd.Start() // fire and forget
 	if cmd.Process != nil {
 		_ = cmd.Process.Release()

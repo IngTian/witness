@@ -1,6 +1,6 @@
 //go:build !windows
 
-package commands
+package proc
 
 import (
 	"os"
@@ -11,10 +11,14 @@ import (
 
 // The detached worker must outlive the terminal/tab that spawned it: closing a
 // terminal SIGHUPs its process group, so the worker has to be in its OWN session
-// (setsid) rather than ours. A session leader's pgid equals its pid.
-func TestDetachedChildIsOwnSessionLeader(t *testing.T) {
+// (setsid) rather than ours. A session leader's pgid equals its pid. This drives
+// the real System() adapter through an actual spawn to prove Detach takes effect.
+func TestSystemDetachMakesOwnSessionLeader(t *testing.T) {
 	cmd := exec.Command("sleep", "1")
-	cmd.SysProcAttr = detachSysProcAttr()
+	System().Detach(cmd)
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatalf("Detach did not set Setsid: %+v", cmd.SysProcAttr)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -30,5 +34,13 @@ func TestDetachedChildIsOwnSessionLeader(t *testing.T) {
 	}
 	if myPgid, _ := syscall.Getpgid(os.Getpid()); pgid == myPgid {
 		t.Errorf("child shares our process group (%d) — not detached from terminal", myPgid)
+	}
+}
+
+// TerminateGroup on a bogus pid must surface an error rather than panic (both the
+// group signal and the bare-pid fallback fail for an unused pid).
+func TestSystemTerminateGroupBadPID(t *testing.T) {
+	if err := System().TerminateGroup(1 << 30); err == nil {
+		t.Fatal("TerminateGroup on a nonexistent pid should error")
 	}
 }

@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"strconv"
-	"syscall"
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -159,8 +157,9 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	// MineSession→Run→exec.CommandContext, and cancelling it sends the child a kill.
 	// Without this, stopping the parent left up to `conc` orphaned children to run to
 	// their own 10-min timeout (issue #22 audit). runner.Close still runs (deferred)
-	// to sweep any OpenCode distill sessions.
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// to sweep any OpenCode distill sessions. proc.NotifyStop is the port's
+	// signal-aware ctx (SIGINT+SIGTERM).
+	ctx, stopSignals := procCtl.NotifyStop(context.Background())
 	defer stopSignals()
 
 	pending := func() []string {

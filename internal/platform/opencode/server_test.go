@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/IngTian/witness/internal/proc"
 )
 
 func TestBuildOpenCodeServeCmdIsolation(t *testing.T) {
@@ -58,33 +60,15 @@ func TestIsStrayServeLine(t *testing.T) {
 	}
 }
 
-func TestPsField(t *testing.T) {
-	cases := []struct {
-		line     string
-		wantN    int
-		wantRest string
-		wantOK   bool
-	}{
-		{"  4321   1 opencode serve --pure", 4321, "1 opencode serve --pure", true},
-		{"1 opencode serve", 1, "opencode serve", true},
-		{"\t99\tclaude -p", 99, "claude -p", true},
-		{"notanumber rest", 0, "", false},
-		{"", 0, "", false},
-		{"12345", 0, "", false}, // no command column
-	}
-	for _, tc := range cases {
-		n, rest, ok := psField(tc.line)
-		if ok != tc.wantOK || n != tc.wantN || rest != tc.wantRest {
-			t.Fatalf("psField(%q) = (%d, %q, %v), want (%d, %q, %v)", tc.line, n, rest, ok, tc.wantN, tc.wantRest, tc.wantOK)
-		}
-	}
-}
-
-// TestStrayServePIDs is the core safety test: only an ORPHANED witness serve
-// (ppid==1, matching fingerprint) may be selected for reaping. A live sibling serve
-// (ppid != 1 — still owned by its worker), a user's own serve, a non-serve process,
-// the scanner's own pid, and init itself must all be skipped.
-func TestStrayServePIDs(t *testing.T) {
+// TestStrayServeFingerprintGatesOrphanReap composes the opencode fingerprint with
+// the port's orphan-gate primitive (proc.OrphanPIDs) — the same combination
+// StartOpenCodeServer drives via procCtl.ReapOrphans(isStrayServeLine). Only an
+// ORPHANED witness serve (ppid==1, matching fingerprint) may be selected. A live
+// sibling serve (ppid != 1 — still owned by its worker), a user's own serve, a
+// non-serve process, the scanner's own pid, and init itself must all be skipped.
+// (The ppid/self gate itself is exhaustively covered by proc.TestOrphanPIDs; this
+// guards that our fingerprint is the predicate feeding it.)
+func TestStrayServeFingerprintGatesOrphanReap(t *testing.T) {
 	const self = 700
 	psOut := strings.Join([]string{
 		"  4321     1 /Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR", // orphan → reap
@@ -96,10 +80,27 @@ func TestStrayServePIDs(t *testing.T) {
 		"  garbage line that does not parse", // skip
 	}, "\n")
 
-	got := strayServePIDs(psOut, self)
+	got := proc.OrphanPIDs(psOut, self, isStrayServeLine)
 	want := []int{4321}
 	if !slices.Equal(got, want) {
-		t.Fatalf("strayServePIDs = %v, want %v", got, want)
+		t.Fatalf("orphan reap selection = %v, want %v", got, want)
+	}
+}
+
+// TestBuildOpenCodeServeCmdDrivesPort proves buildOpenCodeServeCmd binds the serve
+// child's lifetime to the worker through the port (proc.BindToParent) rather than
+// touching syscall.SysProcAttr directly — verified with a proc.Fake, no real
+// process spawned. The GOOS-specific effect of BindToParent (Pdeathsig on Linux,
+// no-op elsewhere) is covered in the proc package's own adapter tests.
+func TestBuildOpenCodeServeCmdDrivesPort(t *testing.T) {
+	prev := procCtl
+	fake := &proc.Fake{}
+	procCtl = fake
+	defer func() { procCtl = prev }()
+
+	cmd := buildOpenCodeServeCmd(context.Background(), 12345, "secret")
+	if len(fake.Bound) != 1 || fake.Bound[0] != cmd {
+		t.Fatalf("buildOpenCodeServeCmd did not call BindToParent on the serve cmd: %+v", fake.Bound)
 	}
 }
 
