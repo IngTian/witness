@@ -19,6 +19,19 @@ import (
 // headroom above the default of 4.
 const maxMineConcurrency = 16
 
+// maxInFlightChars caps the TOTAL input characters mined concurrently — a SECOND
+// admission dimension beside maxMineConcurrency (the count cap). The count cap alone
+// assumes every miner is ~0.35GB, but a `claude -p` child's memory scales with its
+// INPUT: 8 concurrent 200K-token (~800KB) sessions can OOM a laptop while 8 tiny
+// ones are fine, and the collateral kills the issue observed hit small sessions too
+// (issue #56 B2). This budget lets many small sessions fill the window but parks the
+// Nth concurrent giant until an in-flight one frees its share, so wide-and-tiny still
+// runs wide while few-and-huge self-throttles. ~2M chars ≈ 500K tokens ≈ a couple of
+// the largest real sessions, or dozens of ordinary ones. A single session bigger than
+// the whole budget still runs — ALONE — via the in-flight==0 floor in drainWindow, so
+// the drain can never deadlock waiting for room that a lone giant will never fit.
+const maxInFlightChars = 2_000_000
+
 // EffectiveConcurrency is the number of sessions the engine will mine in parallel:
 // the configured cap, clamped to the CPU count, to an absolute memory-safe ceiling,
 // and to 1 when the runner cannot run concurrently. This is the POLICY
@@ -58,6 +71,13 @@ func EffectiveConcurrency(want int, concurrentRunSafe bool) int {
 //     already-drained session are not silently filtered out (issue #22 review #1).
 //
 // When nil, Drain makes its own — a single Drain is still attempt-once by itself.
+//
+// Sized and MaxChars tune the input-size admission gate (issue #56 B2). Sized reports
+// a session's pending-input char size; nil → the store-backed default
+// (PendingInputChars over the worker's active lenses). MaxChars is the total
+// in-flight char budget across concurrent miners; <=0 → maxInFlightChars. Both are
+// injectable so the gate is unit-testable without a real 200K-token corpus; production
+// worker.go leaves them zero-valued and gets the defaults.
 type DrainOpts struct {
 	Conc      int
 	Pending   func() []string
@@ -65,6 +85,8 @@ type DrainOpts struct {
 	Max       int
 	OnCommit  func(session string)
 	Attempted map[string]bool
+	Sized     func(session string) int
+	MaxChars  int
 }
 
 // attemptKey identifies a (session, raw-turn-count) attempt — the question it
@@ -80,6 +102,19 @@ type DrainOpts struct {
 //     the advancing distilled-count must NOT be in the key.
 func (w *Worker) attemptKey(session string) string {
 	return session + "\x00" + strconv.Itoa(w.Store.RawCount(session))
+}
+
+// lensNames is the worker's active-lens name set — the same lenses MineSession runs.
+// It scopes the default PendingInputChars sizer (issue #56 B2) so the in-flight char
+// estimate reflects exactly the per-lens deltas the drain will mine (a newly-enabled
+// lens with no watermark counts its whole-session delta; a since-disabled lens is
+// excluded). Empty → PendingInputChars falls back to the always-on default lens.
+func (w *Worker) lensNames() []string {
+	names := make([]string, len(w.Lenses))
+	for i, ln := range w.Lenses {
+		names[i] = ln.Name
+	}
+	return names
 }
 
 // HasUnattempted reports whether any of the given sessions has NOT yet been
@@ -128,6 +163,19 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 	stop := func() bool { return opts.Stop != nil && opts.Stop() }
 	reached := func(claimed int) bool { return opts.Max > 0 && claimed >= opts.Max }
 
+	// Input-size admission (issue #56 B2). sized(session) estimates the pending-input
+	// chars a miner will hold; maxChars is the total in-flight budget. Defaults keep the
+	// production worker (which leaves these zero) sizing against the real store over its
+	// active lenses; tests inject a fake sizer to exercise the gate deterministically.
+	sized := opts.Sized
+	if sized == nil {
+		sized = func(session string) int { return w.Store.PendingInputChars(session, w.lensNames()) }
+	}
+	maxChars := opts.MaxChars
+	if maxChars <= 0 {
+		maxChars = maxInFlightChars
+	}
+
 	attempted := opts.Attempted
 	if attempted == nil {
 		attempted = map[string]bool{}
@@ -171,7 +219,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		// carries its submission index, out-of-order arrivals are buffered, and the
 		// reducer commits the contiguous prefix. Only the single Drain goroutine
 		// commits, so the store stays single-writer and `existing` race-free.
-		processed += w.drainWindow(ctx, batch, conc, &existing, attempted, stop, reached, processed, opts.OnCommit)
+		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, &existing, attempted, stop, reached, processed, opts.OnCommit)
 
 		if stop() || reached(processed) {
 			return processed
@@ -182,7 +230,16 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 
 // drainWindow runs one batch through the rolling-window MAP + ordered REDUCE and
 // returns how many sessions it committed. See Drain for the invariants.
-func (w *Worker) drainWindow(ctx context.Context, batch []string, conc int, existing *[]store.Observation, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string)) int {
+//
+// Admission is TWO-dimensional (issue #56 B2): the `sem` count cap (at most `conc`
+// miners) AND a char budget (`maxChars` total in-flight input, sized by `sized`). A
+// session is dispatched only when a count slot is free AND admitting its input keeps
+// the in-flight total within budget — EXCEPT the in-flight==0 floor, which always
+// admits so a lone session larger than the whole budget still runs (no deadlock).
+// The char accounting is mutated only by this single dispatcher goroutine (add at
+// dispatch, subtract on reap), so it stays lock-free and race-free like the rest of
+// the reducer.
+func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, existing *[]store.Observation, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string)) int {
 	type minedResult struct {
 		idx int // submission index, for ordered commit
 		m   *SessionMining
@@ -195,6 +252,12 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc int, exis
 	pending := make(map[int]minedResult) // out-of-order results awaiting their turn
 	nextToCommit := 0                    // submission index of the next commit
 	committed := 0
+
+	// In-flight char accounting for the budget gate. sizeByIdx holds the input size of
+	// every dispatched-but-not-yet-reaped job, so len(sizeByIdx)==0 means nothing is in
+	// flight (the floor condition) and inFlightChars is their running sum.
+	inFlightChars := 0
+	sizeByIdx := make(map[int]int)
 
 	// commitReady flushes every buffered result that is now contiguous from
 	// nextToCommit, in submission order — so commits are deterministic even though
@@ -212,27 +275,48 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc int, exis
 		}
 	}
 
+	// reap absorbs one completion: buffer it for ordered commit, release its char
+	// budget, and flush any now-contiguous prefix. The count slot is freed by the
+	// miner goroutine's own `defer <-sem`, decoupled from reap, exactly as before.
+	reap := func(r minedResult) {
+		pending[r.idx] = r
+		inFlightChars -= sizeByIdx[r.idx]
+		delete(sizeByIdx, r.idx)
+		commitReady()
+	}
+
 	dispatched := 0
 	for _, s := range batch {
 		// Budget/stop: don't launch more than allowed committed-or-in-flight.
 		if stop() || reached(processedBase+dispatched) {
 			break
 		}
+		size := sized(s)
+		// Char-budget gate: block until admitting this session's input fits the budget,
+		// reaping in-flight completions (which free their share) to make room. The
+		// in-flight==0 floor (len(sizeByIdx)==0) bypasses it, so a session larger than the
+		// whole budget still runs — alone — and the drain can never deadlock waiting for
+		// room it will never get. Reaping <-done here can't block forever: a non-empty
+		// sizeByIdx guarantees an in-flight miner that will signal done.
+		for len(sizeByIdx) > 0 && inFlightChars+size > maxChars {
+			reap(<-done)
+		}
 		attempted[w.attemptKey(s)] = true
-		sem <- struct{}{} // blocks until a slot frees — THIS is the rolling window
-		// Drain any completions that arrived while we waited for a slot, freeing
-		// their buffer + advancing commits promptly.
+		sem <- struct{}{} // blocks until a slot frees — THIS is the rolling window (count cap)
+		// Drain any completions that arrived while we waited for a slot, freeing their
+		// buffer + char budget and advancing commits promptly.
 		for {
 			select {
 			case r := <-done:
-				pending[r.idx] = r
-				commitReady()
+				reap(r)
 				continue
 			default:
 			}
 			break
 		}
 		idx := dispatched
+		sizeByIdx[idx] = size
+		inFlightChars += size
 		dispatched++
 		wg.Add(1)
 		go func(idx int, session string) {
@@ -246,9 +330,7 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc int, exis
 	// Drain remaining completions until every dispatched job has committed —
 	// finishing in-flight work even on stop/budget (its mining is already paid for).
 	for committed < dispatched {
-		r := <-done
-		pending[r.idx] = r
-		commitReady()
+		reap(<-done)
 	}
 	wg.Wait()
 	return committed

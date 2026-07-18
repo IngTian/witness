@@ -336,6 +336,172 @@ func TestDrainReattemptsRegrownSession(t *testing.T) {
 	}
 }
 
+// Issue #56 B2: the parallel path admits on TWO dimensions — the count cap AND a
+// char budget across in-flight miners. A batch of GIANT sessions (each near the whole
+// budget) must NOT all mine at once even when the count cap `conc` would allow it: the
+// char budget throttles them below `conc`. We gate every miner on a barrier so all
+// admitted-at-once miners are simultaneously in flight, and record the PEAK count.
+func TestDrainCharBudgetThrottlesGiants(t *testing.T) {
+	release := make(chan struct{})
+	var live, peak int32
+	miner := func(_ context.Context, _, _, input string) (string, error) {
+		n := atomic.AddInt32(&live, 1)
+		for { // track the high-water mark of concurrent miners
+			p := atomic.LoadInt32(&peak)
+			if n <= p || atomic.CompareAndSwapInt32(&peak, p, n) {
+				break
+			}
+		}
+		<-release // hold the slot until the test releases everyone
+		atomic.AddInt32(&live, -1)
+		arr := []minedObs{{Dimension: "thinking", Observation: "obs:" + input, Evidence: "e", Poignancy: 3}}
+		b, _ := json.Marshal(arr)
+		return string(b), nil
+	}
+	s := newStore(t)
+	w := drainWorker(s, miner)
+
+	const n = 6
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		id := string(rune('a' + i))
+		ids[i] = id
+		capture(t, s, id, "user", "turn-"+id)
+	}
+	pending := func() []string { return append([]string(nil), ids...) }
+
+	// Every session is a "giant": 40 chars each, budget 100 → at most 2 fit at once
+	// (2*40=80<=100, a 3rd would be 120>100), even though conc=6 would allow all 6.
+	sized := func(string) int { return 40 }
+
+	// Release the barrier once we've confirmed the budget-limited plateau: wait until
+	// two miners are concurrently live (the budget max) and stay pinned there, then let
+	// them all drain. If the budget were ignored, peak would race to 6.
+	go func() {
+		for atomic.LoadInt32(&live) < 2 { // reach the 2-wide plateau the budget permits
+			runtime.Gosched()
+		}
+		// Give any (incorrectly) over-admitted 3rd miner a chance to bump peak before we
+		// release — so the assertion below would catch a broken gate.
+		for i := 0; i < 1000; i++ {
+			runtime.Gosched()
+		}
+		close(release)
+	}()
+
+	done := make(chan int, 1)
+	go func() {
+		done <- w.Drain(context.Background(), DrainOpts{Conc: n, MaxChars: 100, Sized: sized, Pending: pending})
+	}()
+	select {
+	case got := <-done:
+		if got != n {
+			t.Fatalf("committed %d, want %d", got, n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain hung under the char budget")
+	}
+	if p := atomic.LoadInt32(&peak); p != 2 {
+		t.Fatalf("char budget should cap concurrent giants at 2 (2*40<=100<3*40), peak was %d", p)
+	}
+	if obs, _ := s.ReadObservations(""); len(obs) != n {
+		t.Fatalf("expected %d observations, got %d", n, len(obs))
+	}
+}
+
+// Issue #56 B2: many TINY sessions must still run wide — the char budget must not
+// throttle them below the count cap. Same harness as above, but each session is small
+// enough that `conc` of them fit the budget; peak concurrency should reach `conc`.
+func TestDrainCharBudgetAllowsWideTinyConcurrency(t *testing.T) {
+	release := make(chan struct{})
+	var live, peak int32
+	miner := func(_ context.Context, _, _, input string) (string, error) {
+		n := atomic.AddInt32(&live, 1)
+		for {
+			p := atomic.LoadInt32(&peak)
+			if n <= p || atomic.CompareAndSwapInt32(&peak, p, n) {
+				break
+			}
+		}
+		<-release
+		atomic.AddInt32(&live, -1)
+		arr := []minedObs{{Dimension: "thinking", Observation: "obs:" + input, Evidence: "e", Poignancy: 3}}
+		b, _ := json.Marshal(arr)
+		return string(b), nil
+	}
+	s := newStore(t)
+	w := drainWorker(s, miner)
+
+	const conc = 4
+	ids := make([]string, conc)
+	for i := 0; i < conc; i++ {
+		id := string(rune('a' + i))
+		ids[i] = id
+		capture(t, s, id, "user", "turn-"+id)
+	}
+	pending := func() []string { return append([]string(nil), ids...) }
+	// 10 chars each, budget 1000 → all 4 fit easily; the count cap conc=4 binds.
+	sized := func(string) int { return 10 }
+
+	go func() {
+		for atomic.LoadInt32(&live) < conc { // must reach the full count cap
+			runtime.Gosched()
+		}
+		close(release)
+	}()
+
+	done := make(chan int, 1)
+	go func() {
+		done <- w.Drain(context.Background(), DrainOpts{Conc: conc, MaxChars: 1000, Sized: sized, Pending: pending})
+	}()
+	select {
+	case got := <-done:
+		if got != conc {
+			t.Fatalf("committed %d, want %d", got, conc)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain hung — tiny sessions should run wide under a generous budget")
+	}
+	if p := atomic.LoadInt32(&peak); p != conc {
+		t.Fatalf("tiny sessions should run to the count cap %d, peak was %d", conc, p)
+	}
+}
+
+// Issue #56 B2 deadlock floor: a single session LARGER than the entire char budget
+// must still run — alone — rather than deadlock waiting for room it can never get.
+// The in-flight==0 floor admits it unconditionally.
+func TestDrainCharBudgetRunsLoneOverBudgetSession(t *testing.T) {
+	s := newStore(t)
+	w := drainWorker(s, (&safeMiner{}).run)
+	for _, id := range []string{"huge", "small"} {
+		capture(t, s, id, "user", "turn-"+id)
+	}
+	pending := func() []string { return []string{"huge", "small"} }
+	// "huge" is 10x the budget; "small" fits. Both must complete: huge runs alone via
+	// the floor, small runs after. If the floor were missing, huge would wait forever.
+	sized := func(sess string) int {
+		if sess == "huge" {
+			return 5000
+		}
+		return 10
+	}
+	done := make(chan int, 1)
+	go func() {
+		done <- w.Drain(context.Background(), DrainOpts{Conc: 4, MaxChars: 500, Sized: sized, Pending: pending})
+	}()
+	select {
+	case got := <-done:
+		if got != 2 {
+			t.Fatalf("committed %d, want 2 (both sessions must complete)", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain deadlocked on a session larger than the whole budget (missing in-flight==0 floor)")
+	}
+	if obs, _ := s.ReadObservations(""); len(obs) != 2 {
+		t.Fatalf("expected 2 observations, got %d", len(obs))
+	}
+}
+
 // Review #3: the parallel path must be a TRUE rolling window — a slow oldest job
 // must NOT idle the other slots. We make session "slow0" block on a gate while the
 // rest finish fast; if the window were FIFO-blocked on the oldest, the fast jobs
