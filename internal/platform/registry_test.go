@@ -31,7 +31,7 @@ func (mixedCasePlatform) SessionPrefix() string { return "mixedcaseplat:" }
 func (mixedCasePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
 	return []string{""}
 }
-func (mixedCasePlatform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
+func (mixedCasePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{}, nil
 }
 

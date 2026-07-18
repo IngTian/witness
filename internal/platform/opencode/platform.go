@@ -36,7 +36,7 @@ func (Platform) RenderInputs(raw []store.RawRecord, policy platform.ChunkPolicy)
 // the method (so cmd need not know about it) and maps the internal stats onto the
 // shared platform.ImportStats. A held lock means another import is in flight —
 // return zero stats, not an error.
-func (Platform) Import(ctx context.Context, st *store.Store, sessionIDs []string) (platform.ImportStats, error) {
+func (Platform) Import(ctx context.Context, st store.ImportStore, sessionIDs []string) (platform.ImportStats, error) {
 	// Same lock file as before (".opencode-sync.lock"); the store no longer names
 	// the platform — this package owns the "opencode" key.
 	unlock, ok := st.ImportLock("opencode")

@@ -19,7 +19,9 @@ type HookEvent struct {
 	Cwd string `json:"cwd"`
 }
 
-func Capture(st *store.Store, e HookEvent, now time.Time) error {
+// Capture writes one L0 record for a hook event. It needs only the raw-append
+// surface (issue #73-C1): NextSeq to number the turn, AppendRaw to store it.
+func Capture(st store.RawWriter, e HookEvent, now time.Time) error {
 	if e.SessionID == "" {
 		return nil
 	}

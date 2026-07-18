@@ -24,19 +24,25 @@ type RawWriter interface {
 	AppendRaw(r RawRecord) error
 }
 
-// SessionClassifier records/reads which platform owns a session (the per-session
-// axis, issue #21). Both capture adapters stamp it at first sight.
+// SessionClassifier writes which platform owns a session (the per-session axis,
+// issue #21). Both capture adapters stamp it at first sight.
 type SessionClassifier interface {
 	SetSessionPlatform(session, platform string)
 }
 
-// CaptureStore is what a capture adapter needs: append raw turns, stamp the owning
-// platform, and record session meta. It is the store slice threaded through
-// platform.Platform.Capture.
+// SessionPlatformReader reads the persisted owning platform of a session. It is the
+// read-only counterpart platform.ForSession needs to resolve a session's runtime; a
+// nil reader (or an unstamped session) falls through to the id-prefix rule.
+type SessionPlatformReader interface {
+	SessionPlatform(session string) string
+}
+
+// CaptureStore is what a hook-fed capture adapter needs: append raw turns numbered by
+// the current count, and stamp the owning platform. It is the store slice threaded
+// through platform.Capturer.Capture.
 type CaptureStore interface {
 	RawWriter
 	SessionClassifier
-	RecordMeta(m SessionMeta)
 }
 
 // --- import path (platform adapters) ------------------------------------------
@@ -146,5 +152,6 @@ var (
 	_ MetaKV                = (*Store)(nil)
 	_ RawWriter             = (*Store)(nil)
 	_ SessionClassifier     = (*Store)(nil)
+	_ SessionPlatformReader = (*Store)(nil)
 	_ ActiveObservationSink = (*Store)(nil)
 )
