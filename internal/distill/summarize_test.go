@@ -94,6 +94,32 @@ func TestSummarizerSkipsUnchanged(t *testing.T) {
 	}
 }
 
+// A changed summarizer PROMPT (e.g. a witness upgrade ships a new prompts/summarize/
+// lens.md) must invalidate every lens's signature and force a one-time regen, even
+// with unchanged facets — the prompt is part of the signature (#73-S5).
+func TestSummarizerRegeneratesWhenPromptChanges(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	calls := 0
+	fake := func(_ context.Context, _, _, _ string) (string, error) { calls++; return "OUT", nil }
+
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS-v1", UnifiedPrompt: "UNIFIED", Run: fake}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("first Summarize: %v", err)
+	}
+	calls = 0
+
+	// Same facets, but a NEW summarize prompt → all lenses must regenerate.
+	sm.LensPrompt = "LENS-v2"
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("second Summarize: %v", err)
+	}
+	// 2 lenses regenerate + unified = 3 calls; nothing was skipped.
+	if calls != 3 {
+		t.Fatalf("a changed prompt must regenerate all lenses (want 3 calls), got %d", calls)
+	}
+}
+
 // A change to ONE lens's facets regenerates exactly that lens + the unified portrait
 // (which depends on it) — not the other, unchanged lens (#73-S5).
 func TestSummarizerRegeneratesOnlyChangedLens(t *testing.T) {

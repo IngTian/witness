@@ -18,13 +18,15 @@ import (
 func profileSigKey(lens string) string { return "profile_sig:" + lens }
 
 // summarySignature is the fingerprint of everything a per-lens summary depends on:
-// the model that will produce it and the exact facet text fed to the prompt. If it
-// matches the stored signature AND the prior profile file still exists, the summary
-// cannot have changed, so the (expensive) LLM call is skipped and the prior summary
-// is reused. Including the model means switching a lens's review model correctly
-// forces a regen even when its facets are unchanged.
-func summarySignature(model, renderedFacets string) string {
-	sum := sha256.Sum256([]byte(model + "\x00" + renderedFacets))
+// the model that produces it, the summarizer PROMPT, and the exact facet text fed
+// to it. If it matches the stored signature AND the prior profile file still exists,
+// the summary cannot have changed, so the (expensive) LLM call is skipped and the
+// prior summary is reused. Including the model AND the prompt means switching a
+// lens's review model — or a witness upgrade shipping a new summarize prompt —
+// correctly invalidates the signature and forces a one-time regen on the next
+// review, with no manual rebuild needed.
+func summarySignature(model, prompt, renderedFacets string) string {
+	sum := sha256.Sum256([]byte(model + "\x00" + prompt + "\x00" + renderedFacets))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -70,9 +72,11 @@ func (sm *Summarizer) runFor(ln *lens.Lens) SummarizeFunc {
 //
 // Dirty-tracking (issue #73-S5): a per-lens summary is an LLM call, and a review
 // burst at N lenses used to fire N+1 calls even when only one lens's facets changed.
-// Each lens's summary now carries a content signature (its model + facet text); if
-// the signature is unchanged AND the prior profile/<lens>.md still exists, its LLM
-// call is SKIPPED and the prior summary is reused for the portrait. The unified
+// Each lens's summary now carries a content signature (its model + summarizer prompt
+// + facet text); if the signature is unchanged AND the prior profile/<lens>.md still
+// exists, its LLM call is SKIPPED and the prior summary is reused for the portrait.
+// (A witness upgrade that ships a new summarize prompt changes the signature, so
+// every lens regenerates once — no manual rebuild.) The unified
 // portrait — which depends on every lens's summary — is likewise skipped when NO
 // lens changed and profile/unified.md exists. So an unchanged review costs 0 calls,
 // and a one-lens change costs 2 (that lens + unified), not N+1.
@@ -111,7 +115,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		ln := byName[l]
 		model := ModelFor(sm.Config, ln, PhaseReview)
 		rendered := renderFacetsForSummary(l, byLens[l])
-		sig := summarySignature(model, rendered)
+		sig := summarySignature(model, sm.LensPrompt, rendered)
 
 		// Skip the LLM call when this lens's inputs are unchanged AND its prior summary
 		// is still on disk — reuse that summary for the portrait. A missing/failed prior
