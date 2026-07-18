@@ -2,6 +2,8 @@ package distill
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +11,24 @@ import (
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
+
+// profileSigKey is the meta key holding the content signature of the last summary
+// written for a lens (issue #73-S5). Namespaced per lens so the dirty check is
+// O(1) and independent per lens.
+func profileSigKey(lens string) string { return "profile_sig:" + lens }
+
+// summarySignature is the fingerprint of everything a per-lens summary depends on:
+// the model that produces it, the summarizer PROMPT, and the exact facet text fed
+// to it. If it matches the stored signature AND the prior profile file still exists,
+// the summary cannot have changed, so the (expensive) LLM call is skipped and the
+// prior summary is reused. Including the model AND the prompt means switching a
+// lens's review model — or a witness upgrade shipping a new summarize prompt —
+// correctly invalidates the signature and forces a one-time regen on the next
+// review, with no manual rebuild needed.
+func summarySignature(model, prompt, renderedFacets string) string {
+	sum := sha256.Sum256([]byte(model + "\x00" + prompt + "\x00" + renderedFacets))
+	return hex.EncodeToString(sum[:])
+}
 
 // SummarizeFunc runs one summarization pass. Same shape as MineFunc so a shared
 // runner (for example one OpenCode serve process) can cover mining, review, and
@@ -45,10 +65,24 @@ func (sm *Summarizer) runFor(ln *lens.Lens) SummarizeFunc {
 	return sm.Run
 }
 
-// Summarize regenerates every per-lens summary from current facets, then the
-// unified portrait from those summaries. Each file is overwritten only after its
-// summary succeeds, so a mid-pass failure returns an error while leaving already-
-// written (and not-yet-touched) summaries intact.
+// Summarize regenerates each per-lens summary from current facets, then the unified
+// portrait from those summaries. Each file is overwritten only after its summary
+// succeeds, so a mid-pass failure returns an error while leaving already-written
+// (and not-yet-touched) summaries intact.
+//
+// Dirty-tracking (issue #73-S5): a per-lens summary is an LLM call, and a review
+// burst at N lenses used to fire N+1 calls even when only one lens's facets changed.
+// Each lens's summary now carries a content signature (its model + summarizer prompt
+// + facet text); if the signature is unchanged AND the prior profile/<lens>.md still
+// exists, its LLM call is SKIPPED and the prior summary is reused for the portrait.
+// (A witness upgrade that ships a new lens prompt changes the signature, so every
+// lens regenerates once — no manual rebuild.) The unified portrait carries its OWN
+// signature over its model + unified prompt + the whole portrait text (which embeds
+// every per-lens summary), so it is skipped only when all of those are unchanged and
+// profile/unified.md exists — this catches a unified-only prompt change, a
+// DistillModel change, and an added/removed lens, none of which a "did any per-lens
+// summary change?" heuristic would. So an unchanged review costs 0 calls, and a
+// one-lens change costs 2 (that lens + unified), not N+1.
 func (sm *Summarizer) Summarize(ctx context.Context) error {
 	facets, err := sm.Store.ReadFacets()
 	if err != nil {
@@ -82,23 +116,59 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	for _, l := range lenses {
 		ln := byName[l]
 		model := ModelFor(sm.Config, ln, PhaseReview)
-		md, err := sm.runFor(ln)(ctx, model, sm.LensPrompt, renderFacetsForSummary(l, byLens[l]))
+		rendered := renderFacetsForSummary(l, byLens[l])
+		sig := summarySignature(model, sm.LensPrompt, rendered)
+
+		// Skip the LLM call when this lens's inputs are unchanged AND its prior summary
+		// is still on disk — reuse that summary for the portrait. A missing/failed prior
+		// file (prev == "" || !ok) falls through to regenerate, so a deleted profile
+		// self-heals. Signature-read/-write is via meta (a config read error just means
+		// we don't skip — safe, only costs a call).
+		if sm.Store.MetaString(profileSigKey(l)) == sig {
+			if prev, ok, _ := sm.Store.ReadProfile(l); ok && prev != "" {
+				fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, prev)
+				continue
+			}
+		}
+
+		md, err := sm.runFor(ln)(ctx, model, sm.LensPrompt, rendered)
 		if err != nil {
 			return fmt.Errorf("summarize lens %s: %w", l, err)
 		}
 		if err := sm.Store.WriteProfile(l, md); err != nil {
 			return fmt.Errorf("write profile %s: %w", l, err)
 		}
+		// Stamp the signature only AFTER the summary is safely on disk, so a crash
+		// between write and stamp just regenerates next time (never skips a stale file).
+		_ = sm.Store.SetMetaString(profileSigKey(l), sig)
 		fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, md)
 	}
 
 	// The unified portrait spans all lenses → no single lens → the default DistillModel
 	// (ModelFor with a nil lens).
-	umd, err := sm.Run(ctx, ModelFor(sm.Config, nil, PhaseReview), sm.UnifiedPrompt, portrait.String())
+	unifiedModel := ModelFor(sm.Config, nil, PhaseReview)
+	// Sign the unified pass over its OWN inputs: the model, the unified prompt, and the
+	// whole portrait (which already embeds every per-lens summary, so any per-lens
+	// change, a dropped/added lens, or a prompt/model change all flow through here). This
+	// replaces an earlier "skip if no per-lens changed" heuristic that missed a unified-
+	// only prompt change, a DistillModel change under all-lens-overrides, and a removed
+	// lens (which would leave the portrait describing a lens that no longer exists).
+	unifiedSig := summarySignature(unifiedModel, sm.UnifiedPrompt, portrait.String())
+	if sm.Store.MetaString(profileSigKey(store.ProfileUnified)) == unifiedSig {
+		if _, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok {
+			return nil
+		}
+	}
+	umd, err := sm.Run(ctx, unifiedModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {
 		return fmt.Errorf("summarize unified: %w", err)
 	}
-	return sm.Store.WriteProfile(store.ProfileUnified, umd)
+	if err := sm.Store.WriteProfile(store.ProfileUnified, umd); err != nil {
+		return err
+	}
+	// Stamp after the write succeeds (same crash-safety as the per-lens stamp).
+	_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), unifiedSig)
+	return nil
 }
 
 // renderFacetsForSummary formats one lens's active facets as readable input for
