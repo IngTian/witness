@@ -94,29 +94,118 @@ func TestSummarizerSkipsUnchanged(t *testing.T) {
 	}
 }
 
-// A changed summarizer PROMPT (e.g. a witness upgrade ships a new prompts/summarize/
-// lens.md) must invalidate every lens's signature and force a one-time regen, even
-// with unchanged facets — the prompt is part of the signature (#73-S5).
+// A changed per-lens PROMPT (e.g. a witness upgrade ships a new prompts/summarize/
+// lens.md) must invalidate every lens's signature and force a regen, even with
+// unchanged facets — the prompt is part of the per-lens signature (#73-S5). The fake
+// echoes the prompt into its output so the resulting portrait differs, which in turn
+// invalidates the unified signature → unified also regenerates (2 lenses + unified).
 func TestSummarizerRegeneratesWhenPromptChanges(t *testing.T) {
 	s := newStore(t)
 	seedFacets(t, s)
-	calls := 0
-	fake := func(_ context.Context, _, _, _ string) (string, error) { calls++; return "OUT", nil }
+	lensCalls, unifiedCalls := 0, 0
+	fake := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "UNIFIED" {
+			unifiedCalls++
+			return "PORTRAIT", nil
+		}
+		lensCalls++
+		return "SUMMARY(" + prompt + ")", nil // echo prompt so v1≠v2 output
+	}
 
 	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS-v1", UnifiedPrompt: "UNIFIED", Run: fake}
 	if err := sm.Summarize(context.Background()); err != nil {
 		t.Fatalf("first Summarize: %v", err)
 	}
-	calls = 0
+	lensCalls, unifiedCalls = 0, 0
 
-	// Same facets, but a NEW summarize prompt → all lenses must regenerate.
+	// Same facets, but a NEW lens prompt → both lenses regenerate with different output,
+	// so the portrait changes and the unified regenerates too.
 	sm.LensPrompt = "LENS-v2"
 	if err := sm.Summarize(context.Background()); err != nil {
 		t.Fatalf("second Summarize: %v", err)
 	}
-	// 2 lenses regenerate + unified = 3 calls; nothing was skipped.
-	if calls != 3 {
-		t.Fatalf("a changed prompt must regenerate all lenses (want 3 calls), got %d", calls)
+	if lensCalls != 2 {
+		t.Fatalf("a changed lens prompt must regenerate both lenses, got %d", lensCalls)
+	}
+	if unifiedCalls != 1 {
+		t.Fatalf("a changed portrait must regenerate the unified once, got %d", unifiedCalls)
+	}
+}
+
+// The UNIFIED prompt changing alone — with unchanged facets, models, and lens prompt —
+// must still regenerate the unified portrait (its signature includes the unified
+// prompt). The per-lens summaries are unchanged, so they are skipped: only the unified
+// call fires. Guards the audit-found hole that the old !anyChanged heuristic missed.
+func TestSummarizerRegeneratesWhenUnifiedPromptChanges(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	lensCalls, unifiedCalls := 0, 0
+	fake := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "UNIFIED-v1" || prompt == "UNIFIED-v2" {
+			unifiedCalls++
+			return "PORTRAIT(" + prompt + ")", nil
+		}
+		lensCalls++
+		return "SUMMARY", nil
+	}
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED-v1", Run: fake}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("first Summarize: %v", err)
+	}
+	lensCalls, unifiedCalls = 0, 0
+
+	sm.UnifiedPrompt = "UNIFIED-v2" // only the unified prompt changes
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("second Summarize: %v", err)
+	}
+	if lensCalls != 0 {
+		t.Fatalf("per-lens summaries are unchanged and must be skipped, got %d calls", lensCalls)
+	}
+	if unifiedCalls != 1 {
+		t.Fatalf("a changed unified prompt must regenerate the unified once, got %d", unifiedCalls)
+	}
+	if md, ok, _ := s.ReadProfile("unified"); !ok || md != "PORTRAIT(UNIFIED-v2)" {
+		t.Fatalf("unified should reflect the new prompt, got ok=%v md=%q", ok, md)
+	}
+}
+
+// A REMOVED lens (its facets dropped, so it leaves the active set) must rebuild the
+// unified portrait WITHOUT it — even when no surviving lens changed. The old
+// !anyChanged heuristic skipped the unified here, leaving it describing a lens that no
+// longer exists (an audit-found regression vs. always-rebuild). #73-S5.
+func TestSummarizerRebuildsUnifiedWhenLensRemoved(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s) // default + math
+	var unifiedInputs []string
+	fake := func(_ context.Context, _, prompt, input string) (string, error) {
+		if prompt == "UNIFIED" {
+			unifiedInputs = append(unifiedInputs, input)
+			return "PORTRAIT", nil
+		}
+		return "SUMMARY<" + input + ">", nil
+	}
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: fake}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("first Summarize: %v", err)
+	}
+	unifiedInputs = nil
+
+	// Drop the math lens entirely (default's facets unchanged → default is skipped).
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "satisfices",
+			Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatalf("drop math facets: %v", err)
+	}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("second Summarize: %v", err)
+	}
+	// The unified MUST have rebuilt (its portrait no longer contains math).
+	if len(unifiedInputs) != 1 {
+		t.Fatalf("removing a lens must rebuild the unified once, got %d", len(unifiedInputs))
+	}
+	if strings.Contains(unifiedInputs[0], "math") || strings.Contains(unifiedInputs[0], "arithmetic") {
+		t.Fatalf("rebuilt portrait must not mention the removed math lens, got: %q", unifiedInputs[0])
 	}
 }
 
