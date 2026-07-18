@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.IngTian/witness",
+  "title": "witness",
+  "description": "Local memory / second brain for Claude Code & OpenCode: captures your coding sessions and distills how your patterns, habits, and knowledge evolve over time — a person-centric growth archive with provenance, queryable by your agent.",
+  "websiteUrl": "https://github.com/IngTian/witness#readme",
+  "version": "0.3.0",
+  "repository": {
+    "url": "https://github.com/IngTian/witness",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@witness-ai/opencode",
+      "version": "0.3.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "valueHint": "mcp"
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "note": "Local stdio server. First run downloads a local embedding model and uses your local Claude Code / OpenCode auth for distillation; nothing leaves your machine. Prebuilt binaries: darwin-arm64, linux-x64.",
+      "tools": [
+        "search_observations",
+        "get_facets",
+        "get_profile",
+        "record_observation",
+        "delete_observation"
+      ]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# Smithery configuration: https://smithery.ai/docs/config#smitheryyaml
+# witness runs as a LOCAL stdio MCP server. First run downloads a local embedding
+# model and uses your local Claude Code / OpenCode auth for distillation — nothing
+# leaves your machine. Prebuilt npm binaries: darwin-arm64, linux-x64.
+startCommand:
+  type: stdio
+  configSchema:
+    # witness needs no MCP-time configuration: the archive location, runner, and
+    # models are resolved from its own on-disk config (see `witness config`).
+    type: object
+    properties: {}
+  commandFunction: |-
+    (config) => ({ command: 'npx', args: ['-y', '@witness-ai/opencode', 'mcp'], env: {} })

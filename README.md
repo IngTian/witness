@@ -23,11 +23,21 @@ and change** as you work — your thinking, workstyle, habits, the cognitive tra
 and climb out of, and how all of it shifts over time. Not a record of *what your code did*
 (other tools do project memory) — a record of **who you are becoming**.
 
-It is **coach-oriented, not clone-oriented**: the point is to let Claude understand you and reflect
-you back to yourself, and to leave you a re-readable record of how you thought and grew. It is a
-**pure tool** — it captures, structures, and serves the archive (via an MCP server and plain
-files). Building a *coach* on top of it (proactive reflections, "you've done this three times…")
-is left to other projects that read its output.
+It is **reflection-oriented, not clone-oriented**: the point is to let Claude understand you and
+reflect you back to yourself, and to leave you a re-readable record of how you thought and grew.
+It is a **pure tool, not a coach** — it captures, structures, and serves the archive (via an MCP
+server and plain files). Building a *coach* on top of it (proactive reflections, "you've done this
+three times…") is left to other projects that read its output.
+
+## Is this you?
+
+witness is the answer if you've ever wanted to:
+
+- **Remember what you learned across your AI coding sessions** — Claude Code, OpenCode — instead of losing it when the context window resets.
+- Have a **second brain / AI memory** for your thinking, workstyle, and habits, queryable by your agent.
+- **Track how you grow as a developer over time** — the traps you fall into and climb out of — with provenance for every recorded change.
+- Keep a **journal / retrospective** of how you thought and changed, re-readable months later.
+- *(Roadmap)* **Distill your notes & PDFs** and see how your knowledge evolves across documents, not just chats.
 
 **Contents:** [How it works](#how-it-works) · [Lenses](#lenses) · [Example](#example-one-moment-end-to-end) · [Reading the archive](#reading-the-archive) · [Commands](#commands) · [Install](#install) · [Configuration](#configuration) · [Your data](#your-data-is-yours)
 

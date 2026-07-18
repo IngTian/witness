@@ -1,7 +1,7 @@
 {
   "name": "@witness-ai/opencode",
   "version": "0.3.0",
-  "description": "OpenCode plugin for witness session capture and background distillation.",
+  "description": "MCP memory / second brain for Claude Code & OpenCode — captures your coding sessions and distills how your knowledge and habits evolve over time, queryable by your agent.",
   "type": "module",
   "main": "./witness.js",
   "exports": "./witness.js",
@@ -24,9 +24,23 @@
     "@witness-ai/opencode-linux-x64": "0.3.0"
   },
   "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "claude-code",
     "opencode",
-    "plugin",
-    "witness"
+    "memory",
+    "ai-memory",
+    "self-improvement",
+    "reflection",
+    "second-brain",
+    "personal-knowledge-management",
+    "knowledge-distillation",
+    "temporal",
+    "provenance",
+    "growth",
+    "llm",
+    "coding-agent"
   ],
   "license": "MIT",
   "repository": {
