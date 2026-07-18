@@ -13,8 +13,14 @@ import (
 // summarizer (writer) and `witness profile` / get_profile MCP (readers) go through
 // these methods.
 
+// profileFS is the L4 narrative-profile concern: plain markdown files under
+// <root>/profile/. A filesystem leaf — it holds only the data root (never touches
+// the DB), so it can be exercised (and mocked at the Phase-B seam) on its own. Root
+// is set once at Open and never mutated, so this copy can't drift from Store.Root.
+type profileFS struct{ root string }
+
 // ProfileDir is the folder holding the narrative summaries.
-func (s *Store) ProfileDir() string { return filepath.Join(s.Root, "profile") }
+func (p *profileFS) ProfileDir() string { return filepath.Join(p.root, "profile") }
 
 // profileFileName maps a lens to its summary filename, rejecting anything that
 // isn't a plain name — the lens comes from agent/user input (get_profile,
@@ -28,26 +34,26 @@ func profileFileName(lens string) (string, error) {
 
 // WriteProfile writes a lens's narrative summary (dir 0700, file 0600). The lens
 // "unified" holds the cross-lens portrait. Overwrites — regenerated each review.
-func (s *Store) WriteProfile(lens, markdown string) error {
+func (p *profileFS) WriteProfile(lens, markdown string) error {
 	name, err := profileFileName(lens)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.ProfileDir(), 0o700); err != nil {
+	if err := os.MkdirAll(p.ProfileDir(), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.ProfileDir(), name), []byte(markdown), 0o600)
+	return os.WriteFile(filepath.Join(p.ProfileDir(), name), []byte(markdown), 0o600)
 }
 
 // ReadProfile returns a lens's narrative summary and whether it exists yet (a
 // missing summary is exists=false, not an error, so callers can show a friendly
 // "not generated yet" message).
-func (s *Store) ReadProfile(lens string) (string, bool, error) {
+func (p *profileFS) ReadProfile(lens string) (string, bool, error) {
 	name, err := profileFileName(lens)
 	if err != nil {
 		return "", false, err
 	}
-	b, err := os.ReadFile(filepath.Join(s.ProfileDir(), name))
+	b, err := os.ReadFile(filepath.Join(p.ProfileDir(), name))
 	if os.IsNotExist(err) {
 		return "", false, nil
 	}

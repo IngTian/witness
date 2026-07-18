@@ -37,7 +37,7 @@ type Platform interface {
 // break a session, so callers log the error and carry on. Reconcile-only
 // platforms such as OpenCode deliberately do not implement it.
 type Capturer interface {
-	Capture(st *store.Store, data []byte, now time.Time) (ok bool, err error)
+	Capture(st store.CaptureStore, data []byte, now time.Time) (ok bool, err error)
 }
 
 // Importer pulls external native sessions into L0 (the reconcile path). An empty
@@ -45,7 +45,7 @@ type Capturer interface {
 // the requested native session ids are reconciled. OpenCode reads its SQLite
 // store, while Claude's hook-fed implementation is a no-op.
 type Importer interface {
-	Import(ctx context.Context, st *store.Store, sessionIDs []string) (ImportStats, error)
+	Import(ctx context.Context, st store.ImportStore, sessionIDs []string) (ImportStats, error)
 }
 
 // Identity is a platform's naming/namespacing surface: its stable name and the
@@ -234,8 +234,12 @@ func Default() Platform {
 //  3. else Default() (Claude — the unmarked source).
 //
 // st may be nil (or the column empty) — resolution then falls through to prefix
-// and default, so this never fails and never needs a DB row to exist.
-func ForSession(st *store.Store, session string) Platform {
+// and default, so this never fails and never needs a DB row to exist. It takes the
+// narrow store.SessionPlatformReader (issue #73-C1), not the whole *store.Store, since
+// resolution only reads the persisted owning-platform column. Callers pass either a
+// live *store.Store or an untyped nil (the "no store available" path), so a plain
+// nil-interface check is the right guard — the same intent as the former `st != nil`.
+func ForSession(st store.SessionPlatformReader, session string) Platform {
 	if st != nil {
 		if name := st.SessionPlatform(session); name != "" {
 			if p, ok := ByName(name); ok {

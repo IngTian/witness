@@ -30,8 +30,8 @@ import (
 // directory format. Best-effort per lens: a malformed one is left as-is (it will still be
 // surfaced by RegisteredLenses only once it has an extract.md, so an unconvertible lens
 // simply stays invisible, exactly as before). Returns the count converted (for logging).
-func (s *Store) migrateLegacyLenses() int {
-	entries, err := os.ReadDir(s.LensesDir())
+func (r *lensReg) migrateLegacyLenses() int {
+	entries, err := os.ReadDir(r.LensesDir())
 	if err != nil {
 		return 0 // no registry yet (fresh install) — nothing to migrate
 	}
@@ -40,7 +40,7 @@ func (s *Store) migrateLegacyLenses() int {
 		if !e.IsDir() || isLensStagingDir(e.Name()) {
 			continue
 		}
-		dir := filepath.Join(s.LensesDir(), e.Name())
+		dir := filepath.Join(r.LensesDir(), e.Name())
 		// Already new-format (has extract.md) → skip. This makes the pass idempotent.
 		if _, err := os.Stat(filepath.Join(dir, lensExtractFile)); err == nil {
 			continue
@@ -50,7 +50,7 @@ func (s *Store) migrateLegacyLenses() int {
 		if err != nil {
 			continue // no lens.md → not a legacy lens (some other dir); leave it
 		}
-		if s.convertLegacyLensFile(dir, string(data)) {
+		if r.convertLegacyLensFile(dir, string(data)) {
 			converted++
 		}
 	}
@@ -61,7 +61,7 @@ func (s *Store) migrateLegacyLenses() int {
 // dir. Returns true if it wrote a usable lens (non-empty EXTRACT). It writes lens.json only
 // when there is a name/dimensions directive worth recording — a lens whose name was implicit
 // (from the dir) needs no lens.json, matching a natively-registered minimal lens.
-func (s *Store) convertLegacyLensFile(dir, body string) bool {
+func (r *lensReg) convertLegacyLensFile(dir, body string) bool {
 	name, dims, extract, review := parseLegacyLensFile(body)
 	if strings.TrimSpace(extract) == "" {
 		return false // no mining prompt → not convertible; leave the old file untouched

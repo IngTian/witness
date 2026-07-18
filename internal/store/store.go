@@ -30,9 +30,29 @@ var dataDirNames = []string{"witness", "claude-witness"}
 // definitions (lenses/<name>/ — a lens.json plus extract.md/review.md, issue #75)
 // stay as plain files, since they are meant to be read (and, for config/lenses,
 // edited) directly.
+//
+// Internally Store is a thin facade over a set of focused, independently-testable
+// concern types (issue #73-C1) — metaKV, and the others added alongside it — each
+// holding only the shared *sql.DB (and, for the filesystem concerns, Root). Store
+// EMBEDS them, so all of the original methods stay promoted onto *Store and every
+// existing caller keeps compiling unchanged; the split is pure reorganization over
+// one connection (MaxOpenConns(1)+WAL is unchanged — see openDB). Callers that only
+// need a slice of the API can, at the decoupling seam, depend on a narrow interface
+// instead of the whole Store. Root and db remain fields because Close/Export and the
+// path helpers (ConfigPath/LogPath/dbPath) live directly on Store.
 type Store struct {
 	Root string
 	db   *sql.DB
+
+	metaKV     // small-scalar `meta` + `session_meta` bookkeeping (issue #73-C1)
+	profileFS  // L4 narrative profile files under <root>/profile/ (issue #73-C1)
+	procLocks  // cross-process advisory flocks (worker/import) (issue #73-C1)
+	lensReg    // on-disk lens registry under <root>/lenses/ (issue #73-C1)
+	facetIO    // L2 bi-temporal facets (reviewer is sole writer) (issue #73-C1)
+	rawIO      // L0 append-only transcript + size/sample/prune helpers (issue #73-C1)
+	obsIO      // L1 observations + in-session staged buffer (issue #73-C1)
+	queue      // distillation queue: per-(session,lens) watermark/backoff (issue #73-C1)
+	configFile // config.toml + review cadence + runner-bound flag (issue #73-C1)
 }
 
 // Open returns the Store rooted at WITNESS_HOME, else the resolved default under
@@ -46,18 +66,39 @@ func Open() (*Store, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil { // 0700: private growth data
 		return nil, fmt.Errorf("mkdir %s: %w", root, err)
 	}
-	s := &Store{Root: root}
+	// The filesystem concerns get their own copy of root (immutable post-Open, so it
+	// can't drift from Store.Root). configFile is wired with root now so the pre-openDB
+	// EnsureConfigFile below resolves the right path; its db handle is filled in after
+	// openDB. The purely DB-backed concerns are wired after openDB.
+	s := &Store{
+		Root:       root,
+		profileFS:  profileFS{root: root},
+		procLocks:  procLocks{root: root},
+		lensReg:    lensReg{root: root},
+		configFile: configFile{root: root},
+	}
 	// Lay down a fully-commented config template on first contact so any command a
 	// user runs (doctor, profile, lens...) exposes every tunable — not just the
 	// fields install writes. Existing configs are never touched (forward-compatible).
 	// Best-effort: a write failure is ignored because config is optional and a
-	// command must not fail just because it couldn't write a template.
+	// command must not fail just because it couldn't write a template. Uses only the
+	// config path (root), so it is safe before the db handle is wired below.
 	_ = s.EnsureConfigFile()
 	db, err := openDB(s.dbPath())
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	s.db = db
+	// Every DB-backed concern shares this single handle (the deliberate
+	// MaxOpenConns(1)+WAL model). Wire them here, after openDB, and before the
+	// one-shot steps below that call promoted methods (adoptRunnerBound reads the
+	// runner-bound flag via the metaKV-backed MetaString).
+	s.metaKV = metaKV{db: db}
+	s.facetIO = facetIO{db: db}
+	s.rawIO = rawIO{db: db}
+	s.obsIO = obsIO{db: db}
+	s.queue = queue{db: db}
+	s.configFile.db = db // root was set in the literal above (for EnsureConfigFile)
 	// One-shot (issue #71): fold a config that already carries a deliberate runner
 	// choice (a legacy markerless install, or a manually-uncommented runner line)
 	// into the runner_bound flag — the SINGLE source of truth ResolveRunner reads.
@@ -117,7 +158,7 @@ func (s *Store) Close() error {
 
 // --- file paths for user-authored, non-DB state ------------------------------
 
-func (s *Store) ConfigPath() string { return filepath.Join(s.Root, "config.toml") }
+func (s *Store) ConfigPath() string { return configTomlPath(s.Root) }
 func (s *Store) LogPath() string    { return filepath.Join(s.Root, "witness.log") }
 
 // sanitize keeps lens-derived filenames safe (names are short slugs, but be strict).

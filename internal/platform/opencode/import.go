@@ -27,8 +27,12 @@ const (
 // OpenCode as the source of truth and uses a message-id/content key list as the
 // import watermark per session because OpenCode rows can be completed or edited
 // after an earlier sync.
+//
+// Store is the narrow store.ImportStore slice (issue #73-C1) — its own source lock,
+// meta watermark, raw-count probe, and the raw-import commit — not the whole
+// *store.Store, so the importer can be exercised against a fake.
 type Importer struct {
-	Store  *store.Store
+	Store  store.ImportStore
 	DBPath string
 }
 

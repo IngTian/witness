@@ -85,7 +85,7 @@ func RunnerSweepsOnClose(r Runner) bool {
 // imported OpenCode sessions resolves RunnerFor=Claude (shells to claude -p) while
 // each session's ForSession=OpenCode still shapes its input. One engine, per-source
 // input shaping — the two axes never derive from each other.
-func RunnerFor(st *store.Store, cfg store.Config) (Runner, error) {
+func RunnerFor(st store.RunnerResolver, cfg store.Config) (Runner, error) {
 	return RunnerForName(strings.TrimSpace(st.ResolveRunner(cfg)), cfg)
 }
 

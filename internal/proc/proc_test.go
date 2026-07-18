@@ -2,11 +2,16 @@ package proc
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 )
+
+// errStub is a sentinel error returned by the Fake in the GracefulStop test.
+var errStub = errors.New("stub error")
 
 func TestPsField(t *testing.T) {
 	cases := []struct {
@@ -102,5 +107,36 @@ func TestFakeDrivesWithoutSyscalls(t *testing.T) {
 	}
 	if cmd.Process != nil {
 		t.Fatalf("cmd should never have been started by the fake")
+	}
+}
+
+// TestFakeGracefulStopRecords proves the Fake records GracefulStop calls (including a
+// nil process, the no-op path) and surfaces GracefulStopErr, without touching a real
+// process. This lets a caller (e.g. OpenCodeServer.Close) be tested for "did it route
+// the graceful stop through the port?".
+func TestFakeGracefulStopRecords(t *testing.T) {
+	f := &Fake{GracefulStopErr: errStub}
+	var ctl Control = f
+	if err := ctl.GracefulStop(nil); err != errStub {
+		t.Fatalf("GracefulStop err = %v, want errStub", err)
+	}
+	p := &os.Process{Pid: 1234}
+	_ = ctl.GracefulStop(p)
+	if len(f.GracefulStops) != 2 {
+		t.Fatalf("GracefulStops = %d, want 2", len(f.GracefulStops))
+	}
+	if f.GracefulStops[0] != nil {
+		t.Fatalf("first GracefulStop should record nil (no-op path), got %v", f.GracefulStops[0])
+	}
+	if f.GracefulStops[1] != p {
+		t.Fatalf("second GracefulStop should record the process, got %v", f.GracefulStops[1])
+	}
+}
+
+// TestSysGracefulStopNilIsNoop confirms the real controller treats a nil process as a
+// no-op (never panics), matching the callers that hold an optional child handle.
+func TestSysGracefulStopNilIsNoop(t *testing.T) {
+	if err := System().GracefulStop(nil); err != nil {
+		t.Fatalf("GracefulStop(nil) = %v, want nil", err)
 	}
 }

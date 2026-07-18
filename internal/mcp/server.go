@@ -105,7 +105,7 @@ type Embedder interface {
 // witness build version to report in the MCP initialize handshake; it is passed
 // in from cmd (which owns the ldflags-injected version) so this leaf package does
 // not import cmd. Empty falls back to "dev".
-func Serve(ctx context.Context, st *store.Store, emb Embedder, version string) error {
+func Serve(ctx context.Context, st store.MCPStore, emb Embedder, version string) error {
 	return newServer(st, emb, version).Run(ctx, &mcpsdk.StdioTransport{})
 }
 
@@ -119,7 +119,7 @@ func Serve(ctx context.Context, st *store.Store, emb Embedder, version string) e
 // text Content — so a typed-but-empty return made every tool look like it
 // returned `{}` even though the real payload was in Content. Returning `any`/nil
 // suppresses the output schema so clients use Content. (See TestNoStructuredOutput.)
-func newServer(st *store.Store, emb Embedder, version string) *mcpsdk.Server {
+func newServer(st store.MCPStore, emb Embedder, version string) *mcpsdk.Server {
 	if strings.TrimSpace(version) == "" {
 		version = "dev"
 	}

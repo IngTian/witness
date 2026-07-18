@@ -27,7 +27,7 @@ func (leakFakePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy
 	return []string{""}
 }
 func (leakFakePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
-func (leakFakePlatform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
+func (leakFakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{}, nil
 }
 func (leakFakePlatform) NewRunner(store.Config) platform.Runner { return leakFakeRunner{} }

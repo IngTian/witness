@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
@@ -225,7 +224,11 @@ func (s *OpenCodeServer) Close() error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	// Graceful stop via the process-control port (issue #43/#73-C1): SIGTERM the serve
+	// child so it can shut down cleanly, escalating to Kill below if it doesn't exit in
+	// time. Routed through procCtl (not a direct cmd.Process.Signal) so this file holds
+	// no syscall reference and Close is testable against a proc.Fake.
+	_ = procCtl.GracefulStop(cmd.Process)
 	select {
 	case <-waitDone:
 		return s.waitErr

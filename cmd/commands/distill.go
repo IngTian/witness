@@ -3,11 +3,8 @@ package commands
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/IngTian/witness/internal/store"
@@ -159,7 +156,7 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 	if waitBackoffs {
 		// Ctrl-C during a between-passes sleep aborts the wait and falls through to the
 		// end-state check, which reports the honest (still-incomplete) state.
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := procCtl.NotifyStop(context.Background())
 		defer stop()
 		if err := backfillDrainWithRetry(ctx, backfillRetryDeps{
 			rerun:            func() error { _, e := runWorker(false); return e },

@@ -42,7 +42,7 @@ func (fakePlatform) RenderInputs(raw []store.RawRecord, _ platform.ChunkPolicy) 
 }
 
 // Capture: write one L0 row from a trivial {session,text} payload + stamp platform.
-func (fakePlatform) Capture(st *store.Store, data []byte, now time.Time) (bool, error) {
+func (fakePlatform) Capture(st store.CaptureStore, data []byte, now time.Time) (bool, error) {
 	var ev struct {
 		Session string `json:"session"`
 		Text    string `json:"text"`
@@ -58,7 +58,7 @@ func (fakePlatform) Capture(st *store.Store, data []byte, now time.Time) (bool, 
 	return true, nil
 }
 
-func (fakePlatform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
+func (fakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{Agent: "fake"}, nil
 }
 

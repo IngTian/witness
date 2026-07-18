@@ -24,7 +24,10 @@ import (
 //   - NEVER invalidate on mere absence — that only decays confidence
 //   - new facets are added open-ended (valid_to == "")
 type Reviewer struct {
-	Store  *store.Store
+	// Store is the narrow L1→L2 review surface (issue #73-C1): read facets + slimmed
+	// observations, replace the facet profile, stamp the review cadence — not the whole
+	// *store.Store.
+	Store  store.ReviewStore
 	Lenses []*lens.Lens
 	Config store.Config
 	Runner MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake

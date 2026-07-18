@@ -64,6 +64,17 @@ type Control interface {
 	// its drain so a `distill stop` (SIGTERM) or Ctrl-C tears down in-flight
 	// distillation children too.
 	NotifyStop(parent context.Context) (context.Context, context.CancelFunc)
+
+	// GracefulStop asks a single process to terminate cleanly (SIGTERM), giving it a
+	// chance to run its own shutdown before a caller escalates to Kill. Unlike
+	// TerminateGroup (which signals the whole process GROUP by negative pid for the
+	// detached worker + its `claude -p` child), this targets ONE process the caller
+	// already holds — e.g. the opencode-serve child in OpenCodeServer.Close. os.Process.
+	// Signal(SIGTERM) is portable across every GOOS Go builds for (on Windows it maps to
+	// a TerminateProcess), so this is one portable impl, not a GOOS split — routing it
+	// through the port only so the engine holds no direct syscall/signal reference and a
+	// caller can be tested against a Fake. A nil process is a no-op.
+	GracefulStop(p *os.Process) error
 }
 
 // System returns the real, OS-backed process controller.
@@ -76,6 +87,17 @@ type sys struct{}
 
 func (sys) NotifyStop(parent context.Context) (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+}
+
+// GracefulStop sends SIGTERM to one process. os.Process.Signal is the portable
+// entry point (Windows maps a SIGTERM Signal to TerminateProcess), so no GOOS split
+// is needed. A nil process is a no-op — matching the callers that hold an optional
+// child handle.
+func (sys) GracefulStop(p *os.Process) error {
+	if p == nil {
+		return nil
+	}
+	return p.Signal(syscall.SIGTERM)
 }
 
 // ensureSysProcAttr returns cmd's SysProcAttr, allocating a fresh one if unset so

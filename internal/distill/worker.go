@@ -75,6 +75,15 @@ func RunnerMine(r platform.Runner) MineFunc {
 // so this is deliberately strict.
 const dedupThreshold = 0.93
 
+// PreviewStore is the read-only store surface PreviewMine needs (issue #73-C1): the
+// L0 transcript (ReadRaw) plus the owning-platform lookup distillInputs → ForSession
+// performs. It composes two narrow store interfaces so a preview holds no write path
+// and can be driven by a fake. *store.Store satisfies it by promotion.
+type PreviewStore interface {
+	store.RawReader
+	store.SessionPlatformReader
+}
+
 // Worker processes ONE session's L0 into L1. It is the sole writer of L1 and the
 // sole place active + mined observations are combined.
 //
@@ -83,7 +92,13 @@ const dedupThreshold = 0.93
 //   - mined observations: kept only if not a near-duplicate of an active one or an
 //     already-stored same-lens observation
 type Worker struct {
-	Store    *store.Store
+	// Store is the narrow distillation-queue surface (issue #73-C1): the L0/L1 reads,
+	// the L1 commit, and the per-(session,lens) watermark/backoff/drift writes the
+	// drain drives — NOT the whole *store.Store. This is what lets the worker run
+	// against a fake with no real *sql.DB (see worker_fakestore_test.go). store.Queue
+	// embeds SessionPlatformReader, so distillInputs → platform.ForSession still
+	// resolves each session's owning platform through it.
+	Store    store.Queue
 	Embedder Embedder
 	Lenses   []*lens.Lens // default (always) + any config-enabled lenses; all global, applied to every session regardless of source (CC or OpenCode)
 	Config   store.Config
@@ -513,8 +528,10 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 // error (rate limit, timeout) is returned as-is — that is a real failure, not drift.
 //
 // run is the MineFunc the caller wired from an open Runner (RunnerMine); PreviewMine
-// owns no runner lifecycle. cfg supplies the triage model. st is used only to read raw.
-func PreviewMine(ctx context.Context, run MineFunc, cfg store.Config, st *store.Store, session string, ln *lens.Lens) (obs []store.Observation, chunkCount int, drifted bool, err error) {
+// owns no runner lifecycle. cfg supplies the triage model. st is the narrow
+// PreviewStore (issue #73-C1): read the raw transcript and resolve the session's
+// owning platform — no write path, so a preview can never touch the archive.
+func PreviewMine(ctx context.Context, run MineFunc, cfg store.Config, st PreviewStore, session string, ln *lens.Lens) (obs []store.Observation, chunkCount int, drifted bool, err error) {
 	raw, err := st.ReadRaw(session)
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("read L0: %w", err)

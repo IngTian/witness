@@ -41,7 +41,10 @@ type SummarizeFunc = MineFunc
 // is purely derived, so this never blocks the worker (callers treat it as
 // best-effort) and a failed pass leaves the prior summaries in place.
 type Summarizer struct {
-	Store         *store.Store
+	// Store is the narrow L2→L4 summary surface (issue #73-C1): read facets, read/write
+	// the narrative profile files, and its own meta watermark — not the whole
+	// *store.Store.
+	Store         store.SummaryStore
 	Config        store.Config
 	Lenses        []*lens.Lens  // active lenses, so a per-lens summary uses that lens's ReviewModel (#75); a facet whose lens isn't here (orphan) falls back to the default DistillModel
 	LensPrompt    string        // prompts/summarize/lens.md

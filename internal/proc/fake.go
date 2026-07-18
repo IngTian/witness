@@ -2,6 +2,7 @@ package proc
 
 import (
 	"context"
+	"os"
 	"os/exec"
 )
 
@@ -15,12 +16,15 @@ type Fake struct {
 	Detached      []*exec.Cmd
 	Bound         []*exec.Cmd
 	Terminated    []int
+	GracefulStops []*os.Process // processes passed to GracefulStop, in order
 	NotifyStops   int
 	ReapCalls     int
 	ReapPredicate func(cmdline string) bool // the last predicate passed to ReapOrphans
 
 	// TerminateErr, if set, is returned by TerminateGroup (to simulate a dead pid).
 	TerminateErr error
+	// GracefulStopErr, if set, is returned by GracefulStop (to simulate a dead pid).
+	GracefulStopErr error
 	// ReapPS, if non-empty, is treated as synthetic `ps` output: ReapOrphans runs
 	// OrphanPIDs against it with the supplied predicate and appends the selected
 	// pids to ReapSelected, so a test can assert the fingerprint+orphan gate without
@@ -45,6 +49,13 @@ func (f *Fake) ReapOrphans(want func(cmdline string) bool) {
 func (f *Fake) TerminateGroup(pid int) error {
 	f.Terminated = append(f.Terminated, pid)
 	return f.TerminateErr
+}
+
+// GracefulStop records the process it was handed (nil included, so a test can assert
+// the no-op path) and returns GracefulStopErr. No real signal is sent.
+func (f *Fake) GracefulStop(p *os.Process) error {
+	f.GracefulStops = append(f.GracefulStops, p)
+	return f.GracefulStopErr
 }
 
 // NotifyStop returns a plain cancellable child of parent — no real signal handler
