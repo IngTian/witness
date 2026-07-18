@@ -168,17 +168,23 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 // briefly — cheap relative to the LLM call). All dedup-against-corpus and writes
 // happen later in CommitMining.
 func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMining, error) {
-	raw, err := w.Store.ReadRaw(session)
+	// Read the delta AND its raw "generation" (highest raw.id) as ONE atomic snapshot.
+	// CommitMining advances each lens's watermark only if this id still exists, so a
+	// replace-import/cleanup that deletes raw mid-mine can't have a stale count blind-
+	// written over it (#49 C2). The generation is session-level (a property of raw),
+	// shared by all lenses.
+	//
+	// This MUST be a single read, not ReadRaw + a separate MaxRawID: MaxOpenConns(1)
+	// serializes each statement but releases the connection between them, so a replace-
+	// import committing in that gap would pair an OLD-gen count/content with the NEW
+	// gen's high id — the CAS then sees the new id live and blind-advances over never-
+	// mined turns (issue #67-1). One query makes rawHighID provably the max id of
+	// exactly `raw`, so the pair can never straddle a generation boundary.
+	raw, rawHighID, err := w.Store.ReadRawSnapshot(session)
 	if err != nil {
 		return nil, fmt.Errorf("read L0: %w", err)
 	}
 	total := len(raw)
-
-	// Capture the raw "generation" this mine reads — the highest raw.id. CommitMining
-	// advances each lens's watermark only if this id still exists, so a replace-import/
-	// cleanup that deletes raw mid-mine can't have a stale count blind-written over it
-	// (#49 C2). The generation is session-level (a property of raw), shared by all lenses.
-	rawHighID := w.Store.MaxRawID(session)
 
 	m := &SessionMining{Session: session, Total: total, RawHighID: rawHighID, StagedThroughID: 0}
 	if total > 0 {
