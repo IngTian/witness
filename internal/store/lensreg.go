@@ -34,10 +34,18 @@ func ReservedLensName(name string) bool {
 	return n == ProfileUnified || n == LensDefault
 }
 
+// lensReg is the lens-registry concern: the on-disk lens definitions under
+// <root>/lenses/<name>/ (each a directory of lens.json + extract.md + review.md,
+// issue #75) plus their one-shot legacy-format migration (lensmigrate.go). A
+// filesystem leaf — it holds only the data root and never touches the DB. Its
+// registry-mutation lock rides the shared flockPath primitive, so it depends on no
+// other concern.
+type lensReg struct{ root string }
+
 // LensesDir is the central lens registry: <root>/lenses/<name>/ (each a directory of
 // lens.json + extract.md + review.md, issue #75). Lenses live here (not in repos) so
 // the same definition is shared across all sessions.
-func (s *Store) LensesDir() string { return filepath.Join(s.Root, "lenses") }
+func (r *lensReg) LensesDir() string { return filepath.Join(r.root, "lenses") }
 
 // errLensBusy is returned when a registry-mutating op can't take the registry lock
 // because another one holds it (a rare interactive collision; retry).
@@ -47,8 +55,8 @@ var errLensBusy = fmt.Errorf("another lens registry operation is in progress; re
 // SetLensModel) so two concurrent ops can't interleave through the shared staging
 // path and lose a lens. It is a filesystem flock independent of WorkerLock (a worker
 // drain and a lens edit are unrelated), non-blocking (LOCK_EX|LOCK_NB) like the others.
-func (s *Store) lensRegistryLock() (unlock func(), ok bool) {
-	return s.lockFile(".lens-registry.lock")
+func (r *lensReg) lensRegistryLock() (unlock func(), ok bool) {
+	return flockPath(r.root, ".lens-registry.lock")
 }
 
 // lensFileNames are the on-disk files of a lens directory. Duplicated from
@@ -72,12 +80,12 @@ const (
 // memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
 // file. And it stages into a sibling .tmp dir then atomically renames into place, so a
 // concurrent worker read never sees a half-built lens directory.
-func (s *Store) RegisterLens(name, srcDir string) error {
+func (r *lensReg) RegisterLens(name, srcDir string) error {
 	// Serialize registry mutations (this + SetLensModel) so two concurrent
 	// `witness lens register <same-name>` can't interleave through the shared staging
 	// path and silently destroy the lens. Non-blocking: contention returns a retryable
 	// error rather than corrupting — acceptable for a rare interactive admin op.
-	unlock, ok := s.lensRegistryLock()
+	unlock, ok := r.lensRegistryLock()
 	if !ok {
 		return errLensBusy
 	}
@@ -120,7 +128,7 @@ func (s *Store) RegisterLens(name, srcDir string) error {
 	}
 	// Stage into a sibling .tmp dir, fully build it, then swap. A reader sees either the
 	// old dir or the new one, never a half-built one.
-	dir := filepath.Join(s.LensesDir(), sanitize(name))
+	dir := filepath.Join(r.LensesDir(), sanitize(name))
 	tmp := dir + ".tmp"
 	bak := dir + ".bak"
 	if err := os.RemoveAll(tmp); err != nil {
@@ -162,15 +170,15 @@ func (s *Store) RegisterLens(name, srcDir string) error {
 
 // DeregisterLens removes a lens definition from the registry (no-op if absent).
 // (It does not touch config; disable the lens separately if it was enabled.)
-func (s *Store) DeregisterLens(name string) error {
-	return os.RemoveAll(filepath.Join(s.LensesDir(), sanitize(name)))
+func (r *lensReg) DeregisterLens(name string) error {
+	return os.RemoveAll(filepath.Join(r.LensesDir(), sanitize(name)))
 }
 
 // RegisteredLenses lists the names of lenses in the registry (dirs holding an
 // extract.md — the one required file, so the presence probe never misses a lens that
 // simply has no lens.json or review.md).
-func (s *Store) RegisteredLenses() []string {
-	entries, err := os.ReadDir(s.LensesDir())
+func (r *lensReg) RegisteredLenses() []string {
+	entries, err := os.ReadDir(r.LensesDir())
 	if err != nil {
 		return nil
 	}
@@ -179,7 +187,7 @@ func (s *Store) RegisteredLenses() []string {
 		if !e.IsDir() || isLensStagingDir(e.Name()) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(s.LensesDir(), e.Name(), lensExtractFile)); err == nil {
+		if _, err := os.Stat(filepath.Join(r.LensesDir(), e.Name(), lensExtractFile)); err == nil {
 			names = append(names, e.Name())
 		}
 	}
@@ -201,7 +209,7 @@ func isLensStagingDir(name string) bool {
 // default stage model). This is the safe struct round-trip that replaced hand-editing
 // header directives: read → set one field → marshal → atomic write, so no text surgery
 // can corrupt the file. It does NOT touch extract.md/review.md.
-func (s *Store) SetLensModel(name, phase, model string) error {
+func (r *lensReg) SetLensModel(name, phase, model string) error {
 	var field string
 	switch phase {
 	case "extract":
@@ -211,7 +219,7 @@ func (s *Store) SetLensModel(name, phase, model string) error {
 	default:
 		return fmt.Errorf("unknown lens model phase %q (want extract|review)", phase)
 	}
-	return s.setLensJSONField(name, field, model)
+	return r.setLensJSONField(name, field, model)
 }
 
 // SetLensRunner sets a registered lens's per-lens runtime in its lens.json (issue #75
@@ -220,27 +228,27 @@ func (s *Store) SetLensModel(name, phase, model string) error {
 // SetLensModel — no text surgery. It does NOT validate the runner name here (an unknown
 // name surfaces at drain time via the runner-set's circuit breaker + at `witness doctor`),
 // matching how per-lens models are handled.
-func (s *Store) SetLensRunner(name, runner string) error {
-	return s.setLensJSONField(name, "runner", runner)
+func (r *lensReg) SetLensRunner(name, runner string) error {
+	return r.setLensJSONField(name, "runner", runner)
 }
 
 // setLensJSONField is the shared, locked read-modify-write for a single lens.json field:
 // preserve every other field, set the given one (or DELETE it when value is empty so the
 // lens falls back to the default), and atomically write. This is the one place lens.json is
 // mutated by the CLI — a struct/map round-trip, never text surgery (the #71 bug class).
-func (s *Store) setLensJSONField(name, field, value string) error {
+func (r *lensReg) setLensJSONField(name, field, value string) error {
 	// Same registry lock as RegisterLens: a lens.json write must not race a concurrent
 	// register that is mid-swap on this lens's dir (which would read/write a lens.json
 	// that's being renamed out from under it).
-	unlock, ok := s.lensRegistryLock()
+	unlock, ok := r.lensRegistryLock()
 	if !ok {
 		return errLensBusy
 	}
 	defer unlock()
-	if !slices.Contains(s.RegisteredLenses(), name) {
+	if !slices.Contains(r.RegisteredLenses(), name) {
 		return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", name, name)
 	}
-	path := filepath.Join(s.LensesDir(), sanitize(name), lensConfigFile)
+	path := filepath.Join(r.LensesDir(), sanitize(name), lensConfigFile)
 	// Read-modify-write the existing lens.json (preserving other fields); an absent file
 	// starts from an empty config.
 	var raw map[string]any

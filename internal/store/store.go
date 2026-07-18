@@ -46,6 +46,8 @@ type Store struct {
 
 	metaKV    // small-scalar `meta` + `session_meta` bookkeeping (issue #73-C1)
 	profileFS // L4 narrative profile files under <root>/profile/ (issue #73-C1)
+	procLocks // cross-process advisory flocks (worker/import) (issue #73-C1)
+	lensReg   // on-disk lens registry under <root>/lenses/ (issue #73-C1)
 }
 
 // Open returns the Store rooted at WITNESS_HOME, else the resolved default under
@@ -61,7 +63,12 @@ func Open() (*Store, error) {
 	}
 	// The filesystem concerns get their own copy of root (immutable post-Open, so it
 	// can't drift from Store.Root). The DB-backed concerns are wired after openDB.
-	s := &Store{Root: root, profileFS: profileFS{root: root}}
+	s := &Store{
+		Root:      root,
+		profileFS: profileFS{root: root},
+		procLocks: procLocks{root: root},
+		lensReg:   lensReg{root: root},
+	}
 	// Lay down a fully-commented config template on first contact so any command a
 	// user runs (doctor, profile, lens...) exposes every tunable — not just the
 	// fields install writes. Existing configs are never touched (forward-compatible).
