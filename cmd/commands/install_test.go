@@ -10,20 +10,6 @@ import (
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 )
 
-// TestScaffoldDefaultDecision covers the two deterministic branches of the install
-// scaffold decision (the interactive [Y/n] branch needs a real TTY, exercised by hand):
-//   - --no-default always skips, even non-interactively;
-//   - non-interactive (the test harness's stdin is NOT a TTY) scaffolds by default, so
-//     npm/CI/piped installs get a working setup and never hang on a prompt.
-func TestScaffoldDefaultDecision(t *testing.T) {
-	if scaffoldDefaultDecision(true) {
-		t.Fatal("--no-default must always skip scaffolding")
-	}
-	if !scaffoldDefaultDecision(false) {
-		t.Fatal("non-interactive install (no TTY) must scaffold default by fallback, not skip")
-	}
-}
-
 // helper: how many witness entries does event have, and is `other` preserved?
 func eventCommands(t *testing.T, data []byte, event string) []string {
 	t.Helper()

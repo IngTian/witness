@@ -43,11 +43,12 @@ func cmdReview() error {
 
 // forceReview runs an L2 review from the current observations, updates facets, and
 // regenerates the L4 profiles — the unconditional review the `witness review` command
-// exposes, factored out so `lens rebuild` can reuse it (a rebuild DELETES a lens's
-// facets, so it must force a review afterwards to rebuild them from the freshly
+// exposes, factored out so `lens backfill` can reuse it (a backfill re-mines a lens's
+// observations and must force a review afterwards to keep its facets from drifting —
+// and `--fresh` DELETES the facets outright, so they must be rebuilt from the freshly
 // re-mined observations; the periodic ReviewDue triggers may not fire on a small
-// archive, which would otherwise leave that lens with empty facets + a stale profile
-// while the command reported success). Returns whether the review ran (false = another
+// archive, which would otherwise leave that lens with stale/empty facets + a stale
+// profile while the command reported success). Returns whether the review ran (false = another
 // worker holds the lock, so it will review as part of its own drain). The caller owns
 // st and setupLogging; this only borrows st for the review pass.
 func forceReview(st *store.Store) (bool, error) {

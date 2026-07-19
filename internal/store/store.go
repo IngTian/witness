@@ -111,13 +111,15 @@ func Open() (*Store, error) {
 	// hiccup must not fail an Open. Keeps legacy handling in ONE frozen place (lensmigrate.go)
 	// instead of scattering old-format checks across the codebase, mirroring the DB migration.
 	_ = s.migrateLegacyLenses()
-	// One-shot (#44 slice 1a): migrate a PRE-1a archive — one that ran under the old
-	// always-on "default" lens — into the new world where "default" is an ordinary
-	// registered+enabled lens. This is an INJECTED hook (SeedDefaultLens), not an inline
-	// step, because seeding copies the BUNDLED default prompts into the registry, which
-	// needs internal/lens + internal/bundle — and store, the bottom of the stack, imports
-	// nothing internal. cmd wires it at startup; nil in pure-store/test contexts (correct:
-	// no bundle there, nothing to migrate). Idempotent + gated inside the hook.
+	// One-shot (#44 slice 1a + #102): on the FIRST open of an archive that wants it — a
+	// brand-new personal install OR one that predates 1a (ran under the old always-on
+	// "default") — auto-seed "default" as an ordinary registered+enabled lens, so a fresh
+	// user gets a working setup and an upgrade loses nothing. It is an INJECTED hook
+	// (SeedDefaultLens), not an inline step, because seeding copies the BUNDLED default
+	// prompts into the registry, which needs internal/lens + internal/bundle — and store,
+	// the bottom of the stack, imports nothing internal. cmd wires it at startup; nil in
+	// pure-store/test contexts (correct: no bundle there, nothing to seed). Idempotent +
+	// one-shot-gated inside the hook, so a deliberately-removed default stays gone.
 	if SeedDefaultLens != nil {
 		SeedDefaultLens(s)
 	}
@@ -125,14 +127,15 @@ func Open() (*Store, error) {
 }
 
 // SeedDefaultLens, when set by the cmd layer at startup, is invoked once at the end of
-// Open to retro-register the "default" lens for an archive that predates #44 slice 1a
-// (i.e. one that distilled under the old always-on default) — so making default an
-// ordinary lens doesn't silently drop it from an existing install. It is a package var
+// Open to auto-seed the built-in "default" lens the first time an archive is opened that
+// wants it: a fresh personal install (empty archive, empty registry) or one that predates
+// #44 slice 1a (distilled under the old always-on default). It is a package var
 // (dependency injection) rather than an inline Open step because the seed source is the
 // bundled prompts dir, reachable only from internal/lens/internal/bundle; store must not
-// import them. The hook is responsible for its own idempotency + "is this a pre-1a
-// archive?" gate (see HasLegacyDefaultData). Left nil, Open does no default migration —
-// the correct behavior for tests and any store-only consumer.
+// import them. The hook owns its own idempotency, its "should this archive get default?"
+// gate (see HasLegacyDefaultData + IsEmptyArchive), and a durable one-shot marker so a
+// deleted default is never resurrected (#102 "default is deletable"). Left nil, Open does
+// no seeding — the correct behavior for tests and any store-only consumer.
 var SeedDefaultLens func(*Store)
 
 // resolveRoot picks the data-root directory. WITNESS_HOME, if set, wins verbatim

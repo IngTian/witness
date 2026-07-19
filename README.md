@@ -192,6 +192,10 @@ by hand):
 - `witness observations delete <obs_id>` — prune a wrong observation.
 - `witness review` — force an L2 review and regenerate L4 profiles from existing observations.
 - `witness lens register|enable|disable|list` — manage lenses.
+- `witness lens backfill <name> [--fresh]` — re-mine one lens over the whole history and refresh its
+  facets; `--fresh` first drops the lens's observations + facets (for a changed prompt).
+- `witness lens load-default` — re-seed / restore the built-in "default" person-growth lens (it is
+  auto-seeded once on first use and fully deletable, so this is how you bring it back).
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
 - `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.

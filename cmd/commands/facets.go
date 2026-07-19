@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/IngTian/witness/internal/store"
@@ -46,7 +47,14 @@ func cmdFacets(args []string, asJSON bool) error {
 		}
 		return emitJSON(facetsJSON{Lens: lensName, Facets: filtered})
 	}
-	renderCurrentFacets(lensName, facets)
+	// Whether this lens is registered AND enabled decides the right empty-state message:
+	// since #44 slice 1a "default" is an ordinary, DELETABLE lens, so an absent lens (the
+	// user removed it, or typo'd the name) must not be blamed on "the reviewer hasn't run
+	// yet" — and a registered-but-DISABLED lens won't be helped by `witness review` either
+	// (review only iterates the enabled set), so that hint must point at `lens enable`.
+	registered := slices.Contains(st.RegisteredLenses(), lensName)
+	enabled := slices.Contains(st.LoadConfig().EnabledLenses, lensName)
+	renderCurrentFacets(lensName, facets, registered, enabled)
 	return nil
 }
 
@@ -55,7 +63,7 @@ type facetsJSON struct {
 	Facets []store.Facet `json:"facets"`
 }
 
-func renderCurrentFacets(lensName string, facets []store.Facet) {
+func renderCurrentFacets(lensName string, facets []store.Facet, registered, enabled bool) {
 	count := 0
 	for _, f := range facets {
 		if f.Lens == lensName && f.Current() != nil {
@@ -63,7 +71,18 @@ func renderCurrentFacets(lensName string, facets []store.Facet) {
 		}
 	}
 	if count == 0 {
-		fmt.Printf("No facets found for lens %q. The reviewer may not have run yet.\n", lensName)
+		// Three distinct empty states, each with the ACCURATE next step — the deletable
+		// default (#102) makes "absent" and "disabled" normal, not a stuck reviewer:
+		switch {
+		case !registered:
+			fmt.Printf("No lens %q is registered, so it has no facets (see `witness lens list`; restore the built-in one with `witness lens load-default`).\n", lensName)
+		case !enabled:
+			// `witness review` only iterates the ENABLED set, so it would no-op here —
+			// point at enable, not review.
+			fmt.Printf("Lens %q is registered but disabled, so it has no facets — enable it with `witness lens enable %s`, then distill.\n", lensName, lensName)
+		default:
+			fmt.Printf("No facets for lens %q yet — the reviewer runs after enough observations accumulate; force one now with `witness review`.\n", lensName)
+		}
 		return
 	}
 	fmt.Printf("Growth facets (%s lens) - %d\n\n", lensName, count)

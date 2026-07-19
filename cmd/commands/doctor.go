@@ -191,7 +191,7 @@ func cmdDoctor(asJSON bool) error {
 			}
 		}
 		fmt.Printf("    %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
-			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; `witness config set triage_model <stronger>`, then `witness lens rebuild <lens>`",
+			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; `witness config set triage_model <stronger>`, then `witness lens backfill <lens> --fresh`",
 			driftTotal, last)))
 	}
 	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
