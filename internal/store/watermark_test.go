@@ -16,6 +16,43 @@ func appendN(t *testing.T, s *Store, session string, n int) {
 	}
 }
 
+// TestZeroActiveLensesIsLegal pins the #44 slice-1a invariant: the default lens no
+// longer has always-on privilege, so an install may have ZERO active lenses — that is
+// a legal state meaning "nothing to distill", NOT a trigger to fall back to default.
+// Every queue query that cross-joins the active-lens set must short-circuit to an
+// empty/zero result WITHOUT building a malformed `VALUES ` CTE (a nil lens list fed
+// to lensValuesClause would emit invalid SQL). If someone re-introduces a forced
+// default fallback, or drops an empty-set guard (SQL error), this fails.
+func TestZeroActiveLensesIsLegal(t *testing.T) {
+	s := tempStore(t)
+	appendN(t, s, "a", 4) // undistilled data exists...
+	_ = s.SetNextAttempt("a", LensDefault, time.Now().Add(time.Hour))
+	_ = s.StageObservation(Observation{ID: "obs_a", Session: "a", Observation: "x"})
+	empty := []string{} // ...but zero active lenses
+
+	if p, err := s.PendingSessions(empty); err != nil || len(p) != 0 {
+		t.Fatalf("PendingSessions(empty) = %v, err %v; want empty, nil", p, err)
+	}
+	got, err := s.PendingSessionsUpdatedBetween(empty, time.Time{}, time.Time{})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("PendingSessionsUpdatedBetween(empty) = %v, err %v; want empty, nil", got, err)
+	}
+	if n := s.PendingInputChars("a", empty); n != 0 {
+		t.Fatalf("PendingInputChars(empty) = %d; want 0", n)
+	}
+	if at, ok := s.NextBackoffAttempt(empty, time.Now()); ok {
+		t.Fatalf("NextBackoffAttempt(empty) = %s, %v; want _, false", at, ok)
+	}
+	// Stats: archive counts still populate; lens-scoped Pending/BackedOff are 0.
+	st := s.Stats(empty)
+	if st.RawRecords != 4 {
+		t.Fatalf("Stats(empty) archive counts should still populate: %+v", st)
+	}
+	if st.Pending != 0 || st.BackedOff != 0 {
+		t.Fatalf("Stats(empty) lens-scoped counts should be 0: %+v", st)
+	}
+}
+
 func TestRetryCounter(t *testing.T) {
 	s := tempStore(t)
 	if got := s.RetryCount("sess", LensDefault); got != 0 {
@@ -41,19 +78,19 @@ func TestPendingSessionsUsesWatermark(t *testing.T) {
 	appendN(t, s, "a", 4)
 
 	// No marker yet → pending.
-	if p, _ := s.PendingSessions(nil); !slices.Contains(p, "a") {
+	if p, _ := s.PendingSessions([]string{LensDefault}); !slices.Contains(p, "a") {
 		t.Fatalf("fresh session should be pending, got %v", p)
 	}
 
 	// Distilled up to all 4 → not pending.
 	s.MarkDistilled("a", LensDefault, 4)
-	if p, _ := s.PendingSessions(nil); slices.Contains(p, "a") {
+	if p, _ := s.PendingSessions([]string{LensDefault}); slices.Contains(p, "a") {
 		t.Fatalf("fully-distilled session should NOT be pending, got %v", p)
 	}
 
 	// Resume: 2 new turns appended past the watermark → pending again.
 	appendN(t, s, "a", 2) // now 6 records, watermark still 4
-	if p, _ := s.PendingSessions(nil); !slices.Contains(p, "a") {
+	if p, _ := s.PendingSessions([]string{LensDefault}); !slices.Contains(p, "a") {
 		t.Fatalf("resumed session with new turns should be pending again, got %v", p)
 	}
 }
@@ -63,7 +100,7 @@ func TestPendingSessionsIncludesStagedObservations(t *testing.T) {
 	if err := s.StageObservation(Observation{ID: "obs_a", Session: "a", Observation: "noticed a pattern"}); err != nil {
 		t.Fatalf("StageObservation: %v", err)
 	}
-	if p, _ := s.PendingSessions(nil); !slices.Contains(p, "a") {
+	if p, _ := s.PendingSessions([]string{LensDefault}); !slices.Contains(p, "a") {
 		t.Fatalf("session with staged observations should be pending, got %v", p)
 	}
 }
@@ -91,7 +128,7 @@ func TestPendingSessionsUpdatedBetweenUsesLatestRawTimestamp(t *testing.T) {
 
 	since := time.Date(2026, 7, 8, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2026, 7, 11, 23, 59, 59, 0, time.UTC)
-	got, err := s.PendingSessionsUpdatedBetween(nil, since, until)
+	got, err := s.PendingSessionsUpdatedBetween([]string{LensDefault}, since, until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +145,7 @@ func TestPendingSessionsUpdatedBetweenExcludesUndatedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.PendingSessionsUpdatedBetween(nil, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), time.Time{})
+	got, err := s.PendingSessionsUpdatedBetween([]string{LensDefault}, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +307,7 @@ func TestNextBackoffAttempt(t *testing.T) {
 	_ = s.SetNextAttempt("later", LensDefault, now.Add(10*time.Minute))
 	_ = s.SetNextAttempt("sooner", LensDefault, now.Add(2*time.Minute))
 	_ = s.SetNextAttempt("past", LensDefault, now.Add(-time.Minute))
-	at, ok := s.NextBackoffAttempt(nil, now)
+	at, ok := s.NextBackoffAttempt([]string{LensDefault}, now)
 	if !ok || !at.Equal(now.Add(2*time.Minute)) {
 		t.Fatalf("NextBackoffAttempt = %s, %v; want sooner", at, ok)
 	}
@@ -298,9 +335,11 @@ func TestPendingInputChars(t *testing.T) {
 	if got := s.PendingInputChars("a", []string{LensDefault}); got != 35 {
 		t.Fatalf("fresh session: want 35 chars, got %d", got)
 	}
-	// nil lenses falls back to default → same answer.
-	if got := s.PendingInputChars("a", nil); got != 35 {
-		t.Fatalf("nil lenses should default to default lens: want 35, got %d", got)
+	// ZERO active lenses (nil) → nothing to distill → 0 chars (#44 slice 1a: the
+	// default lens no longer has always-on privilege, so an empty set is legal and
+	// means "no active lens", NOT "fall back to default").
+	if got := s.PendingInputChars("a", nil); got != 0 {
+		t.Fatalf("nil (zero) lenses should size to 0, got %d", got)
 	}
 
 	// default distilled past the first 2 turns → only the 5-char tail remains.

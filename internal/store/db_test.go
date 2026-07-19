@@ -538,7 +538,7 @@ func TestStatsSnapshot(t *testing.T) {
 	_ = s.AppendRaw(RawRecord{Session: "a", Seq: 1, Role: "assistant", Text: "y"})
 	_ = s.AppendObservations([]Observation{{ID: "o1", Lens: LensDefault, Poignancy: 3}})
 
-	st := s.Stats(nil)
+	st := s.Stats([]string{LensDefault})
 	if st.Sessions != 1 || st.RawRecords != 2 || st.Observations != 1 {
 		t.Fatalf("unexpected stats: %+v", st)
 	}
@@ -547,7 +547,7 @@ func TestStatsSnapshot(t *testing.T) {
 	}
 	// After distilling, it's no longer pending.
 	_ = s.MarkDistilled("a", LensDefault, 2)
-	if st := s.Stats(nil); st.Pending != 0 {
+	if st := s.Stats([]string{LensDefault}); st.Pending != 0 {
 		t.Fatalf("fully-distilled session should not be pending: %+v", st)
 	}
 }

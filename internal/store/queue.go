@@ -57,6 +57,9 @@ func (q *queue) DistilledCount(session, lens string) int {
 // budget), a fine proxy for the runner child's footprint. Read-only; 0 for a
 // fully-distilled or absent session.
 func (q *queue) PendingInputChars(session string, lenses []string) int {
+	if emptyLensSet(lenses) {
+		return 0 // no active lens → nothing this session would feed a runner
+	}
 	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
 	args := append([]any{}, lensArgs...)
 	args = append(args, session, session)
@@ -268,6 +271,9 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 // (nor be counted as outstanding work) — the disabled lens is no longer mined, so
 // its old backoff is inert. `lenses` follows the same contract as PendingSessions.
 func (q *queue) NextBackoffAttempt(lenses []string, now time.Time) (time.Time, bool) {
+	if emptyLensSet(lenses) {
+		return time.Time{}, false // no active lens → no outstanding retry to wait for
+	}
 	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
 	args := append([]any{}, lensArgs...)
 	args = append(args, now.UTC().Format(time.RFC3339))
@@ -309,6 +315,9 @@ func (q *queue) PendingSessions(lenses []string) ([]string, error) {
 // the whole session, only that lens's share of it.
 func (q *queue) PendingSessionsUpdatedBetween(lenses []string, since, until time.Time) ([]string, error) {
 	lenses = activeLensList(lenses)
+	if len(lenses) == 0 {
+		return nil, nil // no active lens → nothing is pending (drain no-ops)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	sinceValue := ""
 	if !since.IsZero() {
@@ -376,15 +385,21 @@ func (q *queue) PendingSessionsUpdatedBetween(lenses []string, since, until time
 	return pending, rows.Err()
 }
 
-// activeLensList normalizes the caller's active-lens set: empty falls back to the
-// always-on default lens. Keeps the queue queries well-formed even when a caller
-// (a test, or a degenerate config) passes nothing.
-func activeLensList(lenses []string) []string {
-	if len(lenses) == 0 {
-		return []string{LensDefault}
-	}
-	return lenses
-}
+// activeLensList normalizes the caller's active-lens set. Since #44 slice 1a the
+// default lens is an ORDINARY registered lens with no always-on privilege, so an
+// install may legitimately have ZERO active lenses (the user disabled/registered
+// none) — that is not degenerate, it just means "nothing to distill." This no
+// longer injects a fallback lens; it returns the list as-is (a nil/empty list stays
+// empty). Every consumer must guard the empty case BEFORE building a lens CTE,
+// because lensValuesClause(nil) would emit a bare `VALUES ` (invalid SQL) — see
+// emptyLensSet and its callers.
+func activeLensList(lenses []string) []string { return lenses }
+
+// emptyLensSet reports whether the active-lens set is empty. When true, every
+// queue query that cross-joins against the active lenses has no lens to match, so
+// the answer is trivially empty/zero and the caller returns WITHOUT touching the DB
+// — avoiding the malformed `VALUES ` clause lensValuesClause would produce on nil.
+func emptyLensSet(lenses []string) bool { return len(activeLensList(lenses)) == 0 }
 
 // lensValuesClause builds a `VALUES (?),(?),...` fragment plus its args for binding
 // an in-memory lens list into a CTE. Parameterized (never string-interpolated) so a
@@ -424,37 +439,44 @@ func (q *queue) Stats(lenses []string) Stats {
 	_ = q.db.QueryRow(`SELECT COUNT(*) FROM raw`).Scan(&st.RawRecords)
 	_ = q.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&st.Observations)
 	_ = q.db.QueryRow(`SELECT COUNT(*) FROM facets`).Scan(&st.Facets)
-	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
-	args := append([]any{}, lensArgs...)
-	args = append(args, now, now)
-	_ = q.db.QueryRow(
-		`WITH active_lens(lens) AS (`+lensValues+`)
-		 SELECT COUNT(*) FROM (
-		   SELECT l.session
-		     FROM (SELECT session, COUNT(*) c FROM raw GROUP BY session) l
-		     CROSS JOIN active_lens x
-		     LEFT JOIN progress p ON p.session = l.session AND p.lens = x.lens
-		    WHERE l.c > COALESCE(p.distilled,0)
-		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?)
-		   UNION
-		   SELECT st.session
-		     FROM staged st
-		     CROSS JOIN active_lens x
-		     LEFT JOIN progress p ON p.session = st.session AND p.lens = x.lens
-		    WHERE COALESCE(st.session, '') != ''
-		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, args...).Scan(&st.Pending)
-	// BackedOff counts distinct sessions with an ACTIVE lens currently sleeping on a
-	// retry. Filter to active lenses (like Pending): a backoff row left on a disabled
-	// lens is inert (never mined), so counting it would make `distill start --all` and
-	// `lens backfill` falsely report "incomplete" when every active lens is caught up.
-	backoffValues, backoffArgs := lensValuesClause(activeLensList(lenses))
-	bargs := append([]any{}, backoffArgs...)
-	bargs = append(bargs, now)
-	_ = q.db.QueryRow(
-		`WITH active_lens(lens) AS (`+backoffValues+`)
-		 SELECT COUNT(DISTINCT p.session)
-		   FROM progress p JOIN active_lens x ON x.lens = p.lens
-		  WHERE p.next_attempt != '' AND p.next_attempt > ?`, bargs...).Scan(&st.BackedOff)
+	// Pending + BackedOff cross-join against the active-lens set. With ZERO active
+	// lenses (default now an ordinary lens that can be absent, #44 slice 1a) there is
+	// nothing to distill, so both are trivially 0 — and we must NOT build the lens CTE
+	// (lensValuesClause(nil) → invalid `VALUES `). The unconditional counts above and
+	// Drifted/LastReview below still reflect the archive regardless of active lenses.
+	if !emptyLensSet(lenses) {
+		lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
+		args := append([]any{}, lensArgs...)
+		args = append(args, now, now)
+		_ = q.db.QueryRow(
+			`WITH active_lens(lens) AS (`+lensValues+`)
+			 SELECT COUNT(*) FROM (
+			   SELECT l.session
+			     FROM (SELECT session, COUNT(*) c FROM raw GROUP BY session) l
+			     CROSS JOIN active_lens x
+			     LEFT JOIN progress p ON p.session = l.session AND p.lens = x.lens
+			    WHERE l.c > COALESCE(p.distilled,0)
+			      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?)
+			   UNION
+			   SELECT st.session
+			     FROM staged st
+			     CROSS JOIN active_lens x
+			     LEFT JOIN progress p ON p.session = st.session AND p.lens = x.lens
+			    WHERE COALESCE(st.session, '') != ''
+			      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, args...).Scan(&st.Pending)
+		// BackedOff counts distinct sessions with an ACTIVE lens currently sleeping on a
+		// retry. Filter to active lenses (like Pending): a backoff row left on a disabled
+		// lens is inert (never mined), so counting it would make `distill start --all` and
+		// `lens backfill` falsely report "incomplete" when every active lens is caught up.
+		backoffValues, backoffArgs := lensValuesClause(activeLensList(lenses))
+		bargs := append([]any{}, backoffArgs...)
+		bargs = append(bargs, now)
+		_ = q.db.QueryRow(
+			`WITH active_lens(lens) AS (`+backoffValues+`)
+			 SELECT COUNT(DISTINCT p.session)
+			   FROM progress p JOIN active_lens x ON x.lens = p.lens
+			  WHERE p.next_attempt != '' AND p.next_attempt > ?`, bargs...).Scan(&st.BackedOff)
+	}
 	// Drifted: distinct sessions with ANY lens currently sitting at a prose-drift
 	// stamp (#69 Part 2). Unlike Pending/BackedOff this is NOT scoped to the active
 	// lens set — a drift is a persisted fact about a past mine of that (session,lens),
