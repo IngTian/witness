@@ -382,14 +382,23 @@ func cmdInstall(args []string, scaffoldDefault bool) error {
 			return nil
 		}
 		defer st.Close()
-		if slices.Contains(st.RegisteredLenses(), store.LensDefault) {
-			return nil // already present (an existing archive) — nothing to scaffold
-		}
+		// Rerunning `install` is the natural "restore the default lens" gesture, so make
+		// it idempotently ensure default is BOTH registered AND enabled — not just skip
+		// when it happens to be registered. That covers all three states a user can be in:
+		//   - deregistered (gone from the registry) → seedDefaultLens re-registers + enables;
+		//   - disabled (registered, not enabled)    → seedDefaultLens re-enables (register
+		//                                              overwrites the same bundled def, harmless);
+		//   - present + enabled                      → a harmless no-op re-seed.
+		// seedDefaultLens = RegisterLens(bundled default) + EnableLens, both idempotent.
+		already := slices.Contains(st.RegisteredLenses(), store.LensDefault) &&
+			slices.Contains(st.LoadConfig().EnabledLenses, store.LensDefault)
 		if err := seedDefaultLens(st); err != nil {
-			fmt.Fprintf(os.Stderr, "witness: installed, but could not scaffold the default lens (register it later with `witness lens register default`): %v\n", err)
+			fmt.Fprintf(os.Stderr, "witness: installed, but could not scaffold the default lens (re-run `witness install` to retry): %v\n", err)
 			return nil
 		}
-		fmt.Println("scaffolded the built-in 'default' person-growth lens (disable with `witness lens disable default`, or re-run install with --no-default).")
+		if !already {
+			fmt.Println("scaffolded the built-in 'default' person-growth lens (disable it any time with `witness lens disable default`, or re-run install with --no-default to skip).")
+		}
 	}
 	return nil
 }

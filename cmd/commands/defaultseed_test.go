@@ -211,6 +211,49 @@ func TestSeedDefaultLensScaffoldsFreshArchive(t *testing.T) {
 	}
 }
 
+// TestSeedDefaultLensRestoresFromAnyState guards the "restore default by re-running
+// install" path (the user's natural gesture). `install` calls seedDefaultLens, which must
+// leave default registered AND enabled from ALL three states a user can reach — including
+// the DISABLED case, which the old install guard (skip-if-registered) silently no-op'd.
+func TestSeedDefaultLensRestoresFromAnyState(t *testing.T) {
+	ensureRegisteredEnabled := func(t *testing.T, s *store.Store) {
+		t.Helper()
+		if err := seedDefaultLens(s); err != nil {
+			t.Fatalf("seedDefaultLens: %v", err)
+		}
+		if !slices.Contains(s.RegisteredLenses(), store.LensDefault) {
+			t.Fatal("default must be registered after seed")
+		}
+		if !slices.Contains(s.LoadConfig().EnabledLenses, store.LensDefault) {
+			t.Fatal("default must be ENABLED after seed (the disabled-restore bug)")
+		}
+	}
+
+	// (a) DEREGISTERED → restore.
+	sa := openSeedTestStore(t, filepath.Join(t.TempDir(), "a"))
+	_ = seedDefaultLens(sa)
+	if err := sa.DeregisterLens(store.LensDefault); err != nil {
+		t.Fatalf("deregister: %v", err)
+	}
+	ensureRegisteredEnabled(t, sa)
+
+	// (b) DISABLED (still registered) → re-enable. This is the case the old guard missed.
+	sb := openSeedTestStore(t, filepath.Join(t.TempDir(), "b"))
+	_ = seedDefaultLens(sb)
+	if err := sb.DisableLens(store.LensDefault); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if slices.Contains(sb.LoadConfig().EnabledLenses, store.LensDefault) {
+		t.Fatal("precondition: default should be disabled before restore")
+	}
+	ensureRegisteredEnabled(t, sb)
+
+	// (c) ALREADY present + enabled → harmless idempotent no-op.
+	sc := openSeedTestStore(t, filepath.Join(t.TempDir(), "c"))
+	_ = seedDefaultLens(sc)
+	ensureRegisteredEnabled(t, sc)
+}
+
 // TestDefaultSeedSkipsFreshAndLibraryArchive proves the migration does NOT force
 // default onto (a) a fresh archive with no distillation history, nor (b) a library-mode
 // archive that only ever ran its own domain lens — both have no "default" progress row,

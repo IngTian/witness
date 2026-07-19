@@ -60,7 +60,7 @@ func migrateDefaultLensOnOpen(st *store.Store) {
 		return
 	}
 	if err := seedDefaultLens(st); err != nil {
-		slog.Warn("could not migrate the built-in default lens into the registry; will retry next start (or re-seed with `witness lens register default`)",
+		slog.Warn("could not migrate the built-in default lens into the registry; will retry on the next start (or re-run `witness install` to restore it)",
 			"err", err)
 		return // leave the flag UNSET → retry next Open
 	}

@@ -111,6 +111,9 @@ func cmdLens(args []string) error {
 			return err
 		}
 		fmt.Printf("deregistered lens %q\n", args[1])
+		if args[1] == store.LensDefault {
+			fmt.Println("  (this was the built-in person-growth scaffold — restore it any time by re-running `witness install`)")
+		}
 	case "enable":
 		if len(args) < 2 || args[1] == "" {
 			return fmt.Errorf("usage: witness lens enable <name>")
@@ -130,6 +133,9 @@ func cmdLens(args []string) error {
 			return err
 		}
 		fmt.Printf("disabled lens %q\n", args[1])
+		if args[1] == store.LensDefault {
+			fmt.Println("  (re-enable it with `witness lens enable default`, or re-run `witness install` to restore the built-in scaffold)")
+		}
 	case "list":
 		enabled := st.LoadConfig().EnabledLenses
 		reg := st.RegisteredLenses()
