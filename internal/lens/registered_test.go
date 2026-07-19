@@ -112,7 +112,8 @@ func TestLoadRegisteredRejectsLegacyLensMD(t *testing.T) {
 // the registry NAME, but only the resolved json name is known here, so this is where the
 // impersonation is caught. Case variants too (the reserved-name check folds case).
 func TestLoadRegisteredRejectsReservedJSONName(t *testing.T) {
-	for _, reserved := range []string{"default", "unified", "Default", "UNIFIED"} {
+	// Only "unified" is reserved since #44 slice 1a; "default" is an ordinary lens.
+	for _, reserved := range []string{"unified", "UNIFIED", "Unified"} {
 		t.Run(reserved, func(t *testing.T) {
 			dir := t.TempDir()
 			// Registered under an innocent dir name "foo", but lens.json claims a reserved
@@ -123,4 +124,12 @@ func TestLoadRegisteredRejectsReservedJSONName(t *testing.T) {
 			}
 		})
 	}
+	// A lens.json name of "default" is now accepted (it is an ordinary lens).
+	t.Run("allowed/default", func(t *testing.T) {
+		dir := t.TempDir()
+		writeLensDir(t, dir, "default", &LensConfig{Name: "default"}, "mine", "rev")
+		if _, err := LoadRegistered("default", dir); err != nil {
+			t.Fatalf("LoadRegistered must accept the ordinary default lens since #44 slice 1a: %v", err)
+		}
+	})
 }

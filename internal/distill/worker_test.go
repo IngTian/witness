@@ -221,7 +221,7 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	if got := s.DistilledCount(sess, "default"); got != 0 {
 		t.Fatalf("watermark advanced to %d over a replaced generation; want 0 (session must re-mine)", got)
 	}
-	pending, _ := s.PendingSessions(nil)
+	pending, _ := s.PendingSessions([]string{"default"})
 	found := false
 	for _, p := range pending {
 		if p == sess {
@@ -274,7 +274,7 @@ func TestCommitAdvancesWatermarkOnAppendOnlyPath(t *testing.T) {
 		t.Fatalf("append-only watermark = %d, want 2 (the mined count advances cleanly)", got)
 	}
 	// The appended 3rd turn is past the watermark → still pending, as designed.
-	pending, _ := s.PendingSessions(nil)
+	pending, _ := s.PendingSessions([]string{"default"})
 	found := false
 	for _, p := range pending {
 		if p == sess {
@@ -459,7 +459,7 @@ func TestFailureBacksOffFromQueue(t *testing.T) {
 	if err := w.Process(context.Background(), "s"); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := s.PendingSessions(nil)
+	p, _ := s.PendingSessions([]string{"default"})
 	for _, x := range p {
 		if x == "s" {
 			t.Fatalf("a backed-off session should be excluded from pending, got %v", p)

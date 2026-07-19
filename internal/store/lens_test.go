@@ -353,11 +353,11 @@ func TestSetLensRunnerRoundTrip(t *testing.T) {
 // that keeps default's NAME protected even though the engine treats every lens's
 // BEHAVIOR identically.
 func TestReservedLensNamesRejected(t *testing.T) {
-	// Include case variants: on case-insensitive filesystems (macOS/Windows) a
-	// "Default" lens's profile file (Default.md) collides with the built-in's
-	// (default.md), so the guard must fold case and reject these too — else the
-	// registered lens's summary silently clobbers the built-in's.
-	for _, name := range []string{"unified", "default", "Default", "UNIFIED", "Unified"} {
+	// Only "unified" is reserved (it is the cross-lens profile filename stem, not a
+	// lens). Case variants included: on case-insensitive filesystems (macOS/Windows)
+	// "Unified.md" collides with "unified.md", so the guard folds case. Since #44 slice
+	// 1a "default" is NO LONGER reserved — it is an ordinary registered lens.
+	for _, name := range []string{"unified", "UNIFIED", "Unified", "uNiFiEd"} {
 		t.Run(name, func(t *testing.T) {
 			s := tempStore(t)
 			src := writeLensSrcDir(t, name, "x", "y")
@@ -375,11 +375,31 @@ func TestReservedLensNamesRejected(t *testing.T) {
 			}
 		})
 	}
-	if !ReservedLensName("default") || !ReservedLensName("unified") {
-		t.Fatal("ReservedLensName must report both reserved names")
+	// "default" is now an ORDINARY lens: registerable + enableable, and NOT reported
+	// reserved (any case variant).
+	for _, name := range []string{"default", "Default", "DEFAULT"} {
+		t.Run("allowed/"+name, func(t *testing.T) {
+			s := tempStore(t)
+			src := writeLensSrcDir(t, "default", "x", "y") // registry key is the slug "default"
+			if err := s.RegisterLens("default", src); err != nil {
+				t.Fatalf("registering the ordinary default lens must succeed: %v", err)
+			}
+			if !slices.Contains(s.RegisteredLenses(), "default") {
+				t.Fatal("default lens must be written to the registry")
+			}
+			if err := s.EnableLens("default"); err != nil {
+				t.Fatalf("enabling the default lens must succeed: %v", err)
+			}
+			if ReservedLensName(name) {
+				t.Fatalf("ReservedLensName(%q) must be false since #44 slice 1a", name)
+			}
+		})
 	}
-	// Case-folded: mixed/upper-case variants of the reserved names are also reserved.
-	for _, v := range []string{"Default", "DEFAULT", "Unified", "UNIFIED", "uNiFiEd"} {
+	if ReservedLensName("default") || !ReservedLensName("unified") {
+		t.Fatal("only 'unified' is reserved now; 'default' is an ordinary lens")
+	}
+	// Case-folded: only unified's case variants are reserved.
+	for _, v := range []string{"Unified", "UNIFIED", "uNiFiEd"} {
 		if !ReservedLensName(v) {
 			t.Fatalf("ReservedLensName(%q) must be true (case-insensitive)", v)
 		}

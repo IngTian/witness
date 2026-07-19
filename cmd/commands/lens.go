@@ -359,21 +359,15 @@ func modelOrDefaultLabel(m string) string {
 // lens.json, but the view is identical), so the output is a consistent, copyable
 // definition regardless of source.
 func lensShow(st *store.Store, name string) error {
-	var l *lens.Lens
-	var err error
-	if name == store.LensDefault {
-		l, err = lens.LoadDefault()
-		if err != nil {
-			return fmt.Errorf("load default lens: %w", err)
-		}
-	} else {
-		if !slices.Contains(st.RegisteredLenses(), name) {
-			return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
-		}
-		l, err = lens.LoadRegistered(name, st.LensesDir())
-		if err != nil {
-			return fmt.Errorf("read lens %q: %w", name, err)
-		}
+	// Since #44 slice 1a "default" is an ordinary registered lens, so there is no
+	// special LoadDefault path — every lens (default included) is looked up in the
+	// registry the same way.
+	if !slices.Contains(st.RegisteredLenses(), name) {
+		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
+	}
+	l, err := lens.LoadRegistered(name, st.LensesDir())
+	if err != nil {
+		return fmt.Errorf("read lens %q: %w", name, err)
 	}
 	fmt.Print(renderLensDefinition(l))
 	return nil
@@ -403,15 +397,14 @@ func renderLensDefinition(l *lens.Lens) string {
 	return b.String()
 }
 
-// activeLenses returns the default lens (always on) + every enabled, registered
-// lens. All are global — they run on every session.
+// activeLenses returns every enabled, registered lens — all global, all run on every
+// session. Since #44 slice 1a "default" has NO special status: it is an ordinary
+// registered lens that appears in EnabledLenses only if it was seeded+enabled (fresh
+// tool install or the pre-1a migration) and not since disabled. So an install runs
+// exactly the lenses its config enables — including ZERO (a valid state: nothing to
+// distill; the queue short-circuits, see store.emptyLensSet). No lens is force-added.
 func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 	out := []*lens.Lens{}
-	if p, err := lens.LoadDefault(); err == nil {
-		out = append(out, p)
-	} else {
-		return nil, fmt.Errorf("load default lens: %w", err)
-	}
 	for _, name := range st.LoadConfig().EnabledLenses {
 		l, err := lens.LoadRegistered(name, st.LensesDir())
 		if err != nil {

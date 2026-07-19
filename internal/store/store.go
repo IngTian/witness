@@ -111,8 +111,29 @@ func Open() (*Store, error) {
 	// hiccup must not fail an Open. Keeps legacy handling in ONE frozen place (lensmigrate.go)
 	// instead of scattering old-format checks across the codebase, mirroring the DB migration.
 	_ = s.migrateLegacyLenses()
+	// One-shot (#44 slice 1a): migrate a PRE-1a archive — one that ran under the old
+	// always-on "default" lens — into the new world where "default" is an ordinary
+	// registered+enabled lens. This is an INJECTED hook (SeedDefaultLens), not an inline
+	// step, because seeding copies the BUNDLED default prompts into the registry, which
+	// needs internal/lens + internal/bundle — and store, the bottom of the stack, imports
+	// nothing internal. cmd wires it at startup; nil in pure-store/test contexts (correct:
+	// no bundle there, nothing to migrate). Idempotent + gated inside the hook.
+	if SeedDefaultLens != nil {
+		SeedDefaultLens(s)
+	}
 	return s, nil
 }
+
+// SeedDefaultLens, when set by the cmd layer at startup, is invoked once at the end of
+// Open to retro-register the "default" lens for an archive that predates #44 slice 1a
+// (i.e. one that distilled under the old always-on default) — so making default an
+// ordinary lens doesn't silently drop it from an existing install. It is a package var
+// (dependency injection) rather than an inline Open step because the seed source is the
+// bundled prompts dir, reachable only from internal/lens/internal/bundle; store must not
+// import them. The hook is responsible for its own idempotency + "is this a pre-1a
+// archive?" gate (see HasLegacyDefaultData). Left nil, Open does no default migration —
+// the correct behavior for tests and any store-only consumer.
+var SeedDefaultLens func(*Store)
 
 // resolveRoot picks the data-root directory. WITNESS_HOME, if set, wins verbatim
 // (explicit user intent — used by tests and power users). Otherwise the root is

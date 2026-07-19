@@ -1,9 +1,12 @@
 // Package lens loads distillation lenses. A lens is the *policy* (what growth
-// looks like, how to frame it); the tool is the *mechanism*. The "default" lens
-// is global and ships with the binary. Additional lenses are centrally registered
-// (`witness lens register <name> <dir>`) and globally enabled (`witness lens
-// enable <name>`) — an enabled lens runs on every session. Nothing is read from a
-// repo, so a cloned repo can't inject a prompt into your archive.
+// looks like, how to frame it); the tool is the *mechanism*. Since #44 slice 1a the
+// "default" lens is an ORDINARY registered lens — the personal-growth scaffold witness
+// ships (prompts/default/) and seeds into the registry on a fresh tool install; it has
+// no always-on privilege and is freely enable/disable/edit/re-registerable like any
+// lens. Additional lenses are centrally registered (`witness lens register <name>
+// <dir>`) and globally enabled (`witness lens enable <name>`) — an enabled lens runs on
+// every session. An install may run ANY set of lenses, including none. Nothing is read
+// from a repo, so a cloned repo can't inject a prompt into your archive.
 //
 // On-disk shape (issue #75). A lens is a DIRECTORY, not one parsed file:
 //
@@ -16,8 +19,8 @@
 // class) and prompts live in their own files (a missing prompt is a missing FILE, a
 // loud error, never a silently-empty section — the failure the old `## EXTRACT`/
 // `## REVIEW` split-parser could produce). The built-in `default` lens ships in the
-// SAME 2-file shape under prompts/default/ (its settings are hardcoded in LoadDefault
-// rather than a lens.json), so both layouts are one mental model.
+// SAME shape under prompts/default/ (extract.md + review.md + a lens.json carrying its
+// dimensions), so the seed and every registered lens are one mental model.
 package lens
 
 import (
@@ -80,24 +83,15 @@ func promptsDir() string {
 	return bundle.Dir("prompts", "WITNESS_PROMPTS")
 }
 
-// LoadDefault loads the always-on built-in "default" lens from prompts/default/. Its identity and
-// dimensions are hardcoded (not a lens.json) because it is the built-in backbone; only
-// its two prompts live on disk, in the same extract.md/review.md shape a registered
-// lens uses. The default rides the default stage models (no per-lens override), which
-// is correct: it runs on EVERY session, so it should be the cheap/consistent default.
-func LoadDefault() (*Lens, error) {
-	dir := filepath.Join(promptsDir(), "default")
-	extract, review, err := readPromptPair(dir)
-	if err != nil {
-		return nil, err
-	}
-	return &Lens{
-		Name:       store.LensDefault, // canonical name lives in the data layer (store)
-		BuiltIn:    true,
-		Dimensions: DefaultDimensions,
-		Extract:    extract,
-		Review:     review,
-	}, nil
+// DefaultSeedDir returns the bundled prompts/default/ directory — the SEED SOURCE for
+// the "default" lens (#44 slice 1a). Since 1a the default lens is no longer an always-on
+// built-in loaded fresh from the bundle on every drain; instead it is SEEDED into the
+// registry (RegisterLens("default", DefaultSeedDir()) + enable) on a fresh tool install
+// or migrated in for an existing archive, after which it is an ordinary registered lens
+// loaded via LoadRegistered like any other. The bundle still ships prompts/default/
+// (extract.md + review.md + lens.json carrying the dimensions) purely as this seed.
+func DefaultSeedDir() string {
+	return filepath.Join(promptsDir(), "default")
 }
 
 // LoadSummarizePrompts loads the L4 summarizer prompts from prompts/summarize/:
@@ -117,8 +111,11 @@ func LoadSummarizePrompts() (lensPrompt, unifiedPrompt string, err error) {
 	return string(l), string(u), nil
 }
 
-// DefaultDimensions is the fixed scaffold for the built-in "default" lens. Facets within
-// each dimension are emergent (named by the distiller), not pre-enumerated.
+// DefaultDimensions is the person-growth dimension scaffold for the "default" lens.
+// Since #44 slice 1a the default lens is an ordinary registered lens whose dimensions
+// live in its seeded prompts/default/lens.json (this slice must be kept in sync with
+// that file). Facets within each dimension are emergent (named by the distiller), not
+// pre-enumerated. Retained in code as the canonical reference for the seed + tests.
 var DefaultDimensions = []string{
 	"thinking",  // decision frameworks, how problems get approached
 	"workstyle", // how work gets organized, paced, sequenced
@@ -200,12 +197,12 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	// Backstop the reserved-name guard at the RESOLVED name. RegisterLens/EnableLens
 	// reject the registry name, but a lens.json `name` field can override that name
 	// (loadDir above) — so a lens registered under an innocent name could still resolve
-	// to a reserved identity (e.g. "default") and collide with the always-on built-in
-	// on the shared (session,'default') watermark + observation key. This is the ultimate
-	// boundary where the resolved name is known, so enforce it here too rather than trust
-	// every caller to re-check.
+	// to the reserved "unified" identity and collide with the cross-lens profile portrait
+	// (profile/unified.md). This is the ultimate boundary where the resolved name is
+	// known, so enforce it here too rather than trust every caller to re-check. ("default"
+	// is NOT reserved since #44 slice 1a — it is an ordinary registered lens.)
 	if store.ReservedLensName(l.Name) {
-		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its lens.json name impersonates the built-in/unified identity); rename it", name, l.Name)
+		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its lens.json name impersonates the cross-lens 'unified' profile); rename it", name, l.Name)
 	}
 	l.BuiltIn = false
 	return l, nil
@@ -234,18 +231,18 @@ func LoadFromDirUnchecked(dir string) (*Lens, error) {
 }
 
 // LoadFromDir is the STRICT arbitrary-path loader: LoadFromDirUnchecked plus the
-// reserved-name gate LoadRegistered enforces (a directory whose resolved name is a
-// reserved identity — "default"/"unified", case-folded — is rejected). Callers that
-// only PREVIEW (never write) may catch the reserved-name error and fall back to the
-// Unchecked variant with a display name of "candidate"; callers that would persist
-// under the resolved name must use this one.
+// reserved-name gate LoadRegistered enforces (a directory whose resolved name is the
+// reserved "unified" identity, case-folded, is rejected — "default" is an ordinary lens
+// since #44 slice 1a). Callers that only PREVIEW (never write) may catch the
+// reserved-name error and fall back to the Unchecked variant with a display name of
+// "candidate"; callers that would persist under the resolved name must use this one.
 func LoadFromDir(dir string) (*Lens, error) {
 	l, err := LoadFromDirUnchecked(dir)
 	if err != nil {
 		return nil, err
 	}
 	if store.ReservedLensName(l.Name) {
-		return nil, fmt.Errorf("lens dir %q resolves to reserved name %q (the built-in/unified identity); rename it in lens.json", dir, l.Name)
+		return nil, fmt.Errorf("lens dir %q resolves to reserved name %q (the cross-lens 'unified' profile identity); rename it in lens.json", dir, l.Name)
 	}
 	return l, nil
 }

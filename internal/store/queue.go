@@ -28,6 +28,21 @@ func (q *queue) DistilledCount(session, lens string) int {
 	return n
 }
 
+// HasLegacyDefaultData reports whether this archive ever distilled under the old
+// always-on "default" lens — i.e. a `progress` row exists for lens 'default' (#44
+// slice 1a migration gate). It is the precise "is this a pre-1a archive?" signal the
+// default-seed migration keys on: a FRESH install has no progress rows (→ false, so
+// install/init decides whether to scaffold default, not the migration), and a
+// library-mode archive that only ever ran its own domain lens has progress only under
+// that lens (→ false, so the migration correctly does NOT force person-growth default
+// onto it). An archive with real default history → true → seed+enable default so the
+// install keeps working exactly as before.
+func (q *queue) HasLegacyDefaultData() bool {
+	var n int
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM progress WHERE lens = ?`, LensDefault).Scan(&n)
+	return n > 0
+}
+
 // PendingInputChars returns the character size of a session's LARGEST undistilled
 // per-lens delta among the ACTIVE lenses: SUM(LENGTH(text)) over the raw rows past
 // the MINIMUM watermark those lenses hold on the session (an absent (session,lens)

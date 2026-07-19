@@ -226,11 +226,11 @@ func TestDrainRecheckLoopPicksUpMidRunArrivals(t *testing.T) {
 
 	released := false // becomes true after the first Drain empties the queue
 	pending := func() []string {
-		p, _ := s.PendingSessions(nil)
+		p, _ := s.PendingSessions([]string{"default"})
 		if released && s.RawCount("second") == 0 {
 			// a new session lands the instant the first drain finished
 			capture(t, s, "second", "user", "turn-second")
-			p, _ = s.PendingSessions(nil)
+			p, _ = s.PendingSessions([]string{"default"})
 		}
 		return p
 	}

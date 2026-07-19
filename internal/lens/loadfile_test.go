@@ -62,7 +62,8 @@ func TestLoadFromDirUncheckedRequiresExtract(t *testing.T) {
 // lets `lens try` fall back to a "candidate" display while the shared strict loader
 // stays uncompromised.
 func TestLoadFromDirStrictRejectsReservedName(t *testing.T) {
-	for _, reserved := range []string{"default", "unified", "Default", "UNIFIED"} {
+	// Only "unified" is reserved since #44 slice 1a; "default" is an ordinary lens.
+	for _, reserved := range []string{"unified", "UNIFIED", "Unified"} {
 		t.Run(reserved, func(t *testing.T) {
 			root := t.TempDir()
 			dir := writeLensDir(t, root, "innocent", &LensConfig{Name: reserved}, "mine", "synth")
@@ -73,6 +74,16 @@ func TestLoadFromDirStrictRejectsReservedName(t *testing.T) {
 			// Lenient loader accepts (a preview can't collide with anything).
 			if _, err := LoadFromDirUnchecked(dir); err != nil {
 				t.Fatalf("LoadFromDirUnchecked must accept reserved %q (preview is read-only): %v", reserved, err)
+			}
+		})
+	}
+	// "default" now loads via the STRICT loader like any ordinary lens.
+	for _, name := range []string{"default", "Default"} {
+		t.Run("allowed/"+name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := writeLensDir(t, root, "innocent", &LensConfig{Name: name}, "mine", "synth")
+			if _, err := LoadFromDir(dir); err != nil {
+				t.Fatalf("LoadFromDir must accept ordinary name %q since #44 slice 1a: %v", name, err)
 			}
 		})
 	}
