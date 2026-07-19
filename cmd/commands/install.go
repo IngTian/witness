@@ -367,7 +367,34 @@ func cmdInstall(args []string) error {
 	if err := in.Install(); err != nil {
 		return err
 	}
-	return bindRunner(target)
+	if err := bindRunner(target); err != nil {
+		return err
+	}
+	// Report the resulting lens state. The first-open hook auto-seeds the built-in
+	// "default" lens on a fresh archive, and every enabled lens mines an LLM on every
+	// session — real, recurring cost — so surface it explicitly here rather than leaving
+	// it to a background slog line the user never sees. Read ACTUAL state (default is
+	// deletable and won't be re-seeded once removed, so it may legitimately be absent).
+	// Best-effort: never fail an otherwise-good install over a status line.
+	reportEnabledLenses()
+	return nil
+}
+
+// reportEnabledLenses prints the enabled-lens set after install so the user knows what
+// will run (and cost) on every session — the transparency the silent auto-seed otherwise
+// lacks. Best-effort and read-only.
+func reportEnabledLenses() {
+	st, err := store.Open()
+	if err != nil {
+		return
+	}
+	defer st.Close()
+	enabled := st.LoadConfig().EnabledLenses
+	if len(enabled) == 0 {
+		fmt.Println("lenses: none enabled — nothing will be distilled yet (add the built-in one with `witness lens load-default`, or register your own).")
+		return
+	}
+	fmt.Printf("lenses: %s enabled — each mines every session; disable any with `witness lens disable <name>`.\n", strings.Join(enabled, ", "))
 }
 
 // bindRunner pins config.toml's runner field to the integration that was just

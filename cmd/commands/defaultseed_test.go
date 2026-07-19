@@ -235,7 +235,9 @@ func TestBackfillFreshDisabledDefaultFailsFast(t *testing.T) {
 	obsBefore, _ := s.ReadObservations("")
 
 	// backfill --fresh must FAIL FAST (not enabled) and drop NOTHING.
-	err := lensBackfill(s, store.LensDefault, true)
+	// assumeYes=true so the test can't hang on the confirm prompt — the not-enabled guard
+	// fires before the prompt anyway, which is the point.
+	err := lensBackfill(s, store.LensDefault, true, true)
 	if err == nil {
 		t.Fatal("backfill --fresh of a DISABLED default must fail fast, not proceed to delete data")
 	}
@@ -245,6 +247,41 @@ func TestBackfillFreshDisabledDefaultFailsFast(t *testing.T) {
 	obsAfter, _ := s.ReadObservations("")
 	if len(obsAfter) != len(obsBefore) || len(obsAfter) == 0 {
 		t.Fatalf("backfill --fresh must NOT have dropped observations: before=%d after=%d", len(obsBefore), len(obsAfter))
+	}
+}
+
+// TestBackfillFreshWorkerActiveFailsFast guards the #102-fix ordering: `backfill --fresh`
+// must FAIL FAST when a distillation worker is already running, BEFORE dropping any data —
+// otherwise it would DeleteLensData and then find runWorker returns ran=false (lock held),
+// leaving the lens gutted with no re-mine. We stand in for a live worker by holding the
+// WorkerLock (the sole liveness authority), then assert --fresh errors and drops nothing.
+func TestBackfillFreshWorkerActiveFailsFast(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	s := openSeedTestStore(t, home) // fresh open auto-seeds + enables default
+	if err := s.AppendObservations([]store.Observation{{ID: "o1", Lens: store.LensDefault, Observation: "x", Poignancy: 3}}); err != nil {
+		t.Fatalf("AppendObservations: %v", err)
+	}
+	obsBefore, _ := s.ReadObservations("")
+
+	// Stand in for a running worker: hold the WorkerLock so WorkerActive() reports true.
+	unlock, ok := s.WorkerLock()
+	if !ok {
+		t.Fatal("precondition: should have acquired the worker lock")
+	}
+	defer unlock()
+
+	// --fresh must refuse (worker running) and drop NOTHING — even with assumeYes, since the
+	// worker-active guard is checked before the confirm and before DeleteLensData.
+	err := lensBackfill(s, store.LensDefault, true, true)
+	if err == nil {
+		t.Fatal("backfill --fresh while a worker is running must fail fast, not drop data it can't re-mine")
+	}
+	if !strings.Contains(err.Error(), "worker is running") {
+		t.Fatalf("expected a 'worker is running' error, got: %v", err)
+	}
+	obsAfter, _ := s.ReadObservations("")
+	if len(obsAfter) != len(obsBefore) || len(obsAfter) == 0 {
+		t.Fatalf("worker-active --fresh must NOT have dropped observations: before=%d after=%d", len(obsBefore), len(obsAfter))
 	}
 }
 

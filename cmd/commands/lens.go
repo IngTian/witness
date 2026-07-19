@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"bufio"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 
@@ -78,11 +80,11 @@ func newLensCmd() *cobra.Command {
 // forced review, so the lens's facets + profile never drift from the re-mined
 // observations — the consistency the old two-command split lacked.
 func newLensBackfillCmd() *cobra.Command {
-	var fresh bool
+	var fresh, yes bool
 	c := &cobra.Command{
 		Use:   "backfill <name>",
 		Short: "Re-mine one lens over the whole history, then refresh its facets.",
-		Long:  "Reset just this lens's distillation watermark so every past session is re-offered FOR THIS LENS, drain the backlog in the foreground, then run a review so this lens's facets + profile reflect the re-mined observations. Only the named lens is re-mined — every other lens (default included) keeps its watermark. This is the enable-a-new-lens path: cost scales with one lens × history.\n\nWith --fresh, first DELETE this lens's existing L1 observations + L2 facets (raw transcripts are untouched) before re-mining — use it when you changed the lens's prompt and want a clean rebuild instead of merging into the old observations.",
+		Long:  "Reset just this lens's distillation watermark so every past session is re-offered FOR THIS LENS, drain the backlog in the foreground, then run a review so this lens's facets + profile reflect the re-mined observations. Only the named lens is re-mined — every other lens (default included) keeps its watermark. This is the enable-a-new-lens path: cost scales with one lens × history.\n\nWith --fresh, first DELETE this lens's existing L1 observations + L2 facets (raw transcripts are untouched) before re-mining — use it when you changed the lens's prompt and want a clean rebuild instead of merging into the old observations. --fresh is DESTRUCTIVE: mined observations are re-created from L0, but any in-session (active) observations you recorded are lost. It asks for confirmation first; pass --yes to skip the prompt in scripts.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			st, err := store.Open()
@@ -90,10 +92,11 @@ func newLensBackfillCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			return lensBackfill(st, args[0], fresh)
+			return lensBackfill(st, args[0], fresh, yes)
 		},
 	}
-	c.Flags().BoolVar(&fresh, "fresh", false, "drop this lens's existing observations + facets first, then re-mine from scratch (for a changed prompt)")
+	c.Flags().BoolVar(&fresh, "fresh", false, "drop this lens's existing observations + facets first, then re-mine from scratch (DESTRUCTIVE; for a changed prompt)")
+	c.Flags().BoolVar(&yes, "yes", false, "skip the --fresh confirmation prompt (for non-interactive use)")
 	return c
 }
 
@@ -215,7 +218,7 @@ func cmdLens(args []string) error {
 // active-lens set, so a reset watermark for an inactive lens would be invisible and
 // nothing would happen — and for `--fresh` the pre-drop of obs+facets would then be
 // irrecoverable. We fail fast with a clear message rather than silently no-op / lose data.
-func lensBackfill(st *store.Store, name string, fresh bool) error {
+func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// Resolve the CLI arg to the name the WORKER actually keys data under. A
 	// registered lens's mined observations/facets/progress are tagged with the lens's
 	// resolved name (its lens.json `name`, via lens.LoadRegistered), which can differ
@@ -240,6 +243,32 @@ func lensBackfill(st *store.Store, name string, fresh bool) error {
 	}
 	minedName := l.Name // the name the worker tags observations/facets/progress with
 	if fresh {
+		// --fresh is DESTRUCTIVE and #102 folded it in behind a safe-sounding flag, so
+		// gate it like every other irreversible op (mirror `witness cleanup`): (1) fail
+		// FAST if a worker is live, BEFORE dropping anything — otherwise we delete this
+		// lens's obs+facets and then discover we can't re-mine (runWorker returns ran=false),
+		// leaving the lens gutted; (2) warn that ACTIVE (hand-recorded) observations are NOT
+		// re-derivable from L0 and will be lost — the "safe, re-mined from L0" story only
+		// holds for MINED obs; (3) confirm unless --yes. Only then drop.
+		if st.WorkerActive() {
+			return fmt.Errorf("a distillation worker is running; backfill %q --fresh would drop this lens's data but couldn't re-mine it now — wait until `witness distill status` is idle, then retry", name)
+		}
+		obsAll, facetsN := st.LensDataCounts(minedName)
+		active := st.ActiveObservationCount(minedName)
+		if !assumeYes {
+			fmt.Printf("\n%s backfill %q --fresh will DELETE %d observation(s) + %d facet(s) for this lens, then re-mine from your raw transcripts.\n",
+				warnGlyph(), name, obsAll, facetsN)
+			if active > 0 {
+				fmt.Printf("  %s\n", yellow(fmt.Sprintf("%d of those observations were recorded in-session (not mined) and are NOT reproducible by a re-mine — they will be lost permanently.", active)))
+			}
+			fmt.Println(dim("  Raw transcripts (L0) are kept. Mined observations are re-created from them."))
+			fmt.Print("Proceed? [y/N]: ")
+			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			if strings.ToLower(strings.TrimSpace(line)) != "y" {
+				fmt.Println("Aborted; nothing deleted.")
+				return nil
+			}
+		}
 		obs, facets, err := st.DeleteLensData(minedName)
 		if err != nil {
 			return fmt.Errorf("drop lens %q data: %w", name, err)

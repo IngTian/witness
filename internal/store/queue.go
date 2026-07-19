@@ -262,11 +262,39 @@ func (q *queue) ResetLensWatermark(lens string) (int, error) {
 	return int(n), nil
 }
 
+// LensDataCounts reports how many L1 observations + L2 facets a lens currently has,
+// without touching them — the read-only preview a destructive `lens backfill --fresh`
+// shows before calling DeleteLensData, so the user sees exactly what a confirm will drop.
+func (q *queue) LensDataCounts(lens string) (obs, facets int) {
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE lens = ?`, lens).Scan(&obs)
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM facets WHERE lens = ?`, lens).Scan(&facets)
+	return obs, facets
+}
+
+// ActiveObservationCount reports how many of a lens's L1 observations were RECORDED
+// in-session (source='active', via the MCP record_observation tool / `observations
+// record`) rather than mined by the worker. These are NOT reproducible by a re-mine —
+// they were passed through verbatim from the agent and have no L0 turn the miner would
+// re-extract them from — so a `lens backfill --fresh` (which drops all of a lens's obs)
+// destroys them irrecoverably. The CLI counts these to warn before a --fresh drop, so
+// the "safe, re-derivable from L0" story is only told when it is actually true (zero
+// active obs). Read-only.
+func (q *queue) ActiveObservationCount(lens string) int {
+	var n int
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE lens = ? AND source = 'active'`, lens).Scan(&n)
+	return n
+}
+
 // DeleteLensData removes one lens's derived L1 observations and L2 facets (for a
-// `lens rebuild`: re-mine a lens from scratch after its prompt changed). Raw L0 is
-// the durable record and is NOT touched. facet_versions cascade via the ON DELETE
-// CASCADE foreign key. Runs in one transaction so a rebuild never leaves half a
-// lens's derived data behind. Returns (observations, facets) removed.
+// `lens backfill --fresh`: re-mine a lens from scratch after its prompt changed). Raw L0
+// is the durable record and is NOT touched. facet_versions cascade via the ON DELETE
+// CASCADE foreign key. Runs in one transaction so a rebuild never leaves half a lens's
+// derived data behind. Returns (observations, facets) removed.
+//
+// NOTE: "re-mine from scratch" fully restores only MINED observations (source='mined'),
+// which the worker re-extracts from the untouched L0. In-session ACTIVE observations
+// (source='active') are NOT re-created by a re-mine and are lost — callers that offer
+// this destructively (the --fresh path) must warn on ActiveObservationCount > 0 first.
 func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 	tx, err := q.db.Begin()
 	if err != nil {
