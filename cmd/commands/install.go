@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,22 +13,46 @@ import (
 	"github.com/IngTian/witness/internal/platform"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 	"github.com/IngTian/witness/internal/store"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
+
+// scaffoldDefaultDecision decides whether `install` seeds the built-in default lens.
+// --no-default always wins (skip). Otherwise: ASK on an interactive terminal (stdin is
+// a TTY), defaulting to yes on a bare Enter; and when NON-interactive (npm postinstall,
+// CI, piped) scaffold WITHOUT prompting, so scripted installs never hang and a new
+// personal user still gets a working setup. Mirrors the interactive precedent of
+// `witness cleanup`, but TTY-guarded so it's safe in automation.
+func scaffoldDefaultDecision(noDefault bool) bool {
+	if noDefault {
+		return false
+	}
+	if !isatty.IsTerminal(os.Stdin.Fd()) {
+		return true // non-interactive → scaffold the useful default, don't block on a prompt
+	}
+	fmt.Print("Scaffold the built-in \"default\" person-growth lens? It's the shipped starter lens — you can disable or edit it any time. [Y/n]: ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "n", "no":
+		return false
+	default: // "", "y", "yes", anything else → yes (default-on)
+		return true
+	}
+}
 
 func newInstallCmd() *cobra.Command {
 	var noDefault bool
 	c := &cobra.Command{
 		Use:    "install <claude|opencode>",
 		Short:  "Install witness integrations.",
-		Long:   "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.\n\nInstall also SCAFFOLDS the built-in \"default\" person-growth lens into your archive (unless --no-default), since #44 slice 1a made default an ordinary registered lens rather than an always-on built-in. Pass --no-default to start with no lenses and register your own.",
+		Long:   "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.\n\nInstall also SCAFFOLDS the built-in \"default\" person-growth lens into your archive, since #44 slice 1a made default an ordinary registered lens rather than an always-on built-in. On a terminal it ASKS first; when non-interactive (npm/CI/piped) it scaffolds by default. Pass --no-default to always skip and start with no lenses (register your own).",
 		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
 		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cmdInstall(args, !noDefault)
+			return cmdInstall(args, noDefault)
 		},
 	}
-	c.Flags().BoolVar(&noDefault, "no-default", false, "do not scaffold the built-in default person-growth lens (start with no lenses)")
+	c.Flags().BoolVar(&noDefault, "no-default", false, "always skip scaffolding the built-in default lens (no interactive prompt; start with no lenses)")
 	return c
 }
 
@@ -357,7 +382,7 @@ func repoShim() (string, error) {
 // cmdInstall wires witness into Claude Code or OpenCode. The target is required
 // (enforced by cobra ExactArgs) so install always binds the matching distillation
 // runtime into config.toml.
-func cmdInstall(args []string, scaffoldDefault bool) error {
+func cmdInstall(args []string, noDefault bool) error {
 	target := installTarget(args)
 	in, ok := platform.InstallerFor(target)
 	if !ok {
@@ -369,13 +394,15 @@ func cmdInstall(args []string, scaffoldDefault bool) error {
 	if err := bindRunner(target); err != nil {
 		return err
 	}
-	// Scaffold the built-in default person-growth lens (the tool preset), unless the
-	// user opted out. Since #44 slice 1a default is an ordinary registered lens with no
-	// always-on status, so a fresh install must seed+enable it explicitly or the archive
-	// starts with zero lenses. Best-effort: seeding failure shouldn't fail the whole
-	// install (the integration is already wired); the user can `witness lens register
-	// default` later. The pre-1a migration hook handles EXISTING archives separately.
-	if scaffoldDefault {
+	// Scaffold the built-in default person-growth lens (the tool preset). Since #44
+	// slice 1a default is an ordinary registered lens with no always-on status, a fresh
+	// install must seed+enable it explicitly or the archive starts with zero lenses. The
+	// decision: --no-default always skips; otherwise ASK on a terminal, and scaffold by
+	// default when non-interactive (npm/CI/piped) so scripted installs never hang and a
+	// new personal user gets a working setup. Best-effort: a seeding failure shouldn't
+	// fail the whole install (the integration is already wired). The pre-1a migration
+	// hook handles EXISTING archives separately.
+	if scaffoldDefaultDecision(noDefault) {
 		st, err := store.Open()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "witness: installed, but could not open the archive to scaffold the default lens: %v\n", err)
