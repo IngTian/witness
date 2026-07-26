@@ -53,7 +53,7 @@ case "$TARGET" in
   opencode) LABEL="OpenCode plugin + MCP server" ;;
 esac
 step 4 "Wiring $LABEL"
-"$BIN" install "$TARGET"
+"$BIN" wire "$TARGET"
 ok "$LABEL registered"
 
 # --- optional: put `witness` on PATH for the human subcommands ----------------

@@ -68,3 +68,70 @@ injects into a session. Agents read it on demand via the MCP tools (`get_facets`
 
 One moment can produce several observations — one per lens that finds it salient — sharing a raw
 anchor but framed for each lens.
+
+## Records-in: the `ingest` contract
+
+witness can accept records from external sources (notes, market data, timestamped logs) via the
+`witness ingest` command. This is a **stable, versioned public interface** for bringing structured
+text into the distillation engine as a first-class L0 source alongside captured sessions.
+
+### Format
+
+NDJSON (newline-delimited JSON): one JSON object per line, delivered via stdin or a file path.
+
+```sh
+witness ingest < records.ndjson
+witness ingest --file records.ndjson
+```
+
+### Fields
+
+Each record is a JSON object with these fields:
+
+- **`text`** (REQUIRED, non-empty string) — the content to distill. This is what the extract lens sees.
+- **`id`** (optional string) — the caller-defined deduplication identity. Records sharing the same
+  `id` are considered versions of one logical entry. **Recommended** — supply an id when you have a
+  natural stable identifier (a filename, a URL, a database primary key).
+- **`session`** (optional string) — a caller-defined grouping key. Records sharing a `session` value
+  are mined together as one chunk (one distillation unit), so the lens sees them in context. Omit
+  `session` (or pass different values) to mine records independently. All ingested sessions are
+  namespaced with the `file:` prefix in L0.
+- **`ts`** (optional string) — the content timestamp in RFC3339 format (`YYYY-MM-DDTHH:MM:SSZ`) or
+  UTC date (`YYYY-MM-DD`). Defaults to ingest-time if absent. This becomes the L0 row's `ts` and
+  propagates to observations. Used for temporal facets (valid_from) and profile narrative.
+- **`role`** (optional string) — defaults to `"document"`. May be any string; this becomes the L0
+  `role` field. Reserved for future use (e.g., distinguishing user notes from assistant summaries).
+
+Unknown fields are ignored (forward compatibility).
+
+### Deduplication semantics
+
+witness dedups records on the caller-provided `id`:
+
+- **Same id + unchanged text** → skip (already ingested).
+- **Same id + changed text** → update the existing L0 row with the new text and `ts`; observations
+  are re-mined on next distillation (the lens sees the new version).
+- **New id** (or no prior record with this id) → append as a new L0 row.
+- **No id provided** → fall back to content-hash dedup (same hash → skip; new hash → append). Less
+  precise — changing a single character creates a new row rather than updating the logical entry.
+
+Re-ingesting the same record set is idempotent (no duplicate rows, no redundant observations).
+
+### Grouping semantics
+
+Records with the same `session` value mine as one batch — the lens reads the whole group in one
+pass, so cross-record patterns are visible (e.g., a recurring theme across multiple notes). Omit
+`session` (or use distinct values) to mine each record independently; witness derives a session id
+from the record `id` (or content hash) so each record becomes its own session. All ingested sessions
+are namespaced with `file:` in the L0 `session` field, so they never collide with captured agent
+sessions.
+
+### Example
+
+```jsonl
+{"id": "note-2026-07-01", "session": "weekly-retros", "ts": "2026-07-01", "text": "Caught myself rushing to a fix before isolating the cause. Stopped, wrote repro steps, found it in two minutes."}
+{"id": "note-2026-07-08", "session": "weekly-retros", "ts": "2026-07-08", "text": "Same trap again — saw a failing test, went straight to the code. Forced myself to read the failure message first; saved an hour."}
+```
+
+After ingest, `witness distill start` mines these as one session (they share `session`), and the
+lens sees both notes together — enough context to notice a pattern.

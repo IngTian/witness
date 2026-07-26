@@ -532,10 +532,10 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	}
 }
 
-func TestNpmPackageHidesSourceOnlyInstallCommands(t *testing.T) {
+func TestNpmPackageHidesSourceOnlyWireCommands(t *testing.T) {
 	t.Setenv("WITNESS_NPM_PACKAGE", "1")
-	if !newInstallCmd().Hidden || !newUninstallCmd().Hidden {
-		t.Fatal("npm package should hide source-checkout install commands")
+	if !newWireCmd().Hidden || !newUnwireCmd().Hidden {
+		t.Fatal("npm package should hide source-checkout wire commands")
 	}
 }
 
@@ -649,9 +649,29 @@ func TestMCPServerRegisteredExactName(t *testing.T) {
 	}
 }
 
-func TestInstallLongMentionsConfigRunner(t *testing.T) {
-	long := newInstallCmd().Long
+func TestWireUnwireInstallShapes(t *testing.T) {
+	if newWireCmd().Use != "wire <claude|opencode>" {
+		t.Errorf("wire Use = %q", newWireCmd().Use)
+	}
+	if newUnwireCmd().Use != "unwire <claude|opencode>" {
+		t.Errorf("unwire Use = %q", newUnwireCmd().Use)
+	}
+	inst := newInstallCmd()
+	if !strings.HasPrefix(inst.Use, "install") {
+		t.Errorf("install Use = %q, want it to provision (not take an editor target)", inst.Use)
+	}
+	if inst.Flags().Lookup("path") == nil {
+		t.Error("install must have a --path flag (provision an isolated archive)")
+	}
+	// wire still points at the editor-wiring body: its help mentions hooks/plugin.
+	if !strings.Contains(newWireCmd().Long, "editor") && !strings.Contains(newWireCmd().Long, "Claude Code") {
+		t.Error("wire help should describe editor wiring")
+	}
+}
+
+func TestWireLongMentionsConfigRunner(t *testing.T) {
+	long := newWireCmd().Long
 	if !strings.Contains(long, "config set runner") {
-		t.Error("install help should point users at `config set runner` for the runtime, not imply install picks it")
+		t.Error("wire help should point users at `config set runner` for the runtime, not imply wire picks it")
 	}
 }

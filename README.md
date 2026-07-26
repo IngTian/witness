@@ -181,7 +181,7 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 
 ## Commands
 
-`witness <doctor | profile | facets | observations | review | lens | import | distill | cleanup | export | install | uninstall>` (capture,
+`witness <doctor | profile | facets | observations | review | lens | import | distill | cleanup | export | install | wire | unwire | ingest>` (capture,
 the worker, and the MCP server are internal entry points invoked by Claude Code/OpenCode, not typed
 by hand):
 
@@ -206,6 +206,15 @@ by hand):
   selected range.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness export <path>` — write a consistent single-file snapshot of the archive (safe to back up / cloud-sync).
+- `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
+  default data root). Creates the directory structure and database schema. Typically called once per
+  machine; `install.sh` handles this for source-checkout users.
+- `witness wire <claude|opencode>` — wire the editor integration (hooks + MCP for Claude Code;
+  plugin + MCP for OpenCode). Source-checkout command; `install.sh` calls this for you.
+- `witness unwire <claude|opencode>` — remove the editor integration wiring. Your archive is untouched.
+- `witness ingest [--file <path>]` — accept structured records (notes, logs, market data) as NDJSON
+  and distill them into the archive. Reads from stdin or a file. See the record contract in
+  [`prompts/SCHEMA.md`](prompts/SCHEMA.md#records-in-the-ingest-contract).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
 
 ## Single binary, no runtime
@@ -219,17 +228,17 @@ Claude Code auth via `claude -p`; set `runner = opencode` to use a private `open
 
 ```sh
 ./install.sh claude    # Claude Code: build, fetch model (~448MB once), wire hooks + MCP
-./install.sh opencode  # OpenCode: build, fetch model, install local plugin + MCP
+./install.sh opencode  # OpenCode: build, fetch model, wire local plugin + MCP
 ```
 
 That's the whole thing — idempotent, safe to re-run after a `git pull`. The target
-is required: install always binds the matching distillation runtime into
-`config.toml` (`runner = claude` or `runner = opencode`). It also offers to add a
-`witness` command to your PATH (for `witness profile`, `doctor`, `lens`, `import`,
-`distill`, `cleanup`). Equivalent `make` targets exist (`make install`,
+is required: the script builds the binary, provisions the archive, and binds the matching
+distillation runtime into `config.toml` (`runner = claude` or `runner = opencode`). It also
+offers to add a `witness` command to your PATH (for `witness profile`, `doctor`, `lens`,
+`import`, `distill`, `cleanup`, `ingest`). Equivalent `make` targets exist (`make install`,
 `make install-opencode`, `make build`, `make doctor`, `make uninstall`,
-`make uninstall-opencode`, `make clean`). To remove it: `make uninstall` or
-`make uninstall-opencode` (strips integration wiring; your data is untouched).
+`make uninstall-opencode`, `make clean`). To remove the editor integration: `make uninstall`
+or `make uninstall-opencode` (strips wiring; your data is untouched).
 
 ### Windows
 
@@ -240,15 +249,15 @@ to a `witness\` folder holding `witness.exe` and the embedding model. Then, from
 inside that folder in PowerShell:
 
 ```powershell
-.\witness.exe install claude
+.\witness.exe wire claude
 ```
 
 This copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user PATH,
-and wires Claude Code with **exec-form hooks** pointing at `witness.exe` (no shell,
-no Git Bash needed). The zip carries the prompt templates and the ~448MB model
-alongside the exe; the binary resolves both relative to itself. Uninstall strips
-the hooks + MCP (`witness.exe uninstall claude`); the copied files and PATH entry
-are left in place for now.
+provisions the archive, and wires Claude Code with **exec-form hooks** pointing at
+`witness.exe` (no shell, no Git Bash needed). The zip carries the prompt templates
+and the ~448MB model alongside the exe; the binary resolves both relative to itself.
+To remove the editor integration: `witness.exe unwire claude` (strips hooks + MCP);
+the copied files and PATH entry are left in place for now.
 
 ### OpenCode support
 
@@ -266,6 +275,11 @@ The npm package ships the OpenCode plugin, a `witness` CLI shim, prebuilt witnes
 The config-only path is the default: add the plugin to `~/.config/opencode/opencode.json`, and OpenCode
 installs it automatically with Bun on startup. If `mcp.witness` is absent, the plugin auto-registers it
 for you.
+
+The npm package supports OpenCode integration and general CLI usage (`witness profile`, `ingest`, etc.).
+Editor wiring (`witness wire` / `unwire`) is a source-checkout command — npm users configure the plugin
+directly in `opencode.json` and the plugin auto-registers MCP. Archive provisioning and record ingestion
+(`witness install`, `witness ingest`) work normally with the npm package.
 
 The npm distribution supports exactly these platforms:
 
@@ -311,7 +325,7 @@ start that download: the plugin starts it when OpenCode next runs. Keep OpenCode
 download finishes. The plugin owns the downloader, stops it on shutdown, and retries later with bounded
 backoff.
 If you already have your own `mcp.witness` config, the plugin leaves it untouched. The npm wrapper does
-not support `witness install` / `witness uninstall`; those commands are for source-checkout installs.
+not support `witness wire` / `witness unwire`; those commands are for source-checkout editor wiring.
 Custom model mirrors must provide `WITNESS_MODEL_SHA256` and `WITNESS_TOKENIZER_SHA256` alongside
 `WITNESS_MODEL_BASE_URL`.
 

@@ -10,6 +10,7 @@ import (
 	// whose init() ran, and Default() panics if Claude is absent — so anchor both
 	// here rather than relying on some command file happening to import them.
 	_ "github.com/IngTian/witness/internal/platform/claude"
+	_ "github.com/IngTian/witness/internal/platform/file"
 	_ "github.com/IngTian/witness/internal/platform/opencode"
 
 	"github.com/spf13/cobra"
@@ -75,8 +76,10 @@ The profile is collect-only and pull-only: witness never injects content into se
 		newObservationsCmd(),
 		newLensCmd(),
 		newConfigCmd(),
+		newIngestCmd(),
 		newInstallCmd(),
-		newUninstallCmd(),
+		newWireCmd(),
+		newUnwireCmd(),
 		newDoctorCmd(),
 		newExportCmd(),
 		newCleanupCmd(),
