@@ -70,7 +70,7 @@ func workerFlags(args []string) (bool, sessionTimeRange, error) {
 			}
 			i++
 		default:
-			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker [--auto] [--since <time>] [--until <time>]")
+			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker-run [--auto] [--since <time>] [--until <time>]")
 		}
 	}
 	timeRange, err := parseSessionTimeRange(since, until, time.Now())
