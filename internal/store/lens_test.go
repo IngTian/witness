@@ -461,3 +461,58 @@ func TestEnableLensPreservesOtherConfig(t *testing.T) {
 		t.Errorf("config not written")
 	}
 }
+
+// TestRegisterRejectsResolvedNameCollision is the guard for issue #101: RegisterLens
+// validates the lens's RESOLVED name (lens.json `name` field when present, else registry
+// dir name) against every other lens's resolved name, so two different registry dirs
+// can't resolve to the same effective lens identity and share watermark/observations/profile.
+func TestRegisterRejectsResolvedNameCollision(t *testing.T) {
+	s := tempStore(t)
+
+	// Register a lens "default" (no lens.json, so it resolves to "default").
+	if err := s.RegisterLens("default", writeLensSrcDir(t, "", "extract1", "review1")); err != nil {
+		t.Fatalf("register default: %v", err)
+	}
+
+	// Register a probe dir "probe" with lens.json name="default" → MUST be rejected
+	// (resolves to "default", collides with the existing lens's resolved name).
+	probeDir := writeLensSrcDir(t, "default", "extract2", "review2")
+	if err := s.RegisterLens("probe", probeDir); err == nil {
+		t.Fatalf("register 'probe' with lens.json name='default' must be rejected (collides with existing default lens)")
+	} else if !strings.Contains(err.Error(), "collide") && !strings.Contains(err.Error(), "default") {
+		t.Fatalf("error missing collision details: %v", err)
+	}
+	// The probe must NOT have been written to the registry.
+	if slices.Contains(s.RegisteredLenses(), "probe") {
+		t.Fatal("probe lens must not be registered after collision rejection")
+	}
+
+	// Register a lens "math" (no lens.json) — resolves to "math", no collision → succeeds.
+	if err := s.RegisterLens("math", writeLensSrcDir(t, "", "extract-math", "review-math")); err != nil {
+		t.Fatalf("register math: %v", err)
+	}
+
+	// Register a probe dir "another" with lens.json name="math" → MUST be rejected
+	// (resolves to "math", collides with math lens).
+	if err := s.RegisterLens("another", writeLensSrcDir(t, "math", "x", "y")); err == nil {
+		t.Fatalf("register 'another' with lens.json name='math' must be rejected")
+	}
+
+	// Register a lens.json name="unified" (reserved) → MUST be rejected at register
+	// (even though the dir name "probe2" is innocent, the resolved name is reserved).
+	if err := s.RegisterLens("probe2", writeLensSrcDir(t, "unified", "x", "y")); err == nil {
+		t.Fatalf("register with lens.json name='unified' (reserved) must be rejected")
+	} else if !strings.Contains(err.Error(), "reserved") && !strings.Contains(err.Error(), "unified") {
+		t.Fatalf("error missing reserved-name details: %v", err)
+	}
+
+	// A dir whose lens.json name matches its OWN dir name (no collision) → succeeds.
+	if err := s.RegisterLens("market", writeLensSrcDir(t, "market", "extract-m", "review-m")); err != nil {
+		t.Fatalf("register 'market' with matching lens.json name='market' must succeed: %v", err)
+	}
+
+	// Exact-case re-register (resolved name == existing) is still allowed (intentional overwrite).
+	if err := s.RegisterLens("default", writeLensSrcDir(t, "default", "new-extract", "new-review")); err != nil {
+		t.Fatalf("exact-case re-register of 'default' must be allowed: %v", err)
+	}
+}
