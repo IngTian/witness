@@ -1,9 +1,12 @@
 package commands
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/IngTian/witness/internal/store"
 )
 
 func TestParseNDJSONSkipsBadLines(t *testing.T) {
@@ -70,5 +73,34 @@ func TestGroupSessionsGroupingAndDefaults(t *testing.T) {
 		if len(s.Keys) != len(s.Records) {
 			t.Error("Keys must parallel Records")
 		}
+	}
+}
+
+func TestCmdIngestWritesL0AndDedups(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITNESS_HOME", home)
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	nd := `{"text":"alpha","id":"a","session":"feed","ts":"2026-07-01T00:00:00Z"}
+{"text":"beta","id":"b","session":"feed","ts":"2026-07-02T00:00:00Z"}
+`
+	ing, skip, err := cmdIngest(strings.NewReader(nd), true)
+	if err != nil {
+		t.Fatalf("cmdIngest: %v", err)
+	}
+	if ing != 2 || skip != 0 {
+		t.Fatalf("ingested=%d skipped=%d, want 2/0", ing, skip)
+	}
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if n := st.RawCount("file:feed"); n != 2 {
+		t.Fatalf("raw count for file:feed = %d, want 2", n)
+	}
+	// Re-ingest identical → idempotent skip (no growth).
+	ing2, _, _ := cmdIngest(strings.NewReader(nd), true)
+	if ing2 != 0 {
+		t.Fatalf("re-ingest identical wrote %d records, want 0 (idempotent)", ing2)
 	}
 }
