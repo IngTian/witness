@@ -23,7 +23,7 @@ func newLensCmd() *cobra.Command {
 		&cobra.Command{
 			Use:   "register <name> <dir>",
 			Short: "Register or replace a lens definition.",
-			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models afterward with `witness lens set`.",
+			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models with `witness config --lens <name>`.",
 			Args:  cobra.ExactArgs(2),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"register"}, args...)) },
 		},
@@ -65,7 +65,6 @@ func newLensCmd() *cobra.Command {
 			Args:  cobra.NoArgs,
 			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"load-default"}) },
 		},
-		newLensSetCmd(),
 		newLensBackfillCmd(),
 		newLensTryCmd(),
 	)
@@ -194,7 +193,7 @@ func cmdLens(args []string) error {
 		}
 		return lensShow(st, args[1])
 	default:
-		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|show|load-default|backfill|set|try)", args[0])
+		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|show|load-default|backfill|try)", args[0])
 	}
 	return nil
 }
@@ -351,74 +350,6 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	}
 	fmt.Println(msg)
 	return nil
-}
-
-// newLensSetCmd builds `witness lens set <name> [--runner R] [--extract-model M]
-// [--review-model M]`, the safe way to tune a registered lens's per-lens runner + models
-// (issue #75). It writes only lens.json fields via a struct round-trip (store.SetLens*)
-// — never text surgery on the prompt files — so it can't corrupt a lens. An empty value
-// clears the field, so the lens rides the default runner/model again.
-func newLensSetCmd() *cobra.Command {
-	var runner, extractModel, reviewModel string
-	c := &cobra.Command{
-		Use:   "set <name>",
-		Short: "Set a registered lens's per-lens runner + model overrides.",
-		Long:  "Tune a registered lens (written to its lens.json). --runner routes this lens's mine+review to a specific runtime (claude/opencode) instead of the default runner; --extract-model overrides the mining (L0→L1) model; --review-model overrides the review (L1→L2) + summary model. Pass an empty value (e.g. --runner \"\") to clear an override so the lens rides the default again. This is what lets a rare heavy lens run a stronger model — or a cheap lens run a free model on another runtime — without paying for it on every session.",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return lensSet(args[0],
-				cmd.Flags().Changed("runner"), runner,
-				cmd.Flags().Changed("extract-model"), extractModel,
-				cmd.Flags().Changed("review-model"), reviewModel)
-		},
-	}
-	c.Flags().StringVar(&runner, "runner", "", "per-lens runtime (claude/opencode); empty clears → ride the default runner")
-	c.Flags().StringVar(&extractModel, "extract-model", "", "per-lens model for mining (L0→L1); empty clears the override")
-	c.Flags().StringVar(&reviewModel, "review-model", "", "per-lens model for review + summary (L1→L2); empty clears the override")
-	return c
-}
-
-// lensSet applies the flags that were actually PASSED (cobra's Changed) so an unpassed
-// flag leaves that field untouched, while an explicit empty value clears it.
-func lensSet(name string, setRunner bool, runner string, setExtract bool, extractModel string, setReview bool, reviewModel string) error {
-	if !setRunner && !setExtract && !setReview {
-		return fmt.Errorf("nothing to set: pass --runner, --extract-model and/or --review-model")
-	}
-	st, err := store.Open()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	if setRunner {
-		if err := st.SetLensRunner(name, runner); err != nil {
-			return err
-		}
-	}
-	if setExtract {
-		if err := st.SetLensModel(name, "extract", extractModel); err != nil {
-			return err
-		}
-	}
-	if setReview {
-		if err := st.SetLensModel(name, "review", reviewModel); err != nil {
-			return err
-		}
-	}
-	// Re-read so the confirmation reflects what's now on disk (incl. a cleared field).
-	l, err := lens.LoadRegistered(name, st.LensesDir())
-	if err != nil {
-		return err
-	}
-	fmt.Printf("lens %q: runner=%s extract-model=%s review-model=%s\n",
-		name, modelOrDefaultLabel(l.Runner), modelOrDefaultLabel(l.ExtractModel), modelOrDefaultLabel(l.ReviewModel))
-	return nil
-}
-
-func modelOrDefaultLabel(m string) string {
-	if strings.TrimSpace(m) == "" {
-		return dim("(default)")
-	}
-	return m
 }
 
 // lensShow prints a lens's settings + its two prompts. Both a registered lens and the
