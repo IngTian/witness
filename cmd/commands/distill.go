@@ -8,66 +8,13 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/store"
-	"github.com/spf13/cobra"
 )
 
-func newDistillCmd() *cobra.Command {
-	distillCmd := &cobra.Command{
-		Use:   "distill",
-		Short: "Manage the background distillation worker.",
-		Long:  "Start, inspect, or stop the single-flight worker that turns raw turns into observations, reviews facets when due, and regenerates profiles.",
-	}
-	var quiet bool
-	var since string
-	var until string
-	var all bool
-	var waitBackoffs bool
-	start := &cobra.Command{
-		Use:   "start",
-		Short: "Kick the worker in the background (or run a foreground backfill with --all).",
-		Long:  "Kick the distillation worker in the background. Optional bounds select pending sessions by their latest raw timestamp; values accept RFC3339, YYYY-MM-DD (UTC), or an age such as 7d or 24h. If another worker already holds the lock, the new process exits and queued work remains durable on disk.\n\nWith --all, run the whole backlog in the FOREGROUND instead: this process drains every pending session (mining in parallel), loads the embedding model once, and blocks until done — the day-one \"distill my whole history\" path. --all cannot be combined with --since/--until.\n\nWith --all --wait-backoffs, also wait out any per-session mining backoffs (a timed-out or rate-limited session sleeps 5m, 10m, ... before retry) and re-drain, so \"all\" self-heals transient failures instead of returning \"backfill incomplete\" the moment the queue is momentarily empty of ready work. It gives up (and reports incomplete) once even the soonest retry is further out than a bounded wait — a session still failing by then is deterministic; re-run later to resume.",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if all {
-				return cmdDistillBackfill(quiet, since, until, waitBackoffs)
-			}
-			if waitBackoffs {
-				return fmt.Errorf("--wait-backoffs applies only to the foreground backfill; use it with --all")
-			}
-			return cmdDistillStart(quiet, since, until)
-		},
-	}
-	start.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
-	start.Flags().StringVar(&since, "since", "", "latest session update at or after this time (for example 7d or 2026-07-01)")
-	start.Flags().StringVar(&until, "until", "", "latest session update at or before this time")
-	start.Flags().BoolVar(&all, "all", false, "drain the entire backlog in the foreground (blocks until done); the day-one backfill path")
-	start.Flags().BoolVar(&waitBackoffs, "wait-backoffs", false, "with --all, wait out mining backoffs and retry timed-out/rate-limited sessions until the backlog drains or a retry is too far out")
-	distillCmd.AddCommand(start)
-	var statusJSON bool
-	statusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show worker and queue status.",
-		Long:  "Show worker state, current session, archive statistics, pending/backoff counts, and raw/distilled freshness timestamps.",
-		Args:  cobra.NoArgs,
-		RunE:  func(_ *cobra.Command, _ []string) error { return cmdDistillStatus(statusJSON) },
-	}
-	statusCmd.Flags().BoolVarP(&statusJSON, "json", "j", false, "output as JSON")
-	distillCmd.AddCommand(statusCmd)
-	var stopAutoOnly bool
-	stopCmd := &cobra.Command{
-		Use:   "stop",
-		Short: "Request the running worker to stop.",
-		Long:  "Set the worker stop flag and send SIGTERM to the running worker process when it is still alive.",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return cmdDistillStop(stopAutoOnly)
-		},
-	}
-	stopCmd.Flags().BoolVar(&stopAutoOnly, "auto-only", false, "stop only an automatically-started worker")
-	_ = stopCmd.Flags().MarkHidden("auto-only")
-	distillCmd.AddCommand(stopCmd)
-	return distillCmd
-}
+// distill.go holds the cmd* implementation functions for distillation worker control.
+// The old top-level `distill` command was removed from the visible front door (#102);
+// the functionality migrated to the hidden `worker` group and `status` command, but
+// the implementation functions (cmdDistillStart/Backfill/Status/Stop) remain here,
+// called by worker_group.go and status.go.
 
 type sessionTimeRange struct {
 	since time.Time

@@ -28,8 +28,9 @@ func canonicalConfigKey(k string) string {
 
 func newConfigCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "config",
-		Short: "Get or set config (runner, models) — default scope or per-lens.",
+		Use:     "config",
+		GroupID: groupConfig,
+		Short:   "Get or set config (runner, models) — default scope or per-lens.",
 		Long: `Get or set config knobs that control distillation: runner, mine_model (mining / triage), review_model (review).
 
 The config tree has TWO scopes:

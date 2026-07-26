@@ -12,10 +12,11 @@ import (
 func newFacetsCmd() *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{
-		Use:   "facets [lens]",
-		Short: "Print current structured facets.",
-		Long:  "Print the current L2 structured facets for a lens. This is the CLI equivalent of the MCP get_facets tool. Defaults to the default lens.",
-		Args:  cobra.MaximumNArgs(1),
+		Use:     "facets [lens]",
+		GroupID: groupRead,
+		Short:   "Show the specific traits and patterns behind your profile.",
+		Long:    "Print the structured traits and patterns — organized by dimension — that witness currently tracks about you. These are the building blocks that feed the narrative profile. Defaults to the default lens.",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdFacets(args, asJSON)
 		},

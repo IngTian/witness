@@ -16,11 +16,12 @@ import (
 
 func newInstallCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:    "install <claude|opencode>",
-		Short:  "Install witness integrations.",
-		Long:   "Wire witness into Claude Code (hooks + MCP) or OpenCode (plugin + MCP). This sets up capture only — it writes a sensible default runner you can change any time with `witness config set runner <claude|opencode>`.\n\nInstall is a pure MECHANISM: it wires the hooks/plugin + MCP server and binds the runner, and never prompts (safe as a hook subprocess and in CI). It does NOT seed content: the built-in \"default\" person-growth lens is auto-seeded once on the first time an archive is opened, and is fully deletable — remove it with `witness lens disable/deregister default` and it stays gone. Restore or re-seed it any time with `witness lens load-default`, or opt a fresh archive out entirely by setting WITNESS_NO_DEFAULT_LENS.",
-		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
-		Args:   cobra.ExactArgs(1),
+		Use:     "install <claude|opencode>",
+		GroupID: groupSetup,
+		Short:   "Install witness integrations.",
+		Long:    "Wire witness into Claude Code (hooks + MCP) or OpenCode (plugin + MCP). This sets up capture only — it writes a sensible default runner you can change any time with `witness config set runner <claude|opencode>`.\n\nInstall is a pure MECHANISM: it wires the hooks/plugin + MCP server and binds the runner, and never prompts (safe as a hook subprocess and in CI). It does NOT seed content: the built-in \"default\" person-growth lens is auto-seeded once on the first time an archive is opened, and is fully deletable — remove it with `witness lens disable/deregister default` and it stays gone. Restore or re-seed it any time with `witness lens load-default`, or opt a fresh archive out entirely by setting WITNESS_NO_DEFAULT_LENS.",
+		Hidden:  os.Getenv("WITNESS_NPM_PACKAGE") == "1",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdInstall(args)
 		},
@@ -30,11 +31,12 @@ func newInstallCmd() *cobra.Command {
 
 func newUninstallCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:    "uninstall <claude|opencode>",
-		Short:  "Remove witness integrations without deleting data.",
-		Long:   "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
-		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
-		Args:   cobra.ExactArgs(1),
+		Use:     "uninstall <claude|opencode>",
+		GroupID: groupSetup,
+		Short:   "Remove witness integrations without deleting data.",
+		Long:    "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
+		Hidden:  os.Getenv("WITNESS_NPM_PACKAGE") == "1",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdUninstall(args)
 		},

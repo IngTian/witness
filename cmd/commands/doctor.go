@@ -15,10 +15,11 @@ import (
 func newDoctorCmd() *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{
-		Use:   "doctor",
-		Short: "Run a health check for the archive and embedder.",
-		Long:  "Run a health check for configuration, archive statistics, worker queue state, model availability, and multilingual embedder retrieval quality.",
-		Args:  cobra.NoArgs,
+		Use:     "doctor",
+		GroupID: groupSetup,
+		Short:   "Run a health check for the archive and embedder.",
+		Long:    "Run a health check for configuration, archive statistics, worker queue state, model availability, and multilingual embedder retrieval quality.",
+		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return cmdDoctor(asJSON)
 		},

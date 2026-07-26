@@ -9,11 +9,12 @@ import "github.com/spf13/cobra"
 func newStatusCmd() *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{
-		Use:   "status",
-		Short: "Show what witness has captured and whether it's up to date.",
-		Long:  "Show archive stats, the background worker's state, how many sessions are pending, and how fresh the distilled data is. --json emits the same fields for scripts.",
-		Args:  cobra.NoArgs,
-		RunE:  func(_ *cobra.Command, _ []string) error { return cmdDistillStatus(asJSON) },
+		Use:     "status",
+		GroupID: groupRead,
+		Short:   "Show what witness has captured and whether it's up to date.",
+		Long:    "Show archive stats, the background worker's state, how many sessions are pending, and how fresh the distilled data is. --json emits the same fields for scripts.",
+		Args:    cobra.NoArgs,
+		RunE:    func(_ *cobra.Command, _ []string) error { return cmdDistillStatus(asJSON) },
 	}
 	c.Flags().BoolVarP(&asJSON, "json", "j", false, "output as JSON")
 	return c

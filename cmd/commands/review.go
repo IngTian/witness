@@ -7,20 +7,13 @@ import (
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/store"
-	"github.com/spf13/cobra"
 )
 
-func newReviewCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "review",
-		Short: "Force an L2 review and regenerate profiles.",
-		Long:  "Force an L2 review from existing observations, update facets, and regenerate the derived L4 markdown profiles. This writes derived data but does not capture new raw turns.",
-		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return cmdReview()
-		},
-	}
-}
+// review.go holds cmdReview and forceReview: the implementation functions for the
+// unconditional review pass. The old top-level `review` command was removed from the
+// visible front door (#102); the functionality migrated to the hidden `worker review`
+// subcommand, but the implementation functions remain here, called by worker_group.go
+// and lens.go (backfill's forced review).
 
 func cmdReview() error {
 	st, err := store.Open()

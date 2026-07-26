@@ -12,8 +12,9 @@ func newExportCmd() *cobra.Command {
 	var force bool
 	var asJSON bool
 	c := &cobra.Command{
-		Use:   "export <path>",
-		Short: "Write a consistent single-file snapshot of the archive.",
+		Use:     "export <path>",
+		GroupID: groupAdmin,
+		Short:   "Write a consistent single-file snapshot of the archive.",
 		Long: "Write a consistent, single-file SQLite snapshot of the archive to <path> " +
 			"(via VACUUM INTO). The snapshot folds the write-ahead log into one plain .db " +
 			"file with no -wal/-shm sidecars, so it is safe to copy or point a cloud syncer " +

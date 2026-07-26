@@ -15,9 +15,10 @@ import (
 
 func newLensCmd() *cobra.Command {
 	lensCmd := &cobra.Command{
-		Use:   "lens",
-		Short: "Manage global observation lenses.",
-		Long:  "Manage the central lens registry. Every enabled, registered lens runs globally across every session. The built-in \"default\" person-growth lens is an ordinary registered lens (auto-seeded once on first use, restore with `witness lens load-default`) — enable/disable/edit/re-register it like any other; an archive may run any set of lenses, including none.",
+		Use:     "lens",
+		GroupID: groupLenses,
+		Short:   "Manage observation lenses that extract different views of your sessions.",
+		Long:    "Manage the central lens registry. Every enabled lens runs globally across every session, extracting the observations + traits it cares about. The built-in \"default\" person-growth lens is an ordinary registered lens (auto-seeded once on first use, restore with `witness lens load-default`) — enable/disable/edit/re-register it like any other; an archive may run any set of lenses, including none.",
 	}
 	lensCmd.AddCommand(
 		&cobra.Command{
@@ -180,13 +181,31 @@ func cmdLens(args []string) error {
 			fmt.Println(dim("  no lenses registered — nothing is distilled (register one with `witness lens register <name> <dir>`)"))
 			return nil
 		}
+		fmt.Println(header("witness lens"))
+		fmt.Println()
+		lensDir := st.LensesDir()
 		for _, name := range reg {
-			if slices.Contains(enabled, name) {
-				fmt.Printf("  %s %s  %s\n", green("✓"), name, dim("(enabled — runs on every session)"))
-			} else {
-				fmt.Printf("  %s %s  %s\n", dim("·"), name, dim("(registered, disabled)"))
+			isEnabled := slices.Contains(enabled, name)
+			glyph := enabledGlyph(isEnabled)
+			statusText := "disabled"
+			if isEnabled {
+				statusText = "enabled"
 			}
+			// Best-effort detail: load the lens to get dimension count.
+			// If loading fails (corrupt definition), fall back to just name + enabled/disabled.
+			l, err := lens.LoadRegistered(name, lensDir)
+			if err != nil {
+				fmt.Printf("  %s %s\n", glyph, kvRow(name, statusText, ""))
+				continue
+			}
+			dimCount := fmt.Sprintf("%d dims", len(l.Dimensions))
+			fmt.Printf("  %s %s\n", glyph, kvRow(name, statusText, dimCount))
 		}
+		fmt.Println()
+		enabledCount := len(enabled)
+		totalCount := len(reg)
+		summaryText := fmt.Sprintf("%d lenses · %d enabled · run `witness lens show <name>`", totalCount, enabledCount)
+		fmt.Println("  " + footer(summaryText))
 	case "show":
 		if len(args) < 2 || args[1] == "" {
 			return fmt.Errorf("usage: witness lens show <name>")

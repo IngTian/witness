@@ -16,9 +16,10 @@ const maxCLIStagedPerSession = 200
 
 func newObservationsCmd() *cobra.Command {
 	obsCmd := &cobra.Command{
-		Use:   "observations",
-		Short: "Search, record, or delete observations.",
-		Long:  "Search, record, or delete L1 observations. These commands mirror the MCP search_observations, record_observation, and delete_observation tools.",
+		Use:     "observations",
+		GroupID: groupRead,
+		Short:   "Search what witness has noticed about you.",
+		Long:    "Search the specific things witness has noticed about your work patterns, preferences, and growth. Each observation is timestamped and organized by lens and dimension.",
 	}
 
 	var searchLens string
@@ -26,8 +27,8 @@ func newObservationsCmd() *cobra.Command {
 	var searchJSON bool
 	search := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Search observations by meaning.",
-		Long:  "Search L1 observations by local embedding similarity. This is the CLI equivalent of the MCP search_observations tool.",
+		Short: "Search what witness has noticed, by meaning.",
+		Long:  "Search the things witness has observed about you, finding semantically similar observations via local embedding search.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdObservationSearch(args[0], searchLens, searchK, searchJSON)

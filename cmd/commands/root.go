@@ -15,6 +15,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	groupRead   = "read"
+	groupLenses = "lenses"
+	groupConfig = "config"
+	groupSetup  = "setup"
+	groupAdmin  = "admin"
+)
+
 // Build-time variables, injected via -ldflags by the Makefile (and install.sh).
 // Defaults render a runnable `go build` without ldflags as "dev".
 var (
@@ -51,21 +59,29 @@ func newRootCmd() *cobra.Command {
 
 The profile is collect-only and pull-only: witness never injects content into sessions. Humans read it with 'witness profile'; agents read it through MCP tools.`),
 	}
+	root.AddGroup(
+		&cobra.Group{ID: groupRead, Title: "Read your archive:"},
+		&cobra.Group{ID: groupLenses, Title: "Lenses:"},
+		&cobra.Group{ID: groupConfig, Title: "Configure:"},
+		&cobra.Group{ID: groupSetup, Title: "Setup:"},
+		&cobra.Group{ID: groupAdmin, Title: "Maintenance:"},
+	)
+	root.SetHelpCommandGroupID(groupAdmin)
+	root.SetCompletionCommandGroupID(groupAdmin)
 	root.AddCommand(
-		newVersionCmd(),
-		newDoctorCmd(),
 		newProfileCmd(),
+		newStatusCmd(),
 		newFacetsCmd(),
 		newObservationsCmd(),
-		newReviewCmd(),
 		newLensCmd(),
 		newConfigCmd(),
-		newImportCmd(),
-		newDistillCmd(),
-		newCleanupCmd(),
-		newExportCmd(),
 		newInstallCmd(),
 		newUninstallCmd(),
+		newDoctorCmd(),
+		newExportCmd(),
+		newCleanupCmd(),
+		newWorkerCmd(),
+		newImportCmd(),
 		newInternalCaptureCmd(),
 		newInternalSessionStartCmd(),
 		newInternalSessionEndCmd(),

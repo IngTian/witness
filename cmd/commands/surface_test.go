@@ -20,3 +20,29 @@ func TestPlumbingCommandsHidden(t *testing.T) {
 		}
 	}
 }
+
+func TestRootSurface(t *testing.T) {
+	root := newRootCmd()
+	visible := map[string]bool{}
+	for _, c := range root.Commands() {
+		if !c.Hidden && c.Name() != "help" && c.Name() != "completion" {
+			visible[c.Name()] = true
+		}
+	}
+	// present:
+	for _, want := range []string{"profile", "status", "lens", "config", "install", "uninstall", "doctor", "export", "cleanup"} {
+		if !visible[want] {
+			t.Errorf("expected visible command %q", want)
+		}
+	}
+	// gone from the visible front door:
+	for _, gone := range []string{"distill", "review", "version", "import"} {
+		if visible[gone] {
+			t.Errorf("%q must NOT be a visible top-level command anymore", gone)
+		}
+	}
+	// groups registered
+	if len(root.Groups()) == 0 {
+		t.Error("root should register cobra command groups")
+	}
+}
