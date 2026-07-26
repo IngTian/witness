@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,8 +10,6 @@ import (
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
-
-var errWaitBackoffsNeedsForeground = errors.New("--wait-backoffs applies only to the foreground drain; use it with --all or drop --detach")
 
 func newDistillCmd() *cobra.Command {
 	distillCmd := &cobra.Command{
@@ -35,7 +32,7 @@ func newDistillCmd() *cobra.Command {
 				return cmdDistillBackfill(quiet, since, until, waitBackoffs)
 			}
 			if waitBackoffs {
-				return errWaitBackoffsNeedsForeground
+				return fmt.Errorf("--wait-backoffs applies only to the foreground backfill; use it with --all")
 			}
 			return cmdDistillStart(quiet, since, until)
 		},

@@ -1,6 +1,10 @@
 package commands
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
 
 // newWorkerCmd is the HIDDEN operator group for the distillation worker. A normal
 // user never touches it — the worker runs off editor hooks. It exists as an escape
@@ -23,7 +27,7 @@ func newWorkerCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if detach {
 				if waitBackoffs {
-					return errWaitBackoffsNeedsForeground
+					return fmt.Errorf("--wait-backoffs applies only to the foreground drain; drop --detach")
 				}
 				return cmdDistillStart(quiet, since, until)
 			}
