@@ -14,11 +14,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newInstallCmd() *cobra.Command {
+func newWireCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:     "install <claude|opencode>",
+		Use:     "wire <claude|opencode>",
 		GroupID: groupSetup,
-		Short:   "Install witness integrations.",
+		Short:   "Connect an editor integration (hooks/plugin + MCP) to witness.",
 		Long: strings.TrimSpace(`
 Wire witness into your editor: Claude Code (hooks + MCP) or OpenCode (plugin + MCP).
 
@@ -26,7 +26,7 @@ This sets up CAPTURE only. It never prompts (safe in CI / as a hook), and it doe
 not seed content — the built-in "default" lens is added automatically the first
 time your archive is opened.
 
-  runner    install writes a sensible default (matching the editor); change it
+  runner    wire writes a sensible default (matching the editor); change it
             any time with: witness config set runner <claude|opencode>
   default   remove it with 'witness lens disable/deregister default' (it stays
             gone); restore with 'witness lens load-default'; opt a fresh archive
@@ -40,11 +40,11 @@ time your archive is opened.
 	return c
 }
 
-func newUninstallCmd() *cobra.Command {
+func newUnwireCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "uninstall <claude|opencode>",
+		Use:     "unwire <claude|opencode>",
 		GroupID: groupSetup,
-		Short:   "Remove witness integrations without deleting data.",
+		Short:   "Remove an editor integration (data/config untouched).",
 		Long:    "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
 		Hidden:  os.Getenv("WITNESS_NPM_PACKAGE") == "1",
 		Args:    cobra.ExactArgs(1),
@@ -52,6 +52,28 @@ func newUninstallCmd() *cobra.Command {
 			return cmdUninstall(args)
 		},
 	}
+}
+
+func newInstallCmd() *cobra.Command {
+	var path string
+	c := &cobra.Command{
+		Use:     "install",
+		GroupID: groupSetup,
+		Short:   "Provision a witness archive (no editor; use --path for an isolated instance).",
+		Long: strings.TrimSpace(`
+Create (or adopt) a witness archive — its database + config — at a location. This
+provisions witness itself; it does NOT wire any editor. Run several with different
+--path values to keep independent archives (e.g. one per data source).
+
+  --path <dir>   archive location (default: the standard witness data dir)
+
+A bare archive starts with NO lenses: register your own with 'witness lens register',
+then feed it with 'witness ingest'. To connect an editor instead, use 'witness wire'.`),
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error { return cmdProvision(path) },
+	}
+	c.Flags().StringVar(&path, "path", "", "archive location (default: the standard data dir)")
+	return c
 }
 
 // hookCmd / hookEntry mirror the settings.json hooks schema for the entries we own.
@@ -362,6 +384,29 @@ func repoShim() (string, error) {
 		return "", fmt.Errorf("shim not found at %s (run from a built working copy: make build): %w", shim, err)
 	}
 	return shim, nil
+}
+
+// cmdProvision opens (creating) an archive at path without wiring any editor. It opts
+// the archive OUT of the person-growth default-lens auto-seed — a provisioned archive is
+// a blank engine the caller fills with its own lens(es). (wire, by contrast, leaves the
+// env unset so an editor user DOES get the default lens.)
+func cmdProvision(path string) error {
+	if strings.TrimSpace(path) != "" {
+		if err := os.Setenv("WITNESS_HOME", path); err != nil {
+			return err
+		}
+	}
+	// Suppress the person default on this fresh archive (read live by the first-open
+	// seed hook, see defaultseed.go). Set BEFORE Open.
+	_ = os.Setenv(noDefaultLensEnv, "1")
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	fmt.Printf("provisioned witness archive at %s\n", st.Root)
+	fmt.Println("next: witness lens register <name> <dir>  ·  witness ingest  ·  or witness wire <editor>")
+	return nil
 }
 
 // cmdInstall wires witness into Claude Code or OpenCode. The target is required

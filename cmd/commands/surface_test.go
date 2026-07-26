@@ -34,7 +34,7 @@ func TestRootSurface(t *testing.T) {
 		}
 	}
 	// present:
-	for _, want := range []string{"profile", "status", "lens", "config", "install", "uninstall", "doctor", "export", "cleanup"} {
+	for _, want := range []string{"profile", "status", "lens", "config", "install", "wire", "unwire", "doctor", "export", "cleanup"} {
 		if !visible[want] {
 			t.Errorf("expected visible command %q", want)
 		}
