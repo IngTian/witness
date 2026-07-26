@@ -30,7 +30,7 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 	if err != nil {
 		return err
 	}
-	args := []string{"worker"}
+	args := []string{"worker-run"}
 	if !r.since.IsZero() {
 		args = append(args, "--since", r.since.UTC().Format(time.RFC3339Nano))
 	}
@@ -39,7 +39,7 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 	}
 	spawnDetached(args...)
 	if !quiet {
-		fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
+		fmt.Println("distill worker kicked in the background; run `witness status` to watch progress")
 	}
 	return nil
 }
@@ -78,7 +78,7 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 		return fmt.Errorf("--all drains the entire backlog and cannot be combined with --since/--until")
 	}
 	if !quiet {
-		fmt.Println("distilling the full backlog in the foreground; this may take a while — run `witness distill status` in another shell to watch")
+		fmt.Println("distilling the full backlog in the foreground; this may take a while — run `witness status` in another shell to watch")
 	}
 	// Snapshot the monotonic drift counter before the drain so we can report how many
 	// prose_drift events THIS backfill produced (#57) — surfaced at the moment the user

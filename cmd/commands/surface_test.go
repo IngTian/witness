@@ -67,3 +67,37 @@ func TestJSONOutputHasNoANSI(t *testing.T) {
 		t.Errorf("status --json must not contain ANSI escapes: %q", out)
 	}
 }
+
+func TestInternalWorkerCommandResolution(t *testing.T) {
+	// Regression guard for C1: the internal worker token `worker-run` must resolve to
+	// the flag-bearing command (--auto/--since/--until), NOT to the hidden operator group
+	// `worker` (which has run/stop/review subcommands but no flags). A name collision
+	// kills automatic distillation: hooks spawn `worker-run --auto`, and a misroute to
+	// the group errors ("unknown flag: --auto").
+	root := newRootCmd()
+
+	// Assert the internal worker token resolves to the flag-bearing command.
+	cmd, _, err := root.Find([]string{"worker-run", "--auto"})
+	if err != nil {
+		t.Fatalf("worker-run token must resolve: %v", err)
+	}
+	if cmd.Name() != "worker-run" {
+		t.Errorf("expected worker-run to resolve to 'worker-run', got %q", cmd.Name())
+	}
+	if cmd.Flags().Lookup("auto") == nil {
+		t.Error("worker-run command must carry the --auto flag (proves it's the internal worker, not a group)")
+	}
+
+	// Assert the hidden operator group still resolves correctly.
+	groupCmd, _, err := root.Find([]string{"worker"})
+	if err != nil {
+		t.Fatalf("worker group must resolve: %v", err)
+	}
+	if groupCmd.Name() != "worker" {
+		t.Errorf("expected worker group to resolve to 'worker', got %q", groupCmd.Name())
+	}
+	runSubcmd, _, err := root.Find([]string{"worker", "run"})
+	if err != nil || runSubcmd.Name() != "run" {
+		t.Error("worker group must have a 'run' subcommand")
+	}
+}

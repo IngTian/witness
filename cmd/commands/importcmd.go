@@ -80,7 +80,7 @@ func cmdImport(args []string) error {
 	if !quiet {
 		fmt.Printf("import %s: imported %d raw record(s) from %d session(s)\n", stats.Agent, stats.Records, stats.Sessions)
 		if kicked {
-			fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
+			fmt.Println("distill worker kicked in the background; run `witness status` to watch progress")
 		} else {
 			fmt.Println("no distill work pending")
 		}
@@ -115,7 +115,7 @@ func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platfo
 		if auto {
 			return stats, maybeSpawnAutoWorker(st), nil
 		}
-		spawnDetached("worker")
+		spawnDetached("worker-run")
 		return stats, true, nil
 	}
 	return stats, false, nil

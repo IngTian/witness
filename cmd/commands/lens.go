@@ -269,7 +269,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// re-derivable from L0 and will be lost — the "safe, re-mined from L0" story only
 		// holds for MINED obs; (3) confirm unless --yes. Only then drop.
 		if st.WorkerActive() {
-			return fmt.Errorf("a distillation worker is running; backfill %q --fresh would drop this lens's data but couldn't re-mine it now — wait until `witness distill status` is idle, then retry", name)
+			return fmt.Errorf("a distillation worker is running; backfill %q --fresh would drop this lens's data but couldn't re-mine it now — wait until `witness status` is idle, then retry", name)
 		}
 		obsAll, facetsN := st.LensDataCounts(minedName)
 		active := st.ActiveObservationCount(minedName)
@@ -317,9 +317,9 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 			// Plain backfill dropped NOTHING: the reset watermark means the running worker
 			// re-mines this lens as part of its own drain. Its facets survive (just possibly
 			// stale vs. the imminent re-mine), and the worker's drain reviews when ReviewDue
-			// fires — which may not on a small archive. So point the user at `witness review`
+			// fires — which may not on a small archive. So point the user at `witness worker review`
 			// to guarantee the facets refresh, rather than silently promising consistency.
-			fmt.Println("another distillation worker is already running; it will pick up the re-mine — run `witness review` afterward to refresh this lens's facets/profile")
+			fmt.Println("another distillation worker is already running; it will pick up the re-mine — run `witness worker review` afterward to refresh this lens's facets/profile")
 			return nil
 		}
 		// --fresh is NOT fine: we already dropped this lens's observations AND facets. The
@@ -327,7 +327,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// profile is ReviewDue-gated and may never fire on a small/low-poignancy archive —
 		// so the lens would be left with empty facets + a stale profile. Don't claim
 		// success: report the exact state and the recovery step.
-		return fmt.Errorf("backfill %q --fresh incomplete: dropped this lens's observations + facets and reset its watermark, but another distillation worker is already running so the re-mine + review could not run here — once it finishes, run `witness review` to rebuild the facets/profile (or re-run `witness lens backfill %s --fresh`)", name, name)
+		return fmt.Errorf("backfill %q --fresh incomplete: dropped this lens's observations + facets and reset its watermark, but another distillation worker is already running so the re-mine + review could not run here — once it finishes, run `witness worker review` to rebuild the facets/profile (or re-run `witness lens backfill %s --fresh`)", name, name)
 	}
 	// End-state check (mirrors `distill start --all`): the RESET lens must be caught
 	// up. runWorker swallows per-session failures, so a nil error alone isn't "done".
@@ -353,13 +353,13 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	fmt.Println("re-mine complete; running a review to refresh this lens's facets + profile…")
 	ranReview, err := forceReview(st2)
 	if err != nil {
-		return fmt.Errorf("backfill %q: review failed; observations were re-mined but facets/profile are not refreshed (run `witness review`): %w", name, err)
+		return fmt.Errorf("backfill %q: review failed; observations were re-mined but facets/profile are not refreshed (run `witness worker review`): %w", name, err)
 	}
 	if !ranReview {
 		// A worker grabbed the drain lock between our drain and this review. Its review is
 		// ReviewDue-gated and may not fire, so the facets could stay stale (or empty, for
 		// --fresh) — don't claim success; tell the user how to finish.
-		return fmt.Errorf("backfill %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet refreshed; run `witness review` to finish", name)
+		return fmt.Errorf("backfill %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet refreshed; run `witness worker review` to finish", name)
 	}
 	msg := fmt.Sprintf("lens %q backfill complete", name)
 	// A drifted lens advanced its watermark (not "pending") but distilled to zero

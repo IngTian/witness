@@ -212,7 +212,7 @@ func cmdObservationRecord(session, lensName, dimension, observation, evidence st
 		}
 		return fmt.Errorf("too many staged observations for session %s (limit %d)", session, maxCLIStagedPerSession)
 	}
-	spawnDetached("worker")
+	spawnDetached("worker-run")
 	fmt.Printf("recorded (%s/%s) id=%s\n", lensName, dimension, o.ID)
 	fmt.Println("distill worker kicked in the background")
 	return nil

@@ -27,7 +27,7 @@ func maybeSpawnAutoWorker(st *store.Store) bool {
 	}
 	_ = st.SetMetaString("worker_stop_requested", "")
 	_ = st.SetMetaString("worker_mode", "auto-pending")
-	spawnDetached("worker", "--auto")
+	spawnDetached("worker-run", "--auto")
 	return true
 }
 
