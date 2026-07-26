@@ -62,11 +62,11 @@ async function runCLI(argv, harness) {
   }
 }
 
-test("npm CLI gives a clear install/uninstall error before looking for bundled binaries", async () => {
+test("npm CLI gives a clear wire/unwire error before looking for bundled binaries", async () => {
   const harness = {
     fs: {
       existsSync() {
-        throw new Error("should not probe dist for install/uninstall")
+        throw new Error("should not probe dist for wire/unwire")
       },
     },
     model: {
@@ -79,10 +79,10 @@ test("npm CLI gives a clear install/uninstall error before looking for bundled b
     },
     platform: {
       platformPackage() {
-        throw new Error("should not resolve platform for install/uninstall")
+        throw new Error("should not resolve platform for wire/unwire")
       },
       platformWitnessBin() {
-        throw new Error("should not resolve binary for install/uninstall")
+        throw new Error("should not resolve binary for wire/unwire")
       },
       supportedPlatforms() {
         return "supported"
@@ -90,11 +90,14 @@ test("npm CLI gives a clear install/uninstall error before looking for bundled b
     },
     childProcess: {
       spawnSync() {
-        throw new Error("should not spawn install/uninstall")
+        throw new Error("should not spawn wire/unwire")
       },
     },
   }
-  const result = await runCLI([process.execPath, "witness", "install", "opencode"], harness)
+  // Editor-wiring (wire/unwire) is a source-checkout workflow the npm plugin owns via
+  // opencode.json auto-register — the wrapper refuses it. `install` (archive provisioning)
+  // and `ingest` (records-in) are NOT refused; they pass through to the binary (v0.5.0).
+  const result = await runCLI([process.execPath, "witness", "wire", "opencode"], harness)
   assert.equal(result.code, 1)
   assert.match(result.errors[0], /source-checkout commands/)
 })
