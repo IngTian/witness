@@ -12,8 +12,8 @@ const PACKAGE_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 const command = process.argv[2] || ""
 
-if (command === "install" || command === "uninstall") {
-  console.error("witness: `install` and `uninstall` are source-checkout commands. With @witness-ai/opencode, add the plugin to opencode.json and let the plugin auto-register MCP.")
+if (command === "wire" || command === "unwire") {
+  console.error("witness: `wire` and `unwire` are source-checkout commands for editor integrations. With @witness-ai/opencode, add the plugin to opencode.json and let the plugin auto-register MCP. The `install` (archive provisioning) and `ingest` (records-in) commands are supported.")
   process.exit(1)
 }
 
