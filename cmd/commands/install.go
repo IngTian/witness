@@ -19,9 +19,20 @@ func newInstallCmd() *cobra.Command {
 		Use:     "install <claude|opencode>",
 		GroupID: groupSetup,
 		Short:   "Install witness integrations.",
-		Long:    "Wire witness into Claude Code (hooks + MCP) or OpenCode (plugin + MCP). This sets up capture only — it writes a sensible default runner you can change any time with `witness config set runner <claude|opencode>`.\n\nInstall is a pure MECHANISM: it wires the hooks/plugin + MCP server and binds the runner, and never prompts (safe as a hook subprocess and in CI). It does NOT seed content: the built-in \"default\" person-growth lens is auto-seeded once on the first time an archive is opened, and is fully deletable — remove it with `witness lens disable/deregister default` and it stays gone. Restore or re-seed it any time with `witness lens load-default`, or opt a fresh archive out entirely by setting WITNESS_NO_DEFAULT_LENS.",
-		Hidden:  os.Getenv("WITNESS_NPM_PACKAGE") == "1",
-		Args:    cobra.ExactArgs(1),
+		Long: strings.TrimSpace(`
+Wire witness into your editor: Claude Code (hooks + MCP) or OpenCode (plugin + MCP).
+
+This sets up CAPTURE only. It never prompts (safe in CI / as a hook), and it does
+not seed content — the built-in "default" lens is added automatically the first
+time your archive is opened.
+
+  runner    install writes a sensible default (matching the editor); change it
+            any time with: witness config set runner <claude|opencode>
+  default   remove it with 'witness lens disable/deregister default' (it stays
+            gone); restore with 'witness lens load-default'; opt a fresh archive
+            out entirely with WITNESS_NO_DEFAULT_LENS=1`),
+		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
+		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdInstall(args)
 		},

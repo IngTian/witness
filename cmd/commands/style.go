@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -111,3 +112,21 @@ func kvRow(name, value, note string) string {
 
 // footer renders a dim one-line summary under a list/section.
 func footer(summary string) string { return dim(summary) }
+
+// pluralize renders "<n> <singular|plural>" picking the form by count, so summary lines
+// read "1 lens" / "2 lenses" instead of the ungrammatical "1 lenses".
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// modelOrDefaultLabel renders a per-lens runner/model field: the value, or a dim
+// "(default)" when unset (meaning the lens rides the default-scope runner/model).
+func modelOrDefaultLabel(m string) string {
+	if strings.TrimSpace(m) == "" {
+		return dim("(default)")
+	}
+	return m
+}
