@@ -405,6 +405,8 @@ func cmdDistillStatus(asJSON bool) error {
 	}
 	// Decorative rendering (same fields as --json above). Glyph reflects worker
 	// liveness: running/stopping = active, idle = neutral.
+	fmt.Println(header("witness status"))
+	fmt.Println()
 	workerGlyph := dim("○")
 	statusText := status
 	switch status {
@@ -439,6 +441,8 @@ func cmdDistillStatus(asJSON bool) error {
 	}
 	fmt.Printf("  %s raw %s  ·  distilled %s\n", label("through"),
 		valueOrNever(lastRaw), valueOrNever(lastDistilled))
+	fmt.Println()
+	fmt.Println(footer("run `witness doctor` for a deep check"))
 	return nil
 }
 
