@@ -179,9 +179,18 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 }
 
 func TestOpenCodeServerRunAbortsOnAsyncTimeout(t *testing.T) {
+	// Deterministic timeout: a large poll interval means the ticker never races
+	// ctx.Done(), and the caller's context is cancelled from INSIDE the first
+	// /message poll (below) — so the deadline can only fire once the poll loop is
+	// genuinely reached. The old version used a 5ms wall-clock deadline that raced
+	// createSession/prompt_async: if it fired during setup, Run bailed before the
+	// poll loop and abort/delete never ran, flaking CI as aborted=false.
 	oldPoll := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
+	openCodeAsyncPollInterval = time.Hour
 	defer func() { openCodeAsyncPollInterval = oldPoll }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	var aborted, deleted bool
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +200,11 @@ func TestOpenCodeServerRunAbortsOnAsyncTimeout(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_timeout/prompt_async":
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_timeout/message":
+			// The reply never arrives; cancel the caller's context so waitForAsyncReply
+			// hits ctx.Done() on the very next select. abort/delete use their own
+			// background contexts, so this cancellation cannot suppress them.
 			_, _ = w.Write([]byte(`[]`))
+			cancel()
 		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_timeout/abort":
 			aborted = true
 			w.WriteHeader(http.StatusNoContent)
@@ -206,8 +219,6 @@ func TestOpenCodeServerRunAbortsOnAsyncTimeout(t *testing.T) {
 	defer ts.Close()
 	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
-	defer cancel()
 	if _, err := srv.Run(ctx, "", "EXTRACT", "DATA"); err == nil {
 		t.Fatal("Run should time out")
 	}
