@@ -93,6 +93,33 @@ func (q *fakeQueue) MarkDistilledIfCurrent(session, lens string, count int, rawH
 	q.distilled[session][lens] = count
 	return true, nil
 }
+func (q *fakeQueue) CommitLensDistillation(mined []store.Observation, session string, count int, rawHighID int64, lenses []string) (bool, error) {
+	// Mimic the real atomic write (issue #67-2): gate the mined-obs write AND the
+	// watermark advance on the generation still being current; either both happen or
+	// neither. INSERT OR IGNORE semantics via obsID dedup against already-appended obs.
+	if rawHighID != q.rawHigh[session] {
+		return false, nil // stale generation — no obs, no advance (no orphans)
+	}
+	seen := map[string]bool{}
+	for _, o := range q.obs {
+		seen[o.ID] = true
+	}
+	for _, o := range mined {
+		if !seen[o.ID] {
+			seen[o.ID] = true
+			q.obs = append(q.obs, o)
+		}
+	}
+	if q.distilled[session] == nil {
+		q.distilled[session] = map[string]int{}
+	}
+	advanced := false
+	for _, lens := range lenses {
+		q.distilled[session][lens] = count
+		advanced = true
+	}
+	return advanced, nil
+}
 func (q *fakeQueue) ClearStagedThrough(session string, throughID int64) {
 	if throughID <= 0 {
 		return

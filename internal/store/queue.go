@@ -170,6 +170,89 @@ func (q *queue) MarkDistilledIfCurrent(session, lens string, count int, rawHighI
 	return n > 0, nil
 }
 
+// CommitLensDistillation is the ATOMIC write for issue #67-2: it writes the lens-
+// MINED observations AND advances the given (successful) lenses' watermarks in ONE
+// generation-gated transaction, returning whether the generation was still current
+// (== whether the watermarks advanced). Either the mined generation is still live and
+// BOTH the obs and the advances land, or it is gone (an edit-style replace-import
+// landed under the mine) and NEITHER does — so mined obs derived from since-replaced
+// raw text can never be written as orphans, the gap that `AppendObservations` before
+// the per-lens CAS used to leave open (#67-2).
+//
+// Only lens-MINED obs belong here. Active (MCP-staged) obs are authoritative and
+// generation-INDEPENDENT — the caller writes them separately and unconditionally so a
+// mining outage never delays them.
+//
+// Promotion-safe under WAL + MaxOpenConns(1): EVERY statement is a conditional write
+// gated on the SAME `EXISTS(raw WHERE id=rawHighID)` predicate MarkDistilledIfCurrent
+// uses, so the first statement acquires the write lock outright (no read-then-write
+// lock promotion that WAL would reject with SQLITE_BUSY_SNAPSHOT), and all statements
+// see one consistent snapshot. obsID is the PK, so INSERT OR IGNORE keeps a crash-then-
+// re-run idempotent — the same crash-safety AppendObservations gave, now folded into
+// the guarded write.
+func (q *queue) CommitLensDistillation(mined []Observation, session string, count int, rawHighID int64, lenses []string) (bool, error) {
+	if len(mined) == 0 && len(lenses) == 0 {
+		return false, nil // nothing to commit (e.g. every lens failed) — generation moot
+	}
+	tx, err := q.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	// The generation guard, shared by every statement below: current iff a raw row
+	// with the mined high id still exists (rawHighID==0 = an empty session the mine
+	// saw as empty; still gate on "no raw exists now" so a concurrent import isn't
+	// clobbered). Identical in spirit to MarkDistilledIfCurrent — the fact is a
+	// property of the session's raw, not any one lens.
+	const guard = ` (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
+	     OR EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)`
+
+	obsStmt, err := tx.Prepare(
+		`INSERT OR IGNORE INTO observations
+		   (obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source, embedding)
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		  WHERE` + guard)
+	if err != nil {
+		tx.Rollback()
+		return false, err
+	}
+	defer obsStmt.Close()
+	for _, ob := range mined {
+		if _, err := obsStmt.Exec(ob.ID, ob.TS, ob.Session, ob.Lens, ob.Dimension, ob.Observation,
+			ob.Evidence, ob.Poignancy, ob.Source, encodeEmbedding(ob.Embedding),
+			rawHighID, session, session, rawHighID); err != nil {
+			tx.Rollback()
+			return false, err
+		}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	progStmt, err := tx.Prepare(
+		`INSERT INTO progress(session, lens, distilled, distilled_at)
+		 SELECT ?, ?, ?, ?
+		  WHERE` + guard + `
+		 ON CONFLICT(session, lens) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`)
+	if err != nil {
+		tx.Rollback()
+		return false, err
+	}
+	defer progStmt.Close()
+	advanced := false
+	for _, lens := range lenses {
+		res, err := progStmt.Exec(session, lens, count, now, rawHighID, session, session, rawHighID)
+		if err != nil {
+			tx.Rollback()
+			return false, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			advanced = true // the guard passed; the generation is still current
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return advanced, nil
+}
+
 // RetryCount returns how many times distilling this (session, lens) has failed in a
 // row.
 func (q *queue) RetryCount(session, lens string) int {
