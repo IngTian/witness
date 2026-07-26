@@ -4,8 +4,8 @@
 > coding sessions and distills how your patterns, habits, and knowledge **evolve over time** —
 > a person-centric growth archive with provenance. Not project memory (what your code did) —
 > a record of who you are becoming. One pure-Go binary, served over an MCP server + plain files.
-> File & PDF ingestion is on the roadmap, so the same distillation engine can track how
-> knowledge evolves across your notes and documents too.
+> It also ingests your own records — feed it notes, articles, or any text stream with
+> `witness ingest`, and the same distillation engine tracks how that knowledge evolves too.
 
 ## What it does (the needs it serves)
 
@@ -13,7 +13,7 @@
 - **Second brain / AI memory** for my thinking, workstyle, and habits — queryable by my agent.
 - **Reflect / journal / retrospective**: a re-readable record of how I thought and changed.
 - **Track how my knowledge and patterns evolve over time**, with provenance (why each change was recorded).
-- **Distill knowledge** from conversations today — and (roadmap) from notes, Markdown, and PDFs.
+- **Distill knowledge** from conversations — and from your own records (notes, articles, any text) via `witness ingest`.
 
 ## How it works
 
@@ -32,7 +32,8 @@
 
 ## Install
 
-- Claude Code / OpenCode: see the README "Install" section (`witness install claude` or `witness install opencode`).
+- Claude Code / OpenCode: wire the editor with `witness wire claude` (or `witness wire opencode`); see the README "Install" section.
+- Library / records-in: `witness install --path <dir>` provisions an archive, then `witness ingest` feeds it records.
 - npm (OpenCode): `@witness-ai/opencode`.
 
 ## Docs
