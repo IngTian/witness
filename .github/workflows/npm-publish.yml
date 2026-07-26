@@ -12,6 +12,14 @@
 #
 # Provenance requires npm/opencode/package.json's `repository` URL to match this
 # repo (it does: git+https://github.com/IngTian/witness.git).
+#
+# After npm is confirmed live, the same job publishes server.json to the MCP
+# Registry (registry.modelcontextprotocol.io) via `mcp-publisher login
+# github-oidc` — no stored registry token, reusing the `id-token: write` grant.
+# ORDERING IS LOAD-BEARING: the registry validates ownership by fetching the npm
+# package and matching its `mcpName` field to the server name, so the registry
+# publish MUST run after the npm-visibility poll below — a separate workflow
+# would race npm and 400 with "package is missing 'mcpName'".
 name: Publish @witness-ai/opencode to npm
 
 on:
@@ -62,6 +70,11 @@ jobs:
           check "npm/opencode/package.json" "$(node -p "require('./npm/opencode/package.json').version")"
           check ".claude-plugin/plugin.json" "$(node -p "require('./.claude-plugin/plugin.json').version")"
           check ".claude-plugin/marketplace.json" "$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].version")"
+          # server.json feeds the MCP Registry publish at the end of this job. Both its
+          # own version and the npm package reference must track the tag, or the registry
+          # would either reject a stale version or point at the wrong npm package.
+          check "server.json" "$(node -p "require('./server.json').version")"
+          check "server.json packages[0]" "$(node -p "require('./server.json').packages[0].version")"
 
       - name: Test and stage packages
         run: |
@@ -134,3 +147,28 @@ jobs:
           verify_dir="$(mktemp -d)"
           archive="$(npm pack "@witness-ai/opencode@$version" --ignore-scripts --pack-destination "$verify_dir" --silent)"
           tar -xOf "$verify_dir/$archive" package/README.md | grep -Fq "Supported platforms"
+
+          # The MCP Registry validates ownership by matching this field on the LIVE
+          # npm package to server.json's `name`. If it's missing the registry publish
+          # below 400s ("package is missing 'mcpName'"), so fail here with a clear cause.
+          expected="$(node -p "require('./server.json').name")"
+          mcpName="$(npm view "@witness-ai/opencode@$version" mcpName 2>/dev/null || true)"
+          [ "$mcpName" = "$expected" ] || {
+            echo "published @witness-ai/opencode@$version mcpName ($mcpName) != server.json name ($expected)" >&2
+            echo "add \"mcpName\": \"$expected\" to npm/opencode/package.json and re-release." >&2
+            exit 1
+          }
+
+      # --- MCP Registry publish (server.json) --------------------------------
+      # Runs only after npm is confirmed live (ordering is load-bearing; see the
+      # header comment). OIDC reuses the id-token:write grant — no stored token.
+      - name: Install mcp-publisher
+        if: github.event_name == 'release'
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Publish server.json to the MCP Registry
+        if: github.event_name == 'release'
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
