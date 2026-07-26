@@ -1,6 +1,10 @@
 package commands
 
-import "testing"
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestPlumbingCommandsHidden(t *testing.T) {
 	if !newImportCmd().Hidden {
@@ -44,5 +48,22 @@ func TestRootSurface(t *testing.T) {
 	// groups registered
 	if len(root.Groups()) == 0 {
 		t.Error("root should register cobra command groups")
+	}
+}
+
+func TestJSONOutputHasNoANSI(t *testing.T) {
+	// status --json and profile --json must contain no ESC byte, TTY or not.
+	// (Run the command with color forced on to prove decoration is gated off for --json.)
+	old := useColor
+	useColor = true
+	defer func() { useColor = old }()
+	// build an isolated archive
+	home := t.TempDir()
+	t.Setenv("WITNESS_HOME", home)
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	// capture stdout of cmdDistillStatus(true) and assert no "\x1b"
+	out := captureStdout(t, func() { _ = cmdDistillStatus(true) })
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("status --json must not contain ANSI escapes: %q", out)
 	}
 }
