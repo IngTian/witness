@@ -130,6 +130,7 @@ type Queue interface {
 	// commit + advance
 	AppendObservations(obs []Observation) error
 	MarkDistilledIfCurrent(session, lens string, count int, rawHighID int64) (bool, error)
+	CommitLensDistillation(mined []Observation, session string, count int, rawHighID int64, lenses []string) (bool, error)
 	ClearStagedThrough(session string, throughID int64)
 	// retry / backoff / drift bookkeeping
 	IncRetry(session, lens string) int

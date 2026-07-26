@@ -241,6 +241,71 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	}
 }
 
+// TestCommitDoesNotWriteMinedObsWhenRawReplacedMidMine is the issue #67-2 guard:
+// mined obs are derived from the raw generation the mine READ, so if an edit-style
+// replace lands under the mine (that generation gone), those obs must NOT be written
+// — they'd be orphans referencing text that no longer exists. The watermark hold
+// alone (the #49-C2 CAS, tested above) is not enough: it stops the delta being
+// marked distilled but, before this fix, the obs were appended anyway. Active obs
+// (MCP-staged, generation-INDEPENDENT) must still land in the same commit.
+func TestCommitDoesNotWriteMinedObsWhenRawReplacedMidMine(t *testing.T) {
+	s := newStore(t)
+	m := &fakeMiner{}
+	w := testWorker(s, m)
+	ctx := context.Background()
+	sess := "opencode:s"
+
+	// An MCP-staged active obs rides along with this commit; it is authoritative and
+	// generation-independent, so it must survive even when the mined obs are dropped.
+	active := store.Observation{
+		ID: obsID(sess, "default", "active-fact"), Session: sess, Lens: "default",
+		Dimension: "thinking", Observation: "active-fact",
+	}
+	if err := s.StageObservation(active); err != nil {
+		t.Fatalf("StageObservation: %v", err)
+	}
+
+	capture(t, s, sess, "user", "original one")
+	capture(t, s, sess, "assistant", "original two")
+
+	// MAP: mine the original generation (obs hash the old text; RawHighID captured).
+	mining, err := w.MineSession(ctx, sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// RACE: an edit-style replace lands before the commit — the mined generation is gone.
+	replaceRaw(t, s, sess, []string{"edited one", "edited two", "edited three"})
+
+	// REDUCE: commit the stale mining result.
+	existing, _ := s.ReadObservations("")
+	if err := w.CommitMining(mining, &existing); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, _ := s.ReadObservations("")
+	var minedCount, activeSeen int
+	for _, o := range obs {
+		if o.Session != sess {
+			continue
+		}
+		switch o.Source {
+		case "mined":
+			minedCount++
+		case "active":
+			if o.ID == active.ID {
+				activeSeen++
+			}
+		}
+	}
+	if minedCount != 0 {
+		t.Fatalf("wrote %d mined obs over a replaced generation; want 0 (no orphans)", minedCount)
+	}
+	if activeSeen != 1 {
+		t.Fatalf("active (generation-independent) obs landed %d times; want 1", activeSeen)
+	}
+}
+
 // TestCommitAdvancesWatermarkOnAppendOnlyPath is the both-paths guarantee: on the
 // normal append-only path (Claude Code capture never deletes raw), the CAS guard
 // always passes and the watermark advances exactly as before — the fix is free

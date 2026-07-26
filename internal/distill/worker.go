@@ -371,22 +371,34 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 		toWrite = append(toWrite, o)
 	}
 
-	// Write L1 first (so a crash mid-write re-runs the delta; obsID dedup keeps that
-	// re-run from duplicating). Active obs are written regardless of any lens's mining
-	// outcome — they're authoritative and independent of `claude -p`, so a mining
-	// outage must not delay them.
-	if err := w.Store.AppendObservations(toWrite); err != nil {
-		return fmt.Errorf("append L1: %w", err)
+	// Split what we write by provenance (issue #67-2). ACTIVE obs (MCP-staged) are
+	// authoritative and generation-INDEPENDENT — write them unconditionally so a mining
+	// outage or a raw replace never delays them. MINED obs are derived from the raw
+	// generation the mine READ, so they must commit ATOMICALLY with the watermark
+	// advance under the generation guard: on an edit-style replace landing mid-mine,
+	// the mine's generation is gone and BOTH the mined obs and the advance are skipped
+	// — no orphan obs referencing since-replaced text (the gap AppendObservations-then-
+	// CAS used to leave). obsID dedup still keeps a crash-then-re-run idempotent.
+	var activeToWrite, minedToWrite []store.Observation
+	for _, o := range toWrite {
+		if o.Source == "active" {
+			activeToWrite = append(activeToWrite, o)
+		} else {
+			minedToWrite = append(minedToWrite, o)
+		}
+	}
+	if err := w.Store.AppendObservations(activeToWrite); err != nil {
+		return fmt.Errorf("append active L1: %w", err)
 	}
 
-	// Advance each lens's watermark INDEPENDENTLY. A failed lens backs off (its delta
-	// stays pending); a successful lens advances — but ONLY if the raw generation it
-	// mined is still current (#49 C2 CAS). The CAS guard depends only on (session,
-	// rawHighID), which every lens of this session shares, so all successful lenses
-	// return the same currency verdict; we capture it to gate staged-clearing below.
-	generationCurrent := false
+	// Fail/succeed bookkeeping per lens: a failed lens backs off (its delta stays
+	// pending, never dropped); a non-failed lens is a candidate to advance. ResetRetry
+	// runs here for every non-failed lens (it also blanks any stale drift_at — a clean
+	// re-mine forgets old drift; #69 Part 2), and we collect the lenses to advance +
+	// tally drift for the stamp/counter below.
 	driftCount := 0
 	lastDriftLens := ""
+	var okLenses, driftedLenses []string
 	for _, lm := range m.Lenses {
 		if lm.MineFailed {
 			n := w.Store.IncRetry(m.Session, lm.Lens)
@@ -396,43 +408,46 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 			continue
 		}
 		// A drifted lens advances just like a successful one (its data outcome — zero obs
-		// for this delta — is identical to the pre-#57 silent behavior). We tally it here
-		// for the archive-wide meta counter (RecordDrift, below); the per-(session,lens)
-		// drift_at stamp (#69 Part 2) is written after this lens's CAS advance so it can be
-		// gated on that advance individually. Drift is NOT a transport failure, so it must
-		// NOT back off (that would re-hammer a deterministically-below-floor model forever
-		// and wedge the backfill queue).
+		// for this delta — is identical to the pre-#57 silent behavior). Drift is NOT a
+		// transport failure, so it must NOT back off (that would re-hammer a deterministically-
+		// below-floor model forever and wedge the backfill queue).
+		w.Store.ResetRetry(m.Session, lm.Lens)
+		okLenses = append(okLenses, lm.Lens)
 		if lm.Drifted {
 			driftCount++
 			lastDriftLens = lm.Lens
-		}
-		w.Store.ResetRetry(m.Session, lm.Lens)
-		advanced, err := w.Store.MarkDistilledIfCurrent(m.Session, lm.Lens, m.Total, m.RawHighID)
-		if err != nil {
-			return err
-		}
-		if advanced {
-			generationCurrent = true
-			// Persist this lens's drift stamp AFTER ResetRetry cleared any stale one (#69
-			// Part 2). ResetRetry runs above and blanks drift_at (a clean re-mine forgets
-			// old drift); re-stamping here for a lens that drifted on THIS pass makes the
-			// persisted drift_at reflect the LATEST outcome, so Stats.Drifted/doctor show a
-			// currently-drifting lens and drop one that recovered. Gated on `advanced` for
-			// the same reason the meta counter below gates on generationCurrent: a drift over
-			// a since-replaced generation didn't really happen for the archive (the session
-			// re-mines the new one). Best-effort — a stamp hiccup must never fail a commit
-			// whose L1/watermark writes already landed.
-			if lm.Drifted {
-				if err := w.Store.SetDrift(m.Session, lm.Lens); err != nil {
-					slog.Warn("distill: could not stamp per-lens drift", "session", m.Session, "lens", lm.Lens, "err", err)
-				}
-			}
-		} else {
-			slog.Warn("distill: raw changed under mine; lens watermark held, will re-mine",
-				"session", m.Session, "lens", lm.Lens, "mined_to", m.Total)
+			driftedLenses = append(driftedLenses, lm.Lens)
 		}
 	}
-	// Record drift AFTER the advance loop, and only when the generation was still current
+
+	// ATOMIC (issue #67-2): write the mined obs and advance the successful lenses'
+	// watermarks in ONE generation-gated transaction. `advanced` is the shared currency
+	// verdict — the guard is session-level (same rawHighID for every lens), so all
+	// successful lenses advance together or not at all. It gates the drift stamp/counter,
+	// the running-snapshot feed, and staged-clearing below (the old generationCurrent).
+	generationCurrent, err := w.Store.CommitLensDistillation(minedToWrite, m.Session, m.Total, m.RawHighID, okLenses)
+	if err != nil {
+		return fmt.Errorf("commit lens distillation: %w", err)
+	}
+	if !generationCurrent && len(okLenses) > 0 {
+		slog.Warn("distill: raw changed under mine; lens watermarks held, will re-mine",
+			"session", m.Session, "mined_to", m.Total)
+	}
+
+	// Per-lens drift stamp — only when the generation advanced. ResetRetry (above) blanked
+	// drift_at; re-stamping here makes the persisted drift_at reflect THIS pass's outcome,
+	// so Stats.Drifted/doctor show a currently-drifting lens and drop one that recovered. A
+	// drift over a since-replaced generation didn't really happen for the archive (the
+	// session re-mines the new one). Best-effort — a stamp hiccup must never fail a commit
+	// whose L1/watermark writes already landed.
+	if generationCurrent {
+		for _, ln := range driftedLenses {
+			if err := w.Store.SetDrift(m.Session, ln); err != nil {
+				slog.Warn("distill: could not stamp per-lens drift", "session", m.Session, "lens", ln, "err", err)
+			}
+		}
+	}
+	// Record drift AFTER the advance, and only when the generation was still current
 	// (a drift over a since-replaced generation didn't really "happen" for the archive —
 	// the session will re-mine the new generation, so counting it would be misleading).
 	if driftCount > 0 && generationCurrent {
@@ -443,9 +458,14 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 		}
 	}
 
-	// Feed the just-written observations into the running snapshot so a later session
-	// in this drain dedups against them (the cross-session dedup guarantee).
-	*existing = append(*existing, toWrite...)
+	// Feed the just-written observations into the running snapshot so a later session in
+	// this drain dedups against them (the cross-session dedup guarantee). Active obs
+	// always landed; mined obs only landed if the generation was current, so feed them
+	// conditionally — else a later session would dedup against phantom rows not in L1.
+	*existing = append(*existing, activeToWrite...)
+	if generationCurrent {
+		*existing = append(*existing, minedToWrite...)
+	}
 
 	// Clear the staged rows we drained — LAST, so a crash before it just re-drains
 	// harmlessly (obsID dedup absorbs the re-write). Gate on generationCurrent: if a
