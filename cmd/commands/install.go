@@ -18,7 +18,7 @@ func newInstallCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:    "install <claude|opencode>",
 		Short:  "Install witness integrations.",
-		Long:   "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.\n\nInstall is a pure MECHANISM: it wires the hooks/plugin + MCP server and binds the runner, and never prompts (safe as a hook subprocess and in CI). It does NOT seed content: the built-in \"default\" person-growth lens is auto-seeded once on the first time an archive is opened, and is fully deletable — remove it with `witness lens disable/deregister default` and it stays gone. Restore or re-seed it any time with `witness lens load-default`, or opt a fresh archive out entirely by setting WITNESS_NO_DEFAULT_LENS.",
+		Long:   "Wire witness into Claude Code (hooks + MCP) or OpenCode (plugin + MCP). This sets up capture only — it writes a sensible default runner you can change any time with `witness config set runner <claude|opencode>`.\n\nInstall is a pure MECHANISM: it wires the hooks/plugin + MCP server and binds the runner, and never prompts (safe as a hook subprocess and in CI). It does NOT seed content: the built-in \"default\" person-growth lens is auto-seeded once on the first time an archive is opened, and is fully deletable — remove it with `witness lens disable/deregister default` and it stays gone. Restore or re-seed it any time with `witness lens load-default`, or opt a fresh archive out entirely by setting WITNESS_NO_DEFAULT_LENS.",
 		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
 		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -412,7 +412,7 @@ func bindRunner(target string) error {
 	if err := st.SetRunner(target); err != nil {
 		return fmt.Errorf("write runner to config: %w", err)
 	}
-	fmt.Printf("runner set to %s in witness config.toml\n", target)
+	fmt.Printf("default runner set to %s (change with: witness config set runner <claude|opencode>)\n", target)
 	return nil
 }
 
