@@ -12,10 +12,11 @@ import (
 func newFacetsCmd() *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{
-		Use:   "facets [lens]",
-		Short: "Print current structured facets.",
-		Long:  "Print the current L2 structured facets for a lens. This is the CLI equivalent of the MCP get_facets tool. Defaults to the default lens.",
-		Args:  cobra.MaximumNArgs(1),
+		Use:     "facets [lens]",
+		GroupID: groupRead,
+		Short:   "Show the specific traits and patterns behind your profile.",
+		Long:    "Print the structured traits and patterns — organized by dimension — that witness currently tracks about you. These are the building blocks that feed the narrative profile. Defaults to the default lens.",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdFacets(args, asJSON)
 		},
@@ -77,11 +78,11 @@ func renderCurrentFacets(lensName string, facets []store.Facet, registered, enab
 		case !registered:
 			fmt.Printf("No lens %q is registered, so it has no facets (see `witness lens list`; restore the built-in one with `witness lens load-default`).\n", lensName)
 		case !enabled:
-			// `witness review` only iterates the ENABLED set, so it would no-op here —
+			// `witness worker review` only iterates the ENABLED set, so it would no-op here —
 			// point at enable, not review.
 			fmt.Printf("Lens %q is registered but disabled, so it has no facets — enable it with `witness lens enable %s`, then distill.\n", lensName, lensName)
 		default:
-			fmt.Printf("No facets for lens %q yet — the reviewer runs after enough observations accumulate; force one now with `witness review`.\n", lensName)
+			fmt.Printf("No facets for lens %q yet — the reviewer runs after enough observations accumulate; force one now with `witness worker review`.\n", lensName)
 		}
 		return
 	}

@@ -16,9 +16,10 @@ const maxCLIStagedPerSession = 200
 
 func newObservationsCmd() *cobra.Command {
 	obsCmd := &cobra.Command{
-		Use:   "observations",
-		Short: "Search, record, or delete observations.",
-		Long:  "Search, record, or delete L1 observations. These commands mirror the MCP search_observations, record_observation, and delete_observation tools.",
+		Use:     "observations",
+		GroupID: groupRead,
+		Short:   "Search what witness has noticed about you.",
+		Long:    "Search the specific things witness has noticed about your work patterns, preferences, and growth. Each observation is timestamped and organized by lens and dimension.",
 	}
 
 	var searchLens string
@@ -26,8 +27,8 @@ func newObservationsCmd() *cobra.Command {
 	var searchJSON bool
 	search := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Search observations by meaning.",
-		Long:  "Search L1 observations by local embedding similarity. This is the CLI equivalent of the MCP search_observations tool.",
+		Short: "Search what witness has noticed, by meaning.",
+		Long:  "Search the things witness has observed about you, finding semantically similar observations via local embedding search.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdObservationSearch(args[0], searchLens, searchK, searchJSON)
@@ -40,10 +41,11 @@ func newObservationsCmd() *cobra.Command {
 	var recordSession, recordLens, recordDimension, recordObservation, recordEvidence string
 	var recordPoignancy int
 	record := &cobra.Command{
-		Use:   "record --session <id> --dimension <name> --observation <text>",
-		Short: "Record an active observation for a session.",
-		Long:  "Stage an active observation for the worker to append to L1, matching the MCP record_observation behavior.",
-		Args:  cobra.NoArgs,
+		Use:    "record --session <id> --dimension <name> --observation <text>",
+		Short:  "Record an active observation for a session.",
+		Long:   "Stage an active observation for the worker to append to L1, matching the MCP record_observation behavior.",
+		Args:   cobra.NoArgs,
+		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return cmdObservationRecord(recordSession, recordLens, recordDimension, recordObservation, recordEvidence, recordPoignancy)
 		},
@@ -56,10 +58,11 @@ func newObservationsCmd() *cobra.Command {
 	record.Flags().IntVar(&recordPoignancy, "poignancy", 5, "salience from 1 to 10")
 
 	deleteCmd := &cobra.Command{
-		Use:   "delete <obs_id>",
-		Short: "Delete one observation.",
-		Long:  "Delete one L1 observation by obs_id. This is the CLI equivalent of the MCP delete_observation tool.",
-		Args:  cobra.ExactArgs(1),
+		Use:    "delete <obs_id>",
+		Short:  "Delete one observation.",
+		Long:   "Delete one L1 observation by obs_id. This is the CLI equivalent of the MCP delete_observation tool.",
+		Args:   cobra.ExactArgs(1),
+		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdObservationDelete(args[0])
 		},
@@ -209,7 +212,7 @@ func cmdObservationRecord(session, lensName, dimension, observation, evidence st
 		}
 		return fmt.Errorf("too many staged observations for session %s (limit %d)", session, maxCLIStagedPerSession)
 	}
-	spawnDetached("worker")
+	spawnDetached("worker-run")
 	fmt.Printf("recorded (%s/%s) id=%s\n", lensName, dimension, o.ID)
 	fmt.Println("distill worker kicked in the background")
 	return nil

@@ -14,10 +14,11 @@ import (
 
 func newCleanupCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "cleanup",
-		Short: "Interactively prune old raw transcripts.",
-		Long:  "Interactively delete old L0 raw messages for idle sessions while keeping derived observations, facets, and profiles. This is never automatic and asks for confirmation before deleting.",
-		Args:  cobra.NoArgs,
+		Use:     "cleanup",
+		GroupID: groupAdmin,
+		Short:   "Interactively prune old raw transcripts.",
+		Long:    "Interactively delete old raw messages for idle sessions while keeping derived observations, facets, and profiles. This is never automatic and asks for confirmation before deleting.",
+		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return cmdCleanup()
 		},

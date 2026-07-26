@@ -648,3 +648,10 @@ func TestMCPServerRegisteredExactName(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallLongMentionsConfigRunner(t *testing.T) {
+	long := newInstallCmd().Long
+	if !strings.Contains(long, "config set runner") {
+		t.Error("install help should point users at `config set runner` for the runtime, not imply install picks it")
+	}
+}

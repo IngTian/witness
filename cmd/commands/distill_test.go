@@ -65,23 +65,25 @@ func TestDistillBackfillFailsWhenWorkRemains(t *testing.T) {
 	}
 }
 
-// --wait-backoffs is meaningless without --all (there's no foreground loop to retry
-// in the detached-spawn path), so `distill start --wait-backoffs` alone must error
+// --wait-backoffs is meaningless WITH --detach (there's no foreground loop to retry
+// in the detached-spawn path), so `worker run --detach --wait-backoffs` must error
 // rather than silently no-op.
 func TestDistillStartWaitBackoffsRequiresAll(t *testing.T) {
 	if err := newDistillStartForWaitBackoffsTest(t); err == nil {
-		t.Fatal("--wait-backoffs without --all should error")
-	} else if !strings.Contains(err.Error(), "only") || !strings.Contains(err.Error(), "--all") {
+		t.Fatal("--wait-backoffs with --detach should error")
+	} else if !strings.Contains(err.Error(), "foreground") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 // newDistillStartForWaitBackoffsTest exercises the RunE guard for --wait-backoffs
-// without --all by driving the assembled cobra command with just that flag set.
+// with --detach (the background spawn path has no retry loop) by driving the worker
+// run command with both flags. Since the old `distill` command was removed from root,
+// this now tests the hidden `worker run` command which has the same flags.
 func newDistillStartForWaitBackoffsTest(t *testing.T) error {
 	t.Helper()
-	cmd := newDistillCmd()
-	cmd.SetArgs([]string{"start", "--wait-backoffs"})
+	cmd := newWorkerCmd()
+	cmd.SetArgs([]string{"run", "--detach", "--wait-backoffs"})
 	// Silence cobra's own usage/error printing; we only inspect the returned error.
 	cmd.SetOut(nopWriter{})
 	cmd.SetErr(nopWriter{})

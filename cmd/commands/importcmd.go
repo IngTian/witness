@@ -16,10 +16,11 @@ func newImportCmd() *cobra.Command {
 	var quiet bool
 	var auto bool
 	c := &cobra.Command{
-		Use:   "import --agent <claude|opencode>",
-		Short: "Import agent session data and kick background distillation.",
-		Long:  "Import agent data into L0 raw records and kick the background distillation worker when work is pending. OpenCode imports from its local SQLite session database; Claude relies on already-captured hook data.",
-		Args:  cobra.NoArgs,
+		Use:    "import --agent <claude|opencode>",
+		Short:  "Import agent session data and kick background distillation.",
+		Long:   "Import agent data into L0 raw records and kick the background distillation worker when work is pending. OpenCode imports from its local SQLite session database; Claude relies on already-captured hook data.",
+		Args:   cobra.NoArgs,
+		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			args := []string{"--agent", agent}
 			for _, session := range sessions {
@@ -79,7 +80,7 @@ func cmdImport(args []string) error {
 	if !quiet {
 		fmt.Printf("import %s: imported %d raw record(s) from %d session(s)\n", stats.Agent, stats.Records, stats.Sessions)
 		if kicked {
-			fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
+			fmt.Println("distill worker kicked in the background; run `witness status` to watch progress")
 		} else {
 			fmt.Println("no distill work pending")
 		}
@@ -114,7 +115,7 @@ func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platfo
 		if auto {
 			return stats, maybeSpawnAutoWorker(st), nil
 		}
-		spawnDetached("worker")
+		spawnDetached("worker-run")
 		return stats, true, nil
 	}
 	return stats, false, nil

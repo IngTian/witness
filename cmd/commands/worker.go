@@ -19,7 +19,7 @@ func newInternalWorkerCmd() *cobra.Command {
 	var auto bool
 	var since string
 	var until string
-	c := &cobra.Command{Use: "worker", Hidden: true, RunE: func(_ *cobra.Command, args []string) error {
+	c := &cobra.Command{Use: "worker-run", Hidden: true, RunE: func(_ *cobra.Command, args []string) error {
 		if auto {
 			args = append(args, "--auto")
 		}
@@ -70,7 +70,7 @@ func workerFlags(args []string) (bool, sessionTimeRange, error) {
 			}
 			i++
 		default:
-			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker [--auto] [--since <time>] [--until <time>]")
+			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker-run [--auto] [--since <time>] [--until <time>]")
 		}
 	}
 	timeRange, err := parseSessionTimeRange(since, until, time.Now())

@@ -11,8 +11,9 @@ import (
 func newProfileCmd() *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{
-		Use:   "profile [lens]",
-		Short: "Print the narrative profile.",
+		Use:     "profile [lens]",
+		GroupID: groupRead,
+		Short:   "Read your narrative growth summary.",
 		Long: "Print the narrative profile (markdown).\n\n" +
 			"With NO argument, prints the 'unified' profile — the cross-lens portrait that blends every enabled lens into one whole-person view (generated once 2+ lenses have accumulated facets). 'unified' is an aggregate VIEW, not a lens.\n\n" +
 			"Pass a lens name for that lens's own profile: `witness profile default` is the built-in person-growth lens's narrative (distinct from the unified blend); `witness profile <name>` any other enabled lens. See `witness lens list` for what's enabled.",

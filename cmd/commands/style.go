@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/mattn/go-isatty"
 )
@@ -71,4 +73,60 @@ func label(name string) string {
 		padded += " "
 	}
 	return dim(padded)
+}
+
+// header renders a section title (bold on a TTY, plain otherwise). Callers add
+// their own surrounding blank lines for rhythm.
+func header(title string) string { return bold(title) }
+
+// enabledGlyph is the on/off mark for lists (lens list, status). Green ● when on,
+// dim ○ when off; ASCII * / - when color is disabled so piped/non-UTF8 stays clean.
+func enabledGlyph(on bool) string {
+	if !useColor {
+		if on {
+			return "*"
+		}
+		return "-"
+	}
+	if on {
+		return green("●")
+	}
+	return dim("○")
+}
+
+// kvRow renders an aligned "name  value (note)" row. The name is padded to a fixed
+// width on the PLAIN text before coloring, so ANSI escapes don't skew the column.
+// note is omitted when empty.
+func kvRow(name, value, note string) string {
+	const width = 14
+	padded := name
+	for len(padded) < width {
+		padded += " "
+	}
+	row := dim(padded) + value
+	if strings.TrimSpace(note) != "" {
+		row += " " + dim("("+note+")")
+	}
+	return row
+}
+
+// footer renders a dim one-line summary under a list/section.
+func footer(summary string) string { return dim(summary) }
+
+// pluralize renders "<n> <singular|plural>" picking the form by count, so summary lines
+// read "1 lens" / "2 lenses" instead of the ungrammatical "1 lenses".
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// modelOrDefaultLabel renders a per-lens runner/model field: the value, or a dim
+// "(default)" when unset (meaning the lens rides the default-scope runner/model).
+func modelOrDefaultLabel(m string) string {
+	if strings.TrimSpace(m) == "" {
+		return dim("(default)")
+	}
+	return m
 }

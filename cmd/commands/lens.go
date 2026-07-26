@@ -15,15 +15,23 @@ import (
 
 func newLensCmd() *cobra.Command {
 	lensCmd := &cobra.Command{
-		Use:   "lens",
-		Short: "Manage global observation lenses.",
-		Long:  "Manage the central lens registry. Every enabled, registered lens runs globally across every session. The built-in \"default\" person-growth lens is an ordinary registered lens (auto-seeded once on first use, restore with `witness lens load-default`) — enable/disable/edit/re-register it like any other; an archive may run any set of lenses, including none.",
+		Use:     "lens",
+		GroupID: groupLenses,
+		Short:   "Manage observation lenses that extract different views of your sessions.",
+		Long: strings.TrimSpace(`
+A lens is a point of view for distillation — a set of dimensions + prompts that
+decides what witness notices in your sessions. Every enabled lens runs on every
+session; an archive can run any number, including none.
+
+The built-in "default" (person-growth) lens is just an ordinary lens: enable,
+disable, edit, or remove it like any other. It's added automatically on first
+use; 'witness lens load-default' brings it back if you removed it.`),
 	}
 	lensCmd.AddCommand(
 		&cobra.Command{
 			Use:   "register <name> <dir>",
 			Short: "Register or replace a lens definition.",
-			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models afterward with `witness lens set`.",
+			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models with `witness config --lens <name>`.",
 			Args:  cobra.ExactArgs(2),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"register"}, args...)) },
 		},
@@ -51,13 +59,7 @@ func newLensCmd() *cobra.Command {
 			Args:  cobra.NoArgs,
 			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"list"}) },
 		},
-		&cobra.Command{
-			Use:   "show <name>",
-			Short: "Print a registered lens's definition.",
-			Long:  "Print a lens's settings (lens.json) and its EXTRACT + REVIEW prompts. Use `default` to print the built-in lens.",
-			Args:  cobra.ExactArgs(1),
-			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"show"}, args...)) },
-		},
+		newLensShowCmd(),
 		&cobra.Command{
 			Use:   "load-default",
 			Short: "Re-seed / restore the built-in \"default\" person-growth lens.",
@@ -65,7 +67,6 @@ func newLensCmd() *cobra.Command {
 			Args:  cobra.NoArgs,
 			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"load-default"}) },
 		},
-		newLensSetCmd(),
 		newLensBackfillCmd(),
 		newLensTryCmd(),
 	)
@@ -84,8 +85,19 @@ func newLensBackfillCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "backfill <name>",
 		Short: "Re-mine one lens over the whole history, then refresh its facets.",
-		Long:  "Reset just this lens's distillation watermark so every past session is re-offered FOR THIS LENS, drain the backlog in the foreground, then run a review so this lens's facets + profile reflect the re-mined observations. Only the named lens is re-mined — every other lens (default included) keeps its watermark. This is the enable-a-new-lens path: cost scales with one lens × history.\n\nWith --fresh, first DELETE this lens's existing L1 observations + L2 facets (raw transcripts are untouched) before re-mining — use it when you changed the lens's prompt and want a clean rebuild instead of merging into the old observations. --fresh is DESTRUCTIVE: mined observations are re-created from L0, but any in-session (active) observations you recorded are lost. It asks for confirmation first; pass --yes to skip the prompt in scripts.",
-		Args:  cobra.ExactArgs(1),
+		Long: strings.TrimSpace(`
+Catch one lens up over your whole history, then refresh its facets.
+
+Re-mines every past session for THIS lens only (others keep their watermark), in
+the foreground, and runs a review afterward so the lens's facets + profile match
+the re-mined observations. This is the path for a lens you just enabled — cost
+scales with one lens × history.
+
+  --fresh   first DELETE this lens's observations + facets, then re-mine from a
+            clean slate (for a changed prompt). Raw transcripts are untouched.
+            DESTRUCTIVE: mined observations come back, but any you recorded
+            in-session are lost. Asks to confirm; --yes skips the prompt.`),
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			st, err := store.Open()
 			if err != nil {
@@ -181,20 +193,33 @@ func cmdLens(args []string) error {
 			fmt.Println(dim("  no lenses registered — nothing is distilled (register one with `witness lens register <name> <dir>`)"))
 			return nil
 		}
+		fmt.Println(header("witness lens"))
+		fmt.Println()
+		lensDir := st.LensesDir()
 		for _, name := range reg {
-			if slices.Contains(enabled, name) {
-				fmt.Printf("  %s %s  %s\n", green("✓"), name, dim("(enabled — runs on every session)"))
-			} else {
-				fmt.Printf("  %s %s  %s\n", dim("·"), name, dim("(registered, disabled)"))
+			isEnabled := slices.Contains(enabled, name)
+			glyph := enabledGlyph(isEnabled)
+			statusText := "disabled"
+			if isEnabled {
+				statusText = "enabled"
 			}
+			// Best-effort detail: load the lens to get dimension count.
+			// If loading fails (corrupt definition), fall back to just name + enabled/disabled.
+			l, err := lens.LoadRegistered(name, lensDir)
+			if err != nil {
+				fmt.Printf("  %s %s\n", glyph, kvRow(name, statusText, ""))
+				continue
+			}
+			dimCount := fmt.Sprintf("%d dims", len(l.Dimensions))
+			fmt.Printf("  %s %s\n", glyph, kvRow(name, statusText, dimCount))
 		}
-	case "show":
-		if len(args) < 2 || args[1] == "" {
-			return fmt.Errorf("usage: witness lens show <name>")
-		}
-		return lensShow(st, args[1])
+		fmt.Println()
+		enabledCount := len(enabled)
+		totalCount := len(reg)
+		summaryText := fmt.Sprintf("%s · %d enabled · run `witness lens show <name>`", pluralize(totalCount, "lens", "lenses"), enabledCount)
+		fmt.Println("  " + footer(summaryText))
 	default:
-		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|show|load-default|backfill|set|try)", args[0])
+		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|show|load-default|backfill|try)", args[0])
 	}
 	return nil
 }
@@ -251,7 +276,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// re-derivable from L0 and will be lost — the "safe, re-mined from L0" story only
 		// holds for MINED obs; (3) confirm unless --yes. Only then drop.
 		if st.WorkerActive() {
-			return fmt.Errorf("a distillation worker is running; backfill %q --fresh would drop this lens's data but couldn't re-mine it now — wait until `witness distill status` is idle, then retry", name)
+			return fmt.Errorf("a distillation worker is running; backfill %q --fresh would drop this lens's data but couldn't re-mine it now — wait until `witness status` is idle, then retry", name)
 		}
 		obsAll, facetsN := st.LensDataCounts(minedName)
 		active := st.ActiveObservationCount(minedName)
@@ -299,9 +324,9 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 			// Plain backfill dropped NOTHING: the reset watermark means the running worker
 			// re-mines this lens as part of its own drain. Its facets survive (just possibly
 			// stale vs. the imminent re-mine), and the worker's drain reviews when ReviewDue
-			// fires — which may not on a small archive. So point the user at `witness review`
+			// fires — which may not on a small archive. So point the user at `witness worker review`
 			// to guarantee the facets refresh, rather than silently promising consistency.
-			fmt.Println("another distillation worker is already running; it will pick up the re-mine — run `witness review` afterward to refresh this lens's facets/profile")
+			fmt.Println("another distillation worker is already running; it will pick up the re-mine — run `witness worker review` afterward to refresh this lens's facets/profile")
 			return nil
 		}
 		// --fresh is NOT fine: we already dropped this lens's observations AND facets. The
@@ -309,7 +334,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// profile is ReviewDue-gated and may never fire on a small/low-poignancy archive —
 		// so the lens would be left with empty facets + a stale profile. Don't claim
 		// success: report the exact state and the recovery step.
-		return fmt.Errorf("backfill %q --fresh incomplete: dropped this lens's observations + facets and reset its watermark, but another distillation worker is already running so the re-mine + review could not run here — once it finishes, run `witness review` to rebuild the facets/profile (or re-run `witness lens backfill %s --fresh`)", name, name)
+		return fmt.Errorf("backfill %q --fresh incomplete: dropped this lens's observations + facets and reset its watermark, but another distillation worker is already running so the re-mine + review could not run here — once it finishes, run `witness worker review` to rebuild the facets/profile (or re-run `witness lens backfill %s --fresh`)", name, name)
 	}
 	// End-state check (mirrors `distill start --all`): the RESET lens must be caught
 	// up. runWorker swallows per-session failures, so a nil error alone isn't "done".
@@ -335,13 +360,13 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	fmt.Println("re-mine complete; running a review to refresh this lens's facets + profile…")
 	ranReview, err := forceReview(st2)
 	if err != nil {
-		return fmt.Errorf("backfill %q: review failed; observations were re-mined but facets/profile are not refreshed (run `witness review`): %w", name, err)
+		return fmt.Errorf("backfill %q: review failed; observations were re-mined but facets/profile are not refreshed (run `witness worker review`): %w", name, err)
 	}
 	if !ranReview {
 		// A worker grabbed the drain lock between our drain and this review. Its review is
 		// ReviewDue-gated and may not fire, so the facets could stay stale (or empty, for
 		// --fresh) — don't claim success; tell the user how to finish.
-		return fmt.Errorf("backfill %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet refreshed; run `witness review` to finish", name)
+		return fmt.Errorf("backfill %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet refreshed; run `witness worker review` to finish", name)
 	}
 	msg := fmt.Sprintf("lens %q backfill complete", name)
 	// A drifted lens advanced its watermark (not "pending") but distilled to zero
@@ -353,98 +378,101 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	return nil
 }
 
-// newLensSetCmd builds `witness lens set <name> [--runner R] [--extract-model M]
-// [--review-model M]`, the safe way to tune a registered lens's per-lens runner + models
-// (issue #75). It writes only lens.json fields via a struct round-trip (store.SetLens*)
-// — never text surgery on the prompt files — so it can't corrupt a lens. An empty value
-// clears the field, so the lens rides the default runner/model again.
-func newLensSetCmd() *cobra.Command {
-	var runner, extractModel, reviewModel string
+// lensShow prints a lens's settings + its two prompts. Both a registered lens and the
+// built-in `default` render the same way (default's settings are hardcoded, not a
+// lens.json, but the view is identical), so the output is a consistent, copyable
+// definition regardless of source.
+// newLensShowCmd builds `witness lens show <name> [--prompts]`. By DEFAULT it prints a
+// compact card (settings + a one-line excerpt and line count of each prompt) so the
+// common "what is this lens" glance is scannable, not a 120-line wall. --prompts prints
+// the two prompts (extract.md + review.md) verbatim — the full, copyable definition you
+// want when editing or forking a lens.
+func newLensShowCmd() *cobra.Command {
+	var prompts bool
 	c := &cobra.Command{
-		Use:   "set <name>",
-		Short: "Set a registered lens's per-lens runner + model overrides.",
-		Long:  "Tune a registered lens (written to its lens.json). --runner routes this lens's mine+review to a specific runtime (claude/opencode) instead of the default runner; --extract-model overrides the mining (L0→L1) model; --review-model overrides the review (L1→L2) + summary model. Pass an empty value (e.g. --runner \"\") to clear an override so the lens rides the default again. This is what lets a rare heavy lens run a stronger model — or a cheap lens run a free model on another runtime — without paying for it on every session.",
+		Use:   "show <name>",
+		Short: "Show a lens's settings (add --prompts for the full extract/review text).",
+		Long:  "Print a lens's settings — dimensions, runner, models — plus a short excerpt of each prompt. Pass --prompts to print the full EXTRACT + REVIEW prompts verbatim (copyable as a starting point for a new lens). Use `default` for the built-in lens.",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return lensSet(args[0],
-				cmd.Flags().Changed("runner"), runner,
-				cmd.Flags().Changed("extract-model"), extractModel,
-				cmd.Flags().Changed("review-model"), reviewModel)
-		},
+		RunE:  func(_ *cobra.Command, args []string) error { return lensShow(args[0], prompts) },
 	}
-	c.Flags().StringVar(&runner, "runner", "", "per-lens runtime (claude/opencode); empty clears → ride the default runner")
-	c.Flags().StringVar(&extractModel, "extract-model", "", "per-lens model for mining (L0→L1); empty clears the override")
-	c.Flags().StringVar(&reviewModel, "review-model", "", "per-lens model for review + summary (L1→L2); empty clears the override")
+	c.Flags().BoolVar(&prompts, "prompts", false, "print the full extract + review prompts verbatim (default: a short excerpt)")
 	return c
 }
 
-// lensSet applies the flags that were actually PASSED (cobra's Changed) so an unpassed
-// flag leaves that field untouched, while an explicit empty value clears it.
-func lensSet(name string, setRunner bool, runner string, setExtract bool, extractModel string, setReview bool, reviewModel string) error {
-	if !setRunner && !setExtract && !setReview {
-		return fmt.Errorf("nothing to set: pass --runner, --extract-model and/or --review-model")
-	}
+func lensShow(name string, full bool) error {
 	st, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if setRunner {
-		if err := st.SetLensRunner(name, runner); err != nil {
-			return err
-		}
-	}
-	if setExtract {
-		if err := st.SetLensModel(name, "extract", extractModel); err != nil {
-			return err
-		}
-	}
-	if setReview {
-		if err := st.SetLensModel(name, "review", reviewModel); err != nil {
-			return err
-		}
-	}
-	// Re-read so the confirmation reflects what's now on disk (incl. a cleared field).
-	l, err := lens.LoadRegistered(name, st.LensesDir())
-	if err != nil {
-		return err
-	}
-	fmt.Printf("lens %q: runner=%s extract-model=%s review-model=%s\n",
-		name, modelOrDefaultLabel(l.Runner), modelOrDefaultLabel(l.ExtractModel), modelOrDefaultLabel(l.ReviewModel))
-	return nil
-}
-
-func modelOrDefaultLabel(m string) string {
-	if strings.TrimSpace(m) == "" {
-		return dim("(default)")
-	}
-	return m
-}
-
-// lensShow prints a lens's settings + its two prompts. Both a registered lens and the
-// built-in `default` render the same way (default's settings are hardcoded, not a
-// lens.json, but the view is identical), so the output is a consistent, copyable
-// definition regardless of source.
-func lensShow(st *store.Store, name string) error {
 	// Since #44 slice 1a "default" is an ordinary registered lens, so there is no
 	// special LoadDefault path — every lens (default included) is looked up in the
 	// registry the same way.
 	if !slices.Contains(st.RegisteredLenses(), name) {
 		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
 	}
+	enabled := slices.Contains(st.LoadConfig().EnabledLenses, name)
 	l, err := lens.LoadRegistered(name, st.LensesDir())
 	if err != nil {
 		return fmt.Errorf("read lens %q: %w", name, err)
 	}
-	fmt.Print(renderLensDefinition(l))
+	if full {
+		fmt.Print(renderLensPrompts(l))
+	} else {
+		fmt.Print(renderLensCard(l, enabled))
+	}
 	return nil
 }
 
-// renderLensDefinition renders a lens as its settings header + the two prompts, in a
-// plain, copyable shape (no styling → pipeable). It reflects the on-disk directory: a
-// lens.json-style settings block, then extract.md and review.md. Emitted verbatim so it
-// can be read or used as a STARTING POINT for a new lens directory.
-func renderLensDefinition(l *lens.Lens) string {
+// renderLensCard is the compact default `lens show` view: a settings card + a one-line
+// excerpt and line count for each prompt, so a glance fits on screen. The full text is
+// one flag away (`--prompts`), pointed to in the footer.
+func renderLensCard(l *lens.Lens, enabled bool) string {
+	var b strings.Builder
+	state := "disabled"
+	if enabled {
+		state = "enabled"
+	}
+	fmt.Fprintf(&b, "%s  %s\n", header("lens: "+l.Name), dim("("+state+")"))
+	if len(l.Dimensions) > 0 {
+		fmt.Fprintln(&b, "  "+kvRow("dimensions", strings.Join(l.Dimensions, ", "), ""))
+	}
+	fmt.Fprintln(&b, "  "+kvRow("runner", modelOrDefaultLabel(l.Runner), ""))
+	fmt.Fprintln(&b, "  "+kvRow("mine model", modelOrDefaultLabel(l.ExtractModel), ""))
+	fmt.Fprintln(&b, "  "+kvRow("review model", modelOrDefaultLabel(l.ReviewModel), ""))
+	fmt.Fprintln(&b, "  "+kvRow("extract.md", promptExcerpt(l.Extract), ""))
+	fmt.Fprintln(&b, "  "+kvRow("review.md", promptExcerpt(l.Review), ""))
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "  "+footer("full prompts: witness lens show "+l.Name+" --prompts"))
+	return b.String()
+}
+
+// promptExcerpt summarizes a prompt as "<n> lines · \"<first non-empty line, trimmed>\"".
+func promptExcerpt(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	n := len(lines)
+	if strings.TrimSpace(s) == "" {
+		return "(empty)"
+	}
+	first := ""
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) != "" {
+			first = strings.TrimSpace(ln)
+			break
+		}
+	}
+	const max = 52
+	if len(first) > max {
+		first = first[:max] + "…"
+	}
+	return fmt.Sprintf("%d lines · %q", n, first)
+}
+
+// renderLensPrompts is the `--prompts` view: the two prompts verbatim, under plain
+// section rules, so the output stays copyable as a STARTING POINT for a new lens
+// directory. A settings line precedes them for context.
+func renderLensPrompts(l *lens.Lens) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "name: %s\n", l.Name)
 	if len(l.Dimensions) > 0 {
