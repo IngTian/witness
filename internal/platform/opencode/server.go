@@ -455,7 +455,12 @@ const openCodeServeMarker = "opencode"
 // the exact private-serve flags witness passes and NOTHING a user's interactive
 // `opencode serve` would carry (`--pure` + a 127.0.0.1 hostname). Callers must have
 // ALREADY established the process is orphaned (parent gone) before killing — a live
-// witness serve is a child of a live worker and must never be a candidate.
+// witness serve (a child of a live worker) is safe because the orphan gate (ppid≠1)
+// skips it. EDGE: a user's own `nohup opencode serve --pure --hostname 127.0.0.1 &`
+// (deliberately disowned → reparented to init, ppid==1) has the EXACT shape witness's
+// private serve has AND is an orphan, so witness CAN'T distinguish it from a crash-
+// orphan by command-line shape alone — that's an accepted, documented edge case (reap
+// is conservative for witness's own serves, but this external collision is possible).
 func isStrayServeLine(cmdline string) bool {
 	fields := strings.Fields(cmdline)
 	if len(fields) == 0 {

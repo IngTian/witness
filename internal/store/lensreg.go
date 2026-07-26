@@ -120,6 +120,51 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 			return fmt.Errorf("lens name %q collides with the already-registered %q on a case-insensitive filesystem; pick a distinct name or re-register %q exactly", name, existing, existing)
 		}
 	}
+
+	// Guard against RESOLVED lens.json name collisions (issue #101): a lens's
+	// effective identity is its lens.json `name` field when present, else the registry
+	// dir name. Two different registry dirs can resolve to the SAME name and silently
+	// share observations/watermark/profile. Read the candidate lens.json early and
+	// compare its resolved name against ALL other registered lenses' resolved names.
+	// This catches both lens.json-name collisions (probe dir with lens.json name="default"
+	// collides with the real default lens) AND a lens.json name that shadows another
+	// lens's DIR name (probe lens.json name="math" vs. existing dir "math" with no lens.json).
+	resolvedName, resolveErr := r.resolveNameFromSource(name, srcDir)
+	if resolveErr != nil {
+		return resolveErr // fail fast on corrupted/unreadable lens.json
+	}
+	// Apply the reserved-name guard to the RESOLVED name too (register at "probe" with
+	// lens.json name="unified" must be rejected at register, not just at load).
+	if ReservedLensName(resolvedName) {
+		return fmt.Errorf("lens name %q resolves to reserved %q (the cross-lens 'unified' summary); choose another name or remove the lens.json override", name, resolvedName)
+	}
+	// Check the resolved name against all OTHER registered lenses (both their resolved
+	// names and their registry dir names) — a collision in the resolved namespace means
+	// they'd share the same L1/L2/profile identity.
+	if resolvedName != name { // only check when dir name ≠ resolved name (else the dir-collision guard above caught it)
+		rnameLower := strings.ToLower(resolvedName)
+		for _, existing := range r.RegisteredLenses() {
+			if existing == name {
+				continue // skip self (exact-case re-register is allowed)
+			}
+			existingResolved, err := r.resolveNameFromRegistry(existing)
+			if err != nil {
+				// Corrupted registered lens; report the collision-check failure rather than
+				// silently ignoring it (letting this lens register might clobber the broken one).
+				return fmt.Errorf("can't check collision: existing lens %q is unreadable: %w", existing, err)
+			}
+			// Collision if candidate-resolved equals OTHER's resolved (both namespace),
+			// OR candidate-resolved shadows OTHER's DIR name (an addressing collision).
+			if strings.ToLower(existingResolved) == rnameLower || strings.ToLower(existing) == rnameLower {
+				// Clearer message when the lens.json name collides vs. when it shadows a dir name.
+				if strings.ToLower(existingResolved) == rnameLower {
+					return fmt.Errorf("lens name %q with lens.json name=%q collides with existing lens %q (which resolves to %q); they would share observations/watermark/profile", name, resolvedName, existing, existingResolved)
+				}
+				return fmt.Errorf("lens name %q with lens.json name=%q shadows the registry handle %q; pick a different lens.json name or dir name", name, resolvedName, existing)
+			}
+		}
+	}
+
 	info, err := os.Stat(srcDir)
 	if err != nil {
 		return err
@@ -219,6 +264,35 @@ func (r *lensReg) RegisteredLenses() []string {
 // — it just keeps a crash artifact out of listings.
 func isLensStagingDir(name string) bool {
 	return strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".bak")
+}
+
+// resolveNameFromSource computes the effective lens name from a source dir BEFORE it is
+// registered: read its lens.json `name` field if present, else fall back to the registry
+// dir name. This mirrors the loadDir resolution rule in internal/lens/lens.go (lines 176-177).
+func (r *lensReg) resolveNameFromSource(dirName, srcDir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(srcDir, lensConfigFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return dirName, nil // no lens.json → name is the registry dir name
+		}
+		return "", fmt.Errorf("read %s: %w", lensConfigFile, err)
+	}
+	var cfg struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", fmt.Errorf("parse %s: %w", lensConfigFile, err)
+	}
+	if strings.TrimSpace(cfg.Name) != "" {
+		return strings.TrimSpace(cfg.Name), nil
+	}
+	return dirName, nil // empty lens.json name → fall back to dir name
+}
+
+// resolveNameFromRegistry computes the effective lens name for an ALREADY-registered lens
+// (a lens under <root>/lenses/<dirName>/). Same rule: lens.json name if present, else dir name.
+func (r *lensReg) resolveNameFromRegistry(dirName string) (string, error) {
+	return r.resolveNameFromSource(dirName, filepath.Join(r.LensesDir(), dirName))
 }
 
 // SetLensModel updates a registered lens's per-lens model in its lens.json (issue #75),

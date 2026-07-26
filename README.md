@@ -10,8 +10,9 @@
 your coding sessions and distills how your patterns, habits, and knowledge **evolve over time** —
 a person-centric growth archive with provenance, served over an MCP server + plain files, as a
 single pure-Go binary. Think *second brain / AI memory* for how you think and grow, not project
-memory for what your code did. *(File & PDF ingestion is on the way — see the roadmap — so the
-same engine can distill how knowledge evolves across your notes and documents too.)*
+memory for what your code did. **It also ingests your own records** — feed it notes, articles, or
+any text stream with `witness ingest`, and the same engine distills how that knowledge evolves,
+not just your chats.
 
 > *"Aah, you were at my side, all along.*  
 > *My true mentor...*  
@@ -37,7 +38,7 @@ witness is the answer if you've ever wanted to:
 - Have a **second brain / AI memory** for your thinking, workstyle, and habits, queryable by your agent.
 - **Track how you grow as a developer over time** — the traps you fall into and climb out of — with provenance for every recorded change.
 - Keep a **journal / retrospective** of how you thought and changed, re-readable months later.
-- *(Roadmap)* **Distill your notes & PDFs** and see how your knowledge evolves across documents, not just chats.
+- **Distill your own records** — feed notes, articles, or any text stream to `witness ingest` (NDJSON) and see how that knowledge evolves across documents, not just chats.
 
 **Contents:** [How it works](#how-it-works) · [Lenses](#lenses) · [Example](#example-one-moment-end-to-end) · [Reading the archive](#reading-the-archive) · [Commands](#commands) · [Install](#install) · [Configuration](#configuration) · [Your data](#your-data-is-yours)
 

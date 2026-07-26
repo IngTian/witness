@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -51,7 +52,8 @@ var _ store.MCPStore = (*fakeMCPStore)(nil)
 // no longer needs a concrete *store.Store — the C1 decoupling goal for this consumer.
 func TestServerRunsAgainstFakeStore(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeMCPStore{profiles: map[string]string{"default": "# Profile\n\nfake-backed.\n"}}
+	knownProfile := "# Profile\n\nA KNOWN fake-backed profile for default.\n"
+	fake := &fakeMCPStore{profiles: map[string]string{"default": knownProfile}}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
 	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake").Connect(ctx, serverT, nil)
@@ -81,8 +83,98 @@ func TestServerRunsAgainstFakeStore(t *testing.T) {
 		t.Fatal("get_profile returned no content")
 	}
 	// The fake served the canned profile — the server round-tripped a store.MCPStore
-	// with no database.
-	if tc, ok := res.Content[0].(*mcpsdk.TextContent); !ok || tc.Text == "" {
+	// with no database. Assert the returned text CONTAINS the known profile content
+	// (proving it read the fake, not the server's not-found fallback).
+	tc, ok := res.Content[0].(*mcpsdk.TextContent)
+	if !ok || tc.Text == "" {
 		t.Fatalf("expected non-empty text content, got %+v", res.Content[0])
+	}
+	if !strings.Contains(tc.Text, "KNOWN fake-backed profile") {
+		t.Fatalf("returned profile missing known content (got server fallback, not fake): %s", tc.Text)
+	}
+}
+
+// TestServerRecordDeleteSearch exercises the MCP server's record_observation,
+// delete_observation, and search_observations against the fake store, proving the
+// fake's recorders work and those tools are wired correctly (issue #97).
+func TestServerRecordDeleteSearch(t *testing.T) {
+	ctx := context.Background()
+	// The obs needs an embedding for vector search; fakeEmbedder returns [0.1,0.2,0.3].
+	fake := &fakeMCPStore{
+		obs: []store.Observation{{
+			ID: "obs1", Lens: "default", Dimension: "growth",
+			Observation: "canned obs", Embedding: []float32{0.1, 0.2, 0.3},
+		}},
+		profiles:     map[string]string{},
+		existsReturn: false, // dedup: not already staged
+	}
+
+	serverT, clientT := mcpsdk.NewInMemoryTransports()
+	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake").Connect(ctx, serverT, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer ss.Close()
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	// record_observation: stage a new obs.
+	recRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "record_observation",
+		Arguments: map[string]any{
+			"session":     "sess1",
+			"lens":        "default",
+			"dimension":   "growth",
+			"observation": "learned something",
+			"poignancy":   7,
+		},
+	})
+	if err != nil || recRes.IsError {
+		t.Fatalf("record_observation failed: err=%v, res=%+v", err, recRes)
+	}
+	// Verify the fake recorded it.
+	if fake.stagedCalls != 1 {
+		t.Fatalf("fake.stagedCalls: want 1, got %d", fake.stagedCalls)
+	}
+	if fake.lastStaged.Session != "sess1" || fake.lastStaged.Observation != "learned something" {
+		t.Fatalf("fake.lastStaged wrong: %+v", fake.lastStaged)
+	}
+
+	// delete_observation: delete an obs.
+	delRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "delete_observation",
+		Arguments: map[string]any{"obs_id": "obs1"},
+	})
+	if err != nil || delRes.IsError {
+		t.Fatalf("delete_observation failed: err=%v, res=%+v", err, delRes)
+	}
+	// Verify the fake recorded the delete.
+	if len(fake.deletedIDs) != 1 || fake.deletedIDs[0] != "obs1" {
+		t.Fatalf("fake.deletedIDs: want [obs1], got %v", fake.deletedIDs)
+	}
+
+	// search_observations: search returns the canned obs.
+	searchRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "search_observations",
+		Arguments: map[string]any{"query": "growth", "lens": "default", "k": 5},
+	})
+	if err != nil || searchRes.IsError {
+		t.Fatalf("search_observations failed: err=%v, res=%+v", err, searchRes)
+	}
+	if len(searchRes.Content) == 0 {
+		t.Fatal("search_observations returned no content")
+	}
+	tc, ok := searchRes.Content[0].(*mcpsdk.TextContent)
+	if !ok || tc.Text == "" {
+		t.Fatalf("search_observations: expected text content, got %+v", searchRes.Content[0])
+	}
+	// The fake's canned obs should appear in the search result.
+	if !strings.Contains(tc.Text, "canned obs") {
+		t.Fatalf("search result missing the fake's canned obs: %s", tc.Text)
 	}
 }
