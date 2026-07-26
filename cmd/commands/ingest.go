@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type ingestSession struct {
 	Session string
 	Records []store.RawRecord
 	Keys    []string
+	IDs     []string // parallel to Records/Keys: the original caller id (or "" for hash-only)
 }
 
 // parseNDJSON reads one JSON record per line. Blank lines are ignored; a line that
@@ -45,6 +47,12 @@ func parseNDJSON(r io.Reader) (recs []ingestRecord, skipped int) {
 			continue
 		}
 		recs = append(recs, rec)
+	}
+	// Check scanner error after the loop: a >16MB line (or newline-less stream)
+	// would silently truncate the rest of the input. Log it so the truncation is
+	// observable — do NOT return an error (ingest stays best-effort).
+	if err := sc.Err(); err != nil {
+		slog.Warn("NDJSON parse incomplete (scanner error, likely truncated input)", "error", err)
 	}
 	return recs, skipped
 }
@@ -103,6 +111,7 @@ func groupSessions(recs []ingestRecord, now time.Time) []ingestSession {
 			Text:    rec.Text,
 		})
 		s.Keys = append(s.Keys, key)
+		s.IDs = append(s.IDs, rec.ID) // track the original caller id
 	}
 	out := make([]ingestSession, 0, len(order))
 	for _, sid := range order {
@@ -181,30 +190,136 @@ func cmdIngest(reader io.Reader, quiet bool) (ingested, skipped int, err error) 
 	return ingested, skipped, nil
 }
 
-// applyIngestSession commits one grouped session with the same skip/append/replace
-// dedup protocol as the OpenCode importer, keyed on the caller-id-derived keys.
+// applyIngestSession commits one grouped session with TRUE MERGE/APPEND semantics keyed
+// on the caller-supplied id (what the SCHEMA promises). Unlike OpenCode's prefix-or-replace
+// (which always re-reads the FULL session), `witness ingest` allows INCREMENTAL batches under
+// an explicit shared session → the new batch is NOT necessarily a prefix-superset of stored
+// keys. So: load existing keys, partition incoming (skip/update/append), and merge — NEVER
+// delete records the caller didn't mention.
 func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	stateKey := "file_import_keys:" + s.Session
 	oldKeys := parseImportKeysJSON(st.MetaString(stateKey))
 	rawCount := st.RawCount(s.Session)
-	if keysEqual(oldKeys, s.Keys) && rawCount == len(s.Keys) {
-		return 0, nil // idempotent: nothing changed
+
+	// Build a map: id → (index in oldKeys, key) for existing records.
+	oldKeyByID := make(map[string]struct {
+		idx int
+		key string
+	})
+	for i, key := range oldKeys {
+		// Extract id from key (format: "id:hash" or "h:hash" for no-id fallback).
+		// We skip "h:" keys (hash-only, no stable id) for the id-based merge.
+		if colon := strings.IndexByte(key, ':'); colon > 0 && key[:colon] != "h" {
+			id := key[:colon]
+			oldKeyByID[id] = struct {
+				idx int
+				key string
+			}{i, key}
+		}
 	}
-	replace := true
-	start := 0
-	if len(oldKeys) == 0 && rawCount == 0 {
-		replace = false
-	} else if len(oldKeys) > 0 && keysPrefix(s.Keys, oldKeys) && rawCount == len(oldKeys) {
-		replace = false
-		start = len(oldKeys) // append only the new tail
+
+	// Partition incoming records: skip (identical key), update (same id, changed key), append (new id).
+	// We also track which old indices are touched by updates, so we know what to preserve.
+	type updateOp struct {
+		oldIdx     int
+		newRecIdx  int
+		newKey     string
+		updatedKey string
 	}
-	stateValue, _ := json.Marshal(s.Keys)
+	var updates []updateOp
+	var appends []int // indices in s.Records/Keys/IDs
+	updatedIndices := make(map[int]bool)
+
+	for i, id := range s.IDs {
+		key := s.Keys[i]
+		id = strings.TrimSpace(id)
+		if id == "" {
+			// No stable id → treat as append (hash-only keys never match by id).
+			appends = append(appends, i)
+			continue
+		}
+		if old, exists := oldKeyByID[id]; exists {
+			if old.key == key {
+				// Skip: identical key → idempotent no-op.
+				continue
+			}
+			// Update: same id, but key changed (text edited).
+			updates = append(updates, updateOp{old.idx, i, key, key})
+			updatedIndices[old.idx] = true
+		} else {
+			// Append: new id.
+			appends = append(appends, i)
+		}
+	}
+
+	// Fast path: if nothing changed (all incoming keys already exist with same content),
+	// and the stored count matches the key count (no orphans), then skip.
+	if len(updates) == 0 && len(appends) == 0 && rawCount == len(oldKeys) {
+		return 0, nil
+	}
+
+	// If we only have pure appends (no updates) AND the stored state is consistent,
+	// use the cheap append path (replace=false, tail only).
+	if len(updates) == 0 && len(appends) > 0 && rawCount == len(oldKeys) {
+		// Pure append: just add the new tail.
+		var appendRecs []store.RawRecord
+		var appendKeys []string
+		for _, idx := range appends {
+			rec := s.Records[idx]
+			rec.Seq = rawCount + len(appendRecs)
+			appendRecs = append(appendRecs, rec)
+			appendKeys = append(appendKeys, s.Keys[idx])
+		}
+		newKeys := append(append([]string(nil), oldKeys...), appendKeys...)
+		stateValue, _ := json.Marshal(newKeys)
+		meta := store.SessionMeta{Session: s.Session}
+		if err := st.ApplyRawImport(meta, appendRecs, stateKey, string(stateValue), false); err != nil {
+			return 0, err
+		}
+		st.SetSessionPlatform(s.Session, "file")
+		return len(appendRecs), nil
+	}
+
+	// Complex case: we have updates, or the stored state is inconsistent (rawCount != len(oldKeys)).
+	// We need to reconstruct the FULL merged record set (existing rows + updates + appends),
+	// then rewrite with replace=true. Read the existing L0 to get the current records.
+	existingRecs, err := st.ReadRaw(s.Session)
+	if err != nil {
+		return 0, err
+	}
+
+	// Build the merged set: start with existing records, apply updates in place, then append new.
+	mergedRecs := make([]store.RawRecord, len(existingRecs))
+	copy(mergedRecs, existingRecs)
+	mergedKeys := make([]string, len(oldKeys))
+	copy(mergedKeys, oldKeys)
+
+	// Apply updates: replace the record at the old index with the new one.
+	for _, upd := range updates {
+		if upd.oldIdx < len(mergedRecs) && upd.oldIdx < len(mergedKeys) {
+			// Preserve the original seq for the updated record (keep its position).
+			newRec := s.Records[upd.newRecIdx]
+			newRec.Seq = mergedRecs[upd.oldIdx].Seq
+			mergedRecs[upd.oldIdx] = newRec
+			mergedKeys[upd.oldIdx] = upd.updatedKey
+		}
+	}
+
+	// Append new records.
+	for _, idx := range appends {
+		rec := s.Records[idx]
+		rec.Seq = len(mergedRecs)
+		mergedRecs = append(mergedRecs, rec)
+		mergedKeys = append(mergedKeys, s.Keys[idx])
+	}
+
+	stateValue, _ := json.Marshal(mergedKeys)
 	meta := store.SessionMeta{Session: s.Session}
-	if err := st.ApplyRawImport(meta, s.Records[start:], stateKey, string(stateValue), replace); err != nil {
+	if err := st.ApplyRawImport(meta, mergedRecs, stateKey, string(stateValue), true); err != nil {
 		return 0, err
 	}
 	st.SetSessionPlatform(s.Session, "file")
-	return len(s.Records) - start, nil
+	return len(updates) + len(appends), nil
 }
 
 // parseImportKeysJSON decodes a JSON array of keys from meta storage. Mirrors
