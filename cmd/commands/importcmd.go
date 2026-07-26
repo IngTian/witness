@@ -16,10 +16,11 @@ func newImportCmd() *cobra.Command {
 	var quiet bool
 	var auto bool
 	c := &cobra.Command{
-		Use:   "import --agent <claude|opencode>",
-		Short: "Import agent session data and kick background distillation.",
-		Long:  "Import agent data into L0 raw records and kick the background distillation worker when work is pending. OpenCode imports from its local SQLite session database; Claude relies on already-captured hook data.",
-		Args:  cobra.NoArgs,
+		Use:    "import --agent <claude|opencode>",
+		Short:  "Import agent session data and kick background distillation.",
+		Long:   "Import agent data into L0 raw records and kick the background distillation worker when work is pending. OpenCode imports from its local SQLite session database; Claude relies on already-captured hook data.",
+		Args:   cobra.NoArgs,
+		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			args := []string{"--agent", agent}
 			for _, session := range sessions {

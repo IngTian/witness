@@ -40,10 +40,11 @@ func newObservationsCmd() *cobra.Command {
 	var recordSession, recordLens, recordDimension, recordObservation, recordEvidence string
 	var recordPoignancy int
 	record := &cobra.Command{
-		Use:   "record --session <id> --dimension <name> --observation <text>",
-		Short: "Record an active observation for a session.",
-		Long:  "Stage an active observation for the worker to append to L1, matching the MCP record_observation behavior.",
-		Args:  cobra.NoArgs,
+		Use:    "record --session <id> --dimension <name> --observation <text>",
+		Short:  "Record an active observation for a session.",
+		Long:   "Stage an active observation for the worker to append to L1, matching the MCP record_observation behavior.",
+		Args:   cobra.NoArgs,
+		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return cmdObservationRecord(recordSession, recordLens, recordDimension, recordObservation, recordEvidence, recordPoignancy)
 		},
@@ -56,10 +57,11 @@ func newObservationsCmd() *cobra.Command {
 	record.Flags().IntVar(&recordPoignancy, "poignancy", 5, "salience from 1 to 10")
 
 	deleteCmd := &cobra.Command{
-		Use:   "delete <obs_id>",
-		Short: "Delete one observation.",
-		Long:  "Delete one L1 observation by obs_id. This is the CLI equivalent of the MCP delete_observation tool.",
-		Args:  cobra.ExactArgs(1),
+		Use:    "delete <obs_id>",
+		Short:  "Delete one observation.",
+		Long:   "Delete one L1 observation by obs_id. This is the CLI equivalent of the MCP delete_observation tool.",
+		Args:   cobra.ExactArgs(1),
+		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdObservationDelete(args[0])
 		},
