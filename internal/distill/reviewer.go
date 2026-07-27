@@ -75,14 +75,20 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// data loss; their facets are real), but we refuse to stamp and surface the
 	// failure so the review stays due and is retried on the next pass.
 	var failed []string
+	var reviewedOK []string // lenses that folded cleanly this pass — watermark advances AFTER WriteFacets
 	for _, ln := range r.Lenses {
-		obs, err := r.Store.ReadObservationsLite(ln.Name) // reviewer slims embeddings off anyway
+		// Incremental fold (issue #16): read only the observations recorded since this
+		// lens's last successful review, in valid-time order, and fold them against the
+		// stance (L2) we already carry. Input is bounded by "what's new," not archive
+		// size, so the review call never overflows the runner's context/time budget as
+		// the corpus grows — the whole point of the entropy-fold redesign.
+		obs, err := r.Store.ReadObservationsSince(ln.Name, r.Store.ReviewRowid(ln.Name))
 		if err != nil {
 			failed = append(failed, ln.Name)
 			continue
 		}
 		if len(obs) == 0 {
-			continue
+			continue // nothing new since this lens's last fold — leave its watermark as is
 		}
 		reviewed, err := r.reviewLens(ctx, ln, obs, facets)
 		if err != nil {
@@ -92,11 +98,25 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 		for _, rf := range reviewed {
 			r.applyFacet(byKey, ln.Name, rf, nowStr)
 		}
+		reviewedOK = append(reviewedOK, ln.Name)
 	}
 
 	merged := collectFacets(byKey)
 	if err := r.Store.WriteFacets(merged); err != nil {
 		return fmt.Errorf("write L2: %w", err)
+	}
+
+	// Advance each cleanly-folded lens's watermark ONLY AFTER the facets are durably
+	// written — else a WriteFacets failure (or a crash between) would move the watermark
+	// past obs whose facet contributions were never persisted, silently losing that
+	// delta. Per-lens + independent of siblings (the #55 fix): a healthy lens folds
+	// forward even when a sibling failed; a failed lens is not stamped, so its obs are
+	// re-folded next pass. A stamp hiccup marks the lens failed so the pass re-runs it
+	// (re-folding is idempotent against the stance — obs are not consumed by folding).
+	for _, name := range reviewedOK {
+		if err := r.Store.StampReviewLens(name); err != nil {
+			failed = append(failed, name)
+		}
 	}
 	// Only advance the review watermark if EVERY active lens was reviewed. A partial
 	// stamp would mark the failed lens as reviewed-through-now and let it drift
@@ -226,11 +246,14 @@ func collectFacets(m map[string]*store.Facet) []store.Facet {
 }
 
 // slimObs strips embeddings before sending observations to the prompt (save tokens).
+// `session` is included so the reviewer can weight INDEPENDENT recurrence across
+// sessions (strong reinforcement) more heavily than repeats inside one episode — the
+// signal the append-only L1 now preserves (issue #16 / the keep-everything world).
 func slimObs(obs []store.Observation) []map[string]any {
 	out := make([]map[string]any, 0, len(obs))
 	for _, o := range obs {
 		out = append(out, map[string]any{
-			"id": o.ID, "ts": o.TS, "dimension": o.Dimension,
+			"id": o.ID, "ts": o.TS, "session": o.Session, "dimension": o.Dimension,
 			"observation": o.Observation, "evidence": o.Evidence, "poignancy": o.Poignancy,
 		})
 	}
@@ -245,11 +268,19 @@ func slimFacets(facets []store.Facet, lensName string) []map[string]any {
 		}
 		cur := f.Current()
 		val := ""
+		conf := 0.0
 		if cur != nil {
 			val = cur.Value
+			conf = cur.Confidence
 		}
+		// current_confidence is REQUIRED, not decorative: applyFacet keeps
+		// max(current, returned) confidence on reinforcement (reviewer.go), so a
+		// reinforcement is a silent no-op unless the model can see the current value
+		// and return one above it. Exposing it is what lets repeated evidence actually
+		// raise confidence (the keep-everything reinforcement signal, issue #16).
 		out = append(out, map[string]any{
-			"dimension": f.Dimension, "key": f.Key, "current_value": val,
+			"dimension": f.Dimension, "key": f.Key,
+			"current_value": val, "current_confidence": conf,
 		})
 	}
 	return out

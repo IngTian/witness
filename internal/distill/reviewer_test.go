@@ -3,6 +3,7 @@ package distill
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,6 +131,60 @@ func TestReviewerFailedLensDoesNotStamp(t *testing.T) {
 	}
 	if sawCodereview {
 		t.Error("the failed lens (codereview) should not have produced a facet")
+	}
+}
+
+// TestReviewFoldsOnlyObsSinceWatermark is the #16 structural fix: after a lens is
+// reviewed, the NEXT review folds ONLY the observations recorded since that lens's
+// fold watermark — not the whole corpus. This is what bounds the reviewer input by
+// "what's new" instead of archive size (the 10-min / context cliff at scale).
+func TestReviewFoldsOnlyObsSinceWatermark(t *testing.T) {
+	s := newStore(t)
+
+	// Two observations already in L1 before the first review.
+	if err := s.AppendObservations([]store.Observation{
+		{ID: "o1", TS: "2026-01-01T00:00:00Z", Session: "s1", Lens: "default", Dimension: "thinking", Observation: "first", Poignancy: 5},
+		{ID: "o2", TS: "2026-01-02T00:00:00Z", Session: "s1", Lens: "default", Dimension: "thinking", Observation: "second", Poignancy: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var lastFedIDs []string
+	runner := func(_ context.Context, _, _, input string) (string, error) {
+		lastFedIDs = nil
+		for _, id := range []string{"o1", "o2", "o3"} {
+			if strings.Contains(input, id) {
+				lastFedIDs = append(lastFedIDs, id)
+			}
+		}
+		return facetReply("thinking", "clarity", "improving"), nil
+	}
+	r := &Reviewer{
+		Store:  s,
+		Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW"}},
+		Config: store.Config{},
+		Runner: runner,
+	}
+
+	// First review folds o1+o2 (watermark was 0).
+	if err := r.Run(context.Background(), time.Now()); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if len(lastFedIDs) != 2 {
+		t.Fatalf("first review should fold both pre-existing obs, fed %v", lastFedIDs)
+	}
+
+	// A new observation arrives; the second review must fold ONLY it.
+	if err := s.AppendObservations([]store.Observation{
+		{ID: "o3", TS: "2026-01-03T00:00:00Z", Session: "s2", Lens: "default", Dimension: "thinking", Observation: "third", Poignancy: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background(), time.Now()); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if len(lastFedIDs) != 1 || lastFedIDs[0] != "o3" {
+		t.Fatalf("second review must fold only the new obs (o3), fed %v", lastFedIDs)
 	}
 }
 
