@@ -52,12 +52,16 @@ func newWorkerCmd() *cobra.Command {
 	_ = stop.Flags().MarkHidden("auto-only")
 	w.AddCommand(stop)
 
-	w.AddCommand(&cobra.Command{
+	var reviewFull bool
+	reviewCmd := &cobra.Command{
 		Use:   "review",
 		Short: "Force an L2 review and regenerate profiles from existing observations.",
 		Args:  cobra.NoArgs,
-		RunE:  func(_ *cobra.Command, _ []string) error { return cmdReview() },
-	})
+		RunE:  func(_ *cobra.Command, _ []string) error { return cmdReviewFull(reviewFull) },
+	}
+	reviewCmd.Flags().BoolVar(&reviewFull, "full", false,
+		"also run the emergent long-arc pass (cluster L1 → verify → merge; #16)")
+	w.AddCommand(reviewCmd)
 
 	// candidates: the S3 long-arc dry-run inspector. Prints the emergent-arc clusters the
 	// hypothesis engine proposes for a lens WITHOUT verifying (no LLM, no writes) — so
