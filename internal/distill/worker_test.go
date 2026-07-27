@@ -17,8 +17,9 @@ import (
 )
 
 // fakeEmbedder returns a deterministic, well-separated unit vector per string:
-// identical text -> identical vector (cosine 1, so dedup fires); different text
-// -> near-orthogonal (low cosine, so distinct obs survive). No model needed.
+// identical text -> identical vector (cosine 1), different text -> near-orthogonal.
+// Used for read-time recall assertions; L1 no longer dedups on embedding at write
+// time (append-only event log), so these vectors no longer gate what gets stored.
 type fakeEmbedder struct{}
 
 func (fakeEmbedder) Embed(text string) ([]float32, error) {
@@ -238,6 +239,69 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	}
 	if got := s.DistilledCount(sess, "default"); got != 3 {
 		t.Fatalf("after re-mine, watermark = %d, want 3 (the new generation)", got)
+	}
+}
+
+// constMiner returns the SAME observation text for every input — so two different
+// sessions produce obs with identical embeddings (cosine 1.0) but distinct obsIDs
+// (obsID hashes the session). It is the precise probe for the append-only-L1 contract
+// (#16 / "issue B"): the old embedding dedup gate dropped the second; append-only L1
+// must keep both, because that multiplicity IS the reinforcement/recurrence signal.
+func constMiner(_ context.Context, _, _, _ string) (string, error) {
+	arr := []minedObs{{Dimension: "thinking", Observation: "recurring-pattern", Evidence: "e", Poignancy: 3}}
+	b, _ := json.Marshal(arr)
+	return string(b), nil
+}
+
+// TestSameObservationInTwoSessionsIsRecordedTwice is the flagship append-only-L1
+// regression lock. Under the old confirmation-bias dedup gate (CommitMining dropped a
+// mined obs whose cosine to any resident same-lens obs was >= 0.93), session 2's
+// identical observation scored 1.0 against session 1's and was silently discarded —
+// destroying re-emergence and reinforcement-frequency signal before the reviewer ever
+// saw it. L1 is an append-only event log: both must land.
+func TestSameObservationInTwoSessionsIsRecordedTwice(t *testing.T) {
+	s := newStore(t)
+	w := drainWorker(s, constMiner)
+	ctx := context.Background()
+
+	capture(t, s, "s1", "user", "turn one")
+	if err := w.Process(ctx, "s1"); err != nil {
+		t.Fatalf("Process s1: %v", err)
+	}
+	// s2 mines the SAME pattern; CommitMining threads the running snapshot holding s1's
+	// obs, so this exercises the real cross-session path the old gate 2 killed.
+	capture(t, s, "s2", "user", "turn two")
+	if err := w.Process(ctx, "s2"); err != nil {
+		t.Fatalf("Process s2: %v", err)
+	}
+
+	obs, _ := s.ReadObservations("default")
+	if len(obs) != 2 {
+		t.Fatalf("append-only L1 must keep the recurrence across sessions; got %d obs, want 2", len(obs))
+	}
+}
+
+// TestIdenticalMinedTextWithinSessionCollapsesByObsID locks the ONE write-time filter
+// that survives once embedding dedup is gone: exact-obsID idempotency. A session mined
+// into >1 chunk that emits identical text per chunk must collapse to a single row
+// (obsID = sha1(session|lens|text) is identical within a session), so same-session
+// repetition stays bounded by the model's output, not by corpus size.
+func TestIdenticalMinedTextWithinSessionCollapsesByObsID(t *testing.T) {
+	s := newStore(t)
+	w := drainWorker(s, constMiner)
+	// Small budget forces multiple overlapping chunks (mirror TestPartialChunkSuccessIsNotDrift).
+	w.Config = store.Config{ChunkMaxChars: 20}
+	ctx := context.Background()
+
+	for i := 0; i < 6; i++ {
+		capture(t, s, "s", "user", "a reasonably long turn number "+string(rune('a'+i)))
+	}
+	if err := w.Process(ctx, "s"); err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	obs, _ := s.ReadObservations("default")
+	if len(obs) != 1 {
+		t.Fatalf("identical mined text within one session must collapse by obsID; got %d, want 1", len(obs))
 	}
 }
 
