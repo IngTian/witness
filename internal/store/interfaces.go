@@ -156,6 +156,20 @@ type ReviewStore interface {
 	StampReviewLens(lens string) error
 }
 
+// EmergentStore is the surface the S3 long-arc retrieval pass drives (issue #16): it
+// reads embedding-decoded observations (clustering needs the vectors, unlike the fold's
+// stripped reads), reads/writes facets (merge accepted arcs via the same bi-temporal
+// path), and uses meta-KV for its OWN idempotency state (cluster signatures) — it does
+// NOT share the review watermark (ReviewStore), by design: the emergent pass must never
+// advance review_rowid (§5c). Composed from existing interfaces; *Store satisfies it by
+// promotion, so no new method is added anywhere.
+type EmergentStore interface {
+	ObservationReader // ReadObservations(lens) — embeddings decoded
+	MetaKV            // MetaString / SetMetaString — signature state
+	ReadFacets() ([]Facet, error)
+	WriteFacets(facets []Facet) error
+}
+
 // SummaryStore is the surface the Summarizer drives: read facets, read/write the L4
 // narrative profile files, and its own meta watermark for change tracking.
 type SummaryStore interface {
@@ -175,6 +189,7 @@ var (
 	_ MCPStore              = (*Store)(nil)
 	_ Queue                 = (*Store)(nil)
 	_ ReviewStore           = (*Store)(nil)
+	_ EmergentStore         = (*Store)(nil)
 	_ SummaryStore          = (*Store)(nil)
 	_ ObservationReader     = (*Store)(nil)
 	_ MetaKV                = (*Store)(nil)
