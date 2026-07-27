@@ -13,7 +13,6 @@ import (
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
-	"github.com/IngTian/witness/internal/vector"
 )
 
 // errNoArray is mine()'s sentinel for "the model replied, but its reply contained
@@ -69,11 +68,6 @@ func RunnerMine(r platform.Runner) MineFunc {
 		return r.Run(ctx, model, prompt, input)
 	}
 }
-
-// dedupThreshold: a mined observation whose nearest existing same-lens neighbor
-// scores above this is treated as a duplicate and dropped. e5 cosines run high,
-// so this is deliberately strict.
-const dedupThreshold = 0.93
 
 // PreviewStore is the read-only store surface PreviewMine needs (issue #73-C1): the
 // L0 transcript (ReadRaw) plus the owning-platform lookup distillInputs → ForSession
@@ -283,10 +277,14 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 		return m, nil
 	}
 
-	// 3. Embed active + each lens's mined so dedup + later recall work. Done in the
-	// map phase so the serial commit stays cheap; the embedder's own mutex makes this
-	// concurrency-safe. A mined obs whose embedding fails is dropped now — same as
-	// before, where the combine loop skipped it on Embed error.
+	// 3. Embed active + each lens's mined for later recall (MCP/CLI vector search).
+	// Done in the map phase so the serial commit stays cheap; the embedder's own mutex
+	// makes this concurrency-safe. A mined obs whose embedding FAILS is KEPT with an
+	// empty embedding — the embedding is now consulted only at read-time recall (the
+	// write-path dedup that used to require it is gone), so an un-embeddable obs is
+	// still a fully valid L1 event (recall-only degradation until it is re-embedded).
+	// This matches the active-obs loop just above (keep-on-failure) and honors "keep
+	// full L1 to preserve expensive mining work."
 	for i := range m.Active {
 		if len(m.Active[i].Embedding) == 0 {
 			if v, err := w.Embedder.Embed(m.Active[i].Observation); err == nil {
@@ -295,27 +293,24 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 		}
 	}
 	for li := range m.Lenses {
-		kept := m.Lenses[li].Mined[:0]
 		for i := range m.Lenses[li].Mined {
-			v, err := w.Embedder.Embed(m.Lenses[li].Mined[i].Observation)
-			if err != nil {
-				continue
+			if v, err := w.Embedder.Embed(m.Lenses[li].Mined[i].Observation); err == nil {
+				m.Lenses[li].Mined[i].Embedding = v
 			}
-			m.Lenses[li].Mined[i].Embedding = v
-			kept = append(kept, m.Lenses[li].Mined[i])
 		}
-		m.Lenses[li].Mined = kept
 	}
 	return m, nil
 }
 
 // CommitMining is the REDUCE half: given one session's mining result and a pointer
-// to the RUNNING corpus snapshot, dedup the mined observations, write L1, advance
-// the watermark, and clear staged rows. It is the SOLE L1 writer and MUST run
-// serially. `existing` is threaded by pointer and APPENDED with each session's
-// newly-written observations, so a later session in the same drain dedups against
-// an earlier one's writes — strictly better than a per-session fresh snapshot, and
-// what makes parallel mining safe without a cross-session dedup gap.
+// to the RUNNING corpus snapshot, write L1 (append-only), advance the watermark, and
+// clear staged rows. It is the SOLE L1 writer and MUST run serially. `existing` is
+// threaded by pointer and APPENDED with each session's newly-written observations so
+// the exact-obsID idempotency check below sees an earlier session's writes within the
+// same drain — the ONLY remaining use of `existing` now that the embedding dedup gate
+// is gone (L1 is an append-only event log). It cannot suppress a genuine recurrence:
+// obsID hashes the session, so two different sessions with identical text get distinct
+// obsIDs and both survive.
 func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) error {
 	if m.NothingToDo {
 		// Every lens is already at the watermark; the stamp is idempotent. Advance each
@@ -329,27 +324,25 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 		return nil
 	}
 
-	// Combine what to write: active verbatim + each SUCCESSFUL lens's mined minus
-	// near-duplicates (of active or of the running corpus, which includes earlier
-	// sessions' writes in THIS drain). A lens that hit a transport failure contributes
-	// nothing this round; its delta stays pending and re-mines when the failure clears
-	// (S1 at-least-once, NEVER-drop) — but a HEALTHY sibling lens still commits, which
-	// is the whole point of the per-lens watermark (issue #55).
+	// Combine what to write: active verbatim + each SUCCESSFUL lens's mined verbatim.
+	// L1 is an append-only EVENT LOG — we keep every occurrence, including a pattern
+	// that recurs across sessions. The old code dropped a mined obs whose embedding was
+	// a near-duplicate (cosine >= 0.93) of any resident same-lens obs; that was
+	// confirmation bias — it silently destroyed re-emergence (a trait the person moved
+	// away from and returned to could never be recorded, since the original was still
+	// resident) AND reinforcement-frequency (the strongest evidence a trait is real).
+	// That multiplicity IS the signal; the reviewer, which holds the current stance,
+	// is the right place to fold repeats into confidence/change — not a stance-blind
+	// content filter here. The only write-time filter that remains is exact-obsID
+	// idempotency below (crash/re-mine + within-session repeats). A lens that hit a
+	// transport failure contributes nothing this round; its delta stays pending and
+	// re-mines when the failure clears (#55 per-lens watermark, never-drop).
 	combined := append([]store.Observation{}, m.Active...)
 	for li := range m.Lenses {
 		if m.Lenses[li].MineFailed {
 			continue
 		}
-		for i := range m.Lenses[li].Mined {
-			mo := m.Lenses[li].Mined[i]
-			if vector.NearestScore(m.Active, mo.Embedding, mo.Lens) >= dedupThreshold {
-				continue
-			}
-			if vector.NearestScore(*existing, mo.Embedding, mo.Lens) >= dedupThreshold {
-				continue
-			}
-			combined = append(combined, mo)
-		}
+		combined = append(combined, m.Lenses[li].Mined...)
 	}
 
 	// Drop anything whose exact obsID is already in L1. This makes the pass
@@ -459,9 +452,10 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 	}
 
 	// Feed the just-written observations into the running snapshot so a later session in
-	// this drain dedups against them (the cross-session dedup guarantee). Active obs
-	// always landed; mined obs only landed if the generation was current, so feed them
-	// conditionally — else a later session would dedup against phantom rows not in L1.
+	// this drain sees them in the exact-obsID idempotency check (a re-mine of the SAME
+	// (session,lens,text) within the drain won't double-write). Active obs always landed;
+	// mined obs only landed if the generation was current, so feed them conditionally —
+	// else the seen-map would reference phantom rows not actually in L1.
 	*existing = append(*existing, activeToWrite...)
 	if generationCurrent {
 		*existing = append(*existing, minedToWrite...)

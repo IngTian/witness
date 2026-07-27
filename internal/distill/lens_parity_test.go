@@ -153,7 +153,13 @@ func TestParityWatermarkIndependence(t *testing.T) {
 
 // DEDUP self-scoping: dedup is per-lens, so a default observation never suppresses a
 // parity observation with identical text and vice-versa. Both lenses keep their obs.
-func TestParityDedupIsSelfScoped(t *testing.T) {
+// TestParityLensesEachWriteTheirOwnObs: two lenses mining the same transcript into
+// identical text each write their own L1 row — obsID is lens-namespaced (sha1 includes
+// lens), so neither suppresses the other. (This once asserted "dedup is self-scoped";
+// with the embedding dedup gate deleted — L1 is now an append-only event log — there
+// is no cross-obs suppression at all, so the property it locks is now purely that each
+// lens's mined obs is written under its own namespaced obsID.)
+func TestParityLensesEachWriteTheirOwnObs(t *testing.T) {
 	s := newStore(t)
 	capture(t, s, "s", "user", "alpha")
 	capture(t, s, "s", "assistant", "reply")
@@ -163,12 +169,11 @@ func TestParityDedupIsSelfScoped(t *testing.T) {
 	if err := parityWorker(s, m).Process(context.Background(), "s"); err != nil {
 		t.Fatalf("Process: %v", err)
 	}
-	// If dedup were lens-blind, one lens's obs would suppress the other's. Both survive.
 	if d, _ := s.ReadObservations(store.LensDefault); len(d) != 1 {
-		t.Fatalf("default obs suppressed by parity (dedup not self-scoped): got %d", len(d))
+		t.Fatalf("default lens obs missing: got %d, want 1", len(d))
 	}
 	if p, _ := s.ReadObservations(parityLens); len(p) != 1 {
-		t.Fatalf("parity obs suppressed by default (dedup not self-scoped): got %d", len(p))
+		t.Fatalf("parity lens obs missing: got %d, want 1", len(p))
 	}
 }
 
