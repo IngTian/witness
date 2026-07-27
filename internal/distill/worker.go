@@ -3,6 +3,7 @@ package distill
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,6 +109,9 @@ type Worker struct {
 	// instead of the default one. nil → every lens uses Run (the single-runner path, and
 	// what every test that injects only Run relies on). See runFor.
 	RunFor func(ln *lens.Lens) MineFunc
+	// NativeFor reports whether this lens's selected runner supports the optional
+	// retained OpenCode-fork protocol. Nil keeps injected/test MineFuncs ordinary.
+	NativeFor func(ln *lens.Lens) bool
 }
 
 // runFor returns the MineFunc for a lens: the per-lens runner via RunFor when wired,
@@ -160,6 +164,9 @@ type LensMining struct {
 	// uneventful history. It is NOT a MineFailed: drift never backs off (that would
 	// re-hammer a deterministically-drifting model forever and wedge the backfill queue).
 	Drifted bool
+	// Native holds retained OpenCode fork finalizers for this lens's rendered
+	// inputs. They run only after the generation-gated L1 commit succeeds.
+	Native []*platform.NativeSession
 }
 
 // Process runs a full fast-path pass for one session: MineSession then CommitMining
@@ -249,8 +256,27 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			// anywhere AND at least one input drifted — so a long session where one chunk
 			// extracts fine is never miscounted as drift (see LensMining.Drifted).
 			producedObs, sawDrift := false, false
-			for _, transcript := range distillInputs(w.Store, w.Config, session, raw[done:]) {
-				obs, err := w.mine(ctx, ln, session, transcript)
+			isNative := platform.ForSession(w.Store, session).Name() == platform.AgentOpenCode && w.NativeFor != nil && w.NativeFor(ln)
+			var nativeDigest string
+			if isNative {
+				entries := make([]platform.TranscriptEntry, len(raw))
+				for i, record := range raw {
+					entries[i] = platform.TranscriptEntry{Role: record.Role, Text: record.Text}
+				}
+				nativeDigest = platform.TranscriptDigest(entries)
+			}
+			for chunkIndex, transcript := range distillInputs(w.Store, w.Config, session, raw[done:]) {
+				callCtx := ctx
+				var native *platform.NativeSession
+				if isNative {
+					h := sha256.Sum256([]byte(transcript))
+					native = &platform.NativeSession{Session: session, RawHigh: rawHighID, Total: total, Lens: ln.Name, Input: fmt.Sprintf("%d:%x", chunkIndex, h[:]), Digest: nativeDigest}
+					callCtx = platform.WithNativeSession(callCtx, native)
+				}
+				obs, err := w.mine(callCtx, ln, session, transcript)
+				if native != nil {
+					lm.Native = append(lm.Native, native)
+				}
 				if err != nil {
 					if errors.Is(err, errNoArray) {
 						// prose drift: the model replied but emitted no array (likely below the
@@ -441,6 +467,19 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 	// session re-mines the new one). Best-effort — a stamp hiccup must never fail a commit
 	// whose L1/watermark writes already landed.
 	if generationCurrent {
+		// L1 is durable before a native fork is finalized. A finalizer failure is
+		// deliberately non-fatal: its manifest has already been marked committed and
+		// OpenCode retries that cleanup on the next runner Open.
+		for _, lm := range m.Lenses {
+			if lm.MineFailed {
+				continue
+			}
+			for _, native := range lm.Native {
+				if err := native.Finalize(); err != nil {
+					slog.Warn("distill: retain native cleanup for retry", "session", m.Session, "lens", lm.Lens, "err", err)
+				}
+			}
+		}
 		for _, ln := range driftedLenses {
 			if err := w.Store.SetDrift(m.Session, ln); err != nil {
 				slog.Warn("distill: could not stamp per-lens drift", "session", m.Session, "lens", ln, "err", err)

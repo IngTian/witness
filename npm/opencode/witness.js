@@ -8,6 +8,7 @@ const DOWNLOAD_RETRY_MAX = 6
 const DOWNLOAD_RETRY_BASE_MS = 1000
 const DOWNLOAD_RETRY_CAP_MS = 30000
 const IMPORT_GRACE_MS = 5000
+const QUIET_PERIOD_MS = 5 * 60 * 1000
 
 const platformBin = platformWitnessBin()
 const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || (existsSync(platformBin) ? platformBin : "")
@@ -78,18 +79,34 @@ const plugin = async () => {
   let disposing = false
   let disposePromise = null
   let retryTimer = null
+  let quietTimer = null
   let download = null
   let activeImport = null
   let activeWaiters = null
   let globalImportPending = false
   const pendingSessions = new Set()
   const sessionWaiters = new Map()
-  const modernIdleWaiters = new Map()
+  const idleCycles = new Map()
   const idleWaiters = []
 
   function clearRetry() {
     if (retryTimer) clearTimeout(retryTimer)
     retryTimer = null
+  }
+
+  function clearQuietTimer() {
+    if (quietTimer) clearTimeout(quietTimer)
+    quietTimer = null
+  }
+
+  function scheduleQuietWorker() {
+    clearQuietTimer()
+    quietTimer = setTimeout(() => {
+      quietTimer = null
+      if (disposed || disposing) return
+      spawnWitness(["worker-run", "--auto"])
+    }, QUIET_PERIOD_MS)
+    quietTimer.unref?.()
   }
 
   function scheduleRetry(attempt) {
@@ -123,7 +140,7 @@ const plugin = async () => {
   }
 
   function syncOpenCode(sessions = []) {
-    const args = ["import", "--agent", "opencode", "--quiet", "--auto"]
+    const args = ["import", "--agent", "opencode", "--quiet"]
     for (const sessionID of sessions) args.push("--session", sessionID)
     const proc = spawnWitness(args)
     if (!proc) return
@@ -225,7 +242,8 @@ const plugin = async () => {
       if (disposePromise) return disposePromise
       disposing = true
       clearRetry()
-      modernIdleWaiters.clear()
+      clearQuietTimer()
+      idleCycles.clear()
       disposePromise = (async () => {
         let timer
         const drained = await Promise.race([
@@ -262,19 +280,21 @@ const plugin = async () => {
       const type = eventType(event)
       const sessionID = event?.properties?.sessionID
       const modernIdle = type === "session.status" && event?.properties?.status?.type === "idle"
-      if (type === "session.idle" && sessionID && modernIdleWaiters.has(sessionID)) {
-        const done = modernIdleWaiters.get(sessionID)
-        modernIdleWaiters.delete(sessionID)
-        return done
-      }
       if ((type === "session.idle" || modernIdle) && sessionID) {
+        const existing = idleCycles.get(sessionID)
+        if (existing) return existing
         clearRetry()
         ensureDownload()
         const done = syncSessions(sessionID)
-        if (modernIdle) modernIdleWaiters.set(sessionID, done)
+        idleCycles.set(sessionID, done)
+        scheduleQuietWorker()
         return done
       }
-      if (type === "session.status" && sessionID) modernIdleWaiters.delete(sessionID)
+      const sessionActivity = sessionID && (type.startsWith("message.") || type.startsWith("session."))
+      if (sessionActivity) {
+        if (sessionID) idleCycles.delete(sessionID)
+        clearQuietTimer()
+      }
     },
   }
 }

@@ -43,6 +43,9 @@ func (runner) ConcurrentRunSafe() bool { return true }
 // separate turns — see buildRunCmd — so corpus text can't impersonate instructions.
 // Output is the final assistant message (plain text); callers parse JSON out of it.
 func (runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
+	if platform.ExternalRunnersDisabled() {
+		return "", fmt.Errorf("claude runner disabled by %s", platform.DisableExternalRunnersEnv)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 

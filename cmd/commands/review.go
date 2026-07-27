@@ -45,12 +45,8 @@ func cmdReview() error {
 // worker holds the lock, so it will review as part of its own drain). The caller owns
 // st and setupLogging; this only borrows st for the review pass.
 func forceReview(st *store.Store) (bool, error) {
-	// Hold the SAME single-consumer lock the worker uses. A runner's Close() runs the
-	// OpenCode self-traffic cleanup sweep (agent='witness-distill' AND time_created <
-	// now+1s), which is process-global; without this lock a foreground `review`
-	// overlapping a background worker's mid-drain `opencode serve` could delete the
-	// worker's live in-flight distill session and fail its mine. The lock makes
-	// runner + sweep single-flight, which is what the +1s window assumes.
+	// Hold the same single-consumer lock the worker uses so foreground review and a
+	// background drain cannot race facet/profile commits or open duplicate runner sets.
 	unlock, ok := st.WorkerLock()
 	if !ok {
 		return false, nil

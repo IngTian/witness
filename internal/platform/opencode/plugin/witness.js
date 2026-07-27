@@ -1,5 +1,6 @@
 const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || "witness"
 const IMPORT_GRACE_MS = 5000
+const QUIET_PERIOD_MS = 5 * 60 * 1000
 
 function eventType(event) {
   return String(event?.type || "")
@@ -22,7 +23,7 @@ function spawnWitness(args, payload) {
 }
 
 function syncOpenCode(sessions = []) {
-  const args = ["import", "--agent", "opencode", "--quiet", "--auto"]
+  const args = ["import", "--agent", "opencode", "--quiet"]
   for (const sessionID of sessions) args.push("--session", sessionID)
   return spawnWitness(args)
 }
@@ -41,13 +42,27 @@ const plugin = async () => {
   let disposed = false
   let disposing = false
   let disposePromise = null
+  let quietTimer = null
   let activeImport = null
   let activeWaiters = null
   let globalImportPending = false
   const pendingSessions = new Set()
   const sessionWaiters = new Map()
-  const modernIdleWaiters = new Map()
+  const idleCycles = new Map()
   const idleWaiters = []
+  const clearQuietTimer = () => {
+    if (quietTimer) clearTimeout(quietTimer)
+    quietTimer = null
+  }
+  const scheduleQuietWorker = () => {
+    clearQuietTimer()
+    quietTimer = setTimeout(() => {
+      quietTimer = null
+      if (disposed || disposing) return
+      spawnWitness(["worker-run", "--auto"])
+    }, QUIET_PERIOD_MS)
+    quietTimer.unref?.()
+  }
   const claimWaiters = (sessions) => {
     const claimed = new Map()
     for (const sessionID of sessions) {
@@ -112,7 +127,8 @@ const plugin = async () => {
     dispose: async () => {
       if (disposePromise) return disposePromise
       disposing = true
-      modernIdleWaiters.clear()
+      clearQuietTimer()
+      idleCycles.clear()
       disposePromise = (async () => {
         let timer
         const drained = await Promise.race([
@@ -147,17 +163,19 @@ const plugin = async () => {
       const type = eventType(event)
       const sessionID = event?.properties?.sessionID
       const modernIdle = type === "session.status" && event?.properties?.status?.type === "idle"
-      if (type === "session.idle" && sessionID && modernIdleWaiters.has(sessionID)) {
-        const done = modernIdleWaiters.get(sessionID)
-        modernIdleWaiters.delete(sessionID)
-        return done
-      }
       if ((type === "session.idle" || modernIdle) && sessionID) {
+        const existing = idleCycles.get(sessionID)
+        if (existing) return existing
         const done = syncSessions(sessionID)
-        if (modernIdle) modernIdleWaiters.set(sessionID, done)
+        idleCycles.set(sessionID, done)
+        scheduleQuietWorker()
         return done
       }
-      if (type === "session.status" && sessionID) modernIdleWaiters.delete(sessionID)
+      const sessionActivity = sessionID && (type.startsWith("message.") || type.startsWith("session."))
+      if (sessionActivity) {
+        if (sessionID) idleCycles.delete(sessionID)
+        clearQuietTimer()
+      }
     },
   }
 }

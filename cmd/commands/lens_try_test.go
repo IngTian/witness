@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,8 +13,20 @@ import (
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
+
+type limitedPreviewRunner struct{ opened *bool }
+
+func (r limitedPreviewRunner) Open(context.Context) error { *r.opened = true; return nil }
+func (limitedPreviewRunner) Close() error                 { return nil }
+func (limitedPreviewRunner) Run(context.Context, string, string, string) (string, error) {
+	return "[]", nil
+}
+func (limitedPreviewRunner) ValidateModels(context.Context, ...string) error { return nil }
+func (limitedPreviewRunner) InvocationHint() string                          { return "fake opencode" }
+func (limitedPreviewRunner) ConcurrentRunSafe() bool                         { return true }
 
 // writeLensDir writes a candidate lens DIRECTORY (issue #75: lens.json + extract.md +
 // review.md) and returns its path. name/extract/review empty are simply omitted, so a
@@ -65,11 +78,16 @@ func seedTryStore(t *testing.T, runner string) *store.Store {
 	return s
 }
 
-// On a sweeping (OpenCode) runner, a preview must take the WorkerLock and bail if a
-// worker holds it — BEFORE opening the runner (so no `opencode serve` starts and no
-// cleanup sweep can fire). We simulate a busy worker by holding the lock ourselves.
-func TestLensTryBailsWhenWorkerBusyOnSweepingRunner(t *testing.T) {
+// OpenCode no longer sweeps the user's DB, so a preview may overlap a worker.
+// The injected runner keeps this concurrency contract test process-only.
+func TestLensTryOnOpenCodeIsLockFree(t *testing.T) {
 	s := seedTryStore(t, store.RunnerOpenCode)
+	opened := false
+	previous := runnerForStore
+	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+		return limitedPreviewRunner{opened: &opened}, nil
+	}
+	t.Cleanup(func() { runnerForStore = previous })
 	unlock, ok := s.WorkerLock() // stand in for a running worker
 	if !ok {
 		t.Fatal("precondition: could not take the worker lock")
@@ -77,11 +95,11 @@ func TestLensTryBailsWhenWorkerBusyOnSweepingRunner(t *testing.T) {
 	defer unlock()
 
 	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1})
-	if err == nil {
-		t.Fatalf("expected `lens try` to bail when a worker holds the lock on a sweeping runner")
+	if err != nil {
+		t.Fatalf("opencode preview should proceed with a worker active: %v", err)
 	}
-	if !strings.Contains(err.Error(), "exclusive access") {
-		t.Fatalf("error should explain the worker-lock contention, got: %v", err)
+	if !opened {
+		t.Fatal("lock-free opencode preview did not open its fake runner")
 	}
 }
 

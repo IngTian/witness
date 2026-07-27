@@ -187,32 +187,6 @@ func TestImporterRebuildsWhenImportedTextChanges(t *testing.T) {
 	}
 }
 
-func TestImporterSkipsWitnessDistillSessions(t *testing.T) {
-	dbPath := seedOpenCodeDB(t)
-	mutateOpenCodeDB(t, dbPath, `UPDATE session SET title = 'witness-distill' WHERE id = 'ses_test';`)
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	stats, err := (&Importer{Store: st, DBPath: dbPath}).Import(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.Records != 0 || stats.Sessions != 0 {
-		t.Fatalf("witness-distill session should be skipped, stats = %+v", stats)
-	}
-	raw, err := st.ReadRaw(SessionPrefix + "ses_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(raw) != 0 {
-		t.Fatalf("witness-distill raw should be empty, got %d", len(raw))
-	}
-}
-
 func seedOpenCodeDB(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "opencode.db")

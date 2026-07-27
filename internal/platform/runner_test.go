@@ -34,11 +34,8 @@ func TestRunnerFor(t *testing.T) {
 	}
 }
 
-// RunnerSweepsOnClose is the predicate `witness lens try` uses to decide whether it
-// must hold the WorkerLock: the OpenCode runner sweeps the shared DB on Close (true),
-// the Claude runner does not (false, no-op Close). This is a DIFFERENT axis from
-// ConcurrentRunSafe (true for both) — gating on the wrong one would over-lock Claude or
-// under-lock OpenCode, so it is pinned here.
+// Neither built-in runner sweeps process-global state on Close. OpenCode now owns
+// a private runtime DB, so closing a preview runner cannot delete a worker's fork.
 func TestRunnerSweepsOnClose(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	st, err := store.Open()
@@ -47,7 +44,7 @@ func TestRunnerSweepsOnClose(t *testing.T) {
 	}
 	defer st.Close()
 
-	cases := map[string]bool{"claude": false, "opencode": true}
+	cases := map[string]bool{"claude": false, "opencode": false}
 	for name, want := range cases {
 		r, err := platform.RunnerFor(st, store.Config{Runner: name})
 		if err != nil {

@@ -3,8 +3,10 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -28,6 +30,45 @@ func TestBuildOpenCodeServeCmdIsolation(t *testing.T) {
 	}
 	if !strings.Contains(joinedEnv, `"permission":{"*":"deny"}`) {
 		t.Fatalf("agent permission config should deny tools: %s", joinedEnv)
+	}
+}
+
+func TestBuildOpenCodeServeCmdUsesPrivateRuntimeEnv(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", "/user/data")
+	t.Setenv("OPENCODE_DB", "/user/opencode.db")
+	cmd := buildOpenCodeServeCmdIn(context.Background(), root, 12345, "secret")
+	got := map[string]string{}
+	for _, e := range cmd.Env {
+		k, v, _ := strings.Cut(e, "=")
+		if _, exists := got[k]; exists {
+			t.Fatalf("duplicate env key %q", k)
+		}
+		got[k] = v
+	}
+	if got["XDG_DATA_HOME"] != filepath.Join(root, "xdg") || got["OPENCODE_DB"] != filepath.Join(root, "opencode.db") {
+		t.Fatalf("serve used user runtime: %#v", got)
+	}
+}
+
+func TestValidateOpenCodeCapability(t *testing.T) {
+	old := openCodeVersionCommand
+	defer func() { openCodeVersionCommand = old }()
+	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.17.9\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("unsupported version error = %v", err)
+	}
+	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("2.0.0\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("version unknown\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("malformed version error=%v", err)
 	}
 }
 
@@ -106,6 +147,7 @@ func TestBuildOpenCodeServeCmdDrivesPort(t *testing.T) {
 
 func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 	var created, prompted, deleted bool
+	var requestMessageID string
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Basic test" {
 			t.Fatalf("auth header = %q", got)
@@ -117,7 +159,7 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["title"] != "witness-distill" || body["agent"] != MarkerName {
+			if body["title"] != "witness" || body["agent"] != "witness" {
 				t.Fatalf("bad session body: %#v", body)
 			}
 			model := body["model"].(map[string]any)
@@ -134,7 +176,8 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			if !strings.HasPrefix(body["messageID"].(string), "msg_") {
 				t.Fatalf("messageID not generated: %#v", body["messageID"])
 			}
-			if body["agent"] != MarkerName {
+			requestMessageID = body["messageID"].(string)
+			if body["agent"] != "witness" {
 				t.Fatalf("bad agent: %#v", body["agent"])
 			}
 			if system := body["system"].(string); !strings.Contains(system, "EXTRACT") || !strings.Contains(system, "UNTRUSTED") {
@@ -151,10 +194,10 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_test/message":
-			_, _ = w.Write([]byte(`[
-				{"info":{"id":"msg_request","role":"user"},"parts":[{"id":"prt_u","type":"text","text":"DATA"}]},
+			_, _ = fmt.Fprintf(w, `[
+				{"info":{"id":%q,"role":"user"},"parts":[{"id":"prt_u","type":"text","text":"DATA"}]},
 				{"info":{"id":"msg_reply","role":"assistant"},"parts":[{"id":"prt_1","type":"text","text":"RESULT"}]}
-			]`))
+			]`, requestMessageID)
 		case r.Method == http.MethodDelete && r.URL.Path == "/session/ses_test":
 			deleted = true
 			_, _ = w.Write([]byte(`{}`))
@@ -236,11 +279,15 @@ func TestParseOpenCodeMessageResponse(t *testing.T) {
 
 func TestParseOpenCodeAsyncReplySkipsRequestMessage(t *testing.T) {
 	data := []byte(`[
+		{"info":{"id":"msg_old","role":"assistant"},"parts":[{"id":"p0","type":"text","text":"historical"}]},
 		{"info":{"id":"msg_request","role":"user"},"parts":[{"id":"p1","type":"text","text":"input"}]},
 		{"info":{"id":"msg_reply","role":"assistant"},"parts":[{"id":"p2","type":"text","text":"output"}]}
 	]`)
 	if got := parseOpenCodeAsyncReply(data, "msg_request"); got != "output" {
 		t.Fatalf("got %q", got)
+	}
+	if got := parseOpenCodeAsyncReply(data, "msg_missing"); got != "" {
+		t.Fatalf("historical reply leaked into unmatched request: %q", got)
 	}
 }
 

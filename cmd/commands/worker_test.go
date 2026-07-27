@@ -464,3 +464,31 @@ func TestAutoWorkerHonorsStopBeforeStarting(t *testing.T) {
 		t.Fatalf("cancelled auto worker stamped a pid (entered running state): %q", got)
 	}
 }
+
+func TestAutoWorkerRunHonorsDisabledConfig(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.ConfigPath(), []byte("auto_distill = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	ran, err := runWorker(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran {
+		t.Fatal("disabled automatic worker should exit before claiming work")
+	}
+	st, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if got := st.MetaString("worker_pid"); got != "" {
+		t.Fatalf("disabled automatic worker stamped pid %q", got)
+	}
+}

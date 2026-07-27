@@ -121,6 +121,15 @@ func (rs *runnerSet) RunFor(ln *lens.Lens) distill.MineFunc {
 	return brokenRun(name, or.err)
 }
 
+func (rs *runnerSet) NativeFor(ln *lens.Lens) bool {
+	or := rs.byName[distill.RunnerFor(rs.cfg, ln)]
+	if or == nil || or.runner == nil {
+		return false
+	}
+	s, ok := or.runner.(platform.NativeSessionSupport)
+	return ok && s.SupportsNativeSession()
+}
+
 // concurrentRunSafe is the AND across opened runners: the engine's single session-window
 // cap must be safe for EVERY runtime a session might touch (a session's lenses run
 // serially within one goroutine, but different sessions run in parallel and may each hit

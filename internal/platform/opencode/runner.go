@@ -3,8 +3,7 @@ package opencode
 import (
 	"context"
 	"errors"
-	"log/slog"
-	"time"
+	"fmt"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -13,11 +12,8 @@ import (
 var errRunBeforeOpen = errors.New("opencode runner: Run called before Open")
 
 // NewRunner mints the OpenCode distillation runner, bound to cfg's models. It
-// reuses ONE `opencode serve` process across every Run in a drain: Open sweeps
-// stale distill sessions then starts the server; Close stops it and sweeps again.
-// Baking that pairing into the runner is what keeps any call site (worker AND
-// manual review) from leaking witness's own distill sessions — the sweep lives in
-// Close, so it can't be forgotten.
+// reuses ONE `opencode serve` process across every Run in a drain. Its database is
+// rooted under the witness store, so Close only stops that private process.
 func (Platform) NewRunner(cfg store.Config) platform.Runner {
 	return &runner{cfg: cfg}
 }
@@ -25,21 +21,38 @@ func (Platform) NewRunner(cfg store.Config) platform.Runner {
 type runner struct {
 	cfg    store.Config
 	server *OpenCodeServer
+	native *nativeRuntime
 }
 
 func (r *runner) Open(ctx context.Context) error {
-	cleanupDistillSessions(ctx, time.Now().Add(-1*time.Hour))
-	srv, err := StartOpenCodeServer(ctx, r.cfg.TriageModel, r.cfg.DistillModel)
+	if platform.ExternalRunnersDisabled() {
+		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
+	}
+	if r.cfg.RuntimeRoot == "" {
+		return fmt.Errorf("opencode isolated runtime root is unavailable")
+	}
+	if err := newNativeRuntime(r.cfg.RuntimeRoot, nil).prepareAuth(); err != nil {
+		return err
+	}
+	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, r.cfg.TriageModel, r.cfg.DistillModel)
 	if err != nil {
 		return err
 	}
 	r.server = srv
+	r.native = newNativeRuntime(r.cfg.RuntimeRoot, srv)
+	if err := r.native.reconcile(); err != nil {
+		_ = srv.Close()
+		return err
+	}
 	return nil
 }
 
 func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
 	if r.server == nil {
 		return "", errRunBeforeOpen
+	}
+	if n := platform.NativeSessionFromContext(ctx); n != nil {
+		return r.native.run(ctx, n, model, systemPrompt, input)
 	}
 	return r.server.Run(ctx, model, systemPrompt, input)
 }
@@ -48,15 +61,13 @@ func (r *runner) Close() error {
 	if r.server == nil {
 		return nil // never opened (no work this drain) — nothing to stop or sweep
 	}
-	err := r.server.Close()
-	// Post-cleanup uses a detached context so it still runs when the drain's ctx is
-	// already done; the small +time.Second window covers a session created moments
-	// before Close.
-	cleanupDistillSessions(context.Background(), time.Now().Add(time.Second))
-	return err
+	return r.server.Close()
 }
 
 func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
+	if platform.ExternalRunnersDisabled() {
+		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
+	}
 	return ValidateOpenCodeModels(ctx, models...)
 }
 
@@ -70,33 +81,7 @@ func (*runner) InvocationHint() string { return "opencode serve" }
 // several OpenCode sessions at once. If the configured PROVIDER rate-limits, the
 // excess requests queue at the provider and witness's existing backoff absorbs it
 // — that is a provider property, not a witness serialization constraint.
-func (*runner) ConcurrentRunSafe() bool { return true }
+func (*runner) ConcurrentRunSafe() bool     { return true }
+func (*runner) SupportsNativeSession() bool { return true }
 
-// SweepsOnClose is true: Close() runs cleanupDistillSessions (see Close above), a
-// PROCESS-GLOBAL sweep of the shared OpenCode DB that deletes witness-distill
-// sessions created before now+1s — which would delete a concurrent background
-// worker's in-flight distill session. A tool that opens its own OpenCode runner
-// alongside a possible worker (e.g. `witness lens try`) must therefore hold the
-// single-flight WorkerLock for the runner's whole open→Close lifetime. Distinct from
-// ConcurrentRunSafe (which is about calling Run concurrently, not about Close's
-// cross-process reach). Claude does not implement this — its Close is a no-op.
-func (*runner) SweepsOnClose() bool { return true }
-
-// cleanupDistillSessions removes witness's own distill sessions from the OpenCode
-// DB so they aren't re-ingested as user sessions. Lives beside the runner so both
-// the worker and the manual review path get it via Runner.Close().
-func cleanupDistillSessions(ctx context.Context, before time.Time) {
-	dbPath, err := DefaultDBPath()
-	if err != nil {
-		slog.Warn("opencode cleanup: locate db", "err", err)
-		return
-	}
-	deleted, err := CleanupWitnessDistillSessions(ctx, dbPath, before)
-	if err != nil {
-		slog.Warn("opencode cleanup: witness-distill sessions", "err", err)
-		return
-	}
-	if deleted > 0 {
-		slog.Info("opencode cleanup: removed witness-distill sessions", "count", deleted)
-	}
-}
+func (*runner) SweepsOnClose() bool { return false }
