@@ -58,5 +58,15 @@ func newWorkerCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(_ *cobra.Command, _ []string) error { return cmdReview() },
 	})
+
+	// candidates: the S3 long-arc dry-run inspector. Prints the emergent-arc clusters the
+	// hypothesis engine proposes for a lens WITHOUT verifying (no LLM, no writes) — so
+	// cluster quality can be judged on a real archive before any verify budget is spent.
+	w.AddCommand(&cobra.Command{
+		Use:   "candidates <lens>",
+		Short: "Dry-run the emergent-arc clustering for a lens (no LLM, no writes).",
+		Args:  cobra.ExactArgs(1),
+		RunE:  func(_ *cobra.Command, args []string) error { return cmdCandidates(args[0]) },
+	})
 	return w
 }
