@@ -409,6 +409,57 @@ func TestDrainCharBudgetThrottlesGiants(t *testing.T) {
 	}
 }
 
+// Issue #56 B3: a SLOW session at the head of the submission window must NOT stall the
+// commit of a faster follower behind it (head-of-line blocking). The head ("a", index
+// 0) blocks its mine until the follower ("b") has been committed; a faster follower
+// then commits WHILE the head is still mining, and observing that commit is what
+// releases the head. With the old contiguous-prefix commit (nextToCommit), the head
+// had to commit first, so the follower's commit could never happen until the head was
+// released — which never happens — and Drain deadlocks (10s timeout). Commit-as-ready
+// lets the follower commit out of order, so both finish.
+func TestDrainCommitsOutOfOrderNoHeadOfLineBlock(t *testing.T) {
+	bCommitted := make(chan struct{}) // closed when the follower "b" has committed
+	miner := func(_ context.Context, _, _, input string) (string, error) {
+		if strings.Contains(input, "turn-a") {
+			<-bCommitted // the head waits for the follower's commit before it finishes mining
+		}
+		arr := []minedObs{{Dimension: "thinking", Observation: "obs:" + input, Evidence: "e", Poignancy: 3}}
+		b, _ := json.Marshal(arr)
+		return string(b), nil
+	}
+	s := newStore(t)
+	w := drainWorker(s, miner)
+
+	// "a" is submitted first (index 0 = the head); "b" second. Sorted pending order
+	// guarantees a=index0, b=index1, so in-order commit would require a before b.
+	capture(t, s, "a", "user", "turn-a")
+	capture(t, s, "b", "user", "turn-b")
+	pending := func() []string { return []string{"a", "b"} }
+
+	var once sync.Once
+	onCommit := func(session string) {
+		if session == "b" {
+			once.Do(func() { close(bCommitted) }) // releasing the head only once b commits
+		}
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		done <- w.Drain(context.Background(), DrainOpts{Conc: 2, Pending: pending, OnCommit: onCommit})
+	}()
+	select {
+	case got := <-done:
+		if got != 2 {
+			t.Fatalf("committed %d, want 2", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain deadlocked: the follower's commit was stalled behind the slow head (head-of-line blocking not fixed)")
+	}
+	if obs, _ := s.ReadObservations(""); len(obs) != 2 {
+		t.Fatalf("expected 2 observations (both sessions), got %d", len(obs))
+	}
+}
+
 // Issue #56 B2: many TINY sessions must still run wide — the char budget must not
 // throttle them below the count cap. Same harness as above, but each session is small
 // enough that `conc` of them fit the budget; peak concurrency should reach `conc`.
