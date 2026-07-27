@@ -145,8 +145,12 @@ func (w *Worker) HasUnattempted(sessions []string, attempted map[string]bool) bo
 //   - `existing` is a single running corpus snapshot threaded through every commit
 //     and appended after each write, so a later session dedups against an earlier
 //     one's just-written observations — no cross-session dedup gap.
-//   - Commits happen in submission order (FIFO over in-flight jobs), so the result
-//     is deterministic w.r.t. the pending order.
+//   - Commits happen AS EACH MAP FINISHES (commit-as-ready, issue #56 B3), not in
+//     submission order — a slow session no longer stalls the commit of finished
+//     followers behind it. Still exactly one commit goroutine, so single-writer +
+//     `existing` race-freedom are untouched; only the cross-session dedup tie-break
+//     (which near-duplicate wins) now follows completion order, which is fine for a
+//     one-shot backfill.
 //
 // Returns the number of sessions ATTEMPTED-and-reaped this call (including
 // map-failures, backoffs, quiet sessions, and no-op advances — every reaped job
@@ -215,10 +219,9 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		// Parallel path: a TRUE rolling window. Up to `conc` miners run at once; a
 		// miner slot frees the moment ANY map finishes (not just the oldest), so one
 		// slow session no longer idles the other slots or stalls new dispatch (issue
-		// #22 review #3). Commits still happen in submission order: each result
-		// carries its submission index, out-of-order arrivals are buffered, and the
-		// reducer commits the contiguous prefix. Only the single Drain goroutine
-		// commits, so the store stays single-writer and `existing` race-free.
+		// #22 review #3). Commits happen as each map finishes (commit-as-ready, issue
+		// #56 B3) — no slow head stalls finished followers. Only the single Drain
+		// goroutine commits, so the store stays single-writer and `existing` race-free.
 		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, &existing, attempted, stop, reached, processed, opts.OnCommit)
 
 		if stop() || reached(processed) {
@@ -228,8 +231,8 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 	}
 }
 
-// drainWindow runs one batch through the rolling-window MAP + ordered REDUCE and
-// returns how many sessions it committed. See Drain for the invariants.
+// drainWindow runs one batch through the rolling-window MAP + commit-as-ready REDUCE
+// and returns how many sessions it committed. See Drain for the invariants.
 //
 // Admission is TWO-dimensional (issue #56 B2): the `sem` count cap (at most `conc`
 // miners) AND a char budget (`maxChars` total in-flight input, sized by `sized`). A
@@ -241,7 +244,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 // the reducer.
 func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, existing *[]store.Observation, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string)) int {
 	type minedResult struct {
-		idx int // submission index, for ordered commit
+		idx int // submission index, for char-budget accounting
 		m   *SessionMining
 		err error
 	}
@@ -249,8 +252,6 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 	sem := make(chan struct{}, conc)     // caps concurrent miners
 	var wg sync.WaitGroup
 
-	pending := make(map[int]minedResult) // out-of-order results awaiting their turn
-	nextToCommit := 0                    // submission index of the next commit
 	committed := 0
 
 	// In-flight char accounting for the budget gate. sizeByIdx holds the input size of
@@ -259,30 +260,22 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 	inFlightChars := 0
 	sizeByIdx := make(map[int]int)
 
-	// commitReady flushes every buffered result that is now contiguous from
-	// nextToCommit, in submission order — so commits are deterministic even though
-	// maps finish out of order.
-	commitReady := func() {
-		for {
-			r, ok := pending[nextToCommit]
-			if !ok {
-				return
-			}
-			delete(pending, nextToCommit)
-			nextToCommit++
-			w.commitResult(r.m, r.err, existing, onCommit)
-			committed++
-		}
-	}
-
-	// reap absorbs one completion: buffer it for ordered commit, release its char
-	// budget, and flush any now-contiguous prefix. The count slot is freed by the
-	// miner goroutine's own `defer <-sem`, decoupled from reap, exactly as before.
+	// reap absorbs one completion and commits it IMMEDIATELY — commit-as-ready (issue
+	// #56 B3). The old code buffered results and committed only a contiguous prefix from
+	// a submission index, so one slow session at the head stalled the commit of every
+	// finished session behind it (head-of-line blocking): `distill status` understated
+	// progress and a --max/interrupted backfill committed fewer than it mined. Only the
+	// single Drain goroutine calls reap, so committing here keeps the store single-writer
+	// and `existing` race-free exactly as before — we drop only the ORDER, not the
+	// serialization. Cross-session dedup (which earlier-committed obs a later session
+	// dedups against) now depends on completion order rather than submission order; both
+	// are valid distillations (the survivor of two >=0.93 near-duplicates just differs by
+	// provenance), and determinism here mattered for tests, not a one-shot backfill.
 	reap := func(r minedResult) {
-		pending[r.idx] = r
 		inFlightChars -= sizeByIdx[r.idx]
 		delete(sizeByIdx, r.idx)
-		commitReady()
+		w.commitResult(r.m, r.err, existing, onCommit)
+		committed++
 	}
 
 	dispatched := 0
