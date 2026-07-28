@@ -518,7 +518,7 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `export const Witness = plugin`) || !strings.Contains(src, `export const ClaudeWitness = plugin`) {
 		t.Fatalf("installed plugin should preserve both OpenCode export names: %s", src)
 	}
-	if !strings.Contains(src, `const args = ["import", "--agent", "opencode", "--quiet"]`) || strings.Contains(src, `"import", "--agent", "opencode", "--quiet", "--auto"`) {
+	if !strings.Contains(src, `const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]`) || strings.Contains(src, `"import", "--agent", "opencode", "--quiet", "--auto"`) {
 		t.Fatalf("installed plugin should reconcile L0 without immediately starting distillation: %s", src)
 	}
 	if !strings.Contains(src, `const QUIET_PERIOD_MS = 5 * 60 * 1000`) || !strings.Contains(src, `spawnWitness(["worker-run", "--auto"])`) {
@@ -532,6 +532,9 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	}
 	if !strings.Contains(src, `const IMPORT_GRACE_MS = 5000`) || !strings.Contains(src, `let disposing = false`) || !strings.Contains(src, `waitForIdle()`) {
 		t.Fatalf("installed plugin should drain imports gracefully before disposal: %s", src)
+	}
+	if !strings.Contains(src, `spawnWitness(["worker", "stop", "--auto-only"])`) {
+		t.Fatalf("installed plugin should stop only auto workers on disposal: %s", src)
 	}
 }
 

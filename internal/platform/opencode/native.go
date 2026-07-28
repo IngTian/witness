@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -344,9 +345,9 @@ func (n *nativeRuntime) finalize(p string) error {
 	return os.Remove(p)
 }
 
-// reconcile closes the post-L1/pre-finalizer crash window without guessing: only
-// a retained manifest whose exact raw generation still exists and whose lens
-// watermark reached Total is eligible for deletion.
+// reconcile closes the post-L1/pre-finalizer crash window. The raw high id is the
+// store's generation token: a missing token means a replace-import or cleanup
+// superseded this manifest, so its private artifacts are no longer useful.
 func (n *nativeRuntime) reconcile() error {
 	entries, err := os.ReadDir(n.dir())
 	if os.IsNotExist(err) {
@@ -364,13 +365,21 @@ func (n *nativeRuntime) reconcile() error {
 		if err != nil {
 			return err
 		}
-		if !m.Committed && n.progressCommitted(m) {
+		if m.Committed {
+			if err = n.finalize(p); err != nil {
+				return err
+			}
+			continue
+		}
+		current, committed, err := n.generationStatus(m)
+		if err != nil {
+			continue // without store evidence, retain an uncommitted generation
+		}
+		if !current || committed {
 			m.Committed = true
 			if err = n.save(p, m); err != nil {
 				return err
 			}
-		}
-		if m.Committed {
 			if err = n.finalize(p); err != nil {
 				return err
 			}
@@ -378,21 +387,37 @@ func (n *nativeRuntime) reconcile() error {
 	}
 	return nil
 }
-func (n *nativeRuntime) progressCommitted(m nativeManifest) bool {
+func (n *nativeRuntime) generationStatus(m nativeManifest) (current, committed bool, err error) {
 	db, err := sql.Open("sqlite", readOnlyURI(filepath.Join(filepath.Dir(n.root), "witness.db")))
 	if err != nil {
-		return false
+		return false, false, err
 	}
 	defer db.Close()
-	var distilled int
-	if err = db.QueryRow(`SELECT distilled FROM progress WHERE session=? AND lens=?`, m.Session, m.Lens).Scan(&distilled); err != nil || distilled < m.Total {
-		return false
+	var currentValue, committedValue int
+	err = db.QueryRow(`SELECT
+		CASE WHEN (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
+		       OR EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?) THEN 1 ELSE 0 END,
+		CASE WHEN COALESCE((SELECT distilled >= ? FROM progress WHERE session = ? AND lens = ?), 0)
+		     THEN 1 ELSE 0 END`,
+		m.RawHigh, m.Session, m.Session, m.RawHigh, m.Total, m.Session, m.Lens,
+	).Scan(&currentValue, &committedValue)
+	if err != nil {
+		return false, false, err
 	}
-	var one int
-	return db.QueryRow(`SELECT 1 FROM raw WHERE session=? AND id=?`, m.Session, m.RawHigh).Scan(&one) == nil
+	return currentValue != 0, committedValue != 0, nil
 }
 
-func readOnlyURI(path string) string { return "file:" + filepath.ToSlash(path) + "?mode=ro" }
+func readOnlyURI(path string) string {
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Set("mode", "ro")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
 func commandOutput(ctx context.Context, env []string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing opencode command")

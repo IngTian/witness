@@ -273,7 +273,32 @@ func TestNativeMalformedManifestIsRetainedError(t *testing.T) {
 	}
 }
 
-func TestNativeReconcileOnlyCleansCommittedCurrentGeneration(t *testing.T) {
+func TestReadOnlyURIConnectsEscapedAbsolutePathReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "witness#archive.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE marker(value TEXT); INSERT INTO marker VALUES ('correct database')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	ro, err := sql.Open("sqlite", readOnlyURI(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	var value string
+	if err := ro.QueryRow(`SELECT value FROM marker`).Scan(&value); err != nil || value != "correct database" {
+		t.Fatalf("read correct database: value=%q err=%v", value, err)
+	}
+	if _, err := ro.Exec(`INSERT INTO marker VALUES ('must fail')`); err == nil {
+		t.Fatal("read-only URI allowed write")
+	}
+}
+
+func TestNativeReconcileCleansCommittedAndStaleGenerations(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runtime")
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		t.Fatal(err)
@@ -286,10 +311,10 @@ func TestNativeReconcileOnlyCleansCommittedCurrentGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	var deletes int
+	var deletes []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
-			deletes++
+			deletes = append(deletes, r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -300,25 +325,45 @@ func TestNativeReconcileOnlyCleansCommittedCurrentGeneration(t *testing.T) {
 	if err := os.MkdirAll(n.dir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	current := nativeManifest{Session: "opencode:s", Lens: "ok", RawHigh: 9, Total: 2, Fork: "f1"}
-	stale := nativeManifest{Session: "opencode:s", Lens: "stale", RawHigh: 8, Total: 2, Fork: "f2"}
+	current := nativeManifest{Session: "opencode:s", Lens: "pending", RawHigh: 9, Total: 2, Fork: "f1"}
+	committed := nativeManifest{Session: "opencode:s", Lens: "ok", RawHigh: 9, Total: 2, Fork: "f2"}
+	stale := nativeManifest{Session: "opencode:s", Lens: "stale", RawHigh: 8, Total: 2, Fork: "f3"}
 	if err := n.save(filepath.Join(n.dir(), "current.json"), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.save(filepath.Join(n.dir(), "committed.json"), committed); err != nil {
 		t.Fatal(err)
 	}
 	if err := n.save(filepath.Join(n.dir(), "stale.json"), stale); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"current.json", "committed.json", "stale.json"} {
+		if err := os.WriteFile(n.snapshot(filepath.Join(n.dir(), name)), []byte("snapshot"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := n.reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	if deletes != 1 {
-		t.Fatalf("deletes=%d", deletes)
+	if len(deletes) != 2 {
+		t.Fatalf("deletes=%v", deletes)
 	}
-	if _, err := os.Stat(filepath.Join(n.dir(), "current.json")); !os.IsNotExist(err) {
-		t.Fatal("current manifest retained")
+	if strings.Join(deletes, ",") != "/session/f2,/session/f3" {
+		t.Fatalf("deleted forks=%v", deletes)
 	}
-	if _, err := os.Stat(filepath.Join(n.dir(), "stale.json")); err != nil {
-		t.Fatal("stale manifest was removed")
+	if _, err := os.Stat(filepath.Join(n.dir(), "current.json")); err != nil {
+		t.Fatal("uncommitted current manifest removed")
+	}
+	if _, err := os.Stat(n.snapshot(filepath.Join(n.dir(), "current.json"))); err != nil {
+		t.Fatal("uncommitted current snapshot removed")
+	}
+	for _, name := range []string{"committed.json", "stale.json"} {
+		if _, err := os.Stat(filepath.Join(n.dir(), name)); !os.IsNotExist(err) {
+			t.Fatalf("%s manifest retained", name)
+		}
+		if _, err := os.Stat(n.snapshot(filepath.Join(n.dir(), name))); !os.IsNotExist(err) {
+			t.Fatalf("%s snapshot retained", name)
+		}
 	}
 }
 
@@ -342,6 +387,9 @@ func TestNativeCleanupFailureKeepsCommittedManifestForRetry(t *testing.T) {
 	if err := n.save(p, nativeManifest{Session: "opencode:s", Lens: "l", RawHigh: 1, Total: 1, Fork: "fork"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(n.snapshot(p), []byte("snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := n.finalize(p); err == nil {
 		t.Fatal("expected cleanup failure")
 	}
@@ -349,10 +397,16 @@ func TestNativeCleanupFailureKeepsCommittedManifestForRetry(t *testing.T) {
 	if err != nil || !m.Committed {
 		t.Fatalf("manifest not committed for retry: %+v %v", m, err)
 	}
+	if _, err := os.Stat(n.snapshot(p)); err != nil {
+		t.Fatalf("snapshot not retained for retry: %v", err)
+	}
 	if err := n.reconcile(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		t.Fatal("retry manifest retained")
+	}
+	if _, err := os.Stat(n.snapshot(p)); !os.IsNotExist(err) {
+		t.Fatal("retry snapshot retained")
 	}
 }

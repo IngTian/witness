@@ -266,10 +266,10 @@ test("npm plugin imports idle sessions immediately and starts one auto worker af
     await Promise.resolve()
     const imports = () => spawns.filter((args) => args[1] === "import")
     const workers = () => spawns.filter((args) => args[1] === "worker-run")
-    assert.deepEqual(imports()[0], ["/shim/witness", "import", "--agent", "opencode", "--quiet"])
+    assert.deepEqual(imports()[0], ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick"])
 
     await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
-    assert.deepEqual(imports().at(-1), ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--session", "ses_a"])
+    assert.deepEqual(imports().at(-1), ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick", "--session", "ses_a"])
     assert.equal(workers().length, 0, "idle imports must not start a worker")
     const firstQuietTimer = timers.at(-1)
     assert.equal(firstQuietTimer.delay, 300000)
@@ -307,7 +307,7 @@ test("npm plugin imports idle sessions immediately and starts one auto worker af
     await advance(300000)
     assert.equal(workers().length, 1, "dispose must not allow a pending worker launch")
     assert.ok(spawns.every((args) => args[1] !== "export"), "plugin must not invoke export commands")
-    assert.ok(imports().every((args) => args.slice(1, 5).join(" ") === "import --agent opencode --quiet" && !args.includes("--auto")))
+    assert.ok(imports().every((args) => args.slice(1, 6).join(" ") === "import --agent opencode --quiet --no-kick" && !args.includes("--auto")))
   } finally {
     await restore()
     globalThis.setTimeout = realSetTimeout
@@ -458,6 +458,7 @@ test("npm plugin dispose drains startup and idle imports before stopping downloa
   let importCount = 0
   const importArgs = []
   const imports = []
+  let workerStopArgs
   const harness = {
     modelDir: () => "/assets/e5-small",
     modelReady: () => false,
@@ -480,9 +481,10 @@ test("npm plugin dispose drains startup and idle imports before stopping downloa
         imports.push(proc)
         return proc
       }
-      if (args[1] === "distill") {
-        events.push("spawn:distill-stop")
-        return makeProc("distill-stop", events, { autoExit: 0 })
+      if (args[1] === "worker") {
+        workerStopArgs = args
+        events.push("spawn:worker-stop")
+        return makeProc("worker-stop", events, { autoExit: 0 })
       }
       return makeProc("other", events, { autoExit: 0 })
     },
@@ -521,10 +523,11 @@ test("npm plugin dispose drains startup and idle imports before stopping downloa
     await dispose
 
     const downloadStop = events.indexOf("download-stop")
-    const distillStop = events.indexOf("spawn:distill-stop")
+    const distillStop = events.indexOf("spawn:worker-stop")
     assert.notEqual(downloadStop, -1)
     assert.notEqual(distillStop, -1)
     assert.ok(downloadStop < distillStop)
+    assert.deepEqual(workerStopArgs, ["/shim/witness", "worker", "stop", "--auto-only"])
   } finally {
     await restore()
     globalThis.setTimeout = realSetTimeout

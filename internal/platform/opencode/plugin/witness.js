@@ -23,7 +23,7 @@ function spawnWitness(args, payload) {
 }
 
 function syncOpenCode(sessions = []) {
-  const args = ["import", "--agent", "opencode", "--quiet"]
+  const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]
   for (const sessionID of sessions) args.push("--session", sessionID)
   return spawnWitness(args)
 }
@@ -152,8 +152,8 @@ const plugin = async () => {
         disposed = true
         // From-source installs do not own the model downloader, but they still own
         // automatic worker starts from plugin events. Stop only auto workers so a
-        // manual `witness distill start` keeps running after OpenCode closes.
-        const proc = spawnWitness(["distill", "stop", "--auto-only"])
+        // manual `witness worker run --detach` keeps running after OpenCode closes.
+        const proc = spawnWitness(["worker", "stop", "--auto-only"])
         await proc?.exited?.catch?.(() => {})
       })()
       return disposePromise

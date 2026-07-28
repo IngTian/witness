@@ -140,7 +140,7 @@ const plugin = async () => {
   }
 
   function syncOpenCode(sessions = []) {
-    const args = ["import", "--agent", "opencode", "--quiet"]
+    const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]
     for (const sessionID of sessions) args.push("--session", sessionID)
     const proc = spawnWitness(args)
     if (!proc) return
@@ -269,8 +269,8 @@ const plugin = async () => {
         await waitForExit(download?.child)
         download = null
         // Only stop automatically-started workers. A user may have explicitly run
-        // `witness distill start`; closing OpenCode must not kill that manual job.
-        const proc = spawnWitness(["distill", "stop", "--auto-only"])
+        // `witness worker run --detach`; closing OpenCode must not kill that manual job.
+        const proc = spawnWitness(["worker", "stop", "--auto-only"])
         await proc?.exited?.catch?.(() => {})
       })()
       return disposePromise
