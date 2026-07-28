@@ -439,6 +439,32 @@ func (c *configFile) StampReview() error {
 	return tx.Commit()
 }
 
+// reviewRowidKey is the meta key holding one lens's incremental-fold watermark: the
+// max observation rowid folded into L2 the last time this lens was reviewed. Namespaced
+// per lens (issue #16 / the #55 per-lens review-state fix), mirroring profile_sig:<lens>,
+// so a healthy lens advances its fold window independently of a sibling that failed.
+func reviewRowidKey(lens string) string { return "review_rowid:" + lens }
+
+// StampReviewLens advances ONE lens's incremental-fold watermark to the current max
+// observation rowid — call it after that lens's review succeeds. Independent of the
+// global StampReview cadence stamp (which governs WHEN to review); this governs WHAT
+// the next fold reads (rowid > this). A lens whose review failed is simply not stamped,
+// so its unfolded observations are re-offered next pass — no delta is skipped or
+// double-folded (the cursor is monotonic).
+func (c *configFile) StampReviewLens(lens string) error {
+	var maxRow int64
+	if err := c.db.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM observations`).Scan(&maxRow); err != nil {
+		return err
+	}
+	return metaSet(c.db, reviewRowidKey(lens), strconv.FormatInt(maxRow, 10))
+}
+
+// ReviewRowid returns a lens's incremental-fold watermark (0 if never reviewed — so
+// the whole corpus is "new," which the reviewer routes to a windowed full re-derivation).
+func (c *configFile) ReviewRowid(lens string) int64 {
+	return int64(metaGetInt(c.db, reviewRowidKey(lens)))
+}
+
 // SessionsSinceReview counts sessions distilled since the last review stamp.
 // Progress is per-(session,lens), so COUNT DISTINCT session — else a session mined
 // by N lenses would count N times and trip the review cadence N× too early.

@@ -185,6 +185,36 @@ func (o *obsIO) ReadObservationsLite(lens string) ([]Observation, error) {
 	return out, rows.Err()
 }
 
+// ReadObservationsSince is the incremental-fold read (issue #16): the observations
+// for one lens with rowid > sinceRowid, embeddings stripped (like ReadObservationsLite),
+// in VALID-TIME order (ts, then rowid as a stable tiebreak). The rowid cursor is the
+// monotonic "new since last review" frontier (advanced by StampReviewLens); the ts
+// sort is what lets the reviewer fold "the stance as it was at that moment," since
+// under the parallel commit-as-ready drain (#56 B3) rowid order is NOT valid-time
+// order. The window is one small ReviewEvery batch, so the ts-sort is trivial — this
+// is what bounds the reviewer input by "what's new" instead of the whole corpus.
+func (o *obsIO) ReadObservationsSince(lens string, sinceRowid int64) ([]Observation, error) {
+	rows, err := o.db.Query(
+		`SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
+		   FROM observations
+		  WHERE lens = ? AND rowid > ?
+		  ORDER BY ts, rowid`, lens, sinceRowid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Observation
+	for rows.Next() {
+		var ob Observation
+		if err := rows.Scan(&ob.ID, &ob.TS, &ob.Session, &ob.Lens, &ob.Dimension, &ob.Observation,
+			&ob.Evidence, &ob.Poignancy, &ob.Source); err != nil {
+			return nil, err
+		}
+		out = append(out, ob)
+	}
+	return out, rows.Err()
+}
+
 // ReadObservations returns all L1 observations (optionally one lens), in insertion
 // order (rowid), embeddings decoded.
 func (o *obsIO) ReadObservations(lens string) ([]Observation, error) {
