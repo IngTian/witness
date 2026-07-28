@@ -1,6 +1,6 @@
 {
   "name": "@witness-ai/opencode-darwin-arm64",
-  "version": "0.7.0-beta.0",
+  "version": "0.6.1-beta.0",
   "description": "witness binary for OpenCode on macOS Apple Silicon.",
   "os": ["darwin"],
   "cpu": ["arm64"],
