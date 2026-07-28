@@ -331,29 +331,3 @@ func parseImportKeysJSON(data string) []string {
 	}
 	return keys
 }
-
-// keysEqual checks if two key slices are identical. Mirrors opencode's sameKeys.
-func keysEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// keysPrefix checks if prefix is a prefix of keys. Mirrors opencode's keysHavePrefix.
-func keysPrefix(keys, prefix []string) bool {
-	if len(prefix) > len(keys) {
-		return false
-	}
-	for i := range prefix {
-		if keys[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
-}
