@@ -341,6 +341,16 @@ func (q *queue) ResetLensWatermark(lens string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Also clear the per-lens REVIEW watermark (issue #123). A `lens backfill --fresh`
+	// deletes the lens's observations and re-mines from scratch; because the observations
+	// rowid is currently reused (no AUTOINCREMENT), the re-mined obs restart at low rowids.
+	// If review_rowid were left at the pre-fresh (higher) value, the forced review would
+	// read "rowid > staleWatermark" = zero new obs and leave the lens with the empty facets
+	// --fresh just dropped. Deleting the key resets it to 0 so the whole re-mined delta is
+	// re-folded. (The root rowid-reuse hazard is fixed separately by an AUTOINCREMENT seq.)
+	if _, err := q.db.Exec(`DELETE FROM meta WHERE key = ?`, "review_rowid:"+lens); err != nil {
+		return 0, err
+	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
 }

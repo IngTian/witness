@@ -2,6 +2,105 @@ package store
 
 import "testing"
 
+// TestReadObservationsSinceOrderedByRowid locks the windowed-fold read (#123): it
+// returns obs for the lens with rowid > since, in ROWID order, each carrying its
+// rowid. Rowid order (not ts) is what lets the windowed fold advance the watermark
+// per contiguous window without ever skipping a low-rowid/high-ts obs.
+func TestReadObservationsSinceOrderedByRowid(t *testing.T) {
+	s := tempStore(t)
+	// Insert so ts order != rowid order: rowid 1 has the LATER ts.
+	s.AppendObservations([]Observation{{ID: "a", TS: "2026-03-01T00:00:00Z", Lens: LensDefault, Observation: "a"}})
+	s.AppendObservations([]Observation{{ID: "b", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "b"}})
+	s.AppendObservations([]Observation{{ID: "c", TS: "2026-02-01T00:00:00Z", Lens: LensDefault, Observation: "c"}})
+
+	got, err := s.ReadObservationsSinceOrdered(LensDefault, 0)
+	if err != nil {
+		t.Fatalf("ReadObservationsSinceOrdered: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 obs, got %d", len(got))
+	}
+	// Rowid order → insertion order a,b,c (NOT ts order b,c,a).
+	if got[0].ID != "a" || got[1].ID != "b" || got[2].ID != "c" {
+		t.Fatalf("want rowid order [a,b,c], got [%s,%s,%s]", got[0].ID, got[1].ID, got[2].ID)
+	}
+	// Each carries a monotonically increasing rowid.
+	if !(got[0].Rowid > 0 && got[1].Rowid > got[0].Rowid && got[2].Rowid > got[1].Rowid) {
+		t.Fatalf("rowids must be present + increasing, got %d,%d,%d", got[0].Rowid, got[1].Rowid, got[2].Rowid)
+	}
+	// Windowing past the first rowid drops it.
+	got2, _ := s.ReadObservationsSinceOrdered(LensDefault, got[0].Rowid)
+	if len(got2) != 2 || got2[0].ID != "b" {
+		t.Fatalf("since first rowid should return [b,c], got %d obs", len(got2))
+	}
+}
+
+// TestStampReviewLensThroughRowid locks the per-window stamp: the watermark advances to
+// the GIVEN rowid (this window's max), not the global MAX(rowid) — so stamping window 1
+// cannot jump the cursor past unfolded windows 2..N.
+func TestStampReviewLensThroughRowid(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{
+		{ID: "a", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "a"},
+		{ID: "b", TS: "2026-01-02T00:00:00Z", Lens: LensDefault, Observation: "b"},
+		{ID: "c", TS: "2026-01-03T00:00:00Z", Lens: LensDefault, Observation: "c"},
+	})
+	// Stamp only through the FIRST obs's rowid; the watermark must be exactly that,
+	// NOT the global max (3) — the later two obs stay pending.
+	if err := s.StampReviewLens(LensDefault, 1); err != nil {
+		t.Fatalf("StampReviewLens: %v", err)
+	}
+	if got := s.ReviewRowid(LensDefault); got != 1 {
+		t.Fatalf("watermark = %d, want 1 (this window's rowid, not global max)", got)
+	}
+	pending, _ := s.ReadObservationsSinceOrdered(LensDefault, s.ReviewRowid(LensDefault))
+	if len(pending) != 2 {
+		t.Fatalf("after stamping through rowid 1, want 2 obs still pending, got %d", len(pending))
+	}
+}
+
+// TestResetLensWatermarkClearsReviewRowid locks the #123 --fresh fix: ResetLensWatermark
+// (called by `lens backfill --fresh`) must clear the per-lens REVIEW watermark too, not
+// just the mining watermark — else a re-mine that reuses low rowids folds an empty delta
+// and leaves the lens with the empty facets --fresh dropped.
+func TestResetLensWatermarkClearsReviewRowid(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{
+		{ID: "a", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "a"},
+		{ID: "b", TS: "2026-01-02T00:00:00Z", Lens: LensDefault, Observation: "b"},
+	})
+	if err := s.StampReviewLens(LensDefault, 2); err != nil {
+		t.Fatalf("StampReviewLens: %v", err)
+	}
+	if s.ReviewRowid(LensDefault) != 2 {
+		t.Fatalf("precondition: watermark should be 2, got %d", s.ReviewRowid(LensDefault))
+	}
+	if _, err := s.ResetLensWatermark(LensDefault); err != nil {
+		t.Fatalf("ResetLensWatermark: %v", err)
+	}
+	if got := s.ReviewRowid(LensDefault); got != 0 {
+		t.Fatalf("--fresh must reset the review watermark to 0, got %d (a re-mine would then fold an empty delta)", got)
+	}
+}
+
+// TestUnreviewedDelta locks the doctor-visibility count: obs for a lens with rowid past
+// its review watermark.
+func TestUnreviewedDelta(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{
+		{ID: "a", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "a"},
+		{ID: "b", TS: "2026-01-02T00:00:00Z", Lens: LensDefault, Observation: "b"},
+		{ID: "x", TS: "2026-01-03T00:00:00Z", Lens: "other", Observation: "x"},
+	})
+	if got := s.UnreviewedDelta(LensDefault); got != 2 {
+		t.Fatalf("unreviewed delta (unstamped) = %d, want 2", got)
+	}
+	s.StampReviewLens(LensDefault, 1)
+	if got := s.UnreviewedDelta(LensDefault); got != 1 {
+		t.Fatalf("after stamping through rowid 1, delta = %d, want 1", got)
+	}
+}
+
 // TestReadObservationsSinceWindowsAndOrdersByTS locks the incremental-fold read (#16):
 // it returns only observations for the lens with rowid > sinceRowid, in valid-time
 // (ts) order — NOT insertion/rowid order (which, under the parallel commit-as-ready
@@ -53,11 +152,11 @@ func TestPerLensReviewWatermarkAdvancesIndependently(t *testing.T) {
 	})
 	maxRow := int64(2)
 
-	if err := s.StampReviewLens(LensDefault); err != nil {
+	if err := s.StampReviewLens(LensDefault, maxRow); err != nil {
 		t.Fatalf("StampReviewLens: %v", err)
 	}
 	if got := s.ReviewRowid(LensDefault); got != maxRow {
-		t.Fatalf("default watermark = %d, want %d (current max rowid)", got, maxRow)
+		t.Fatalf("default watermark = %d, want %d (stamped through-rowid)", got, maxRow)
 	}
 	// The sibling lens was not stamped — its watermark stays 0.
 	if got := s.ReviewRowid("codereview"); got != 0 {

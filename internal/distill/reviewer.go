@@ -3,6 +3,7 @@ package distill
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -59,82 +60,103 @@ type reviewedFacet struct {
 
 // Run reviews all active lenses and rewrites L2.
 func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
-	facets, err := r.Store.ReadFacets()
-	if err != nil {
-		return fmt.Errorf("read L2: %w", err)
-	}
-	byKey := indexFacets(facets)
 	nowStr := now.UTC().Format(time.RFC3339)
 
-	// Track lenses whose review call failed. A read error or an empty obs set is
-	// benign (skip), but a FAILED review call (timeout, model error, unparseable
-	// reply) must not be swallowed: silently continuing here — then stamping the
-	// review and returning nil below — advanced the watermark past a lens that was
-	// never actually reviewed and reported "review complete" with zero facets
-	// synthesized (issue #16 C1). We still apply the lenses that DID succeed (no
-	// data loss; their facets are real), but we refuse to stamp and surface the
-	// failure so the review stays due and is retried on the next pass.
+	// Each lens folds INDEPENDENTLY, in size-bounded WINDOWS (issue #123). A lens whose
+	// window read/fold fails (timeout, model error, unparseable reply) must not be
+	// swallowed: the earlier #16-C1 bug advanced the watermark past a never-reviewed lens
+	// and reported "complete" with zero facets. We keep the windows that DID commit (real
+	// facets, watermark advanced through them), but refuse the global stamp and surface
+	// the failure so the review stays due and resumes from the watermark next pass.
 	var failed []string
-	var reviewedOK []string // lenses that folded cleanly this pass — watermark advances AFTER WriteFacets
 	for _, ln := range r.Lenses {
-		// Incremental fold (issue #16): read only the observations recorded since this
-		// lens's last successful review, in valid-time order, and fold them against the
-		// stance (L2) we already carry. Input is bounded by "what's new," not archive
-		// size, so the review call never overflows the runner's context/time budget as
-		// the corpus grows — the whole point of the entropy-fold redesign.
-		obs, err := r.Store.ReadObservationsSince(ln.Name, r.Store.ReviewRowid(ln.Name))
-		if err != nil {
+		if err := r.foldLensWindowed(ctx, ln, nowStr); err != nil {
+			slog.Error("review: lens fold failed (committed windows kept; watermark left at last good window)",
+				"lens", ln.Name, "err", err)
 			failed = append(failed, ln.Name)
-			continue
 		}
-		if len(obs) == 0 {
-			continue // nothing new since this lens's last fold — leave its watermark as is
-		}
-		reviewed, err := r.reviewLens(ctx, ln, obs, facets)
-		if err != nil {
-			failed = append(failed, ln.Name)
-			continue
-		}
-		for _, rf := range reviewed {
-			r.applyFacet(byKey, ln.Name, rf, nowStr)
-		}
-		reviewedOK = append(reviewedOK, ln.Name)
 	}
 
-	merged := collectFacets(byKey)
-	if err := r.Store.WriteFacets(merged); err != nil {
-		return fmt.Errorf("write L2: %w", err)
-	}
-
-	// Advance each cleanly-folded lens's watermark ONLY AFTER the facets are durably
-	// written — else a WriteFacets failure (or a crash between) would move the watermark
-	// past obs whose facet contributions were never persisted, silently losing that
-	// delta. Per-lens + independent of siblings (the #55 fix): a healthy lens folds
-	// forward even when a sibling failed; a failed lens is not stamped, so its obs are
-	// re-folded next pass. A stamp hiccup marks the lens failed so the pass re-runs it
-	// (re-folding is idempotent against the stance — obs are not consumed by folding).
-	for _, name := range reviewedOK {
-		if err := r.Store.StampReviewLens(name); err != nil {
-			failed = append(failed, name)
-		}
-	}
-	// Only advance the review watermark if EVERY active lens was reviewed. A partial
-	// stamp would mark the failed lens as reviewed-through-now and let it drift
-	// unreviewed until the next unrelated trigger.
-	//
-	// Tradeoff (bounded, accepted): not stamping keeps ReviewDue() true, so under a
-	// PERSISTENTLY-failing lens with concurrent live capture the worker re-reviews
-	// the healthy lenses each drain iteration (O(new-sessions) redundant full reviews
-	// vs ~1). This terminates when capture stops — it is NOT the #49-C1 unbounded
-	// no-progress spin (loop continuation gates on unattempted mining work, never on
-	// ReviewDue). Correctly never reporting silent success outweighs the redundant
-	// cost; the clean fix is per-lens review state (#55), which lets a healthy lens
-	// stamp independently of a failing one.
+	// Only advance the GLOBAL review cadence stamp if EVERY active lens folded cleanly. A
+	// partial stamp would mark a failed lens reviewed-through-now and let it drift. Per-lens
+	// watermarks already advanced per committed window inside foldLensWindowed (the #55
+	// per-lens state), so a persistent single-lens failure no longer strands healthy lenses.
 	if len(failed) > 0 {
-		return fmt.Errorf("review failed for %d lens(es): %s (partial facets written; review left pending)",
+		return fmt.Errorf("review failed for %d lens(es): %s (committed windows kept; review left pending)",
 			len(failed), strings.Join(failed, ", "))
 	}
 	return r.Store.StampReview()
+}
+
+// foldLensWindowed folds one lens's unreviewed delta into L2 in size-bounded windows
+// (issue #123). It reads the delta in ROWID order (not the ts order of the incremental
+// read) so each window is a CONTIGUOUS rowid range — advancing the watermark to a
+// window's max rowid then never skips a low-rowid/high-ts obs that a ts-ordered read
+// would place in a later window. Per window: fold against the CURRENT stance (re-read
+// each iteration, so a later window sees an earlier window's just-written facets and can
+// reinforce/contradict them), WriteFacets, then StampReviewLens THROUGH that window's max
+// rowid. So each window is a durable mini-review: partial progress sticks, a failed or
+// crashed window strands only itself, and the next Run resumes from the watermark. The
+// window size is store.Config.ReviewMaxChars serialized-slimObs characters — a latency
+// ceiling that keeps any one review call well under the runner's 10-min wall.
+func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr string) error {
+	budget := r.Config.ReviewMaxChars
+	if budget <= 0 {
+		budget = store.DefaultReviewMaxChars // defensive: never fold unbounded (the #123 stall)
+	}
+	obs, err := r.Store.ReadObservationsSinceOrdered(ln.Name, r.Store.ReviewRowid(ln.Name))
+	if err != nil {
+		return fmt.Errorf("read L1 delta: %w", err)
+	}
+	for start := 0; start < len(obs); {
+		end := windowEnd(obs, start, budget) // [start,end): a size-bounded, ≥1-obs window
+		window := obs[start:end]
+
+		// Fold against the CURRENT stance (includes prior windows' writes this Run).
+		prior, err := r.Store.ReadFacets()
+		if err != nil {
+			return fmt.Errorf("read L2: %w", err)
+		}
+		reviewed, err := r.reviewLens(ctx, ln, window, prior)
+		if err != nil {
+			// Surface the cause (was silently discarded pre-#123). Windows already
+			// committed stay; the watermark sits at the last good window; resume next pass.
+			return fmt.Errorf("review window [%d obs, through rowid %d]: %w", len(window), window[len(window)-1].Rowid, err)
+		}
+		byKey := indexFacets(prior)
+		for _, rf := range reviewed {
+			r.applyFacet(byKey, ln.Name, rf, nowStr)
+		}
+		if err := r.Store.WriteFacets(collectFacets(byKey)); err != nil {
+			return fmt.Errorf("write L2: %w", err)
+		}
+		// Advance ONLY AFTER the write (crash-safety) and ONLY through this window's max
+		// rowid (contiguous — never past unfolded later windows).
+		if err := r.Store.StampReviewLens(ln.Name, window[len(window)-1].Rowid); err != nil {
+			return fmt.Errorf("stamp watermark: %w", err)
+		}
+		start = end
+	}
+	return nil
+}
+
+// windowEnd returns the exclusive end index of the next fold window starting at `start`:
+// the largest end such that the serialized size of obs[start:end] stays within budget,
+// but ALWAYS at least one obs (the lone-giant floor — a single obs larger than the whole
+// budget folds alone rather than wedging the loop, mirroring drainWindow's in-flight==0
+// floor). Sizes each obs's serialized slimObs once and accumulates (no O(n²) re-marshal).
+func windowEnd(obs []store.Observation, start, budget int) int {
+	total := 0
+	end := start
+	for end < len(obs) {
+		sz := len(mustJSON(slimObs(obs[end : end+1])))
+		if end > start && total+sz > budget {
+			break // adding this obs would overflow; cut the window before it
+		}
+		total += sz
+		end++
+	}
+	return end
 }
 
 // applyFacet enforces the bi-temporal rule deterministically.

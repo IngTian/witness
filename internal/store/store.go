@@ -182,6 +182,13 @@ func (s *Store) Close() error {
 
 // --- file paths for user-authored, non-DB state ------------------------------
 
+// UnreviewedDelta reports how many observations for a lens sit past its review
+// watermark — the per-lens backlog `witness doctor` surfaces so a frozen fold (#123)
+// is visible rather than silent. Combines the obsIO count with the configFile watermark.
+func (s *Store) UnreviewedDelta(lens string) int {
+	return s.unreviewedDeltaSince(lens, s.ReviewRowid(lens))
+}
+
 func (s *Store) ConfigPath() string { return configTomlPath(s.Root) }
 func (s *Store) LogPath() string    { return filepath.Join(s.Root, "witness.log") }
 

@@ -188,6 +188,130 @@ func TestReviewFoldsOnlyObsSinceWatermark(t *testing.T) {
 	}
 }
 
+// bigObs seeds `n` observations for the default lens with padded text so the delta is
+// large enough to force multiple windows under a small ReviewMaxChars.
+func bigObs(t *testing.T, s *store.Store, n int) {
+	t.Helper()
+	pad := strings.Repeat("x", 300) // ~300+ chars/obs serialized → predictable window sizing
+	obs := make([]store.Observation, n)
+	for i := 0; i < n; i++ {
+		obs[i] = store.Observation{
+			ID: "o" + string(rune('A'+i)), TS: "2026-01-01T00:00:0" + string(rune('0'+i%10)) + "Z",
+			Session: "s", Lens: "default", Dimension: "thinking",
+			Observation: "obs " + string(rune('A'+i)) + " " + pad, Poignancy: 5,
+		}
+	}
+	if err := s.AppendObservations(obs); err != nil {
+		t.Fatalf("bigObs: %v", err)
+	}
+}
+
+// TestReviewChunksLargeDeltaByReviewMaxChars (issue #123): a delta whose serialized size
+// exceeds ReviewMaxChars must be folded in MORE THAN ONE reviewLens call, each bounded —
+// not one giant call that would ride the 10-min timeout.
+func TestReviewChunksLargeDeltaByReviewMaxChars(t *testing.T) {
+	s := newStore(t)
+	bigObs(t, s, 10) // ~3KB+ of serialized obs
+
+	var callSizes []int
+	runner := func(_ context.Context, _, _, input string) (string, error) {
+		callSizes = append(callSizes, len(input))
+		return facetReply("thinking", "clarity", "improving"), nil
+	}
+	r := &Reviewer{
+		Store:  s,
+		Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW"}},
+		Config: store.Config{ReviewMaxChars: 800}, // small → forces several windows
+		Runner: runner,
+	}
+	if err := r.Run(context.Background(), time.Now()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(callSizes) < 2 {
+		t.Fatalf("a large delta must fold in >1 window; got %d call(s)", len(callSizes))
+	}
+	// Watermark advanced through the whole delta (all 10 obs folded).
+	if got := s.UnreviewedDelta("default"); got != 0 {
+		t.Fatalf("after windowed fold the whole delta must be reviewed; %d still pending", got)
+	}
+}
+
+// TestReviewWindowFailureStrandsOnlyCurrentWindow: if window K's fold fails (timeout),
+// the windows before it stay committed and the watermark sits at the last GOOD window —
+// not rolled back, not advanced past the failure.
+func TestReviewWindowFailureStrandsOnlyCurrentWindow(t *testing.T) {
+	s := newStore(t)
+	bigObs(t, s, 9)
+
+	var calls int
+	runner := func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		if calls == 2 { // second window fails
+			return "", errors.New("simulated review timeout")
+		}
+		return facetReply("thinking", "k"+string(rune('0'+calls)), "v"), nil
+	}
+	r := &Reviewer{
+		Store:  s,
+		Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW"}},
+		Config: store.Config{ReviewMaxChars: 800},
+		Runner: runner,
+	}
+	err := r.Run(context.Background(), time.Now())
+	if err == nil {
+		t.Fatal("a window failure must surface as an error (not silent)")
+	}
+	// Watermark advanced past window 1 but NOT to the end (window 2 failed).
+	wm := s.ReviewRowid("default")
+	if wm == 0 {
+		t.Fatal("window 1 committed but watermark stayed 0 — partial progress lost")
+	}
+	if s.UnreviewedDelta("default") == 0 {
+		t.Fatal("window 2 failed so some delta must remain pending, got 0")
+	}
+	// A facet from window 1 is durably written.
+	facets, _ := s.ReadFacets()
+	if len(facets) == 0 {
+		t.Fatal("window 1's facet must be durably written despite window 2's failure")
+	}
+}
+
+// TestReviewLaterWindowSeesEarlierWindowStance: window 2 must fold against the facets
+// window 1 just wrote (re-read per window), so a later window can reinforce/contradict
+// an earlier one. We assert window 2's reviewLens input contains window 1's facet.
+func TestReviewLaterWindowSeesEarlierWindowStance(t *testing.T) {
+	s := newStore(t)
+	bigObs(t, s, 8)
+
+	var call int
+	var window2SawPriorFacet bool
+	runner := func(_ context.Context, _, _, input string) (string, error) {
+		call++
+		if call == 1 {
+			return facetReply("thinking", "established_in_window_1", "v1"), nil
+		}
+		if strings.Contains(input, "established_in_window_1") {
+			window2SawPriorFacet = true
+		}
+		return facetReply("thinking", "from_window_2", "v2"), nil
+	}
+	r := &Reviewer{
+		Store:  s,
+		Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW"}},
+		Config: store.Config{ReviewMaxChars: 800},
+		Runner: runner,
+	}
+	if err := r.Run(context.Background(), time.Now()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if call < 2 {
+		t.Fatalf("expected >1 window, got %d", call)
+	}
+	if !window2SawPriorFacet {
+		t.Fatal("a later window must fold against the stance written by an earlier window (re-read per window)")
+	}
+}
+
 // The happy path still stamps the review and returns nil.
 func TestReviewerAllLensesSucceedStamps(t *testing.T) {
 	s := newStore(t)

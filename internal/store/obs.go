@@ -215,6 +215,46 @@ func (o *obsIO) ReadObservationsSince(lens string, sinceRowid int64) ([]Observat
 	return out, rows.Err()
 }
 
+// ReadObservationsSinceOrdered is the WINDOWED-fold read (issue #123): obs for one lens
+// with rowid > since, in ROWID order, each carrying its rowid. Rowid order (not the ts
+// order of ReadObservationsSince) is load-bearing for the windowed fold: windows are
+// then contiguous rowid ranges, so advancing the per-lens watermark to a window's max
+// rowid does not skip a low-rowid/high-ts obs that a ts-ordered read would have placed
+// in a later window. (This holds for appended obs; it does NOT protect against a rowid
+// REUSED after a delete-of-newest — see StampReviewLens's caveat and the AUTOINCREMENT
+// follow-up.) Embeddings stripped, like the sibling read.
+func (o *obsIO) ReadObservationsSinceOrdered(lens string, since int64) ([]Observation, error) {
+	rows, err := o.db.Query(
+		`SELECT rowid, obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
+		   FROM observations
+		  WHERE lens = ? AND rowid > ?
+		  ORDER BY rowid`, lens, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Observation
+	for rows.Next() {
+		var ob Observation
+		if err := rows.Scan(&ob.Rowid, &ob.ID, &ob.TS, &ob.Session, &ob.Lens, &ob.Dimension, &ob.Observation,
+			&ob.Evidence, &ob.Poignancy, &ob.Source); err != nil {
+			return nil, err
+		}
+		out = append(out, ob)
+	}
+	return out, rows.Err()
+}
+
+// unreviewedDeltaSince counts observations for a lens with rowid past sinceRowid — the
+// primitive behind the Store.UnreviewedDelta convenience (which supplies the lens's
+// current watermark). Surfaced in `witness doctor` so a frozen fold is visible (#123).
+func (o *obsIO) unreviewedDeltaSince(lens string, sinceRowid int64) int {
+	var n int
+	_ = o.db.QueryRow(
+		`SELECT COUNT(*) FROM observations WHERE lens = ? AND rowid > ?`, lens, sinceRowid).Scan(&n)
+	return n
+}
+
 // ReadObservations returns all L1 observations (optionally one lens), in insertion
 // order (rowid), embeddings decoded.
 func (o *obsIO) ReadObservations(lens string) ([]Observation, error) {
