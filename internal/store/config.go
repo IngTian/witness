@@ -495,8 +495,15 @@ func reviewRowidKey(lens string) string { return "review_rowid:" + lens }
 // the cursor past unfolded windows and silently drop them. Independent of the global
 // StampReview cadence stamp (which governs WHEN to review); this governs WHAT the next
 // fold reads (rowid > this). A lens whose review failed is simply not stamped, so its
-// unfolded observations are re-offered next pass — no delta is skipped or double-folded
-// (the cursor is monotonic).
+// unfolded observations are re-offered next pass.
+//
+// CAVEAT (rowid reuse): this cursor assumes an appended obs always gets a higher rowid
+// than the watermark. That holds for pure appends, but the observations table has no
+// AUTOINCREMENT (obs_id TEXT PRIMARY KEY, db.go), so SQLite REUSES a freed rowid after
+// the current max-rowid row is deleted. Deleting the newest obs then mining a new one
+// can therefore land it at a rowid <= this watermark, where the fold never re-reads it
+// (a silent skip). `lens backfill --fresh` resets this key to 0 (ResetLensWatermark) to
+// dodge one instance; the root fix is an AUTOINCREMENT seq column (tracked separately).
 func (c *configFile) StampReviewLens(lens string, throughRowid int64) error {
 	return metaSet(c.db, reviewRowidKey(lens), strconv.FormatInt(throughRowid, 10))
 }

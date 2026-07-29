@@ -59,6 +59,30 @@ func TestStampReviewLensThroughRowid(t *testing.T) {
 	}
 }
 
+// TestResetLensWatermarkClearsReviewRowid locks the #123 --fresh fix: ResetLensWatermark
+// (called by `lens backfill --fresh`) must clear the per-lens REVIEW watermark too, not
+// just the mining watermark — else a re-mine that reuses low rowids folds an empty delta
+// and leaves the lens with the empty facets --fresh dropped.
+func TestResetLensWatermarkClearsReviewRowid(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{
+		{ID: "a", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "a"},
+		{ID: "b", TS: "2026-01-02T00:00:00Z", Lens: LensDefault, Observation: "b"},
+	})
+	if err := s.StampReviewLens(LensDefault, 2); err != nil {
+		t.Fatalf("StampReviewLens: %v", err)
+	}
+	if s.ReviewRowid(LensDefault) != 2 {
+		t.Fatalf("precondition: watermark should be 2, got %d", s.ReviewRowid(LensDefault))
+	}
+	if _, err := s.ResetLensWatermark(LensDefault); err != nil {
+		t.Fatalf("ResetLensWatermark: %v", err)
+	}
+	if got := s.ReviewRowid(LensDefault); got != 0 {
+		t.Fatalf("--fresh must reset the review watermark to 0, got %d (a re-mine would then fold an empty delta)", got)
+	}
+}
+
 // TestUnreviewedDelta locks the doctor-visibility count: obs for a lens with rowid past
 // its review watermark.
 func TestUnreviewedDelta(t *testing.T) {

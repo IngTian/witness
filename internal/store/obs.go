@@ -219,8 +219,10 @@ func (o *obsIO) ReadObservationsSince(lens string, sinceRowid int64) ([]Observat
 // with rowid > since, in ROWID order, each carrying its rowid. Rowid order (not the ts
 // order of ReadObservationsSince) is load-bearing for the windowed fold: windows are
 // then contiguous rowid ranges, so advancing the per-lens watermark to a window's max
-// rowid can never skip a low-rowid/high-ts obs that a ts-ordered read would have placed
-// in a later window. Embeddings stripped, like the sibling read.
+// rowid does not skip a low-rowid/high-ts obs that a ts-ordered read would have placed
+// in a later window. (This holds for appended obs; it does NOT protect against a rowid
+// REUSED after a delete-of-newest — see StampReviewLens's caveat and the AUTOINCREMENT
+// follow-up.) Embeddings stripped, like the sibling read.
 func (o *obsIO) ReadObservationsSinceOrdered(lens string, since int64) ([]Observation, error) {
 	rows, err := o.db.Query(
 		`SELECT rowid, obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
