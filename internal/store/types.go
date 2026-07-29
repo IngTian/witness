@@ -71,7 +71,7 @@ type Observation struct {
 	Poignancy   int       `json:"poignancy"`           // 1-10 salience (drives review trigger)
 	Source      string    `json:"source"`              // "mined" | "active"
 	Embedding   []float32 `json:"embedding,omitempty"` // 384-d e5-small vector
-	Rowid       int64     `json:"-"`                   // sqlite rowid; set only by ReadObservationsSinceOrdered (the windowed-fold cursor, #123). Not persisted/serialized.
+	Rowid       int64     `json:"-"`                   // observations.seq (monotonic AUTOINCREMENT surrogate, #125); set only by ReadObservationsSinceOrdered (the windowed-fold cursor, #123). Not persisted/serialized.
 }
 
 // FacetVersion is one bi-temporal version of a facet's value. Per the invalidation

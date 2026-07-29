@@ -30,8 +30,16 @@ import (
 // progress.drift_at (issue #69 Part 2), an RFC3339 stamp of a per-(session,lens)
 // prose-drift so drift survives across worker runs and is queryable (empty = never
 // drifted) via a guarded ADD COLUMN in migrate() (addDriftColumn) — this persists
-// the previously in-memory-only LensMining.Drifted signal.
-const schemaVersion = 7
+// the previously in-memory-only LensMining.Drifted signal; v8 rebuilds observations
+// from (obs_id TEXT PRIMARY KEY, no AUTOINCREMENT) to (seq INTEGER PRIMARY KEY
+// AUTOINCREMENT, obs_id TEXT UNIQUE NOT NULL) via a guarded table rebuild in migrate()
+// (migrateObservationsSeq) that copies each row's old implicit rowid INTO the new seq
+// (so persisted review_rowid:<lens> watermarks stay valid). Without AUTOINCREMENT
+// SQLite REUSES a freed rowid after the max-rowid row is deleted, so a delete-of-newest
+// + re-mine could land a new obs at a rowid <= a lens's review watermark and be silently
+// skipped by the windowed fold (issue #125); AUTOINCREMENT makes the fold cursor
+// strictly monotonic so a fresh obs always sorts after the watermark.
+const schemaVersion = 8
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -220,6 +228,18 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v7 add progress.drift_at: %w", err)
 	}
 
+	// 7. v7 -> v8: rebuild observations with a monotonic AUTOINCREMENT surrogate key
+	// (issue #125). A pre-v8 DB has observations keyed by obs_id (no seq column), whose
+	// implicit rowid SQLite reuses after a delete-of-newest; schemaV1's CREATE ... IF
+	// NOT EXISTS won't reshape the existing table (PK change is not an ALTER), so rebuild
+	// explicitly, copying each old rowid INTO the new seq so review watermarks stay valid.
+	// Guarded on the seq column's absence, so it's a no-op on fresh DBs (schemaV1 shape)
+	// and on any re-run. MUST come last: it references only its own table.
+	if err := migrateObservationsSeq(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v8 observations seq: %w", err)
+	}
+
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("set user_version: %w", err)
@@ -372,10 +392,78 @@ func addDriftColumn(tx *sql.Tx) error {
 	return nil
 }
 
+// migrateObservationsSeq is the v7->v8 step: rebuild `observations` from the old
+// (obs_id TEXT PRIMARY KEY, no surrogate) shape to (seq INTEGER PRIMARY KEY
+// AUTOINCREMENT, obs_id TEXT UNIQUE NOT NULL) — issue #125.
+//
+// Why a table rebuild and not ADD COLUMN: the fix is a NEW integer primary key with
+// AUTOINCREMENT semantics (SQLite tracks the high-water mark in sqlite_sequence and
+// never reuses a value below it, even after the max row is deleted). A plain ADD
+// COLUMN cannot introduce a PRIMARY KEY or AUTOINCREMENT, so — exactly like the v5
+// migrateProgressPerLens rebuild — rename the old table aside, let schemaV1 (already
+// applied above) provide the new-shape `observations`, and copy the old rows in.
+//
+// The copy is load-bearing: it writes each row's OLD IMPLICIT ROWID into the explicit
+// seq column (SELECT rowid), so every persisted review_rowid:<lens> watermark — a
+// rowid cursor — keeps pointing at the same observations after the migration (old
+// rowid == new seq). Any gaps left by earlier deletes are preserved, and seeding seq
+// to the historical max means sqlite_sequence starts there, so the next mined obs gets
+// a strictly higher seq than any that ever existed — closing the reuse hole that let a
+// delete-of-newest + re-mine slip a fresh obs past a lens's watermark unread. The
+// embedding BLOB rides along verbatim (no re-embedding). Idempotent: the guard skips
+// once seq exists (fresh DBs from schemaV1; a re-run sees it too).
+func migrateObservationsSeq(tx *sql.Tx) error {
+	var hasSeq int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('observations') WHERE name='seq'`,
+	).Scan(&hasSeq); err != nil {
+		return fmt.Errorf("probe seq column: %w", err)
+	}
+	if hasSeq > 0 {
+		return nil // already the seq shape (fresh DB from schemaV1, or a prior migrate run)
+	}
+	// The old obs_id-keyed table exists without a seq column. schemaV1 ran with
+	// CREATE ... IF NOT EXISTS, so it did NOT create the new-shape table (the old one
+	// was present). Move the old rows aside, build the new shape, copy rowid->seq.
+	stmts := []string{
+		`ALTER TABLE observations RENAME TO observations_v7`,
+		`CREATE TABLE observations (
+		   seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+		   obs_id      TEXT    NOT NULL UNIQUE,
+		   ts          TEXT    NOT NULL DEFAULT '',
+		   session     TEXT    NOT NULL DEFAULT '',
+		   lens        TEXT    NOT NULL DEFAULT '',
+		   dimension   TEXT    NOT NULL DEFAULT '',
+		   observation TEXT    NOT NULL DEFAULT '',
+		   evidence    TEXT    NOT NULL DEFAULT '',
+		   poignancy   INTEGER NOT NULL DEFAULT 0,
+		   source      TEXT    NOT NULL DEFAULT '',
+		   embedding   BLOB
+		 )`,
+		// Copy old implicit rowid INTO seq so review_rowid watermarks stay valid.
+		`INSERT INTO observations(seq, obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source, embedding)
+		   SELECT rowid, obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source, embedding
+		     FROM observations_v7`,
+		`DROP TABLE observations_v7`,
+		// The rename carried the old idx_obs_lens onto observations_v7 and DROP TABLE
+		// took it with it; recreate it on the new table (schemaV1 ran before the rename,
+		// so its CREATE INDEX IF NOT EXISTS was a no-op against the old-named table).
+		`CREATE INDEX IF NOT EXISTS idx_obs_lens ON observations(lens)`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("rebuild observations: %w", err)
+		}
+	}
+	return nil
+}
+
 // schemaV1 is the full current schema. `raw` is the append-only ground-truth
 // transcript (surrogate rowid; seq is a plain ordinal, not a uniqueness
-// constraint, matching the old JSONL append). observations dedup on obs_id
-// (content hash) — the idempotency guarantee the worker relied on. staged is the
+// constraint, matching the old JSONL append). observations carry a monotonic
+// seq (INTEGER PRIMARY KEY AUTOINCREMENT — never reused after a delete, so the
+// per-lens review fold cursor never skips a re-mined obs, issue #125) and dedup on
+// obs_id UNIQUE (content hash) — the idempotency guarantee the worker relied on. staged is the
 // in-session buffer, unique per (session, obs_id) so a re-recorded observation
 // collapses. facets/facet_versions model the bi-temporal profile relationally.
 // progress is the distillation queue/watermark. meta holds small scalar
@@ -400,7 +488,8 @@ CREATE TABLE IF NOT EXISTS session_meta (
 );
 
 CREATE TABLE IF NOT EXISTS observations (
-  obs_id      TEXT PRIMARY KEY,
+  seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+  obs_id      TEXT    NOT NULL UNIQUE,
   ts          TEXT    NOT NULL DEFAULT '',
   session     TEXT    NOT NULL DEFAULT '',
   lens        TEXT    NOT NULL DEFAULT '',
