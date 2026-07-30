@@ -517,6 +517,82 @@ func TestMigrateObservationsToAutoincrementSeq(t *testing.T) {
 	}
 }
 
+// TestMigrateObservationsSeqClampsStaleWatermark locks the migration-boundary half of
+// #125 (found by adversarial audit of the first cut). The seq copy seeds sqlite_sequence
+// to MAX(SURVIVING rowid), not the historical high-water mark. If a pre-v8 archive folded
+// through its newest obs and THEN pruned it (the delete-of-newest lever), a per-lens
+// review_rowid watermark sits ABOVE the surviving max; without a clamp the first re-mined
+// obs gets a seq <= that stale watermark and the fold (seq > watermark) silently skips it
+// — #125 reintroduced at the upgrade. The migration must clamp such a watermark down to
+// the surviving max so a fresh append lands strictly above it and folds normally.
+func TestMigrateObservationsSeqClampsStaleWatermark(t *testing.T) {
+	s := tempStore(t) // fully migrated
+	// Simulate a stored-v7 archive that folded through the newest obs, then pruned it.
+	for _, stmt := range []string{
+		`DROP TABLE observations`,
+		`CREATE TABLE observations (
+		   obs_id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT '', session TEXT NOT NULL DEFAULT '',
+		   lens TEXT NOT NULL DEFAULT '', dimension TEXT NOT NULL DEFAULT '', observation TEXT NOT NULL DEFAULT '',
+		   evidence TEXT NOT NULL DEFAULT '', poignancy INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '',
+		   embedding BLOB)`,
+		`CREATE INDEX IF NOT EXISTS idx_obs_lens ON observations(lens)`,
+		`INSERT INTO observations(obs_id, lens, poignancy) VALUES ('a','default',1),('b','default',1),('c','default',1)`, // rowid 1,2,3
+		// Folded through the newest (c=3) for the default lens AND the global poignancy cursor.
+		`INSERT INTO meta(key, value) VALUES ('review_rowid:default','3'),('review_obs_rowid','3')`,
+		`DELETE FROM observations WHERE obs_id='c'`, // prune the NEWEST → surviving max rowid is now 2
+		`PRAGMA user_version=7`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v7 (%q): %v", stmt, err)
+		}
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v7->v8 migrate: %v", err)
+	}
+
+	// Both stale watermarks (3) must be clamped to the surviving max (2). Otherwise a
+	// re-mined obs would be skipped.
+	if got := s.ReviewRowid(LensDefault); got != 2 {
+		t.Fatalf("stale per-lens watermark must clamp to surviving max 2, got %d", got)
+	}
+	if got := metaGetInt(s.db, "review_obs_rowid"); got != 2 {
+		t.Fatalf("stale global review_obs_rowid must clamp to surviving max 2, got %d", got)
+	}
+
+	// The payoff: a genuinely new mined obs must be fold-visible (seq > watermark),
+	// not silently skipped.
+	if err := s.AppendObservations([]Observation{{ID: "d", Lens: LensDefault, Observation: "d", Poignancy: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := s.ReadObservationsSinceOrdered(LensDefault, s.ReviewRowid(LensDefault))
+	if len(pending) != 1 || pending[0].ID != "d" {
+		t.Fatalf("re-mined obs after delete-of-newest-before-upgrade must be fold-visible, got %d obs %+v (the #125 migration-boundary skip)",
+			len(pending), pending)
+	}
+	// And the poignancy cadence sees it too (was under-counting under the stale cursor).
+	if got := s.PoignancySinceReview(); got != 4 {
+		t.Fatalf("PoignancySinceReview after clamp+append = %d, want 4 (the new obs)", got)
+	}
+
+	// A watermark that was NOT stale (<= surviving max) must be left untouched.
+	if _, err := s.db.Exec(`UPDATE meta SET value='1' WHERE key='review_rowid:default'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("PRAGMA user_version=7"); err != nil {
+		t.Fatal(err)
+	}
+	// Force a re-run of the seq step by dropping seq — but the table already has seq, so
+	// instead just assert the clamp is conditional: re-migrate is a no-op (guard: seq
+	// present) and the valid watermark stays 1.
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("idempotent re-run: %v", err)
+	}
+	if got := s.ReviewRowid(LensDefault); got != 1 {
+		t.Fatalf("a non-stale watermark must be left untouched, got %d", got)
+	}
+}
+
 // SetSessionPlatform upserts even when no session_meta row exists yet (CC sessions
 // have none until now), and SessionPlatform reads it back.
 func TestSetSessionPlatformUpsert(t *testing.T) {

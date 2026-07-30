@@ -34,11 +34,12 @@ import (
 // from (obs_id TEXT PRIMARY KEY, no AUTOINCREMENT) to (seq INTEGER PRIMARY KEY
 // AUTOINCREMENT, obs_id TEXT UNIQUE NOT NULL) via a guarded table rebuild in migrate()
 // (migrateObservationsSeq) that copies each row's old implicit rowid INTO the new seq
-// (so persisted review_rowid:<lens> watermarks stay valid). Without AUTOINCREMENT
-// SQLite REUSES a freed rowid after the max-rowid row is deleted, so a delete-of-newest
-// + re-mine could land a new obs at a rowid <= a lens's review watermark and be silently
-// skipped by the windowed fold (issue #125); AUTOINCREMENT makes the fold cursor
-// strictly monotonic so a fresh obs always sorts after the watermark.
+// (so persisted review_rowid:<lens> watermarks stay valid) and clamps any watermark left
+// above the surviving max down to it. Without AUTOINCREMENT SQLite REUSES a freed rowid
+// after the max-rowid row is deleted, so a delete-of-newest + re-mine could land a new
+// obs at a rowid <= a lens's review watermark and be silently skipped by the windowed
+// fold (issue #125); AUTOINCREMENT makes the fold cursor strictly monotonic so a fresh
+// obs always sorts after the watermark.
 const schemaVersion = 8
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
@@ -406,11 +407,23 @@ func addDriftColumn(tx *sql.Tx) error {
 // The copy is load-bearing: it writes each row's OLD IMPLICIT ROWID into the explicit
 // seq column (SELECT rowid), so every persisted review_rowid:<lens> watermark — a
 // rowid cursor — keeps pointing at the same observations after the migration (old
-// rowid == new seq). Any gaps left by earlier deletes are preserved, and seeding seq
-// to the historical max means sqlite_sequence starts there, so the next mined obs gets
-// a strictly higher seq than any that ever existed — closing the reuse hole that let a
-// delete-of-newest + re-mine slip a fresh obs past a lens's watermark unread. The
-// embedding BLOB rides along verbatim (no re-embedding). Idempotent: the guard skips
+// rowid == new seq). Any gaps left by earlier deletes are preserved. An explicit-seq
+// INSERT seeds sqlite_sequence (the AUTOINCREMENT high-water mark) to the MAX seq
+// actually copied, so the next mined obs gets a strictly higher seq than any SURVIVING
+// row — the reuse hole for a delete-of-newest that happens AFTER the upgrade is closed.
+//
+// But sqlite_sequence is seeded to the max SURVIVING rowid, NOT the historical
+// high-water mark: if the pre-v8 archive deleted its newest obs(es) after folding them,
+// a review_rowid:<lens> (or review_obs_rowid) watermark can point ABOVE the surviving
+// max. Left alone, the first re-mined obs would get a seq <= that stale watermark and
+// the fold (seq > watermark) would silently skip it — #125 reintroduced at the migration
+// boundary for exactly the delete-of-newest cohort. So after the copy, CLAMP any such
+// watermark down to the surviving max. That is loss-free: every surviving obs has seq <=
+// the surviving max, so all of them were already folded (the watermark was above them);
+// clamping only lowers a cursor that pointed at deleted rows, and any future append now
+// lands strictly above every persisted cursor.
+//
+// The embedding BLOB rides along verbatim (no re-embedding). Idempotent: the guard skips
 // once seq exists (fresh DBs from schemaV1; a re-run sees it too).
 func migrateObservationsSeq(tx *sql.Tx) error {
 	var hasSeq int
@@ -449,6 +462,15 @@ func migrateObservationsSeq(tx *sql.Tx) error {
 		// took it with it; recreate it on the new table (schemaV1 ran before the rename,
 		// so its CREATE INDEX IF NOT EXISTS was a no-op against the old-named table).
 		`CREATE INDEX IF NOT EXISTS idx_obs_lens ON observations(lens)`,
+		// Clamp any fold cursor left ABOVE the surviving max (a pre-v8 delete-of-newest
+		// after folding) down to it — otherwise a re-mined obs at a reused-then-freed
+		// rowid range would land <= the watermark and be silently skipped (#125 at the
+		// migration boundary). Loss-free: surviving obs are all <= this max, so already
+		// folded. Covers every per-lens review_rowid:<lens> and the global review_obs_rowid.
+		`UPDATE meta
+		    SET value = CAST((SELECT COALESCE(MAX(seq), 0) FROM observations) AS TEXT)
+		  WHERE (key LIKE 'review_rowid:%' OR key = 'review_obs_rowid')
+		    AND CAST(value AS INTEGER) > (SELECT COALESCE(MAX(seq), 0) FROM observations)`,
 	}
 	for _, q := range stmts {
 		if _, err := tx.Exec(q); err != nil {
