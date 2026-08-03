@@ -89,16 +89,17 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 }
 
 // foldLensWindowed folds one lens's unreviewed delta into L2 in size-bounded windows
-// (issue #123). It reads the delta in ROWID order (not the ts order of the incremental
-// read) so each window is a CONTIGUOUS rowid range — advancing the watermark to a
-// window's max rowid then never skips a low-rowid/high-ts obs that a ts-ordered read
-// would place in a later window. Per window: fold against the CURRENT stance (re-read
-// each iteration, so a later window sees an earlier window's just-written facets and can
-// reinforce/contradict them), WriteFacets, then StampReviewLens THROUGH that window's max
-// rowid. So each window is a durable mini-review: partial progress sticks, a failed or
-// crashed window strands only itself, and the next Run resumes from the watermark. The
-// window size is store.Config.ReviewMaxChars serialized-slimObs characters — a latency
-// ceiling that keeps any one review call well under the runner's 10-min wall.
+// (issue #123). It reads the delta in SEQ order (not the ts order of the incremental
+// read) so each window is a CONTIGUOUS seq range — advancing the watermark to a window's
+// max seq then never skips a low-seq/high-ts obs that a ts-ordered read would place in a
+// later window. seq is a monotonic AUTOINCREMENT (never reused after a delete — #125), so
+// a re-mined obs always lands above the watermark and is re-read. Per window: fold against
+// the CURRENT stance (re-read each iteration, so a later window sees an earlier window's
+// just-written facets and can reinforce/contradict them), WriteFacets, then StampReviewLens
+// THROUGH that window's max seq. So each window is a durable mini-review: partial progress
+// sticks, a failed or crashed window strands only itself, and the next Run resumes from the
+// watermark. The window size is store.Config.ReviewMaxChars serialized-slimObs characters —
+// a latency ceiling that keeps any one review call well under the runner's 10-min wall.
 func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr string) error {
 	budget := r.Config.ReviewMaxChars
 	if budget <= 0 {
@@ -121,7 +122,7 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 		if err != nil {
 			// Surface the cause (was silently discarded pre-#123). Windows already
 			// committed stay; the watermark sits at the last good window; resume next pass.
-			return fmt.Errorf("review window [%d obs, through rowid %d]: %w", len(window), window[len(window)-1].Rowid, err)
+			return fmt.Errorf("review window [%d obs, through seq %d]: %w", len(window), window[len(window)-1].Rowid, err)
 		}
 		byKey := indexFacets(prior)
 		for _, rf := range reviewed {
@@ -131,7 +132,7 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 			return fmt.Errorf("write L2: %w", err)
 		}
 		// Advance ONLY AFTER the write (crash-safety) and ONLY through this window's max
-		// rowid (contiguous — never past unfolded later windows).
+		// seq (contiguous — never past unfolded later windows).
 		if err := r.Store.StampReviewLens(ln.Name, window[len(window)-1].Rowid); err != nil {
 			return fmt.Errorf("stamp watermark: %w", err)
 		}

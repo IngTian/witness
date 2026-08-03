@@ -35,6 +35,55 @@ func TestReadObservationsSinceOrderedByRowid(t *testing.T) {
 	}
 }
 
+// TestReviewCursorSurvivesDeleteNewestReMine is the #125 root-cause repro: the fold
+// cursor (Observation.Rowid, advanced by StampReviewLens) must be MONOTONIC — a
+// freshly appended obs always gets a cursor value strictly greater than any obs that
+// ever existed, so it can never land at or below an already-advanced watermark.
+//
+// The pre-#125 schema (obs_id TEXT PRIMARY KEY, no AUTOINCREMENT) used the implicit
+// rowid, which SQLite REUSES after the max-rowid row is deleted. Sequence: mine a..c
+// (cursor 1,2,3), review through 3, delete c (the newest), then mine a genuinely new
+// obs d. On the reused-rowid schema d lands at cursor 3 <= watermark 3 → the windowed
+// fold (rowid > watermark) never re-reads it → silent permanent skip. With the seq
+// AUTOINCREMENT column, d gets cursor 4 > 3 and folds normally.
+func TestReviewCursorSurvivesDeleteNewestReMine(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{
+		{ID: "a", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "a"},
+		{ID: "b", TS: "2026-01-02T00:00:00Z", Lens: LensDefault, Observation: "b"},
+		{ID: "c", TS: "2026-01-03T00:00:00Z", Lens: LensDefault, Observation: "c"},
+	})
+	all, _ := s.ReadObservationsSinceOrdered(LensDefault, 0)
+	if len(all) != 3 {
+		t.Fatalf("precondition: want 3 obs, got %d", len(all))
+	}
+	newestCursor := all[len(all)-1].Rowid // 'c'
+
+	// A review folded everything through the newest obs.
+	if err := s.StampReviewLens(LensDefault, newestCursor); err != nil {
+		t.Fatalf("StampReviewLens: %v", err)
+	}
+	// Delete the NEWEST obs (the human "prune a wrong observation" lever), freeing its cursor.
+	if _, err := s.DeleteObservation("c"); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+	// Mine a genuinely new observation.
+	s.AppendObservations([]Observation{
+		{ID: "d", TS: "2026-01-04T00:00:00Z", Lens: LensDefault, Observation: "d"},
+	})
+
+	// The new obs MUST have a cursor strictly greater than the watermark, or the fold
+	// (rowid > watermark) silently skips it forever.
+	pending, _ := s.ReadObservationsSinceOrdered(LensDefault, s.ReviewRowid(LensDefault))
+	if len(pending) != 1 || pending[0].ID != "d" {
+		t.Fatalf("new obs after delete-of-newest must be pending (cursor > watermark), got %d obs %+v — this is the #125 skip",
+			len(pending), pending)
+	}
+	if got := s.UnreviewedDelta(LensDefault); got != 1 {
+		t.Fatalf("UnreviewedDelta after delete-newest+re-mine = %d, want 1 (the skipped obs)", got)
+	}
+}
+
 // TestStampReviewLensThroughRowid locks the per-window stamp: the watermark advances to
 // the GIVEN rowid (this window's max), not the global MAX(rowid) — so stamping window 1
 // cannot jump the cursor past unfolded windows 2..N.
