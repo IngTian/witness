@@ -571,6 +571,13 @@ func commandOutput(ctx context.Context, env []string, args ...string) ([]byte, e
 	}
 	c := execCommandContext(ctx, "opencode", args...)
 	c.Env = env
+	// Pin the cwd, like the two sibling invocations in server.go. OpenCode derives the
+	// PROJECT it records (worktree, vcs, sandboxes) from the working directory, so
+	// inheriting the worker's cwd — which is a user repo, since neither spawnDetached nor
+	// the plugin's Bun.spawn sets one — makes a witness subprocess rewrite project
+	// bookkeeping for whatever repo the worker happened to start in. A neutral temp dir
+	// keeps witness's own invocations from carrying project identity at all.
+	c.Dir = os.TempDir()
 	procCtl.BindToParent(c)
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
