@@ -146,14 +146,19 @@ type ReviewStore interface {
 	ReadFacets() ([]Facet, error)
 	ReadObservationsLite(lens string) ([]Observation, error)
 	// ReadObservationsSince is the incremental fold read: obs for one lens with
-	// rowid > sinceRowid, ts-ordered, embeddings stripped (issue #16).
+	// seq > sinceRowid, ts-ordered, embeddings stripped (issue #16).
 	ReadObservationsSince(lens string, sinceRowid int64) ([]Observation, error)
+	// ReadObservationsSinceOrdered is the WINDOWED-fold read (#123): same but SEQ-
+	// ordered and carrying each obs's seq (in Observation.Rowid), so windows are
+	// contiguous seq ranges (seq is a monotonic AUTOINCREMENT, never reused — #125).
+	ReadObservationsSinceOrdered(lens string, sinceRowid int64) ([]Observation, error)
 	WriteFacets(facets []Facet) error
 	StampReview() error
 	// ReviewRowid / StampReviewLens are the per-lens fold watermark: what the next
-	// fold reads (rowid > ReviewRowid), advanced per-lens after a successful review.
+	// fold reads (seq > ReviewRowid). StampReviewLens advances it to throughRowid —
+	// the max seq of the window just folded (#123), advanced per successful window.
 	ReviewRowid(lens string) int64
-	StampReviewLens(lens string) error
+	StampReviewLens(lens string, throughRowid int64) error
 }
 
 // EmergentStore is the surface the S3 long-arc retrieval pass drives (issue #16): it

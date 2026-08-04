@@ -43,6 +43,18 @@ type Config struct {
 	// one chunk, so only the few giants are split. Source-agnostic — the same budget
 	// governs Claude and OpenCode alike, so neither runtime under-extracts long sessions.
 	ChunkMaxChars int
+	// ReviewMaxChars is the REVIEW fold budget: the max serialized-slimObs characters
+	// folded into L2 in ONE review call (issue #123). Unlike ChunkMaxChars its default is
+	// a POSITIVE safety CEILING, because 0-means-unbounded here re-ships the permanent-
+	// stall bug: a cold start (ReviewRowid==0 → whole corpus is the delta) or a batch
+	// producer sends the entire delta in one runnerFor call, which rides the hardcoded
+	// 10-min claude -p wall, the error is dropped, the watermark freezes, and every later
+	// obs piles up unreviewed forever. The windowed fold splits the delta into seq-
+	// contiguous windows of this size, committing + advancing the watermark per window.
+	// Splitting is loss-free (obs are atomic facts; each window WriteFacets then the next
+	// re-reads them, preserving cross-window contradiction), so this is a pure latency
+	// ceiling, never a quality knob. <=0 in config clamps back to the default.
+	ReviewMaxChars int
 	// EnabledLenses is the set of registered lens names that run on EVERY session
 	// (alongside the always-on "default" lens). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
@@ -53,6 +65,16 @@ type Config struct {
 // drain when mine_concurrency is unset. The embedder is loaded once and shared;
 // runner generation may proceed concurrently when the runner declares it safe.
 const DefaultMineConcurrency = 4
+
+// DefaultReviewMaxChars is the default review-fold window budget (issue #123): the max
+// serialized-slimObs characters folded into L2 in one review call. Derived from the
+// measured data — an 18-obs delta reviews in seconds (~4-9 KB serialized) while a
+// 138-obs delta (~24-32 KB) rode the 10-min timeout. 16 KB sits ~2× below the measured
+// failure and ~4× the known-good window (~32-70 obs), leaving headroom for the fixed
+// per-call overhead the budget doesn't count (the prior facets + prompt + corpus fence).
+// A safety ceiling like the 10-min timeout, not a quality dial; err small (too small =
+// slower but correct; too large = reopens the stall).
+const DefaultReviewMaxChars = 16000
 
 // configFile is the user-authored config.toml concern plus the DB-backed review
 // cadence and runner-bound flag that config resolution consults. Unlike the other
@@ -88,7 +110,8 @@ func DefaultConfig() Config {
 		// 0 = never chunk (mine whole). This is the deliberate default per #57: chunking
 		// is a timeout guard, not a quality feature, and it degrades arc lenses badly.
 		// A user with giant sessions opts in by setting a positive chunk_max_chars.
-		ChunkMaxChars: 0,
+		ChunkMaxChars:  0,
+		ReviewMaxChars: DefaultReviewMaxChars,
 	}
 }
 
@@ -166,6 +189,20 @@ func (c *configFile) LoadConfig() Config {
 			// user with oversized sessions into last-resort splitting (issue #57).
 			if n, err := strconv.Atoi(v); err == nil {
 				cfg.ChunkMaxChars = n
+			}
+		case "review_max_chars":
+			// Unlike chunk_max_chars, 0 is NOT a meaningful "off" here: 0-as-unbounded is
+			// exactly the #123 permanent-stall. So clamp <=0 back to the default (like
+			// review_every / mine_concurrency) — review is BOUNDED BY DEFAULT and cannot be
+			// foot-gunned into the stall. To fold LARGER windows a user RAISES the number
+			// (accepted risk: "too big = same timeout risk as today, never worse"); there
+			// is no upper clamp (a fast/cheap review model may legitimately want big windows).
+			if n, err := strconv.Atoi(v); err == nil {
+				if n <= 0 {
+					cfg.ReviewMaxChars = DefaultReviewMaxChars
+				} else {
+					cfg.ReviewMaxChars = n
+				}
 			}
 		case "lens":
 			// One enabled lens per line: "lens = <name>". Global — runs on every
@@ -387,6 +424,14 @@ mine_concurrency = 4
 # Applies equally to Claude Code and OpenCode sessions.
 chunk_max_chars = 0
 
+# Max observation characters folded into the profile in ONE review call. A SAFETY
+# CEILING (like the internal 10-min runner timeout), not a quality dial: a large review
+# backlog is folded in windows of this size so no single call rides the timeout and
+# freezes the profile forever. Larger = fewer, slower calls (and, well past this, timeout
+# risk); smaller = more, faster calls. <=0 restores the default. Splitting the fold does
+# not degrade the profile (observations are independent facts).
+review_max_chars = 16000
+
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math
 `
@@ -408,9 +453,11 @@ func isConfigKeyLine(line, key string) bool {
 //
 // Both signals are read straight from the DB instead of scanning files or the
 // whole observation corpus. A review records two offsets in `meta`:
-//   - review_obs_rowid: the max observation rowid at review time. Poignancy since
-//     review is SUM(poignancy) for rowids beyond it — an O(log n) indexed scan,
-//     not a full corpus read + ts parse on the hot path.
+//   - review_obs_rowid: the max observation seq at review time (the meta key keeps its
+//     historical "rowid" name; before v8 the cursor WAS the implicit rowid, and a
+//     migrated value equals the row's seq since v8 copies rowid->seq). Poignancy since
+//     review is SUM(poignancy) for seqs beyond it — an O(log n) indexed scan, not a
+//     full corpus read + ts parse on the hot path.
 //   - review_ts: when the review ran. Sessions since review = distilled sessions
 //     whose distilled_at is later (RFC3339 UTC sorts lexically).
 
@@ -422,7 +469,7 @@ func (c *configFile) StampReview() error {
 		return err
 	}
 	var maxRow int64
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM observations`).Scan(&maxRow); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM observations`).Scan(&maxRow); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -440,27 +487,38 @@ func (c *configFile) StampReview() error {
 }
 
 // reviewRowidKey is the meta key holding one lens's incremental-fold watermark: the
-// max observation rowid folded into L2 the last time this lens was reviewed. Namespaced
+// max observation seq folded into L2 the last time this lens was reviewed. Namespaced
 // per lens (issue #16 / the #55 per-lens review-state fix), mirroring profile_sig:<lens>,
-// so a healthy lens advances its fold window independently of a sibling that failed.
+// so a healthy lens advances its fold window independently of a sibling that failed. The
+// key keeps its historical "rowid" name for on-disk compatibility: before v8 the cursor
+// was the implicit rowid, and v8 copies each rowid into seq (db.go, #125) so an existing
+// watermark value keeps pointing at the same observation.
 func reviewRowidKey(lens string) string { return "review_rowid:" + lens }
 
-// StampReviewLens advances ONE lens's incremental-fold watermark to the current max
-// observation rowid — call it after that lens's review succeeds. Independent of the
-// global StampReview cadence stamp (which governs WHEN to review); this governs WHAT
-// the next fold reads (rowid > this). A lens whose review failed is simply not stamped,
-// so its unfolded observations are re-offered next pass — no delta is skipped or
-// double-folded (the cursor is monotonic).
-func (c *configFile) StampReviewLens(lens string) error {
-	var maxRow int64
-	if err := c.db.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM observations`).Scan(&maxRow); err != nil {
-		return err
-	}
-	return metaSet(c.db, reviewRowidKey(lens), strconv.FormatInt(maxRow, 10))
+// StampReviewLens advances ONE lens's incremental-fold watermark to throughRowid — the
+// max seq of the window just folded (#123 windowed fold). Call it after each window's
+// facets are durably written. throughRowid (NOT the global MAX(seq)) is load-bearing:
+// the windowed fold commits contiguous seq ranges, so stamping this window's max leaves
+// later windows' obs (higher seq) pending — stamping the global max would jump the cursor
+// past unfolded windows and silently drop them. Independent of the global StampReview
+// cadence stamp (which governs WHEN to review); this governs WHAT the next fold reads
+// (seq > this). A lens whose review failed is simply not stamped, so its unfolded
+// observations are re-offered next pass.
+//
+// Monotonicity: the cursor is the observations.seq surrogate (INTEGER PRIMARY KEY
+// AUTOINCREMENT, db.go), so an appended obs ALWAYS gets a seq strictly greater than any
+// that ever existed — even after the current max-seq row is deleted (AUTOINCREMENT never
+// reuses a freed value). Deleting the newest obs then mining a new one lands it ABOVE
+// this watermark, where the fold still reads it. This is issue #125: the pre-v8 implicit
+// rowid could be reused after a delete-of-newest, landing a fresh obs at a rowid <= this
+// watermark that the fold silently skipped forever.
+func (c *configFile) StampReviewLens(lens string, throughRowid int64) error {
+	return metaSet(c.db, reviewRowidKey(lens), strconv.FormatInt(throughRowid, 10))
 }
 
-// ReviewRowid returns a lens's incremental-fold watermark (0 if never reviewed — so
-// the whole corpus is "new," which the reviewer routes to a windowed full re-derivation).
+// ReviewRowid returns a lens's incremental-fold watermark — the max observation seq
+// folded so far (0 if never reviewed — so the whole corpus is "new," which the reviewer
+// routes to a windowed full re-derivation).
 func (c *configFile) ReviewRowid(lens string) int64 {
 	return int64(metaGetInt(c.db, reviewRowidKey(lens)))
 }
@@ -483,7 +541,7 @@ func (c *configFile) PoignancySinceReview() int {
 	off := metaGetInt(c.db, "review_obs_rowid")
 	var sum int
 	_ = c.db.QueryRow(
-		`SELECT COALESCE(SUM(poignancy), 0) FROM observations WHERE rowid > ?`, off).Scan(&sum)
+		`SELECT COALESCE(SUM(poignancy), 0) FROM observations WHERE seq > ?`, off).Scan(&sum)
 	return sum
 }
 

@@ -167,7 +167,7 @@ func (o *obsIO) ReadObservationsLite(lens string) ([]Observation, error) {
 		q += ` WHERE lens = ?`
 		args = append(args, lens)
 	}
-	q += ` ORDER BY rowid`
+	q += ` ORDER BY seq`
 	rows, err := o.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -186,19 +186,19 @@ func (o *obsIO) ReadObservationsLite(lens string) ([]Observation, error) {
 }
 
 // ReadObservationsSince is the incremental-fold read (issue #16): the observations
-// for one lens with rowid > sinceRowid, embeddings stripped (like ReadObservationsLite),
-// in VALID-TIME order (ts, then rowid as a stable tiebreak). The rowid cursor is the
+// for one lens with seq > sinceRowid, embeddings stripped (like ReadObservationsLite),
+// in VALID-TIME order (ts, then seq as a stable tiebreak). The seq cursor is the
 // monotonic "new since last review" frontier (advanced by StampReviewLens); the ts
 // sort is what lets the reviewer fold "the stance as it was at that moment," since
-// under the parallel commit-as-ready drain (#56 B3) rowid order is NOT valid-time
+// under the parallel commit-as-ready drain (#56 B3) seq order is NOT valid-time
 // order. The window is one small ReviewEvery batch, so the ts-sort is trivial — this
 // is what bounds the reviewer input by "what's new" instead of the whole corpus.
 func (o *obsIO) ReadObservationsSince(lens string, sinceRowid int64) ([]Observation, error) {
 	rows, err := o.db.Query(
 		`SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
 		   FROM observations
-		  WHERE lens = ? AND rowid > ?
-		  ORDER BY ts, rowid`, lens, sinceRowid)
+		  WHERE lens = ? AND seq > ?
+		  ORDER BY ts, seq`, lens, sinceRowid)
 	if err != nil {
 		return nil, err
 	}
@@ -215,8 +215,50 @@ func (o *obsIO) ReadObservationsSince(lens string, sinceRowid int64) ([]Observat
 	return out, rows.Err()
 }
 
+// ReadObservationsSinceOrdered is the WINDOWED-fold read (issue #123): obs for one lens
+// with seq > since, in SEQ order, each carrying its seq (in Observation.Rowid). Seq order
+// (not the ts order of ReadObservationsSince) is load-bearing for the windowed fold:
+// windows are then contiguous seq ranges, so advancing the per-lens watermark to a
+// window's max seq does not skip a low-seq/high-ts obs that a ts-ordered read would have
+// placed in a later window. seq is INTEGER PRIMARY KEY AUTOINCREMENT (db.go, #125), so it
+// is strictly monotonic and NEVER reused — a delete-of-newest + re-mine gives the new obs
+// a seq above the watermark, where the fold still reads it (the implicit-rowid version
+// this replaced could reuse a freed rowid and silently skip it). Embeddings stripped,
+// like the sibling read.
+func (o *obsIO) ReadObservationsSinceOrdered(lens string, since int64) ([]Observation, error) {
+	rows, err := o.db.Query(
+		`SELECT seq, obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
+		   FROM observations
+		  WHERE lens = ? AND seq > ?
+		  ORDER BY seq`, lens, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Observation
+	for rows.Next() {
+		var ob Observation
+		if err := rows.Scan(&ob.Rowid, &ob.ID, &ob.TS, &ob.Session, &ob.Lens, &ob.Dimension, &ob.Observation,
+			&ob.Evidence, &ob.Poignancy, &ob.Source); err != nil {
+			return nil, err
+		}
+		out = append(out, ob)
+	}
+	return out, rows.Err()
+}
+
+// unreviewedDeltaSince counts observations for a lens with seq past sinceRowid — the
+// primitive behind the Store.UnreviewedDelta convenience (which supplies the lens's
+// current watermark). Surfaced in `witness doctor` so a frozen fold is visible (#123).
+func (o *obsIO) unreviewedDeltaSince(lens string, sinceRowid int64) int {
+	var n int
+	_ = o.db.QueryRow(
+		`SELECT COUNT(*) FROM observations WHERE lens = ? AND seq > ?`, lens, sinceRowid).Scan(&n)
+	return n
+}
+
 // ReadObservations returns all L1 observations (optionally one lens), in insertion
-// order (rowid), embeddings decoded.
+// order (seq), embeddings decoded.
 func (o *obsIO) ReadObservations(lens string) ([]Observation, error) {
 	q := `SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source, embedding
 	        FROM observations`
@@ -225,7 +267,7 @@ func (o *obsIO) ReadObservations(lens string) ([]Observation, error) {
 		q += ` WHERE lens = ?`
 		args = append(args, lens)
 	}
-	q += ` ORDER BY rowid`
+	q += ` ORDER BY seq`
 	rows, err := o.db.Query(q, args...)
 	if err != nil {
 		return nil, err

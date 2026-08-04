@@ -362,6 +362,237 @@ func TestMigrateV4ToV7SeedsDriftAtBlank(t *testing.T) {
 	}
 }
 
+// v7 -> v8 (issue #125) rebuilds `observations` from (obs_id TEXT PRIMARY KEY, no
+// AUTOINCREMENT) to (seq INTEGER PRIMARY KEY AUTOINCREMENT, obs_id TEXT UNIQUE) so the
+// review cursor stops reusing a freed rowid after a delete-of-newest. A pre-v8 DB has
+// the old shape; migrate() must rebuild it, PRESERVE each row's old implicit rowid AS
+// its new seq (so persisted review_rowid:<lens> watermarks stay valid), keep obs_id
+// dedup, and seed sqlite_sequence to the max so future appends never reuse. The rebuild
+// must survive a gap (a pruned obs) in the old rowids. Non-destructive, idempotent.
+func TestMigrateObservationsToAutoincrementSeq(t *testing.T) {
+	s := tempStore(t) // fully migrated (observations already has seq)
+
+	// The fresh schema must carry the new shape.
+	if !hasColumn(t, s, "observations", "seq") {
+		t.Fatal("fresh DB missing observations.seq")
+	}
+
+	// Simulate a stored-v7 archive: rebuild observations in the OLD shape (obs_id PK,
+	// no seq), seed rows, prune one to leave a rowid gap, and force the version back.
+	for _, stmt := range []string{
+		`DROP TABLE observations`,
+		`CREATE TABLE observations (
+		   obs_id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT '', session TEXT NOT NULL DEFAULT '',
+		   lens TEXT NOT NULL DEFAULT '', dimension TEXT NOT NULL DEFAULT '', observation TEXT NOT NULL DEFAULT '',
+		   evidence TEXT NOT NULL DEFAULT '', poignancy INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '',
+		   embedding BLOB)`,
+		`CREATE INDEX IF NOT EXISTS idx_obs_lens ON observations(lens)`,
+		`INSERT INTO observations(obs_id, lens, observation, poignancy) VALUES
+		   ('a','default','A',3),('b','default','B',4),('c','codereview','C',5),('d','default','D',6)`,
+		`DELETE FROM observations WHERE obs_id = 'b'`, // leave a rowid gap (rows: 1=a, 3=c, 4=d)
+		`PRAGMA user_version=7`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v7 (%q): %v", stmt, err)
+		}
+	}
+	if hasColumn(t, s, "observations", "seq") {
+		t.Fatal("precondition: seq should be absent before re-migrate")
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v7->v8 migrate: %v", err)
+	}
+
+	// The new shape landed and integrity holds.
+	if !hasColumn(t, s, "observations", "seq") {
+		t.Fatal("v7->v8 migrate did not add observations.seq")
+	}
+	var ic string
+	_ = s.db.QueryRow(`PRAGMA integrity_check`).Scan(&ic)
+	if ic != "ok" {
+		t.Fatalf("integrity_check after migrate = %q, want ok", ic)
+	}
+
+	// Old implicit rowid preserved AS seq, gap intact (a=1, c=3, d=4) — so the existing
+	// per-lens review_rowid watermarks still point at the right observations.
+	type row struct {
+		seq int64
+		id  string
+	}
+	rows, err := s.db.Query(`SELECT seq, obs_id FROM observations ORDER BY seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.seq, &r.id); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, r)
+	}
+	rows.Close()
+	want := []row{{1, "a"}, {3, "c"}, {4, "d"}}
+	if len(got) != len(want) {
+		t.Fatalf("want %d rows, got %d: %+v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("row %d = %+v, want %+v (old rowid must survive as seq)", i, got[i], want[i])
+		}
+	}
+
+	// obs_id is still unique: a duplicate INSERT OR IGNORE is a no-op, not a new row.
+	// (Under AUTOINCREMENT the ignored insert harmlessly burns a seq value — seq is a
+	// monotonic cursor, not a dense row count, so gaps are expected and fine.)
+	if err := s.AppendObservations([]Observation{{ID: "a", Lens: "default", Observation: "dup"}}); err != nil {
+		t.Fatalf("append dup: %v", err)
+	}
+	if n := s.Stats([]string{"default"}).Observations; n != 3 {
+		t.Fatalf("obs_id UNIQUE must dedup: got %d rows, want 3", n)
+	}
+
+	// The #125 guarantee end-to-end: a genuinely new obs gets a seq STRICTLY PAST the
+	// prior max (>4), and after deleting that newest, the next append still does NOT
+	// reuse it. (The cursor read is per-lens; default-lens seqs so far are 1(a) and 4(d).)
+	sinceMax, _ := s.ReadObservationsSinceOrdered("default", 4)
+	if len(sinceMax) != 0 {
+		t.Fatalf("no default-lens obs should sit past seq 4 yet, got %d", len(sinceMax))
+	}
+	if err := s.AppendObservations([]Observation{{ID: "e", Lens: "default", Observation: "E"}}); err != nil {
+		t.Fatal(err)
+	}
+	newObs, _ := s.ReadObservationsSinceOrdered("default", 4)
+	if len(newObs) != 1 || newObs[0].ID != "e" || newObs[0].Rowid <= 4 {
+		t.Fatalf("new append must get a seq strictly past the max (>4), got %+v", newObs)
+	}
+	eSeq := newObs[0].Rowid
+	// Delete the newest and append again — the reuse the pre-v8 rowid schema allowed.
+	if _, err := s.DeleteObservation("e"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendObservations([]Observation{{ID: "f", Lens: "default", Observation: "F"}}); err != nil {
+		t.Fatal(err)
+	}
+	afterDel, _ := s.ReadObservationsSinceOrdered("default", eSeq)
+	if len(afterDel) != 1 || afterDel[0].ID != "f" {
+		t.Fatalf("delete-of-newest then append must NOT reuse a seq <= %d (the #125 skip), got %+v", eSeq, afterDel)
+	}
+
+	var v int
+	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// Idempotent: re-running migrate over the applied v8 schema (version forced back)
+	// must not error, rebuild, or lose/renumber rows. Snapshot before, compare after.
+	snapshot := func() []row {
+		rr, _ := s.db.Query(`SELECT seq, obs_id FROM observations ORDER BY seq`)
+		var out []row
+		for rr.Next() {
+			var r row
+			_ = rr.Scan(&r.seq, &r.id)
+			out = append(out, r)
+		}
+		rr.Close()
+		return out
+	}
+	before := snapshot() // a=1, c=3, d=4, f=<burned seq> (e was deleted, dup 'a' collapsed)
+	if _, err := s.db.Exec("PRAGMA user_version=7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("re-run migrate must be idempotent: %v", err)
+	}
+	after := snapshot()
+	if len(after) != len(before) {
+		t.Fatalf("idempotent re-run changed row set: before=%+v after=%+v", before, after)
+	}
+	for i := range before {
+		if after[i] != before[i] {
+			t.Fatalf("idempotent re-run row %d = %+v, want %+v (no rebuild/renumber)", i, after[i], before[i])
+		}
+	}
+}
+
+// TestMigrateObservationsSeqClampsStaleWatermark locks the migration-boundary half of
+// #125 (found by adversarial audit of the first cut). The seq copy seeds sqlite_sequence
+// to MAX(SURVIVING rowid), not the historical high-water mark. If a pre-v8 archive folded
+// through its newest obs and THEN pruned it (the delete-of-newest lever), a per-lens
+// review_rowid watermark sits ABOVE the surviving max; without a clamp the first re-mined
+// obs gets a seq <= that stale watermark and the fold (seq > watermark) silently skips it
+// — #125 reintroduced at the upgrade. The migration must clamp such a watermark down to
+// the surviving max so a fresh append lands strictly above it and folds normally.
+func TestMigrateObservationsSeqClampsStaleWatermark(t *testing.T) {
+	s := tempStore(t) // fully migrated
+	// Simulate a stored-v7 archive that folded through the newest obs, then pruned it.
+	for _, stmt := range []string{
+		`DROP TABLE observations`,
+		`CREATE TABLE observations (
+		   obs_id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT '', session TEXT NOT NULL DEFAULT '',
+		   lens TEXT NOT NULL DEFAULT '', dimension TEXT NOT NULL DEFAULT '', observation TEXT NOT NULL DEFAULT '',
+		   evidence TEXT NOT NULL DEFAULT '', poignancy INTEGER NOT NULL DEFAULT 0, source TEXT NOT NULL DEFAULT '',
+		   embedding BLOB)`,
+		`CREATE INDEX IF NOT EXISTS idx_obs_lens ON observations(lens)`,
+		`INSERT INTO observations(obs_id, lens, poignancy) VALUES ('a','default',1),('b','default',1),('c','default',1)`, // rowid 1,2,3
+		// Folded through the newest (c=3) for the default lens AND the global poignancy cursor.
+		`INSERT INTO meta(key, value) VALUES ('review_rowid:default','3'),('review_obs_rowid','3')`,
+		`DELETE FROM observations WHERE obs_id='c'`, // prune the NEWEST → surviving max rowid is now 2
+		`PRAGMA user_version=7`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v7 (%q): %v", stmt, err)
+		}
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v7->v8 migrate: %v", err)
+	}
+
+	// Both stale watermarks (3) must be clamped to the surviving max (2). Otherwise a
+	// re-mined obs would be skipped.
+	if got := s.ReviewRowid(LensDefault); got != 2 {
+		t.Fatalf("stale per-lens watermark must clamp to surviving max 2, got %d", got)
+	}
+	if got := metaGetInt(s.db, "review_obs_rowid"); got != 2 {
+		t.Fatalf("stale global review_obs_rowid must clamp to surviving max 2, got %d", got)
+	}
+
+	// The payoff: a genuinely new mined obs must be fold-visible (seq > watermark),
+	// not silently skipped.
+	if err := s.AppendObservations([]Observation{{ID: "d", Lens: LensDefault, Observation: "d", Poignancy: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := s.ReadObservationsSinceOrdered(LensDefault, s.ReviewRowid(LensDefault))
+	if len(pending) != 1 || pending[0].ID != "d" {
+		t.Fatalf("re-mined obs after delete-of-newest-before-upgrade must be fold-visible, got %d obs %+v (the #125 migration-boundary skip)",
+			len(pending), pending)
+	}
+	// And the poignancy cadence sees it too (was under-counting under the stale cursor).
+	if got := s.PoignancySinceReview(); got != 4 {
+		t.Fatalf("PoignancySinceReview after clamp+append = %d, want 4 (the new obs)", got)
+	}
+
+	// A watermark that was NOT stale (<= surviving max) must be left untouched.
+	if _, err := s.db.Exec(`UPDATE meta SET value='1' WHERE key='review_rowid:default'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("PRAGMA user_version=7"); err != nil {
+		t.Fatal(err)
+	}
+	// Force a re-run of the seq step by dropping seq — but the table already has seq, so
+	// instead just assert the clamp is conditional: re-migrate is a no-op (guard: seq
+	// present) and the valid watermark stays 1.
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("idempotent re-run: %v", err)
+	}
+	if got := s.ReviewRowid(LensDefault); got != 1 {
+		t.Fatalf("a non-stale watermark must be left untouched, got %d", got)
+	}
+}
+
 // SetSessionPlatform upserts even when no session_meta row exists yet (CC sessions
 // have none until now), and SessionPlatform reads it back.
 func TestSetSessionPlatformUpsert(t *testing.T) {

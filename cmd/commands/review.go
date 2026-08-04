@@ -10,13 +10,11 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// review.go holds cmdReview and forceReview: the implementation functions for the
+// review.go holds cmdReviewFull and forceReview: the implementation functions for the
 // unconditional review pass. The old top-level `review` command was removed from the
 // visible front door (#102); the functionality migrated to the hidden `worker review`
 // subcommand, but the implementation functions remain here, called by worker_group.go
 // and lens.go (backfill's forced review).
-
-func cmdReview() error { return cmdReviewFull(false) }
 
 // cmdReviewFull runs the ordinary review; with full=true it ALSO runs the S3 emergent
 // long-arc retrieval pass (cluster L1 → verify → merge) in the same locked runner

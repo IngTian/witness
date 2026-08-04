@@ -80,6 +80,7 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 		"review_poignancy",
 		"auto_distill",
 		"mine_concurrency",
+		"review_max_chars",
 		"lens =",
 	} {
 		if !strings.Contains(body, want) {
@@ -192,6 +193,47 @@ func TestReviewEveryClampsNonPositive(t *testing.T) {
 	}
 	if c := st.LoadConfig(); c.ReviewEvery != 12 {
 		t.Errorf("positive review_every should be honored, got %d", c.ReviewEvery)
+	}
+}
+
+// TestReviewMaxCharsClampsNonPositive is the issue #123 guard: review_max_chars <= 0
+// must clamp to the default (NOT be accepted as "unbounded"), because unbounded is
+// exactly the permanent-stall. A positive value is honored verbatim.
+func TestReviewMaxCharsClampsNonPositive(t *testing.T) {
+	for _, val := range []string{"0", "-100"} {
+		t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+		st, err := Open()
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if err := os.WriteFile(st.ConfigPath(), []byte("review_max_chars = "+val+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c := st.LoadConfig()
+		if c.ReviewMaxChars != DefaultReviewMaxChars {
+			t.Errorf("review_max_chars=%s should clamp to default %d, got %d", val, DefaultReviewMaxChars, c.ReviewMaxChars)
+		}
+		if c.ReviewMaxChars <= 0 {
+			t.Errorf("review_max_chars=%s left a non-positive (unbounded = the #123 stall) value %d", val, c.ReviewMaxChars)
+		}
+		st.Close()
+	}
+	// Absent → default.
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if c := st.LoadConfig(); c.ReviewMaxChars != DefaultReviewMaxChars {
+		t.Errorf("absent review_max_chars should default to %d, got %d", DefaultReviewMaxChars, c.ReviewMaxChars)
+	}
+	// Positive honored verbatim.
+	if err := os.WriteFile(st.ConfigPath(), []byte("review_max_chars = 5000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c := st.LoadConfig(); c.ReviewMaxChars != 5000 {
+		t.Errorf("positive review_max_chars should be honored, got %d", c.ReviewMaxChars)
 	}
 }
 

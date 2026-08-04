@@ -121,6 +121,7 @@ func cmdDoctor(asJSON bool) error {
 				AutoDistill:     cfg.AutoDistill,
 				MineConcurrency: cfg.MineConcurrency,
 				ChunkMaxChars:   cfg.ChunkMaxChars,
+				ReviewMaxChars:  cfg.ReviewMaxChars,
 			},
 			ModelCheck: modelStatus,
 			Archive: doctorArchiveJSON{
@@ -179,7 +180,7 @@ func cmdDoctor(asJSON bool) error {
 		fmt.Printf("    %s %s\n", label("models ok"), modelStatus)
 	}
 	fmt.Printf("    %s review_every=%d  poignancy=%d\n", label("review"), cfg.ReviewEvery, cfg.ReviewPoignancy)
-	fmt.Printf("    %s enabled=%t  mine_concurrency=%d  chunking=%s\n", label("auto"), cfg.AutoDistill, cfg.MineConcurrency, chunkingLabel(cfg.ChunkMaxChars))
+	fmt.Printf("    %s enabled=%t  mine_concurrency=%d  chunking=%s  review_window=%d chars\n", label("auto"), cfg.AutoDistill, cfg.MineConcurrency, chunkingLabel(cfg.ChunkMaxChars), cfg.ReviewMaxChars)
 	// Surface prose_drift: the triage model returned no JSON observation array on some
 	// pass, so those sessions distilled to zero observations even though they may not be
 	// uneventful. The remedy is a stronger triage model then a re-mine (#57).
@@ -218,6 +219,22 @@ func cmdDoctor(asJSON bool) error {
 	}
 	fmt.Printf("    %s %s\n", label("profile"),
 		dim("collect-only (never injected); read via `witness profile`, MCP get_profile/get_facets, or witness.db"))
+	// Per-lens unreviewed backlog (#123): observations mined past the lens's review
+	// watermark but not yet folded into facets. Normally small (steady-state deltas fold
+	// in one window). A LARGE, persistent backlog is the visible signal of a frozen fold —
+	// surfaced here so a stall is actionable, not silent. Windowed review (ReviewMaxChars)
+	// keeps this draining; a backlog that stays large despite reviews warrants a look at
+	// witness.log for a per-lens review error.
+	for _, ln := range activeLensNames(st) {
+		if d := st.UnreviewedDelta(ln); d > 0 {
+			line := fmt.Sprintf("lens %q: %d observation(s) mined but not yet folded into facets", ln, d)
+			if d > cfg.ReviewMaxChars/200 { // ~more than one window's worth of obs pending — nudge
+				fmt.Printf("    %s %s\n", warnGlyph(), yellow(line+" — review is behind; it folds in windows on the next `witness worker review`"))
+			} else {
+				fmt.Printf("    %s %s\n", label("review"), dim(line))
+			}
+		}
+	}
 
 	fmt.Println()
 	fmt.Println("  " + bold("Embedder"))
@@ -279,6 +296,7 @@ type doctorConfigJSON struct {
 	AutoDistill     bool   `json:"auto_distill"`
 	MineConcurrency int    `json:"mine_concurrency"`
 	ChunkMaxChars   int    `json:"chunk_max_chars"`
+	ReviewMaxChars  int    `json:"review_max_chars"`
 }
 
 type doctorArchiveJSON struct {
