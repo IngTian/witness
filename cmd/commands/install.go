@@ -196,13 +196,17 @@ func isWitnessEntry(e any) bool {
 // "witness.sh" (e.g. "notwitness.sh", "witness.sha256") is NOT matched. Mirrors the
 // exec-form basename-exact + token discipline (issue #49 I3).
 func isWitnessShimCommand(cmd string) bool {
-	fields := strings.Fields(cmd)
-	if len(fields) < 2 {
+	// Split off the FIRST word the way a shell would, honoring the quoting shellQuote
+	// applied. Splitting on raw whitespace would break the round trip for a shim path
+	// containing a space (~/My Projects/... — the very case shellQuote exists to protect):
+	// fields[0] would be `'/Users/me/My`, its basename `My`, and witness would fail to
+	// recognize a hook it wrote itself — so every re-install appended a duplicate (capture
+	// firing N times per prompt) and unwire stripped nothing (uninstall silently leaving
+	// witness wired in).
+	first, rest, ok := splitFirstShellWord(cmd)
+	if !ok || rest == "" {
 		return false
 	}
-	// The shim path is shell-quoted by shellQuote (single quotes); strip them so the
-	// basename check sees the real path. A bare unquoted path also works.
-	first := strings.Trim(fields[0], "'\"")
 	base := first
 	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
 		base = base[i+1:]
@@ -210,7 +214,56 @@ func isWitnessShimCommand(cmd string) bool {
 	if !strings.EqualFold(base, "witness.sh") {
 		return false
 	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return false
+	}
 	return witnessHookTokens[fields[len(fields)-1]]
+}
+
+// splitFirstShellWord returns the first shell word of s (unquoted) and the remainder.
+// It handles the single-quoted form shellQuote writes — including its POSIX escape for
+// an embedded quote ('\”) — plus double quotes and bare unquoted words, which is the
+// full set of shapes a hook command we wrote (or a human hand-edited) can take. ok is
+// false only for an empty/blank command.
+func splitFirstShellWord(s string) (word, rest string, ok bool) {
+	s = strings.TrimLeft(s, " \t")
+	if s == "" {
+		return "", "", false
+	}
+	var b strings.Builder
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == ' ' || c == '\t':
+			return b.String(), strings.TrimLeft(s[i:], " \t"), true
+		case c == '\'':
+			i++ // opening quote
+			for i < len(s) && s[i] != '\'' {
+				b.WriteByte(s[i])
+				i++
+			}
+			i++ // closing quote
+			// shellQuote renders an embedded quote as '\'' — after the closing quote that
+			// leaves \'' ; consume the escaped quote and let the reopened quote continue.
+			if i+1 < len(s) && s[i] == '\\' && s[i+1] == '\'' {
+				b.WriteByte('\'')
+				i += 2
+			}
+		case c == '"':
+			i++
+			for i < len(s) && s[i] != '"' {
+				b.WriteByte(s[i])
+				i++
+			}
+			i++
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String(), "", true
 }
 
 // isWitnessBinary reports whether an exec-form command path's basename is the
