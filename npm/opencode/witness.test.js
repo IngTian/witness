@@ -265,7 +265,11 @@ test("npm plugin imports idle sessions immediately and starts one auto worker af
     const hooks = await mod.default()
     await Promise.resolve()
     const imports = () => spawns.filter((args) => args[1] === "import")
-    const workers = () => spawns.filter((args) => args[1] === "worker-run")
+    // worker-kick, not worker-run: dispose runs `worker stop --auto-only`, which latches a
+    // durable stop flag that an auto worker refuses to run under, and only the shared kick
+    // gate clears it. Spawning worker-run directly would freeze auto-distillation
+    // permanently after the first OpenCode close.
+    const workers = () => spawns.filter((args) => args[1] === "worker-kick")
     assert.deepEqual(imports()[0], ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick"])
 
     await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
@@ -298,7 +302,11 @@ test("npm plugin imports idle sessions immediately and starts one auto worker af
     await advance(299999)
     assert.equal(workers().length, 0)
     await advance(1)
-    assert.deepEqual(workers(), [["/shim/witness", "worker-run", "--auto"]])
+    assert.deepEqual(workers(), [["/shim/witness", "worker-kick"]])
+    assert.ok(
+      spawns.every((args) => args[1] !== "worker-run"),
+      "plugin must never spawn worker-run directly; it bypasses the stop-flag clear",
+    )
 
     await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_d" } } })
     const disposeQuietTimer = timers.at(-1)
