@@ -135,6 +135,43 @@ func (s *Store) Export(dst string, force bool) error {
 // cleanly: the DB is either fully at the new version or fully at the old one,
 // never half-applied. The schema is all CREATE ... IF NOT EXISTS and is applied
 // unconditionally, so re-runs and any starting version converge harmlessly.
+//
+// The transaction is BEGIN IMMEDIATE, not the default DEFERRED. Every step below reads
+// (pragma_table_info / sqlite_master) before it writes, and under WAL a DEFERRED tx that
+// takes a read snapshot and THEN tries to write fails with SQLITE_BUSY_SNAPSHOT (517) if
+// any other connection committed in between — a conflict busy_timeout does NOT retry,
+// because there is no lock to wait for, the snapshot is simply stale. witness is
+// multi-process by design (a capture hook fires per user turn while a worker may be
+// draining), so on the very first Open after an upgrade a single concurrent capture
+// could abort the migration and fail store.Open in the migrating process. IMMEDIATE
+// takes the write lock up front, so a concurrent writer makes us WAIT (busy_timeout)
+// instead of aborting.
+// beginImmediate starts a transaction that already holds the WRITE lock, so a later
+// write cannot fail the un-retryable SQLITE_BUSY_SNAPSHOT upgrade that a DEFERRED
+// read-then-write transaction hits when another process commits mid-transaction.
+//
+// database/sql exposes no isolation level for SQLite's BEGIN IMMEDIATE, so we take a
+// normal (DEFERRED) transaction and immediately force it to acquire the write lock with
+// a no-op write. `PRAGMA user_version = <current>` is ideal: it is a genuine write (it
+// promotes the transaction) but sets the value it already has, so it is a semantic
+// no-op even if the transaction later rolls back. Contention on that write IS retryable
+// via busy_timeout, which is the whole point.
+func beginImmediate(db *sql.DB) (*sql.Tx, error) {
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return nil, fmt.Errorf("read user_version: %w", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", v)); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("acquire write lock: %w", err)
+	}
+	return tx, nil
+}
+
 func migrate(db *sql.DB) error {
 	var v int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
@@ -143,7 +180,7 @@ func migrate(db *sql.DB) error {
 	if v >= schemaVersion {
 		return nil
 	}
-	tx, err := db.Begin()
+	tx, err := beginImmediate(db)
 	if err != nil {
 		return err
 	}

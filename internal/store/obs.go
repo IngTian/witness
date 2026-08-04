@@ -144,16 +144,54 @@ func (o *obsIO) AppendObservations(obs []Observation) error {
 // supported way to correct the profile — the next review re-derives from what's
 // left. Durable against re-mining: the per-session watermark won't re-mine an
 // already-distilled delta, and obs_id dedup would catch it even if it did.
+// It also RESETS that lens's incremental review watermark, so the promise the CLI and
+// the MCP tool both make — "the profile re-derives from what's left on the next review" —
+// is actually kept. The fold is incremental (it reads only obs with seq > review_rowid,
+// the #16 fix), so a pruned observation that had ALREADY been folded would otherwise sit
+// below the cursor forever: the next review would see an empty delta, never invoke the
+// model for that lens, and leave the facet it grounded asserting a claim whose only
+// evidence (because_of) no longer exists in the archive. Clearing the cursor makes the
+// next review re-fold that lens from scratch. That is bounded work, not a timeout risk —
+// the fold is windowed by ReviewMaxChars (#123).
 func (o *obsIO) DeleteObservation(obsID string) (bool, error) {
-	res, err := o.db.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
+	tx, err := o.db.Begin()
 	if err != nil {
+		return false, err
+	}
+	// Capture the lens BEFORE the delete; afterwards the row is gone.
+	var lens string
+	switch err := tx.QueryRow(`SELECT lens FROM observations WHERE obs_id = ?`, obsID).Scan(&lens); {
+	case err == sql.ErrNoRows:
+		tx.Rollback()
+		return false, nil // no such id — not an error, just no hit
+	case err != nil:
+		tx.Rollback()
+		return false, err
+	}
+	res, err := tx.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
+	if err != nil {
+		tx.Rollback()
 		return false, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		tx.Rollback()
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		tx.Rollback()
+		return false, nil
+	}
+	// Same transaction as the delete: the archive must never be left with the row gone
+	// but the stale cursor still in place (that is the bug this closes).
+	if _, err := tx.Exec(`DELETE FROM meta WHERE key = ?`, reviewRowidKey(lens)); err != nil {
+		tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ReadObservationsLite is ReadObservations without decoding embeddings — for

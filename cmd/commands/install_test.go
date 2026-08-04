@@ -687,3 +687,108 @@ func TestWireLongMentionsConfigRunner(t *testing.T) {
 		t.Error("wire help should point users at `config set runner` for the runtime, not imply wire picks it")
 	}
 }
+
+// isWitnessShimCommand must be the exact inverse of what witnessHookSpecs WRITES, for
+// every path shellQuote is designed to protect. It previously split on raw whitespace,
+// so a shim path containing a space (~/My Projects/... — the case shellQuote's own doc
+// cites) made witness fail to recognize a hook it wrote itself: every re-install
+// appended a duplicate (capture firing N times per prompt) and unwire stripped nothing
+// (uninstall silently leaving witness wired in). It must stay NARROW too — a foreign
+// command must never be claimed as ours, or a re-install would strip someone else's hook.
+func TestIsWitnessShimCommandRoundTripsQuotedPaths(t *testing.T) {
+	for _, target := range []string{
+		"/Users/me/witness/hooks/witness.sh",
+		"/Users/me/My Projects/witness/hooks/witness.sh", // space (the regression)
+		"/Users/me/two  spaces/witness/hooks/witness.sh", // consecutive spaces
+		"/Users/me/it's mine/witness/hooks/witness.sh",   // embedded single quote
+		"/opt/witness/hooks/witness.sh",
+	} {
+		for _, token := range []string{"capture", "session-start", "session-end"} {
+			cmd := shellQuote(target) + " " + token
+			if !isWitnessShimCommand(cmd) {
+				t.Errorf("must recognize our own written hook: %s", cmd)
+			}
+			// isWitnessEntry takes a settings.json ENTRY ({hooks:[{command:...}]}), which is
+			// what removeWitnessHooks/mergeWitnessHooks actually walk.
+			entry := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": cmd}}}
+			if !isWitnessEntry(entry) {
+				t.Errorf("isWitnessEntry must agree: %s", cmd)
+			}
+		}
+	}
+	// Narrowness: never claim a foreign hook (that would strip a user's own tooling).
+	for _, foreign := range []string{
+		"'/Users/me/My Projects/other/hooks/notwitness.sh' capture",
+		"'/Users/me/My Projects/witness/hooks/witness.sha256' capture",
+		"'/Users/me/My Projects/witness/hooks/witness.sh' not-our-token",
+		"'/Users/me/My Projects/witness/hooks/witness.sh'",
+		"",
+		"   ",
+	} {
+		if isWitnessShimCommand(foreign) {
+			t.Errorf("must NOT claim a foreign/incomplete command: %q", foreign)
+		}
+	}
+}
+
+// splitFirstShellWord underpins the round trip above; lock its quoting cases directly.
+func TestSplitFirstShellWord(t *testing.T) {
+	for _, tc := range []struct{ in, word, rest string }{
+		{"'/a b/witness.sh' capture", "/a b/witness.sh", "capture"},
+		{"/plain/witness.sh capture", "/plain/witness.sh", "capture"},
+		{`"/dq path/witness.sh" capture`, "/dq path/witness.sh", "capture"},
+		{"'/it'\\''s/witness.sh' capture", "/it's/witness.sh", "capture"},
+		{"'/only/word'", "/only/word", ""},
+	} {
+		w, r, ok := splitFirstShellWord(tc.in)
+		if !ok || w != tc.word || r != tc.rest {
+			t.Errorf("splitFirstShellWord(%q) = (%q,%q,%v), want (%q,%q,true)", tc.in, w, r, ok, tc.word, tc.rest)
+		}
+	}
+	if _, _, ok := splitFirstShellWord("   "); ok {
+		t.Error("blank command must report ok=false")
+	}
+}
+
+// End-to-end proof of the space-in-path fix at the level a user feels it: with a shim
+// path containing a space, a re-install must NOT duplicate the hooks (otherwise Claude
+// Code fires `capture` N times per prompt) and unwire must actually STRIP them
+// (otherwise uninstall silently leaves witness wired in).
+func TestInstallRoundTripWithSpaceInShimPath(t *testing.T) {
+	const shim = "/Users/me/My Projects/witness/hooks/witness.sh"
+	inv := shellInvocation(shim)
+
+	out, err := mergeWitnessHooks([]byte(`{}`), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pass := 2; pass <= 3; pass++ {
+		if out, err = mergeWitnessHooks(out, inv); err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
+			ours := 0
+			for _, c := range eventCommands(t, out, ev) {
+				if isWitnessShimCommand(c) {
+					ours++
+				}
+			}
+			if ours != 1 {
+				t.Fatalf("pass %d: %s has %d witness hooks, want exactly 1 (duplicate capture per prompt)", pass, ev, ours)
+			}
+		}
+	}
+
+	// unwire must remove them all.
+	cleaned, err := removeWitnessHooks(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
+		for _, c := range eventCommands(t, cleaned, ev) {
+			if isWitnessShimCommand(c) {
+				t.Errorf("%s: unwire left a witness hook behind: %s", ev, c)
+			}
+		}
+	}
+}
