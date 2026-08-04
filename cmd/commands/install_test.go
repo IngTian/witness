@@ -518,17 +518,29 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `export const Witness = plugin`) || !strings.Contains(src, `export const ClaudeWitness = plugin`) {
 		t.Fatalf("installed plugin should preserve both OpenCode export names: %s", src)
 	}
-	if !strings.Contains(src, `const args = ["import", "--agent", "opencode", "--quiet", "--auto"]`) {
-		t.Fatalf("installed plugin should reconcile OpenCode DB before distillation: %s", src)
+	if !strings.Contains(src, `const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]`) || strings.Contains(src, `"import", "--agent", "opencode", "--quiet", "--auto"`) {
+		t.Fatalf("installed plugin should reconcile L0 without immediately starting distillation: %s", src)
+	}
+	if !strings.Contains(src, `const QUIET_PERIOD_MS = 5 * 60 * 1000`) || !strings.Contains(src, `spawnWitness(["worker-kick"])`) {
+		t.Fatalf("installed plugin should start automatic mining only after five minutes quiet: %s", src)
+	}
+	// worker-kick, not worker-run: dispose latches a durable worker_stop_requested flag
+	// that only the kick gate clears, so a direct worker-run spawn would permanently
+	// freeze automatic distillation after the first OpenCode close.
+	if strings.Contains(src, `spawnWitness(["worker-run", "--auto"])`) {
+		t.Fatalf("installed plugin must not spawn worker-run directly (bypasses the stop-flag clear): %s", src)
 	}
 	if !strings.Contains(src, `type === "session.idle"`) || !strings.Contains(src, `type === "session.status"`) || !strings.Contains(src, `status?.type === "idle"`) {
 		t.Fatalf("installed plugin should sync from idle events: %s", src)
 	}
-	if !strings.Contains(src, `const sessionWaiters = new Map()`) || !strings.Contains(src, `const batchWaiters = claimWaiters(coveredSessions)`) || !strings.Contains(src, `const modernIdleWaiters = new Map()`) {
+	if !strings.Contains(src, `const sessionWaiters = new Map()`) || !strings.Contains(src, `const batchWaiters = claimWaiters(coveredSessions)`) || !strings.Contains(src, `const idleCycles = new Map()`) {
 		t.Fatalf("installed plugin should wait for and deduplicate idle imports: %s", src)
 	}
 	if !strings.Contains(src, `const IMPORT_GRACE_MS = 5000`) || !strings.Contains(src, `let disposing = false`) || !strings.Contains(src, `waitForIdle()`) {
 		t.Fatalf("installed plugin should drain imports gracefully before disposal: %s", src)
+	}
+	if !strings.Contains(src, `spawnWitness(["worker", "stop", "--auto-only"])`) {
+		t.Fatalf("installed plugin should stop only auto workers on disposal: %s", src)
 	}
 }
 

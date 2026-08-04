@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -184,5 +185,81 @@ func TestWorkerMinesAgainstFakeQueue(t *testing.T) {
 	// The miner saw the whole session as one transcript (default chunk policy = whole).
 	if len(miner.inputs) != 1 {
 		t.Fatalf("miner inputs = %d, want 1 (whole-session default policy)", len(miner.inputs))
+	}
+}
+
+func TestCommitMiningFinalizesNativeForksOnlyForCurrentGeneration(t *testing.T) {
+	q := newFakeQueue()
+	q.rawHigh["current"] = 7
+	q.rawHigh["stale"] = 9
+	w := &Worker{Store: q}
+	finalized := 0
+	native := func(session string) *platform.NativeSession {
+		n := &platform.NativeSession{Session: session, RawHigh: 7, Total: 1, Lens: "default", Input: "chunk"}
+		n.SetFinalizer(func() error {
+			finalized++
+			return nil
+		})
+		return n
+	}
+	result := func(session string) *SessionMining {
+		return &SessionMining{
+			Session:   session,
+			Total:     1,
+			RawHighID: 7,
+			Lenses: []LensMining{{
+				Lens:   "default",
+				Native: []*platform.NativeSession{native(session)},
+			}},
+		}
+	}
+	var existing []store.Observation
+	if err := w.CommitMining(result("current"), &existing); err != nil {
+		t.Fatal(err)
+	}
+	if finalized != 1 {
+		t.Fatalf("current generation finalizers=%d, want 1", finalized)
+	}
+	if err := w.CommitMining(result("stale"), &existing); err != nil {
+		t.Fatal(err)
+	}
+	if finalized != 1 {
+		t.Fatalf("stale generation finalized retained fork: %d", finalized)
+	}
+}
+
+func TestMineSessionPassesCapturedTranscriptDigestToNativeRunner(t *testing.T) {
+	q := newFakeQueue()
+	const session = "opencode:native"
+	q.platform[session] = platform.AgentOpenCode
+	q.rawHigh[session] = 2
+	q.raw[session] = []store.RawRecord{
+		{Session: session, Seq: 0, Role: "user", Text: "hello"},
+		{Session: session, Seq: 1, Role: "assistant", Text: "answer"},
+	}
+	want := platform.TranscriptDigest([]platform.TranscriptEntry{{Role: "user", Text: "hello"}, {Role: "assistant", Text: "answer"}})
+	seen := ""
+	w := &Worker{
+		Store:    q,
+		Embedder: fakeEmbedder{},
+		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Config:   store.Config{},
+		NativeFor: func(*lens.Lens) bool {
+			return true
+		},
+		Run: func(ctx context.Context, _, _, _ string) (string, error) {
+			native := platform.NativeSessionFromContext(ctx)
+			if native == nil {
+				t.Fatal("native context missing")
+			}
+			seen = native.Digest
+			return "[]", nil
+		},
+	}
+	if _, err := w.MineSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if seen != want {
+		t.Fatalf("native digest=%s, want %s", seen, want)
 	}
 }

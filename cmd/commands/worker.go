@@ -88,6 +88,10 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	}
 	defer st.Close()
 	defer setupLogging(st)()
+	cfg := st.LoadConfig()
+	if auto && !cfg.AutoDistill {
+		return false, nil
+	}
 
 	unlock, ok := st.WorkerLock()
 	if !ok {
@@ -129,7 +133,6 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		defer scheduleRetryWakeup(st)
 	}
 
-	cfg := st.LoadConfig()
 	// Resolve the effective default runner ONCE and overwrite cfg.Runner: it is the runtime
 	// a lens with no explicit `# runner` rides, and the target the per-lens router
 	// (distill.RunnerFor) compares against. This is what lets an npm OpenCode user — who
@@ -226,7 +229,8 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	stopRequested := func() bool { return st.MetaString("worker_stop_requested") == "1" }
 
 	// Lazily build the parallel-mining worker the first time there is mining to do;
-	// the embedder (~448MB) loads once and is shared across drain passes. nil if the
+	// the embedder loads once and is shared across drain passes (its parsed weights
+	// and execution state can expand well beyond the ~448MB asset). nil if the
 	// model isn't ready (review-only work can still proceed).
 	var miner *distill.Worker
 	attempted := map[string]bool{}
@@ -253,7 +257,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 				slog.Error("embedder", "err", err) // can't mine this run; review may still run
 				return nil
 			}
-			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens}
+			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens, NativeFor: rs.NativeFor}
 		}
 		return miner
 	}

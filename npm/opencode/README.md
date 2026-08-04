@@ -52,6 +52,12 @@ npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
 npm exec --yes --package=@witness-ai/opencode@beta -- witness distill status
 ```
 
+> **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is
+> `witness-distill` when distillation was interrupted. Current releases no longer create or filter
+> those sessions in OpenCode's user database. Before the first import after upgrading, remove any
+> leftover `witness-distill` sessions with OpenCode's supported session-management tools so they are
+> not captured as normal archive data.
+
 By default the model is downloaded from Hugging Face. A custom `WITNESS_MODEL_BASE_URL` must serve the same paths (`onnx/model.onnx` and `tokenizer.json`) and also set `WITNESS_MODEL_SHA256` plus `WITNESS_TOKENIZER_SHA256`.
 
 Automatic distillation is batched by default: sessions are reconciled on startup and idle, while model work starts at most once every 10 minutes, drains the current queue, then exits so the embed model is not resident. Edit witness `config.toml` if you want manual-only behavior:

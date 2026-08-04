@@ -187,32 +187,6 @@ func TestImporterRebuildsWhenImportedTextChanges(t *testing.T) {
 	}
 }
 
-func TestImporterSkipsWitnessDistillSessions(t *testing.T) {
-	dbPath := seedOpenCodeDB(t)
-	mutateOpenCodeDB(t, dbPath, `UPDATE session SET title = 'witness-distill' WHERE id = 'ses_test';`)
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	stats, err := (&Importer{Store: st, DBPath: dbPath}).Import(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.Records != 0 || stats.Sessions != 0 {
-		t.Fatalf("witness-distill session should be skipped, stats = %+v", stats)
-	}
-	raw, err := st.ReadRaw(SessionPrefix + "ses_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(raw) != 0 {
-		t.Fatalf("witness-distill raw should be empty, got %d", len(raw))
-	}
-}
-
 func seedOpenCodeDB(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "opencode.db")
@@ -284,5 +258,82 @@ func mutateOpenCodeDB(t *testing.T, path, stmt string) {
 	defer db.Close()
 	if _, err := db.Exec(stmt); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Leftover scratch sessions from the PRE-isolation design (labeled witness-distill in
+// the user's own OpenCode DB) must never be imported: witness would ingest its own
+// distillation chatter as if it were the user coding. #119 removed the old skip because
+// nothing writes that label any more — but an archive that ran the old version and was
+// killed mid-distill can still have such rows today, so the READ-side skip has to stay.
+// The user's DB is read-only to witness, so we skip rather than delete.
+//
+// Also locks the NULL-safety trap the old implementation documented: the predicate must
+// be `IS NOT`, never `NOT (col = ?)`. Under three-valued logic a NULL agent makes
+// `agent = ?` NULL and `NOT NULL` falsy, which would silently drop every genuine session
+// whose agent is NULL (all sessions predating OpenCode's ADD COLUMN) — real capture loss.
+func TestImportSkipsLegacyWitnessDistillSessions(t *testing.T) {
+	for _, tc := range []struct{ name, extraCol, agentVal string }{
+		{"agent column", `, agent text`, `'witness-distill'`},
+		{"title fallback (older schema)", ``, ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "opencode.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			schema := `CREATE TABLE session (id text PRIMARY KEY, directory text NOT NULL, title text NOT NULL,
+				time_created integer NOT NULL, time_updated integer NOT NULL` + tc.extraCol + `);
+				CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL,
+				time_updated integer NOT NULL, data text NOT NULL);
+				CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL,
+				time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);`
+			if _, err := db.Exec(schema); err != nil {
+				t.Fatal(err)
+			}
+			if tc.extraCol != "" {
+				// A real user session with a NULL agent (predates ADD COLUMN) must SURVIVE.
+				if _, err := db.Exec(`INSERT INTO session VALUES ('ses_real','/repo','real work',1000,5000,NULL)`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO session VALUES ('ses_scratch','/repo','anything',1000,5000,` + tc.agentVal + `)`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := db.Exec(`INSERT INTO session VALUES ('ses_real','/repo','real work',1000,5000)`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO session VALUES ('ses_scratch','/repo','witness-distill',1000,5000)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			db.Close()
+
+			ro, err := sql.Open("sqlite", sqliteURI(path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ro.Close()
+			im := &Importer{Store: newFakeImportStore()}
+
+			// Unfiltered listing (no ids): scratch skipped, real session kept.
+			got, err := im.sessions(context.Background(), ro, nil)
+			if err != nil {
+				t.Fatalf("sessions: %v", err)
+			}
+			if len(got) != 1 || got[0].ID != "ses_real" {
+				t.Fatalf("want only ses_real (NULL-agent real session must survive, scratch skipped), got %+v", got)
+			}
+
+			// Even asked for BY NAME, a legacy scratch session must not be importable.
+			got, err = im.sessions(context.Background(), ro, []string{"ses_scratch"})
+			if err != nil {
+				t.Fatalf("sessions by id: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("explicitly named scratch session must still be skipped, got %+v", got)
+			}
+		})
 	}
 }

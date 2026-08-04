@@ -4,6 +4,8 @@ VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo d
 COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILDTIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS    := -X github.com/IngTian/witness/cmd/commands.version=$(VERSION) -X github.com/IngTian/witness/cmd/commands.commit=$(COMMIT) -X github.com/IngTian/witness/cmd/commands.buildTime=$(BUILDTIME)
+TEST_GOMAXPROCS ?= 2
+TEST_GOMEMLIMIT ?= 1GiB
 
 .PHONY: build build-all build-npm-platforms package-windows npm-opencode-package fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
 
@@ -78,9 +80,9 @@ doctor: build
 
 ## test / vet / fmt
 test:
-	CGO_ENABLED=0 go test ./...
+	CGO_ENABLED=0 WITNESS_DISABLE_EXTERNAL_RUNNERS=1 GOMAXPROCS=$(TEST_GOMAXPROCS) GOMEMLIMIT=$(TEST_GOMEMLIMIT) go test -p 1 -parallel 1 ./...
 vet:
-	CGO_ENABLED=0 go vet ./...
+	CGO_ENABLED=0 GOMAXPROCS=$(TEST_GOMAXPROCS) GOMEMLIMIT=$(TEST_GOMEMLIMIT) go vet -p 1 ./...
 fmt:
 	gofmt -w internal cmd
 

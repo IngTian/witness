@@ -57,12 +57,8 @@ func forceReview(st *store.Store) (bool, error) { return forceReviewOpts(st, fal
 
 // forceReviewOpts is forceReview with an optional S3 emergent long-arc pass (full=true).
 func forceReviewOpts(st *store.Store, full bool) (bool, error) {
-	// Hold the SAME single-consumer lock the worker uses. A runner's Close() runs the
-	// OpenCode self-traffic cleanup sweep (agent='witness-distill' AND time_created <
-	// now+1s), which is process-global; without this lock a foreground `review`
-	// overlapping a background worker's mid-drain `opencode serve` could delete the
-	// worker's live in-flight distill session and fail its mine. The lock makes
-	// runner + sweep single-flight, which is what the +1s window assumes.
+	// Hold the same single-consumer lock the worker uses so foreground review and a
+	// background drain cannot race facet/profile commits or open duplicate runner sets.
 	unlock, ok := st.WorkerLock()
 	if !ok {
 		return false, nil
@@ -76,10 +72,8 @@ func forceReviewOpts(st *store.Store, full bool) (bool, error) {
 		return false, err
 	}
 	ctx := context.Background()
-	// Same runner lifecycle as the worker: open the SET of runtimes the active lenses need
-	// (issue #75 slice 2), review through the per-lens resolver, Close all after. Close runs
-	// each OpenCode runner's self-traffic cleanup sweep — held under WorkerLock above so it
-	// can't delete a concurrent worker's live distill session.
+	// Same runner lifecycle as the worker: open the set of runtimes the active lenses
+	// need, review through the per-lens resolver, then close each private runtime.
 	rs, err := newRunnerSet(ctx, st, cfg, lenses)
 	if err != nil {
 		return false, err

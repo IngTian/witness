@@ -89,6 +89,7 @@ The profile is collect-only and pull-only: witness never injects content into se
 		newInternalSessionStartCmd(),
 		newInternalSessionEndCmd(),
 		newInternalWorkerCmd(),
+		newInternalWorkerKickCmd(),
 		newInternalWorkerWakeupCmd(),
 		newInternalMCPCmd(),
 	)

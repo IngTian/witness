@@ -337,6 +337,12 @@ npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
 npm exec --yes --package=@witness-ai/opencode@beta -- witness distill status
 ```
 
+> **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is
+> `witness-distill` when distillation was interrupted. Current releases no longer create or filter
+> those sessions in OpenCode's user database. Before the first import after upgrading, remove any
+> leftover `witness-distill` sessions with OpenCode's supported session-management tools so they are
+> not captured as normal archive data.
+
 The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and prompts before publishing:
 
 ```sh

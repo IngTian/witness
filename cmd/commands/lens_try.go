@@ -79,6 +79,8 @@ type lensTryOpts struct {
 	asJSON      bool
 }
 
+var runnerForStore = platform.RunnerFor
+
 // --- JSON output shape (stable, for diffing v1-vs-v2 prompt runs) -------------
 
 type lensTryObsJSON struct {
@@ -208,24 +210,18 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 
 	ctx := context.Background()
 
-	// Mint the runner WITHOUT opening it yet. For a sweeping runner (OpenCode) the
-	// WorkerLock MUST be taken between minting and Open: if we Opened first (starting the
-	// server) and then bailed on a failed lock, the deferred Close()'s +1s sweep could
-	// delete a live worker's in-flight distill session — the exact hazard the lock guards.
-	// So the mint→lock→Open sequence is inlined here (a mint+Open helper would leave no
-	// seam for the pre-Open lock decision on a sweeping runner).
-	runner, err := platform.RunnerFor(st, cfg)
+	// Mint without opening so a process-global sweeping runner can acquire the
+	// worker lock before any subprocess starts.
+	runner, err := runnerForStore(st, cfg)
 	if err != nil {
 		return err
 	}
 	if platform.RunnerSweepsOnClose(runner) {
 		unlock, ok := st.WorkerLock()
 		if !ok {
-			return fmt.Errorf("`lens try` needs exclusive access on the %q runner (its shutdown sweep "+
-				"would disrupt a running worker); a witness worker is draining now — retry once it is idle", cfg.Runner)
+			return fmt.Errorf("`lens try` needs exclusive access on the %q runner; a witness worker is draining now — retry once it is idle", cfg.Runner)
 		}
-		// Registered BEFORE runner.Close below: LIFO runs Close (its sweep) while the lock
-		// is still held, THEN unlock — so the sweep never fires outside the lock.
+		// Registered before runner.Close below: LIFO closes the subprocess first.
 		defer unlock()
 	}
 	if err := runner.Open(ctx); err != nil {

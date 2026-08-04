@@ -15,6 +15,7 @@ func newImportCmd() *cobra.Command {
 	var sessions []string
 	var quiet bool
 	var auto bool
+	var noKick bool
 	c := &cobra.Command{
 		Use:    "import --agent <claude|opencode>",
 		Short:  "Import agent session data and kick background distillation.",
@@ -32,6 +33,9 @@ func newImportCmd() *cobra.Command {
 			if auto {
 				args = append(args, "--auto")
 			}
+			if noKick {
+				args = append(args, "--no-kick")
+			}
 			return cmdImport(args)
 		},
 	}
@@ -40,6 +44,8 @@ func newImportCmd() *cobra.Command {
 	c.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
 	c.Flags().BoolVar(&auto, "auto", false, "use the automatic worker gate (only start if auto_distill is on and no worker is running)")
 	_ = c.Flags().MarkHidden("auto")
+	c.Flags().BoolVar(&noKick, "no-kick", false, "import L0 without starting a worker")
+	_ = c.Flags().MarkHidden("no-kick")
 	return c
 }
 
@@ -48,6 +54,7 @@ func cmdImport(args []string) error {
 	var sessions []string
 	quiet := false
 	auto := false
+	noKick := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--agent":
@@ -60,6 +67,8 @@ func cmdImport(args []string) error {
 			quiet = true
 		case "--auto":
 			auto = true
+		case "--no-kick":
+			noKick = true
 		case "--session":
 			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
 				return fmt.Errorf("--session requires a value")
@@ -67,13 +76,13 @@ func cmdImport(args []string) error {
 			sessions = append(sessions, strings.TrimSpace(args[i+1]))
 			i++
 		default:
-			return fmt.Errorf("usage: witness import --agent <claude|opencode> [--session <id>]... [--quiet] [--auto]")
+			return fmt.Errorf("usage: witness import --agent <claude|opencode> [--session <id>]... [--quiet] [--auto] [--no-kick]")
 		}
 	}
 	if agent == "" {
-		return fmt.Errorf("usage: witness import --agent <claude|opencode> [--session <id>]... [--quiet] [--auto]")
+		return fmt.Errorf("usage: witness import --agent <claude|opencode> [--session <id>]... [--quiet] [--auto] [--no-kick]")
 	}
-	stats, kicked, err := runImport(agent, sessions, true, auto)
+	stats, kicked, err := runImport(agent, sessions, !noKick, auto)
 	if err != nil {
 		return err
 	}
@@ -87,6 +96,8 @@ func cmdImport(args []string) error {
 	}
 	return nil
 }
+
+var importWorkerSpawner = func() { spawnDetached("worker-run") }
 
 func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platform.ImportStats, bool, error) {
 	st, err := store.Open()
@@ -115,7 +126,7 @@ func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platfo
 		if auto {
 			return stats, maybeSpawnAutoWorker(st), nil
 		}
-		spawnDetached("worker-run")
+		importWorkerSpawner()
 		return stats, true, nil
 	}
 	return stats, false, nil

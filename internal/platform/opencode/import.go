@@ -137,34 +137,69 @@ func sqliteURI(path string) string {
 	return u.String()
 }
 
-func (im *Importer) sessions(ctx context.Context, db *sql.DB, ids []string) ([]sessionRow, error) {
-	// Exclude witness's OWN distill sessions via the NULL-safe negation of the shared
-	// self-traffic predicate (same authoritative column cleanup DELETEs by, so read
-	// and delete never disagree). Agent-authoritative: fixes the old title-only
-	// filter that OpenCode's auto-titler could defeat by renaming a witness-distill
-	// session. selfTrafficExclude uses `IS NOT` (not `NOT (...=...)`) so a NULL agent
-	// — every pre-agent-column user session after ADD COLUMN — is correctly kept, not
-	// silently dropped by SQL three-valued logic. Older schemas fall back to title.
-	notSelf, selfArgs := selfTrafficExclude(sessionHasAgentColumn(ctx, db))
+// legacyMarkerName is the label the PRE-isolation design stamped on the scratch
+// sessions witness created inside the user's own OpenCode database. Nothing writes it
+// any more — distillation now runs against a private database and never touches the
+// user's — but an archive that ran the old version and was killed mid-distill can still
+// have such rows sitting in the user's DB today.
+//
+// They must never be imported: witness would ingest its own distillation chatter as if
+// it were the user coding, quietly polluting the growth profile with self-talk. Since
+// the user's DB is opened READ-ONLY (the invariant this package exists to hold), the fix
+// is to SKIP them, not delete them — a leftover row stays visible in OpenCode's own
+// session list, where the user can remove it with their own tool if they wish.
+const legacyMarkerName = "witness-distill"
 
+// excludeLegacyScratch returns the predicate that skips leftover pre-isolation scratch
+// sessions, keyed on the `agent` column when the running OpenCode has one and falling
+// back to `title` for older schemas.
+//
+// It uses `IS NOT`, never `NOT (col = ?)`: under SQL's three-valued logic a NULL agent
+// makes `agent = ?` NULL and `NOT NULL` falsy, which would SILENTLY DROP every genuine
+// user session whose agent is NULL — sessions predating OpenCode's ADD COLUMN carry
+// exactly that, so the naive negation would lose real capture data on the first full
+// backfill. SQLite's `IS NOT` compares NULL-safely, so a NULL agent correctly reads as
+// "not witness's own" and is imported.
+func excludeLegacyScratch(hasAgent bool) (clause string, arg any) {
+	if hasAgent {
+		return `agent IS NOT ?`, legacyMarkerName
+	}
+	return `title IS NOT ?`, legacyMarkerName
+}
+
+// sessionHasAgentColumn reports whether the running OpenCode's session table carries an
+// `agent` column, so the skip predicate keys on the authoritative one. Agent is
+// preferred because OpenCode's auto-titler can rewrite a session's title after the fact,
+// whereas the agent is set at creation and never rewritten.
+func sessionHasAgentColumn(ctx context.Context, db *sql.DB) bool {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('session') WHERE name = 'agent'`).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
+func (im *Importer) sessions(ctx context.Context, db *sql.DB, ids []string) ([]sessionRow, error) {
 	const cols = `SELECT id, directory, title, time_created, time_updated FROM session`
+	skip, marker := excludeLegacyScratch(sessionHasAgentColumn(ctx, db))
 	if len(ids) > 0 {
 		placeholders := make([]string, len(ids))
-		args := make([]any, 0, len(ids)+len(selfArgs))
+		args := make([]any, 0, len(ids)+1)
 		for i, id := range ids {
 			placeholders[i] = "?"
 			args = append(args, strings.TrimPrefix(id, SessionPrefix))
 		}
-		args = append(args, selfArgs...)
-		q := cols + ` WHERE id IN (` + strings.Join(placeholders, ",") + `) AND ` + notSelf + ` ORDER BY time_updated`
-		return scanSessions(ctx, db, q, args...)
+		// The skip applies even to an explicitly named id: a caller asking for a legacy
+		// scratch session by name still must not get witness's own output into L0.
+		q := cols + ` WHERE id IN (` + strings.Join(placeholders, ",") + `) AND ` + skip + ` ORDER BY time_updated`
+		return scanSessions(ctx, db, q, append(args, marker)...)
 	}
 	last, _ := strconv.ParseInt(strings.TrimSpace(im.Store.MetaString(syncMetaKey)), 10, 64)
 	if last > 0 {
-		args := append([]any{last}, selfArgs...)
-		return scanSessions(ctx, db, cols+` WHERE time_updated >= ? AND `+notSelf+` ORDER BY time_updated`, args...)
+		return scanSessions(ctx, db, cols+` WHERE time_updated >= ? AND `+skip+` ORDER BY time_updated`, last, marker)
 	}
-	return scanSessions(ctx, db, cols+` WHERE `+notSelf+` ORDER BY time_updated`, selfArgs...)
+	return scanSessions(ctx, db, cols+` WHERE `+skip+` ORDER BY time_updated`, marker)
 }
 
 func scanSessions(ctx context.Context, db *sql.DB, q string, args ...any) ([]sessionRow, error) {

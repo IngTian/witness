@@ -23,6 +23,10 @@ const (
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
 // keys are ignored; missing file = all defaults.
 type Config struct {
+	// RuntimeRoot is witness-owned, non-user-configurable runtime state. It is
+	// deliberately populated from Store.Root, not config.toml: OpenCode must never
+	// create distillation state in the user's database.
+	RuntimeRoot     string
 	Runner          string // "claude" (default) or "opencode" for headless distillation calls
 	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
 	DistillModel    string // model for the reviewer ("" = claude -p default)
@@ -58,10 +62,8 @@ type Config struct {
 }
 
 // DefaultMineConcurrency is the default cap on sessions mined in parallel per
-// drain when mine_concurrency is unset. Chosen for a laptop: the embedder loads
-// once and is shared (~1.5GB), each concurrent `claude -p` adds ~0.35GB, so 4
-// peaks around 2.9GB. The engine additionally clamps to GOMAXPROCS and to 1 for a
-// runner that is not ConcurrentRunSafe.
+// drain when mine_concurrency is unset. The embedder is loaded once and shared;
+// runner generation may proceed concurrently when the runner declares it safe.
 const DefaultMineConcurrency = 4
 
 // DefaultReviewMaxChars is the default review-fold window budget (issue #123): the max
@@ -116,6 +118,7 @@ func DefaultConfig() Config {
 // LoadConfig reads config.toml if present, layering over defaults.
 func (c *configFile) LoadConfig() Config {
 	cfg := DefaultConfig()
+	cfg.RuntimeRoot = filepath.Join(c.root, "runtime")
 	data, err := os.ReadFile(c.configPath())
 	if err != nil {
 		return cfg

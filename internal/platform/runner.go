@@ -2,10 +2,70 @@ package platform
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
+	"sync"
 
 	"github.com/IngTian/witness/internal/store"
 )
+
+const DisableExternalRunnersEnv = "WITNESS_DISABLE_EXTERNAL_RUNNERS"
+
+func ExternalRunnersDisabled() bool { return os.Getenv(DisableExternalRunnersEnv) == "1" }
+
+// NativeSession identifies one OpenCode-owned L0 input. Runners that support
+// native isolation use it to retain an isolated fork until its L1 commit succeeds.
+// Other runners ignore it. The finalizer is set by the runner and called only by
+// distill after the generation CAS succeeds.
+type NativeSession struct {
+	Session  string
+	RawHigh  int64
+	Total    int
+	Lens     string
+	Input    string
+	Digest   string
+	mu       sync.Mutex
+	finalize func() error
+}
+
+type TranscriptEntry struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
+func TranscriptDigest(entries []TranscriptEntry) string {
+	b, _ := json.Marshal(entries)
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// NativeSessionSupport is implemented only by runners that understand the
+// retained OpenCode-fork protocol.
+type NativeSessionSupport interface{ SupportsNativeSession() bool }
+
+type nativeSessionKey struct{}
+
+func WithNativeSession(ctx context.Context, n *NativeSession) context.Context {
+	return context.WithValue(ctx, nativeSessionKey{}, n)
+}
+
+func NativeSessionFromContext(ctx context.Context) *NativeSession {
+	n, _ := ctx.Value(nativeSessionKey{}).(*NativeSession)
+	return n
+}
+
+func (n *NativeSession) SetFinalizer(f func() error) { n.mu.Lock(); n.finalize = f; n.mu.Unlock() }
+func (n *NativeSession) Finalize() error {
+	n.mu.Lock()
+	f := n.finalize
+	n.mu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f()
+}
 
 // Runner is the default distillation-engine lifecycle: one engine drains every
 // pending session regardless of which platform produced it. It is the whole of
@@ -14,16 +74,15 @@ import (
 // This is the axis resolved by RunnerFor (by cfg.Runner), the counterpart to
 // ForSession (the per-session owning platform).
 type Runner interface {
-	// Open acquires whatever the engine needs to serve Run (OpenCode: a pre-cleanup
-	// sweep + `opencode serve`; Claude: nothing). Callers may skip Open when there is
+	// Open acquires whatever the engine needs to serve Run (OpenCode: a private
+	// isolated `opencode serve`; Claude: nothing). Callers may skip Open when there is
 	// no work; Close must tolerate an unopened runner.
 	Open(ctx context.Context) error
 	// Run performs one mining/review/summarize pass. systemPrompt is witness's own
 	// instruction; input is the corpus being analyzed — the platform fences it with
 	// WrapCorpus so it cannot impersonate instructions.
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
-	// Close releases engine resources and, for a session-persisting engine, sweeps
-	// witness's own distill sessions so they are never re-ingested as user sessions.
+	// Close releases engine resources.
 	Close() error
 	// ValidateModels reports whether the configured models are usable by this engine
 	// (feeds `witness doctor`). Claude is a no-op; OpenCode checks its model list.
@@ -52,10 +111,8 @@ type RunnerProvider interface {
 // SweepsOnCloser is the OPTIONAL capability of a Runner whose Open/Close runs a
 // PROCESS-GLOBAL cleanup sweep — one that reaches beyond this runner's own work and
 // can disturb a concurrently-running witness worker. The OpenCode runner implements
-// it (true): its Close() calls cleanupDistillSessions, deleting witness-distill
-// sessions from the shared OpenCode DB, which would delete a background worker's
-// in-flight distill session. The Claude runner does NOT implement it (each Run is an
-// isolated `claude -p` process; Close is a no-op).
+// it. Current built-in runners do not sweep process-global state: OpenCode writes
+// only its private runtime and Claude has no persistent runtime state.
 //
 // This is a SEPARATE axis from ConcurrentRunSafe: that says "can the engine call Run
 // on THIS runner concurrently" (true for both today); SweepsOnClose says "does
