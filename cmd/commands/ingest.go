@@ -69,6 +69,26 @@ func recordKey(id, text string) string {
 	return "h:" + fmt.Sprintf("%x", h[:16])
 }
 
+// idFromRecordKey is the inverse of recordKey: it recovers the caller's id from a stored
+// dedup key. It splits at the LAST colon because recordKey APPENDS the hash, so the hash
+// is the final segment and the id may itself contain colons. Splitting at the FIRST colon
+// truncated any such id (a URL -> "https", "arxiv:2301.12345" -> "arxiv", an ISO
+// timestamp -> "2026-08-04T12"), which made the dedup lookup miss and re-append the
+// record on EVERY ingest — unbounded L0 growth for exactly the id shapes a document feed
+// uses. ok is false for the hash-only "h:<hash>" fallback (no stable id to merge on) and
+// for a malformed key.
+func idFromRecordKey(key string) (string, bool) {
+	colon := strings.LastIndexByte(key, ':')
+	if colon <= 0 {
+		return "", false
+	}
+	id := key[:colon]
+	if id == "h" {
+		return "", false
+	}
+	return id, true
+}
+
 // groupSessions turns parsed records into per-session L0 batches. A record's `session`
 // groups it; an empty `session` makes the record its own session (id-derived, else
 // hash-derived). Every RawRecord gets a non-empty ts (record ts, else now), a role
@@ -207,15 +227,21 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 		key string
 	})
 	for i, key := range oldKeys {
-		// Extract id from key (format: "id:hash" or "h:hash" for no-id fallback).
-		// We skip "h:" keys (hash-only, no stable id) for the id-based merge.
-		if colon := strings.IndexByte(key, ':'); colon > 0 && key[:colon] != "h" {
-			id := key[:colon]
-			oldKeyByID[id] = struct {
-				idx int
-				key string
-			}{i, key}
+		// Extract the id from the key (recordKey builds "<id>:<hash>", or "h:<hash>" for
+		// the no-id fallback). Split at the LAST colon, because recordKey appends the hash
+		// — so the hash is the final segment and the id may itself contain colons. Using
+		// the FIRST colon truncated any id with one (a URL -> "https", "arxiv:2301.12345"
+		// -> "arxiv", an ISO timestamp -> "2026-08-04T12"), so the dedup lookup missed and
+		// the record was re-appended on EVERY ingest — unbounded L0 growth for exactly the
+		// id shapes a document/paper feed uses.
+		id, ok := idFromRecordKey(key)
+		if !ok {
+			continue
 		}
+		oldKeyByID[id] = struct {
+			idx int
+			key string
+		}{i, key}
 	}
 
 	// Partition incoming records: skip (identical key), update (same id, changed key), append (new id).
