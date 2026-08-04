@@ -612,3 +612,83 @@ func TestNativeReconcileReapsGenerationSupersededByNewerRaw(t *testing.T) {
 		t.Fatal("current uncommitted generation must be retained")
 	}
 }
+
+// A retained manifest must not replay a stale reply after the REQUEST changes. The
+// manifest is a crash-resume cache keyed by identity, and `lens backfill --fresh` clears
+// only DB state — it cannot see the manifest directory. So if the key ignored the prompt
+// and model, editing a lens prompt (or switching triage_model) and re-backfilling would
+// short-circuit on the OLD model's answer and write it into L1 as if it were fresh.
+func TestNativeManifestKeyCoversModelAndPrompt(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("WITNESS_OPENCODE_DB", writeFakeSourceDB(t, filepath.Join(t.TempDir(), "source.db")))
+	oldCommand := nativeCommand
+	nativeCommand = func(context.Context, []string, ...string) ([]byte, error) {
+		return []byte(`{"info":{},"messages":[]}`), nil
+	}
+	defer func() { nativeCommand = oldCommand }()
+	oldPoll := openCodeAsyncPollInterval
+	openCodeAsyncPollInterval = time.Millisecond
+	defer func() { openCodeAsyncPollInterval = oldPoll }()
+
+	var prompts int
+	var replies sync.Map
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/fork"):
+			_, _ = fmt.Fprintf(w, `{"id":"fork_%d"}`, prompts+1)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/prompt_async"):
+			var body struct{ MessageID string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			prompts++
+			replies.Store(strings.Split(r.URL.Path, "/")[2], body.MessageID)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/message"):
+			id, ok := replies.Load(strings.Split(r.URL.Path, "/")[2])
+			if !ok {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = fmt.Fprintf(w, `[
+				{"info":{"id":%q,"role":"user"},"parts":[{"type":"text","text":"request"}]},
+				{"info":{"id":"reply","role":"assistant"},"parts":[{"type":"text","text":"[]"}]}
+			]`, id)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	n := newNativeRuntime(root, &OpenCodeServer{baseURL: ts.URL, client: ts.Client()})
+	session := func() *platform.NativeSession {
+		return &platform.NativeSession{Session: "opencode:s", RawHigh: 7, Total: 1, Lens: "l", Input: "0:chunk"}
+	}
+
+	if _, err := n.run(context.Background(), session(), "prov/modelA", "promptA", "I"); err != nil {
+		t.Fatal(err)
+	}
+	if prompts != 1 {
+		t.Fatalf("first run should generate once, got %d", prompts)
+	}
+	// Same request → resume from the manifest, no new generation.
+	if _, err := n.run(context.Background(), session(), "prov/modelA", "promptA", "I"); err != nil {
+		t.Fatal(err)
+	}
+	if prompts != 1 {
+		t.Fatalf("identical request must reuse the retained reply, got %d generations", prompts)
+	}
+	// Changed PROMPT → must re-generate, not replay.
+	if _, err := n.run(context.Background(), session(), "prov/modelA", "promptB", "I"); err != nil {
+		t.Fatal(err)
+	}
+	if prompts != 2 {
+		t.Fatalf("a changed prompt must re-generate (stale reply replayed?), got %d generations", prompts)
+	}
+	// Changed MODEL → must re-generate too.
+	if _, err := n.run(context.Background(), session(), "prov/modelB", "promptB", "I"); err != nil {
+		t.Fatal(err)
+	}
+	if prompts != 3 {
+		t.Fatalf("a changed model must re-generate (stale reply replayed?), got %d generations", prompts)
+	}
+}

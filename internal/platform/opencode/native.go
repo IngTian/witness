@@ -41,8 +41,20 @@ func newNativeRuntime(root string, server *OpenCodeServer) *nativeRuntime {
 	return &nativeRuntime{root: root, server: server}
 }
 func (n *nativeRuntime) dir() string { return filepath.Join(n.root, "opencode-native") }
-func (n *nativeRuntime) path(w *platform.NativeSession) string {
-	h := sha256.Sum256([]byte(w.Session + "\x00" + fmt.Sprint(w.RawHigh) + "\x00" + w.Lens + "\x00" + w.Input))
+
+// path is the manifest key: the identity of one retained generation.
+//
+// It covers the REQUEST as well as the input, because run() short-circuits on a cached
+// Reply without re-prompting. Keying on (session, rawHigh, lens, input) alone would make
+// the manifest a second, invisible cache of derived state that survives `lens backfill
+// --fresh` (which clears only DB state — DeleteLensData + ResetLensWatermark — and cannot
+// see this directory): editing a lens prompt or switching triage_model and re-backfilling
+// would replay the OLD model's answer into L1 as if it were fresh. Folding model+prompt
+// into the key means a changed request simply misses the cache and re-generates, while an
+// interrupted identical request still resumes.
+func (n *nativeRuntime) path(w *platform.NativeSession, model, prompt string) string {
+	h := sha256.Sum256([]byte(w.Session + "\x00" + fmt.Sprint(w.RawHigh) + "\x00" + w.Lens + "\x00" + w.Input +
+		"\x00" + model + "\x00" + prompt))
 	return filepath.Join(n.dir(), fmt.Sprintf("%x.json", h[:]))
 }
 func (n *nativeRuntime) snapshot(p string) string {
@@ -87,7 +99,7 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 	if err := os.MkdirAll(n.dir(), 0o700); err != nil {
 		return "", err
 	}
-	p := n.path(w)
+	p := n.path(w, model, prompt)
 	m, err := n.load(p)
 	if err != nil {
 		return "", err
