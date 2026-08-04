@@ -153,6 +153,15 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 			return "", err
 		}
 		m.Fork = id
+		// KNOWN LIMITATION (accepted, bounded): a kill in the two statements between fork()
+		// returning and this save leaves a fork in the ISOLATED db that no manifest names,
+		// so reconcile — which only knows m.Fork — can never reap it. The resume re-forks
+		// (m.Fork is still ""), so nothing is lost or double-committed; the cost is one
+		// stranded session per crash landing in that window, inside witness's own private
+		// database. Reaping it would need a session-LIST endpoint plus "delete every fork no
+		// manifest claims", which is more machinery (and more delete authority) than a
+		// leak of this size justifies. Saving BEFORE the fork cannot help: the id does not
+		// exist yet, so the manifest still would not name it.
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
