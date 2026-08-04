@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -40,9 +41,11 @@ func (r *runner) Open(ctx context.Context) error {
 	}
 	r.server = srv
 	r.native = newNativeRuntime(r.cfg.RuntimeRoot, srv)
+	// Reconcile is opportunistic CLEANUP of a previous run's crash residue, not a
+	// precondition for this one: failing Open on it would let one unreadable manifest
+	// block all OpenCode distillation. Log and proceed — the next Open retries.
 	if err := r.native.reconcile(); err != nil {
-		_ = srv.Close()
-		return err
+		slog.Warn("opencode: native reconcile incomplete; continuing", "err", err)
 	}
 	return nil
 }
@@ -52,6 +55,11 @@ func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (st
 		return "", errRunBeforeOpen
 	}
 	if n := platform.NativeSessionFromContext(ctx); n != nil {
+		// Same generation deadline the legacy path gets inside OpenCodeServer.Run: the
+		// native path bypasses that method, and the caller's ctx has no deadline, so
+		// without this wrap a stalled serve process polls forever holding WorkerLock.
+		ctx, cancel := context.WithTimeout(ctx, generateTimeout)
+		defer cancel()
 		return r.native.run(ctx, n, model, systemPrompt, input)
 	}
 	return r.server.Run(ctx, model, systemPrompt, input)
@@ -68,7 +76,9 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	return ValidateOpenCodeModels(ctx, models...)
+	// Pass the runtime root so the `opencode models` probe (which opens its DB
+	// read-write) hits the isolated database, never the user's.
+	return ValidateOpenCodeModelsIn(ctx, r.cfg.RuntimeRoot, models...)
 }
 
 func (*runner) InvocationHint() string { return "opencode serve" }

@@ -104,7 +104,11 @@ const plugin = async () => {
     quietTimer = setTimeout(() => {
       quietTimer = null
       if (disposed || disposing) return
-      spawnWitness(["worker-run", "--auto"])
+      // worker-kick, NOT `worker-run --auto`: dispose below runs `worker stop
+      // --auto-only`, which latches a durable worker_stop_requested flag that an auto
+      // worker refuses to run under. Only the shared kick gate clears it, so spawning
+      // worker-run directly would no-op forever after the first OpenCode close.
+      spawnWitness(["worker-kick"])
     }, QUIET_PERIOD_MS)
     quietTimer.unref?.()
   }

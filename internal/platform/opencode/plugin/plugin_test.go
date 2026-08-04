@@ -28,8 +28,14 @@ func TestBodyExportsDefaultPlugin(t *testing.T) {
 	if !strings.Contains(body, "const IMPORT_GRACE_MS = 5000") || !strings.Contains(body, "let disposing = false") || !strings.Contains(body, "waitForIdle()") {
 		t.Fatal("embedded plugin should drain imports gracefully before disposal")
 	}
-	if !strings.Contains(body, "const QUIET_PERIOD_MS = 5 * 60 * 1000") || !strings.Contains(body, "scheduleQuietWorker()") || !strings.Contains(body, `spawnWitness(["worker-run", "--auto"])`) || !strings.Contains(body, "clearQuietTimer()") {
+	if !strings.Contains(body, "const QUIET_PERIOD_MS = 5 * 60 * 1000") || !strings.Contains(body, "scheduleQuietWorker()") || !strings.Contains(body, `spawnWitness(["worker-kick"])`) || !strings.Contains(body, "clearQuietTimer()") {
 		t.Fatal("embedded plugin should start one auto worker after a resettable quiet period")
+	}
+	// Must go through worker-kick, NOT `worker-run --auto`: dispose latches a durable
+	// worker_stop_requested flag that only the kick gate clears, so spawning worker-run
+	// directly freezes automatic distillation permanently after the first OpenCode close.
+	if strings.Contains(body, `spawnWitness(["worker-run", "--auto"])`) {
+		t.Fatal("embedded plugin must not spawn worker-run directly; it bypasses the stop-flag clear and freezes auto-distill")
 	}
 	if !strings.Contains(body, `spawnWitness(["worker", "stop", "--auto-only"])`) {
 		t.Fatal("embedded plugin should stop only auto workers on disposal")

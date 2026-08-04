@@ -77,7 +77,7 @@ func StartOpenCodeServer(ctx context.Context, models ...string) (*OpenCodeServer
 
 // StartOpenCodeServerIn starts serve with a witness-owned OpenCode database.
 func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...string) (*OpenCodeServer, error) {
-	if err := ValidateOpenCodeModels(ctx, models...); err != nil {
+	if err := ValidateOpenCodeModelsIn(ctx, runtimeRoot, models...); err != nil {
 		return nil, err
 	}
 	if runtimeRoot != "" {
@@ -128,13 +128,21 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 	return srv, nil
 }
 
+// generateTimeout bounds ONE model generation through `opencode serve`. It is a
+// liveness backstop, not a quality knob: completion is observed by polling, and the
+// caller's ctx is signal-cancellable but has no deadline, so without this a stalled or
+// dead serve process would poll forever and pin the machine-wide WorkerLock until
+// someone sent a signal by hand. Every generation path must apply it — the legacy Run
+// below and the native retained-fork path (see runner.Run).
+const generateTimeout = 10 * time.Minute
+
 // Run sends one isolated distillation request through the shared OpenCode serve
 // process. It uses OpenCode's async prompt endpoint so the HTTP request that
 // starts generation never has to stay open for the full model latency; completion
 // is observed by polling the short message-list endpoint. It creates and deletes
 // an OpenCode session for this request only.
 func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, generateTimeout)
 	defer cancel()
 
 	// Concurrency (issue #22): the lock guards ONLY the closed check, NOT the whole
@@ -395,8 +403,16 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 
 // ValidateOpenCodeModels ensures configured OpenCode model names are available
 // from `opencode models`. Empty model strings are valid and mean "use OpenCode's
-// default".
+// default". Prefer ValidateOpenCodeModelsIn, which keeps the probe off the user's DB.
 func ValidateOpenCodeModels(ctx context.Context, models ...string) error {
+	return ValidateOpenCodeModelsIn(ctx, "", models...)
+}
+
+// ValidateOpenCodeModelsIn is ValidateOpenCodeModels with the witness-owned runtime
+// root, so the `opencode models` probe runs against the ISOLATED database instead of
+// the user's (it opens its OPENCODE_DB read-write). runtimeRoot "" keeps the ambient
+// env, for callers that have no runtime root yet.
+func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ...string) error {
 	if err := ValidateOpenCodeCapability(ctx); err != nil {
 		return err
 	}
@@ -409,7 +425,7 @@ func ValidateOpenCodeModels(ctx context.Context, models ...string) error {
 		if !ok || provider == "" {
 			return fmt.Errorf("opencode model %q must use provider/model format; choose one from `opencode models`", model)
 		}
-		available, err := loadOpenCodeModels(ctx, provider)
+		available, err := loadOpenCodeModels(ctx, runtimeRoot, provider)
 		if err != nil {
 			return err
 		}
@@ -442,13 +458,20 @@ func ValidateOpenCodeCapability(ctx context.Context) error {
 	return nil
 }
 
-func loadOpenCodeModels(ctx context.Context, provider string) (openCodeModelList, error) {
+func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (openCodeModelList, error) {
 	if cached, ok := openCodeModelsCache.Load(provider); ok {
 		return cached.(openCodeModelList), nil
 	}
 	cmd := exec.CommandContext(ctx, "opencode", "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
+	// Isolated env when we have a runtime root: `opencode models` opens its OPENCODE_DB
+	// read-WRITE (and applies schema migrations), so inheriting the ambient env would
+	// reach into the USER's database from the hot Open/doctor paths — the one thing this
+	// package must never do.
 	cmd.Env = append(os.Environ(), "WITNESS_WORKER=1")
+	if runtimeRoot != "" {
+		cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
+	}
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb

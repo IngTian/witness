@@ -18,8 +18,28 @@ import (
 	"github.com/IngTian/witness/internal/platform"
 )
 
+// writeFakeSourceDB creates a minimal real SQLite file to stand in for the user's
+// opencode.db. export() snapshots the source read-only (VACUUM INTO) before handing a
+// COPY to the subprocess, so the file has to exist even when `opencode` itself is faked.
+func writeFakeSourceDB(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS session (id text PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestNativeRunUsesPrivateImportAndDistinctForks(t *testing.T) {
 	root, source := t.TempDir(), filepath.Join(t.TempDir(), "opencode.db")
+	writeFakeSourceDB(t, source)
 	t.Setenv("WITNESS_OPENCODE_DB", source)
 	var commands [][]string
 	oldCommand := nativeCommand
@@ -102,8 +122,22 @@ func TestNativeRunUsesPrivateImportAndDistinctForks(t *testing.T) {
 	}
 	for _, c := range commands {
 		joined := strings.Join(c, "\n")
-		if strings.Contains(joined, "export --pure") && !strings.Contains(joined, "OPENCODE_DB="+source) {
-			t.Fatalf("export did not target source DB: %s", joined)
+		if strings.Contains(joined, "export --pure") {
+			// The export subprocess must NEVER be handed the user's DB path: `opencode
+			// export` opens its OPENCODE_DB read-write and durably mutates it. It gets a
+			// disposable read-only snapshot COPY instead, plus the isolated XDG_DATA_HOME
+			// so it cannot reach the user's data dir either. Match the exact line — the
+			// env legitimately still carries witness's own WITNESS_OPENCODE_DB=<user db>
+			// resolver var, which OpenCode never reads.
+			if strings.Contains(joined, "\nOPENCODE_DB="+source) {
+				t.Fatalf("export was handed the USER db read-write: %s", joined)
+			}
+			if !strings.Contains(joined, "OPENCODE_DB="+filepath.Join(root, "opencode-native", sourceCopyPrefix)) {
+				t.Fatalf("export did not target a disposable source copy: %s", joined)
+			}
+			if !strings.Contains(joined, "XDG_DATA_HOME="+filepath.Join(root, "xdg")) {
+				t.Fatalf("export not isolated from the user data dir: %s", joined)
+			}
 		}
 		if strings.Contains(joined, "import --pure") && (!strings.Contains(joined, "XDG_DATA_HOME="+filepath.Join(root, "xdg")) || !strings.Contains(joined, "OPENCODE_DB="+filepath.Join(root, "opencode.db"))) {
 			t.Fatalf("import not isolated: %s", joined)
@@ -131,7 +165,7 @@ func TestExportedTranscriptDigestMatchesCapturedL0(t *testing.T) {
 
 func TestNativeRunRejectsExportNewerThanCapturedL0(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(t.TempDir(), "source.db"))
+	t.Setenv("WITNESS_OPENCODE_DB", writeFakeSourceDB(t, filepath.Join(t.TempDir(), "source.db")))
 	oldCommand := nativeCommand
 	nativeCommand = func(context.Context, []string, ...string) ([]byte, error) {
 		return []byte(`{"messages":[{"info":{"role":"user"},"parts":[{"type":"text","text":"new text"}]}]}`), nil
@@ -151,7 +185,7 @@ func TestNativeRunRejectsExportNewerThanCapturedL0(t *testing.T) {
 
 func TestNativeRunsGenerateConcurrentlyAfterIsolatedForkSetup(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(t.TempDir(), "source.db"))
+	t.Setenv("WITNESS_OPENCODE_DB", writeFakeSourceDB(t, filepath.Join(t.TempDir(), "source.db")))
 	oldCommand := nativeCommand
 	nativeCommand = func(context.Context, []string, ...string) ([]byte, error) {
 		return []byte(`{"info":{},"messages":[]}`), nil
@@ -163,6 +197,14 @@ func TestNativeRunsGenerateConcurrentlyAfterIsolatedForkSetup(t *testing.T) {
 
 	var forks, inFlight, peak atomic.Int32
 	var replies sync.Map
+	// A RENDEZVOUS, not a sleep: every generation blocks until all three have arrived, so
+	// the concurrency assertion is deterministic. The previous version slept 20ms and hoped
+	// the windows overlapped, which flaked to peak=1 whenever CPU contention serialized
+	// them (observed in a full-suite run). If the native path ever re-serializes
+	// generation, the barrier never fills and the test fails by timeout instead.
+	const wantConcurrent = 3
+	barrier := make(chan struct{})
+	var arrived atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodDelete:
@@ -184,7 +226,15 @@ func TestNativeRunsGenerateConcurrentlyAfterIsolatedForkSetup(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(20 * time.Millisecond)
+			// Hold every generation open until all of them are in flight together.
+			if arrived.Add(1) == wantConcurrent {
+				close(barrier)
+			}
+			select {
+			case <-barrier:
+			case <-time.After(10 * time.Second):
+				t.Error("native generations did not run concurrently: barrier never filled")
+			}
 			inFlight.Add(-1)
 			replies.Store(strings.Split(r.URL.Path, "/")[2], body.MessageID)
 			w.WriteHeader(http.StatusNoContent)
@@ -408,5 +458,157 @@ func TestNativeCleanupFailureKeepsCommittedManifestForRetry(t *testing.T) {
 	}
 	if _, err := os.Stat(n.snapshot(p)); !os.IsNotExist(err) {
 		t.Fatal("retry snapshot retained")
+	}
+}
+
+// nativeReconcileFixture builds a runtime whose sibling witness.db has one session at
+// raw high id 9, plus a fake OpenCode server that records fork deletions.
+func nativeReconcileFixture(t *testing.T, extraSQL string) (*nativeRuntime, *[]string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "runtime")
+	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(filepath.Dir(root), "witness.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt := `CREATE TABLE raw(id INTEGER PRIMARY KEY, session TEXT);
+		CREATE TABLE progress(session TEXT,lens TEXT,distilled INTEGER);
+		INSERT INTO raw VALUES(9,'opencode:s');` + extraSQL
+	if _, err = db.Exec(stmt); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	deletes := &[]string{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			*deletes = append(*deletes, r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(ts.Close)
+	n := newNativeRuntime(root, &OpenCodeServer{baseURL: ts.URL, client: ts.Client()})
+	if err := os.MkdirAll(n.dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return n, deletes
+}
+
+// A single unreadable manifest must not end the sweep. os.ReadDir returns names sorted,
+// so a malformed entry used to abort reconcile and hide every later manifest — and
+// because runner Open treated that error as fatal, one bad file could block all
+// OpenCode distillation. The bad entry is now reaped and the rest still processed.
+func TestNativeReconcileIsolatesUnreadableManifest(t *testing.T) {
+	n, deletes := nativeReconcileFixture(t, `INSERT INTO progress VALUES('opencode:s','ok',2)`)
+	// "aaa" sorts BEFORE "zzz", so pre-fix the corrupt file aborted before zzz was seen.
+	bad := filepath.Join(n.dir(), "aaa.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(n.snapshot(bad), []byte("snap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	good := filepath.Join(n.dir(), "zzz.json")
+	if err := n.save(good, nativeManifest{Session: "opencode:s", Lens: "ok", RawHigh: 9, Total: 2, Fork: "f_good"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := n.reconcile(); err != nil {
+		t.Fatalf("reconcile must not fail on one bad manifest: %v", err)
+	}
+
+	// The committed manifest AFTER the bad one was still finalized.
+	if len(*deletes) != 1 || (*deletes)[0] != "/session/f_good" {
+		t.Fatalf("later manifest was not reconciled: deletes=%v", *deletes)
+	}
+	if _, err := os.Stat(good); !os.IsNotExist(err) {
+		t.Fatal("committed manifest after the bad entry should be finalized")
+	}
+	// The unparseable manifest is reaped (its fork id is unrecoverable), not retained.
+	if _, err := os.Stat(bad); !os.IsNotExist(err) {
+		t.Fatal("unreadable manifest should be discarded, not leaked forever")
+	}
+	if _, err := os.Stat(n.snapshot(bad)); !os.IsNotExist(err) {
+		t.Fatal("unreadable manifest's snapshot should be discarded too")
+	}
+}
+
+// export() writes the snapshot BEFORE any manifest exists, so a crash in that window
+// leaves an orphan .snapshot.json that the manifest-only loop can never see. Same for an
+// interrupted .tmp and a leftover disposable source-db copy. reconcile must sweep them,
+// while leaving a snapshot that a live manifest still owns.
+func TestNativeReconcileSweepsOrphanResidue(t *testing.T) {
+	n, _ := nativeReconcileFixture(t, "")
+	owned := filepath.Join(n.dir(), "owned.json")
+	if err := n.save(owned, nativeManifest{Session: "opencode:s", Lens: "pending", RawHigh: 9, Total: 2, Fork: "f1"}); err != nil {
+		t.Fatal(err)
+	}
+	ownedSnap := n.snapshot(owned)
+	orphanSnap := filepath.Join(n.dir(), "deadbeef.snapshot.json")
+	tmp := filepath.Join(n.dir(), "deadbeef.json.tmp")
+	srcCopy := filepath.Join(n.dir(), sourceCopyPrefix+"abc123.db")
+	for _, p := range []string{ownedSnap, orphanSnap, tmp, srcCopy} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := n.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, p := range []string{orphanSnap, tmp, srcCopy} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("residue not swept: %s", filepath.Base(p))
+		}
+	}
+	// A snapshot a live (uncommitted, still-current) manifest owns must survive.
+	if _, err := os.Stat(ownedSnap); err != nil {
+		t.Fatal("snapshot owned by a live manifest must not be swept")
+	}
+	if _, err := os.Stat(owned); err != nil {
+		t.Fatal("live manifest must not be removed")
+	}
+}
+
+// A generation a LATER mine has already grown past can never be the one that commits
+// (a mine always reads the session's present max raw id). Without reaping it, a lens
+// that keeps failing strands one manifest + full-session snapshot + live isolated fork
+// per drain, forever.
+func TestNativeReconcileReapsGenerationSupersededByNewerRaw(t *testing.T) {
+	// raw now holds id 9 AND a newer id 12 for the same session.
+	n, deletes := nativeReconcileFixture(t, `INSERT INTO raw VALUES(12,'opencode:s')`)
+	superseded := filepath.Join(n.dir(), "old.json")
+	if err := n.save(superseded, nativeManifest{Session: "opencode:s", Lens: "failing", RawHigh: 9, Total: 2, Fork: "f_old"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(n.snapshot(superseded), []byte("snap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newest := filepath.Join(n.dir(), "new.json")
+	if err := n.save(newest, nativeManifest{Session: "opencode:s", Lens: "failing", RawHigh: 12, Total: 2, Fork: "f_new"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := n.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The superseded generation is reaped, fork included.
+	if _, err := os.Stat(superseded); !os.IsNotExist(err) {
+		t.Fatal("generation superseded by a newer raw id must be reaped")
+	}
+	if _, err := os.Stat(n.snapshot(superseded)); !os.IsNotExist(err) {
+		t.Fatal("superseded snapshot must be reaped")
+	}
+	if len(*deletes) != 1 || (*deletes)[0] != "/session/f_old" {
+		t.Fatalf("only the superseded fork should be deleted, got %v", *deletes)
+	}
+	// The CURRENT generation (still the high-water mark, uncommitted) must survive.
+	if _, err := os.Stat(newest); err != nil {
+		t.Fatal("current uncommitted generation must be retained")
 	}
 }
