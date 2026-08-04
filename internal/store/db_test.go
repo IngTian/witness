@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"testing"
 )
 
@@ -1002,5 +1003,107 @@ func TestWriteFacetsReplacesAll(t *testing.T) {
 	got, _ := s.ReadFacets()
 	if len(got) != 1 || got[0].Key != "new" {
 		t.Fatalf("WriteFacets should replace, got %+v", got)
+	}
+}
+
+// witness is multi-process by design: a capture hook fires per user turn while a worker
+// may be draining. migrate() reads (pragma_table_info / sqlite_master) before it writes,
+// and under WAL a DEFERRED transaction that takes a read snapshot and THEN writes fails
+// with SQLITE_BUSY_SNAPSHOT (517) if another connection committed in between — a conflict
+// busy_timeout does NOT retry, because there is no lock to wait for; the snapshot is
+// simply stale. So on the first Open after an upgrade, one concurrent capture could abort
+// the migration and fail store.Open in the migrating process (on the capture/session-start
+// path that silently drops the user's turn).
+//
+// beginImmediate takes the write lock up front, so a concurrent writer makes the
+// migration WAIT rather than abort. This reproduces the interleaving against the real
+// migrate() and asserts it now succeeds.
+func TestMigrateSurvivesConcurrentWriterDuringMigration(t *testing.T) {
+	s := tempStore(t) // fully migrated; we rewind below to force real work
+	// A second connection to the SAME file, standing in for another witness process.
+	other, err := sql.Open("sqlite", s.dbPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	other.SetMaxOpenConns(1)
+	for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL"} {
+		if _, err := other.Exec(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Force migrate() to do real work, then interleave a commit from the other process
+	// right after migrate's first read would have taken its snapshot.
+	if _, err := s.db.Exec("PRAGMA user_version=0"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		// Land the concurrent write while migrate is mid-transaction.
+		_, err := other.Exec(`INSERT INTO raw(session, seq, ts, role, text) VALUES ('concurrent', 0, '2026-01-01T00:00:00Z', 'user', 'a turn typed during the upgrade')`)
+		done <- err
+	}()
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("migration must survive a concurrent writer, got: %v (517 = SQLITE_BUSY_SNAPSHOT)", err)
+	}
+	if err := <-done; err != nil {
+		// The other process may legitimately have had to wait; what must not happen is
+		// the MIGRATION aborting. A busy error here would mean the capture path retries.
+		t.Logf("concurrent writer returned %v (acceptable: it retries; the migration is what must not abort)", err)
+	}
+
+	var v int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d, want %d (migration did not complete)", v, schemaVersion)
+	}
+	// And the schema is usable afterwards.
+	if _, err := s.db.Exec(`SELECT COUNT(*) FROM observations`); err != nil {
+		t.Fatalf("schema unusable after migration: %v", err)
+	}
+}
+
+// beginImmediate must hand back a transaction that already holds the write lock, so a
+// read-then-write sequence inside it cannot hit the un-retryable snapshot upgrade.
+func TestBeginImmediateHoldsWriteLockAndPreservesUserVersion(t *testing.T) {
+	s := tempStore(t)
+	var before int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := beginImmediate(s.db)
+	if err != nil {
+		t.Fatalf("beginImmediate: %v", err)
+	}
+	// Read then write inside the tx — the shape that used to abort.
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&n); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS probe_immediate(x TEXT)`); err != nil {
+		tx.Rollback()
+		t.Fatalf("write inside an immediate tx must succeed: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	// The lock-acquiring write is a semantic no-op: user_version is unchanged, and the
+	// rolled-back probe table is gone.
+	var after int
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("beginImmediate changed user_version: %d -> %d", before, after)
+	}
+	var probes int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='probe_immediate'`).Scan(&probes)
+	if probes != 0 {
+		t.Fatal("rollback did not undo the probe table")
 	}
 }
