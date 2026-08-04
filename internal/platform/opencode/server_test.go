@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -311,5 +312,66 @@ func TestModelHint(t *testing.T) {
 	}
 	if got := modelHint([]string{"openai/gpt-5.5"}); !strings.Contains(got, "openai/gpt-5.5") {
 		t.Fatalf("model hint = %q", got)
+	}
+}
+
+// A generation that FAILED at the provider is not an empty response: OpenCode marks the
+// assistant message completed, attaches info.error, and emits ZERO text parts. Without
+// checking info.error that is indistinguishable from "still generating", so the poll used
+// to spin for the full 10-minute generateTimeout and then blame a timeout — burying the
+// real, actionable cause.
+//
+// testdata/async_provider_error.json is a VERBATIM capture from real OpenCode 1.18.3
+// (an unfunded account: APIError / 401 / "Insufficient balance"), workspace id redacted.
+func TestAsyncProviderErrorIsSurfacedNotPolled(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "async_provider_error.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const requestID = "msg_wreq1785880955"
+
+	// The reply parser still (correctly) sees no text — that is why the error check exists.
+	if reply := parseOpenCodeAsyncReply(data, requestID); reply != "" {
+		t.Fatalf("no text parts exist, so the reply must be empty, got %q", reply)
+	}
+	// The error parser must extract the provider's own message.
+	got := parseOpenCodeAsyncError(data, requestID)
+	if got == "" {
+		t.Fatal("a completed-with-error assistant message must surface an error, got none")
+	}
+	for _, want := range []string{"APIError", "401", "Insufficient balance"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error %q should mention %q so the user can act on it", got, want)
+		}
+	}
+}
+
+// The error must be attributed to THIS request only. A native fork carries the source
+// conversation, so a failure already present in that history must never be reported as
+// this run's outcome — and nothing at all until our own request appears in the window.
+func TestAsyncProviderErrorIgnoresHistoryAndPreRequest(t *testing.T) {
+	errMsg := `{"info":{"id":"msg_old","role":"assistant","time":{"completed":1},` +
+		`"error":{"name":"APIError","data":{"message":"an OLD failure from the forked history","statusCode":500}}},"parts":[]}`
+	req := `{"info":{"id":"msg_ours","role":"user"},"parts":[{"type":"text","text":"go"}]}`
+
+	// Error BEFORE our request → not ours.
+	if got := parseOpenCodeAsyncError([]byte("["+errMsg+","+req+"]"), "msg_ours"); got != "" {
+		t.Errorf("a failure preceding our request must be ignored, got %q", got)
+	}
+	// Our request absent entirely → nothing is attributable yet.
+	if got := parseOpenCodeAsyncError([]byte("["+errMsg+"]"), "msg_ours"); got != "" {
+		t.Errorf("with our request absent nothing is ours, got %q", got)
+	}
+	// Error AFTER our request → ours.
+	after := `{"info":{"id":"msg_new","role":"assistant","time":{"completed":2},` +
+		`"error":{"name":"APIError","data":{"message":"our failure","statusCode":429}}},"parts":[]}`
+	got := parseOpenCodeAsyncError([]byte("["+req+","+after+"]"), "msg_ours")
+	if !strings.Contains(got, "our failure") || !strings.Contains(got, "429") {
+		t.Errorf("a failure after our request must be surfaced with its status, got %q", got)
+	}
+	// A clean completed reply must report NO error (no false positives).
+	ok := `{"info":{"id":"msg_ok","role":"assistant","time":{"completed":3}},"parts":[{"type":"text","text":"[]"}]}`
+	if got := parseOpenCodeAsyncError([]byte("["+req+","+ok+"]"), "msg_ours"); got != "" {
+		t.Errorf("a successful generation must report no error, got %q", got)
 	}
 }

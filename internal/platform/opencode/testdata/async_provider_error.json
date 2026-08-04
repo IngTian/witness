@@ -1,0 +1,81 @@
+[
+ {
+  "info": {
+   "id": "msg_wreq1785880955",
+   "sessionID": "ses_0313333e5ffexUreD9hZ4N8BRC",
+   "role": "user",
+   "time": {
+    "created": 1785880955983
+   },
+   "summary": {
+    "diffs": []
+   },
+   "agent": "build",
+   "model": {
+    "providerID": "opencode",
+    "modelID": "claude-haiku-4-5"
+   }
+  },
+  "parts": [
+   {
+    "id": "prt_fcecccc55001Rz3WCIZOpmAGEI",
+    "sessionID": "ses_0313333e5ffexUreD9hZ4N8BRC",
+    "messageID": "msg_wreq1785880955",
+    "type": "text",
+    "text": "Reply with exactly: [{\"observation\":\"ok\"}]"
+   }
+  ]
+ },
+ {
+  "info": {
+   "id": "msg_fcecccd1a001UYCiMh92IbbYNW",
+   "sessionID": "ses_0313333e5ffexUreD9hZ4N8BRC",
+   "role": "assistant",
+   "time": {
+    "created": 1785880956186,
+    "completed": 1785880957051
+   },
+   "error": {
+    "name": "APIError",
+    "data": {
+     "message": "Insufficient balance. Manage your billing here: https://opencode.ai/workspace/wrk_REDACTED/billing",
+     "statusCode": 401,
+     "isRetryable": false,
+     "responseHeaders": {
+      "cf-placement": "remote-ORD",
+      "cf-ray": "REDACTED",
+      "connection": "keep-alive",
+      "content-length": "177",
+      "content-type": "text/plain;charset=UTF-8",
+      "date": "Tue, 04 Aug 2026 22:02:37 GMT",
+      "server": "cloudflare"
+     },
+     "responseBody": "{\"type\":\"error\",\"error\":{\"type\":\"CreditsError\",\"message\":\"Insufficient balance. Manage your billing here: https://opencode.ai/workspace/wrk_REDACTED/billing\"}}",
+     "metadata": {
+      "url": "https://opencode.ai/zen/v1/messages"
+     }
+    }
+   },
+   "parentID": "msg_wreq1785880955",
+   "modelID": "claude-haiku-4-5",
+   "providerID": "opencode",
+   "mode": "build",
+   "agent": "build",
+   "path": {
+    "cwd": "/Users/zetian/.claude/jobs/1dc6d910/tmp/oclab",
+    "root": "/"
+   },
+   "cost": 0,
+   "tokens": {
+    "input": 0,
+    "output": 0,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  "parts": []
+ }
+]

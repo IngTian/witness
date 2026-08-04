@@ -240,6 +240,15 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 			if reply := parseOpenCodeAsyncReply(data, requestMessageID); strings.TrimSpace(reply) != "" {
 				return reply, nil
 			}
+			// FAIL FAST on a generation that completed with a provider error. Such a
+			// message has no text parts, so it is indistinguishable from "still
+			// generating" unless we look at info.error — and without this the poll spun
+			// for the full generateTimeout and then blamed a timeout, burying the real
+			// cause (e.g. an unfunded account's 401 "Insufficient balance") that the user
+			// needs to see. Retrying cannot help: the provider already answered.
+			if provErr := parseOpenCodeAsyncError(data, requestMessageID); provErr != "" {
+				return "", fmt.Errorf("opencode generation failed: %s", provErr)
+			}
 		} else {
 			lastErr = err
 		}
@@ -630,6 +639,42 @@ func parseOpenCodeMessageResponse(data []byte) string {
 	return joinOpenCodeTextParts(findOpenCodeTextParts(v))
 }
 
+// parseOpenCodeAsyncError returns the provider error from an assistant message that
+// belongs to THIS request, or "" if none does. It mirrors parseOpenCodeAsyncReply's scan
+// exactly — only messages AFTER the request index count, so a failure recorded in the
+// forked source conversation (history witness did not create) is never mistaken for this
+// run's outcome. Requires the request to be present for the same reason.
+func parseOpenCodeAsyncError(data []byte, requestMessageID string) string {
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		// Single-message shape: only report an error if it is not the request itself.
+		if isOpenCodeRequestMessage(data, requestMessageID) {
+			return ""
+		}
+		return openCodeMessageError(data)
+	}
+	requestIndex := -1
+	for i := range list {
+		if isOpenCodeRequestMessage(list[i], requestMessageID) {
+			requestIndex = i
+			break
+		}
+	}
+	if requestIndex < 0 {
+		return ""
+	}
+	for i := len(list) - 1; i > requestIndex; i-- {
+		role := openCodeMessageRole(list[i])
+		if role != "" && role != "assistant" {
+			continue
+		}
+		if e := openCodeMessageError(list[i]); e != "" {
+			return e
+		}
+	}
+	return ""
+}
+
 func parseOpenCodeAsyncReply(data []byte, requestMessageID string) string {
 	var list []json.RawMessage
 	if err := json.Unmarshal(data, &list); err == nil {
@@ -690,6 +735,50 @@ func openCodeMessageID(data []byte) string {
 		return strings.TrimSpace(msg.Info.ID)
 	}
 	return strings.TrimSpace(msg.ID)
+}
+
+// openCodeMessageError returns the provider error an assistant message COMPLETED with,
+// or "" if it carried none.
+//
+// A failed generation is not an empty response: OpenCode marks the assistant message
+// completed, attaches info.error (an APIError with the provider's message and status),
+// and emits ZERO text parts. Without checking this, a provider failure — an unfunded or
+// expired account (401 "Insufficient balance"), a rate limit, a bad model id — looks
+// exactly like "still generating", so the poll spins until the 10-minute generateTimeout
+// and then reports a timeout, hiding the real and usually actionable cause.
+func openCodeMessageError(data []byte) string {
+	var msg struct {
+		Info struct {
+			Error struct {
+				Name string `json:"name"`
+				Data struct {
+					Message    string `json:"message"`
+					StatusCode int    `json:"statusCode"`
+				} `json:"data"`
+			} `json:"error"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return ""
+	}
+	e := msg.Info.Error
+	detail := strings.TrimSpace(e.Data.Message)
+	name := strings.TrimSpace(e.Name)
+	if detail == "" && name == "" {
+		return ""
+	}
+	switch {
+	case detail == "":
+		return name
+	case name == "" && e.Data.StatusCode == 0:
+		return detail
+	case name == "":
+		return fmt.Sprintf("%s (status %d)", detail, e.Data.StatusCode)
+	case e.Data.StatusCode == 0:
+		return fmt.Sprintf("%s: %s", name, detail)
+	default:
+		return fmt.Sprintf("%s (status %d): %s", name, e.Data.StatusCode, detail)
+	}
 }
 
 func openCodeMessageRole(data []byte) string {
