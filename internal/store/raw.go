@@ -267,7 +267,7 @@ func (r *rawIO) RawPruneStats(cutoff string) (sessions, records int, err error) 
 // (raw + progress) is watermark-safe: the count-based distill watermark can never
 // point at deleted rows. Returns sessions and records removed.
 func (r *rawIO) PruneSessionsBefore(cutoff string) (sessions, records int, err error) {
-	tx, err := r.db.Begin()
+	tx, err := beginImmediate(r.db)
 	if err != nil {
 		return 0, 0, err
 	}

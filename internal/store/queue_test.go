@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"database/sql"
+	"testing"
+)
 
 // `witness cleanup` deliberately keeps L1 while reclaiming L0. A later `lens backfill
 // --fresh` then deletes those observations on the promise "Mined observations are
@@ -46,5 +49,54 @@ func TestOrphanedL0ObservationCount(t *testing.T) {
 		if p == "pruned" {
 			t.Fatal("a session with no raw must not be offered for re-mining")
 		}
+	}
+}
+
+// Every transaction that READS before it WRITES must hold the write lock up front. Under
+// WAL a DEFERRED tx that takes a read snapshot and then writes fails with
+// SQLITE_BUSY_SNAPSHOT (517) — a conflict busy_timeout CANNOT retry, because there is no
+// lock to wait for; the snapshot is simply stale. witness is multi-process (a capture hook
+// per user turn, a draining worker, an MCP server), so these must survive a concurrent
+// commit. The three read-then-write sites are StampReview, DeleteObservation and
+// PruneSessionsBefore; the other transactions in this package write first, which takes the
+// lock immediately, so they are already safe.
+func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*Store) error
+	}{
+		{"StampReview", func(s *Store) error { return s.StampReview() }},
+		{"DeleteObservation", func(s *Store) error { _, err := s.DeleteObservation("o1"); return err }},
+		{"PruneSessionsBefore", func(s *Store) error { _, _, err := s.PruneSessionsBefore("2025-01-01T00:00:00Z"); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for attempt := 0; attempt < 5; attempt++ { // the race is timing-dependent
+				s := tempStore(t)
+				_ = s.AppendRaw(RawRecord{Session: "old", Seq: 0, TS: "2020-01-01T00:00:00Z", Role: "user", Text: "x"})
+				_ = s.AppendObservations([]Observation{{ID: "o1", Lens: LensDefault, Session: "old", Observation: "x", Poignancy: 3}})
+
+				other, err := sql.Open("sqlite", s.dbPath())
+				if err != nil {
+					t.Fatal(err)
+				}
+				other.SetMaxOpenConns(1)
+				for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
+					if _, err := other.Exec(p); err != nil {
+						t.Fatal(err)
+					}
+				}
+				done := make(chan error, 1)
+				go func() {
+					_, e := other.Exec(`INSERT INTO raw(session,seq,ts,role,text) VALUES ('concurrent',0,'2030-01-01T00:00:00Z','user','a turn')`)
+					done <- e
+				}()
+				runErr := tc.run(s)
+				<-done
+				other.Close()
+				if runErr != nil {
+					t.Fatalf("attempt %d: must survive a concurrent writer, got: %v (517 = SQLITE_BUSY_SNAPSHOT)", attempt, runErr)
+				}
+			}
+		})
 	}
 }
