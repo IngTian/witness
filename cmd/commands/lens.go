@@ -280,13 +280,25 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		}
 		obsAll, facetsN := st.LensDataCounts(minedName)
 		active := st.ActiveObservationCount(minedName)
+		// The SECOND non-reproducible class: mined obs whose session's L0 was reclaimed by
+		// `witness cleanup` (which keeps L1 on purpose). The re-mine enumerates candidates
+		// from `raw`, so those sessions are never offered and their obs never come back.
+		orphaned := st.OrphanedL0ObservationCount(minedName)
 		if !assumeYes {
 			fmt.Printf("\n%s backfill %q --fresh will DELETE %d observation(s) + %d facet(s) for this lens, then re-mine from your raw transcripts.\n",
 				warnGlyph(), name, obsAll, facetsN)
 			if active > 0 {
 				fmt.Printf("  %s\n", yellow(fmt.Sprintf("%d of those observations were recorded in-session (not mined) and are NOT reproducible by a re-mine — they will be lost permanently.", active)))
 			}
-			fmt.Println(dim("  Raw transcripts (L0) are kept. Mined observations are re-created from them."))
+			if orphaned > 0 {
+				fmt.Printf("  %s\n", yellow(fmt.Sprintf("%d were mined from sessions whose raw transcripts `witness cleanup` has already reclaimed — there is no L0 left to re-mine them from, so they will be lost permanently.", orphaned)))
+			}
+			// Only make the re-derivable promise when it actually holds for everything.
+			if active == 0 && orphaned == 0 {
+				fmt.Println(dim("  Raw transcripts (L0) are kept. Mined observations are re-created from them."))
+			} else {
+				fmt.Println(dim("  Raw transcripts (L0) are kept, and every observation still backed by one is re-created from it."))
+			}
 			fmt.Print("Proceed? [y/N]: ")
 			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 			if strings.ToLower(strings.TrimSpace(line)) != "y" {

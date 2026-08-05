@@ -378,6 +378,27 @@ func (q *queue) ActiveObservationCount(lens string) int {
 	return n
 }
 
+// OrphanedL0ObservationCount reports how many of a lens's MINED observations belong to a
+// session whose raw transcript (L0) no longer exists — because `witness cleanup` reclaimed
+// it. Cleanup deliberately keeps L1 ("your observations and profile are kept, only raw
+// transcripts are removed"), so these are perfectly good observations whose SOURCE is gone.
+//
+// They are the second class of obs a `lens backfill --fresh` destroys irrecoverably, and
+// the more surprising one: the re-mine enumerates candidate sessions FROM `raw`
+// (PendingSessions), so a session with zero raw rows is never offered and its observations
+// are never re-created — even though the --fresh prompt says "Raw transcripts (L0) are
+// kept. Mined observations are re-created from them." Counting them lets the CLI tell the
+// truth before an irreversible delete. Read-only.
+func (q *queue) OrphanedL0ObservationCount(lens string) int {
+	var n int
+	_ = q.db.QueryRow(
+		`SELECT COUNT(*) FROM observations o
+		  WHERE o.lens = ?
+		    AND o.source != 'active'
+		    AND NOT EXISTS (SELECT 1 FROM raw r WHERE r.session = o.session)`, lens).Scan(&n)
+	return n
+}
+
 // DeleteLensData removes one lens's derived L1 observations and L2 facets (for a
 // `lens backfill --fresh`: re-mine a lens from scratch after its prompt changed). Raw L0
 // is the durable record and is NOT touched. facet_versions cascade via the ON DELETE
