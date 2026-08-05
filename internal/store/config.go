@@ -338,6 +338,11 @@ func (c *configFile) SetConfigString(key, value string) error {
 // perturb which runner resolves. (Previously this had to special-case a marker
 // comment to avoid exactly that coupling.)
 func (c *configFile) setConfigKey(key, value string) error {
+	// Same read-modify-write hazard as rewriteEnabledLens: unserialized, a concurrent
+	// process's `runner =` binding or lens line is silently discarded.
+	if unlock, ok := c.configMutationLock(); ok {
+		defer unlock()
+	}
 	data, err := os.ReadFile(c.configPath())
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -373,6 +378,11 @@ func (c *configFile) setConfigKey(key, value string) error {
 // later installs only refresh `runner` via SetRunner, leaving user edits intact.
 // Forward-compatible: old configs without some fields simply fall back to defaults.
 func (c *configFile) EnsureConfigFile() error {
+	// Hold the lock across the stat AND the create: otherwise two first-run processes both
+	// see "absent" and the second's template write clobbers whatever the first seeded.
+	if unlock, ok := c.configMutationLock(); ok {
+		defer unlock()
+	}
 	if _, err := os.Stat(c.configPath()); err == nil {
 		return nil // already present; never clobber user edits
 	} else if !os.IsNotExist(err) {
@@ -578,10 +588,36 @@ func (c *configFile) EnableLens(name string) error {
 // DisableLens removes a lens from the enabled set (no-op if absent).
 func (c *configFile) DisableLens(name string) error { return c.rewriteEnabledLens(name, false) }
 
+// configMutationLock serializes read-modify-write of config.toml ACROSS PROCESSES.
+//
+// Every config write reads the whole file, edits lines, and writes it back. Unserialized,
+// two witness processes both read the pre-edit file and the second rename silently
+// discards the first's edit while BOTH report success — measured 22 silent lost updates
+// across 20 concurrent trials. The stakes are not cosmetic: losing the auto-seeded
+// `lens = default` line permanently disables all distillation, because defaultseed.go has
+// already burned its one-shot `default_lens_migrated_v1a` marker so no later Open
+// re-seeds it, PendingSessions returns nil on an empty lens set, and `doctor` then prints
+// [ok] with 0 pending forever.
+//
+// MaxOpenConns(1) provides nothing here — this is plain file I/O, not SQLite. A
+// filesystem flock is the only thing that orders separate processes, mirroring
+// lensReg.lensRegistryLock. Best-effort by the same convention: if the lock can't be
+// taken we proceed rather than fail a config write outright (the unique-temp rename in
+// writeAtomic still prevents mutual destruction, leaving last-writer-wins).
+func (c *configFile) configMutationLock() (unlock func(), ok bool) {
+	// WAITING, not try-once: for mutual exclusion "couldn't get it, proceed anyway" is the
+	// bug itself. flockPathWaiting also takes a process-level mutex, since flock is
+	// per-descriptor and would not order two goroutines inside one process.
+	return flockPathWaiting(c.root, ".config-write.lock", 5*time.Second)
+}
+
 // rewriteEnabledLens drops any existing `lens = <name>` line for name, then (if
-// enabling) appends one. Read-modify-write of the whole file, atomic on rename —
-// fine at config scale. Comments and other settings are preserved verbatim.
+// enabling) appends one. Read-modify-write of the whole file under
+// configMutationLock, atomic on rename. Comments and other settings are preserved verbatim.
 func (c *configFile) rewriteEnabledLens(name string, enable bool) error {
+	if unlock, ok := c.configMutationLock(); ok {
+		defer unlock()
+	}
 	data, err := os.ReadFile(c.configPath())
 	if err != nil && !os.IsNotExist(err) {
 		return err

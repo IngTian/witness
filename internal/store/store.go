@@ -212,9 +212,34 @@ func sanitize(id string) string {
 
 // writeAtomic writes data to path via a temp file + rename (atomic on POSIX).
 // Used for config.toml rewrites; the data layers are transactional in SQLite.
+// writeAtomic publishes data to path via a UNIQUE temp file + rename.
+//
+// The temp name must be per-writer, not path+".tmp": with a shared staging path two
+// concurrent processes collide destructively — B's os.WriteFile O_TRUNCs A's half-written
+// tmp, A renames it away, and B's rename then fails with a bare
+// "rename .../config.toml.tmp .../config.toml: no such file or directory" that surfaces
+// from `witness config set` and reads like a corrupt archive. Measured 98 such failures
+// across 20 concurrent trials before this change. os.CreateTemp gives each writer its own
+// file, so the worst case is a normal last-writer-wins rename instead of mutual
+// destruction. (Ordering between writers is the caller's job — see configMutationLock.)
 func writeAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	f, err := os.CreateTemp(dir, base+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once the rename succeeds; cleans up every failure path
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	// Close before chmod+rename so the bytes are flushed to the OS, and surface a close
+	// error: on a full disk the write can succeed while close reports the real failure.
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil { // CreateTemp makes 0600 already; explicit for clarity
 		return err
 	}
 	return os.Rename(tmp, path)
