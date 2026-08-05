@@ -401,6 +401,21 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	copy(mergedKeys, oldKeys)
 
 	// Apply updates: replace the record at the old index with the new one.
+	//
+	// applied is counted, NOT len(updates). The stored key list and the raw rows can
+	// desynchronize (that is the whole reason this replace path exists — rawCount !=
+	// len(oldKeys)), and then an update's positional oldIdx can point past the rows that
+	// actually exist. The bounds guard correctly refuses to write there, but the return value
+	// used to be len(updates)+len(appends) regardless — so `witness ingest` printed "1
+	// ingested" for an edit it had silently thrown away. Reproduced with a key list longer
+	// than raw: reported ingested=1, the edited text nowhere in L0.
+	//
+	// Telling the user their document updated when it did not is the real damage: they move
+	// on, and the archive keeps distilling the stale body. An out-of-range update is turned
+	// into an APPEND instead of a drop — the record is genuinely new to this L0 (its position
+	// is gone), so appending preserves it rather than losing the caller's text, and the key
+	// list is extended to match.
+	applied := 0
 	for _, upd := range updates {
 		if upd.oldIdx < len(mergedRecs) && upd.oldIdx < len(mergedKeys) {
 			// Preserve the original seq for the updated record (keep its position).
@@ -408,7 +423,16 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 			newRec.Seq = mergedRecs[upd.oldIdx].Seq
 			mergedRecs[upd.oldIdx] = newRec
 			mergedKeys[upd.oldIdx] = upd.updatedKey
+			applied++
+			continue
 		}
+		slog.Warn("ingest: stored key list is out of step with L0; re-adding this record instead of updating in place",
+			"session", s.Session, "index", upd.oldIdx, "rows", len(mergedRecs))
+		rec := s.Records[upd.newRecIdx]
+		rec.Seq = len(mergedRecs)
+		mergedRecs = append(mergedRecs, rec)
+		mergedKeys = append(mergedKeys, upd.updatedKey)
+		applied++
 	}
 
 	// Append new records.
@@ -425,7 +449,8 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 		return 0, err
 	}
 	st.SetSessionPlatform(s.Session, "file")
-	return len(updates) + len(appends), nil
+	// `applied`, not len(updates): an update that could not be placed is not an ingest.
+	return applied + len(appends), nil
 }
 
 // parseImportKeysJSON decodes a JSON array of keys from meta storage. Mirrors
