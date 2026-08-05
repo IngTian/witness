@@ -100,3 +100,76 @@ func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 		})
 	}
 }
+
+// DeleteLensData (the `lens backfill --fresh` drop) must clear the lens's DERIVED
+// bookkeeping too, not just its observations and facets. Those meta keys are caches ABOUT
+// the deleted data, so leaving them makes a rebuilt lens look already-processed:
+//   - emerge_seen:<lens>:<sig> keys a cluster by its member obs_ids, and obs_id is
+//     sha1(session|lens|text) — a CONTENT hash — so a re-mine of unchanged text
+//     regenerates identical ids and an identical signature. The emergent pass would skip
+//     re-verifying an arc whose facets --fresh just deleted, and nothing would restore them.
+//   - profile_sig:<lens> would vouch for an L4 narrative derived from facets that are gone.
+//
+// A SIBLING lens's state must survive untouched.
+func TestDeleteLensDataClearsDerivedState(t *testing.T) {
+	s := tempStore(t)
+	_ = s.AppendObservations([]Observation{
+		{ID: "obs_a", Lens: LensDefault, Session: "s", Observation: "x"},
+		{ID: "obs_b", Lens: "sibling", Session: "s", Observation: "y"},
+	})
+	_ = s.WriteFacets([]Facet{
+		{Lens: LensDefault, Dimension: "d", Key: "k", Versions: []FacetVersion{{Value: "v", ValidFrom: "t"}}},
+		{Lens: "sibling", Dimension: "d", Key: "k", Versions: []FacetVersion{{Value: "v", ValidFrom: "t"}}},
+	})
+	_ = s.SetMetaString("emerge_seen:"+LensDefault+":sig1", `{"outcome":"accepted","members":9}`)
+	_ = s.SetMetaString("emerge_seen:"+LensDefault+":sig2", `{"outcome":"rejected","members":4}`)
+	_ = s.SetMetaString("profile_sig:"+LensDefault, "old-facet-signature")
+	_ = s.SetMetaString("emerge_seen:sibling:sigX", `{"outcome":"accepted","members":3}`)
+	_ = s.SetMetaString("profile_sig:sibling", "sibling-signature")
+	_ = s.SetMetaString("review_ts", "2026-01-01T00:00:00Z") // a GLOBAL key, must survive
+
+	if _, _, err := s.DeleteLensData(LensDefault); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, gone := range []string{
+		"emerge_seen:" + LensDefault + ":sig1",
+		"emerge_seen:" + LensDefault + ":sig2",
+		"profile_sig:" + LensDefault,
+	} {
+		if got := s.MetaString(gone); got != "" {
+			t.Errorf("--fresh must clear derived key %q, still %q", gone, got)
+		}
+	}
+	for _, kept := range []string{"emerge_seen:sibling:sigX", "profile_sig:sibling", "review_ts"} {
+		if got := s.MetaString(kept); got == "" {
+			t.Errorf("must NOT touch %q", kept)
+		}
+	}
+}
+
+// A lens name containing a LIKE wildcard must be escaped, or '_' (which matches ANY
+// character) would let one lens's --fresh delete a sibling's emergent bookkeeping.
+func TestDeleteLensDataEscapesLikeWildcardsInLensName(t *testing.T) {
+	s := tempStore(t)
+	_ = s.SetMetaString("emerge_seen:my_lens:sig", "target")
+	_ = s.SetMetaString("emerge_seen:myXlens:sig", "innocent bystander")
+	_ = s.SetMetaString("emerge_seen:my%lens:sig", "percent lens")
+
+	if _, _, err := s.DeleteLensData("my_lens"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.MetaString("emerge_seen:my_lens:sig"); got != "" {
+		t.Errorf("the named lens's key must be cleared, still %q", got)
+	}
+	if got := s.MetaString("emerge_seen:myXlens:sig"); got == "" {
+		t.Error("'_' must be escaped: a lens whose name merely matches the wildcard was wiped")
+	}
+	// And a '%' in the name must not turn into "match everything".
+	if _, _, err := s.DeleteLensData("my%lens"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.MetaString("emerge_seen:my%lens:sig"); got != "" {
+		t.Errorf("the percent-named lens's key must be cleared, still %q", got)
+	}
+}
