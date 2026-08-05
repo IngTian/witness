@@ -154,7 +154,7 @@ func (o *obsIO) AppendObservations(obs []Observation) error {
 // next review re-fold that lens from scratch. That is bounded work, not a timeout risk —
 // the fold is windowed by ReviewMaxChars (#123).
 func (o *obsIO) DeleteObservation(obsID string) (bool, error) {
-	tx, err := o.db.Begin()
+	tx, err := beginImmediate(o.db)
 	if err != nil {
 		return false, err
 	}

@@ -378,6 +378,27 @@ func (q *queue) ActiveObservationCount(lens string) int {
 	return n
 }
 
+// OrphanedL0ObservationCount reports how many of a lens's MINED observations belong to a
+// session whose raw transcript (L0) no longer exists — because `witness cleanup` reclaimed
+// it. Cleanup deliberately keeps L1 ("your observations and profile are kept, only raw
+// transcripts are removed"), so these are perfectly good observations whose SOURCE is gone.
+//
+// They are the second class of obs a `lens backfill --fresh` destroys irrecoverably, and
+// the more surprising one: the re-mine enumerates candidate sessions FROM `raw`
+// (PendingSessions), so a session with zero raw rows is never offered and its observations
+// are never re-created — even though the --fresh prompt says "Raw transcripts (L0) are
+// kept. Mined observations are re-created from them." Counting them lets the CLI tell the
+// truth before an irreversible delete. Read-only.
+func (q *queue) OrphanedL0ObservationCount(lens string) int {
+	var n int
+	_ = q.db.QueryRow(
+		`SELECT COUNT(*) FROM observations o
+		  WHERE o.lens = ?
+		    AND o.source != 'active'
+		    AND NOT EXISTS (SELECT 1 FROM raw r WHERE r.session = o.session)`, lens).Scan(&n)
+	return n
+}
+
 // DeleteLensData removes one lens's derived L1 observations and L2 facets (for a
 // `lens backfill --fresh`: re-mine a lens from scratch after its prompt changed). Raw L0
 // is the durable record and is NOT touched. facet_versions cascade via the ON DELETE
@@ -388,6 +409,21 @@ func (q *queue) ActiveObservationCount(lens string) int {
 // which the worker re-extracts from the untouched L0. In-session ACTIVE observations
 // (source='active') are NOT re-created by a re-mine and are lost — callers that offer
 // this destructively (the --fresh path) must warn on ActiveObservationCount > 0 first.
+//
+// It also clears the lens's DERIVED bookkeeping in `meta`, in the same transaction. Those
+// keys are caches ABOUT the data being deleted, so leaving them behind makes a rebuilt
+// lens look already-processed:
+//   - emerge_seen:<lens>:<sig> — "this emergent cluster was already verified". The
+//     signature hashes the member obs_ids, and obs_id is sha1(session|lens|text), a pure
+//     CONTENT hash — so a re-mine of unchanged text regenerates identical ids and thus an
+//     identical signature. The emergent pass would skip re-verifying an arc whose facets
+//     --fresh just deleted, and nothing would ever restore them.
+//   - profile_sig:<lens> — "the L4 narrative is current for this facet set", which would
+//     otherwise vouch for a profile derived from facets that no longer exist.
+//
+// (The per-lens review cursor review_rowid:<lens> is cleared by ResetLensWatermark, which
+// the --fresh path also calls.) This is the third instance of the same class — derived
+// state outliving the data it describes — so it is swept here rather than patched per key.
 func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 	tx, err := q.db.Begin()
 	if err != nil {
@@ -408,10 +444,30 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 		return 0, 0, err
 	}
 	nf, _ := res.RowsAffected()
+	// Derived caches about the data just deleted. Exact key for profile_sig; prefix match
+	// for emerge_seen (one row per cluster signature). A sibling lens is untouched — the
+	// prefix ends with ':' so "emerge_seen:math:" can never match "emerge_seen:mathsy:".
+	if _, err = tx.Exec(`DELETE FROM meta WHERE key = ?`, "profile_sig:"+lens); err != nil {
+		return 0, 0, err
+	}
+	if _, err = tx.Exec(
+		`DELETE FROM meta WHERE key LIKE ? ESCAPE '\'`, escapeMetaLike("emerge_seen:"+lens+":")+"%"); err != nil {
+		return 0, 0, err
+	}
 	if err = tx.Commit(); err != nil {
 		return 0, 0, err
 	}
 	return int(no), int(nf), nil
+}
+
+// escapeMetaLike escapes the LIKE wildcards in a literal meta-key prefix so a lens name
+// containing '%' or '_' (both legal in a lens name) matches literally instead of acting
+// as a wildcard — '_' in particular would otherwise match ANY character and could reach a
+// sibling lens's rows.
+func escapeMetaLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	return strings.ReplaceAll(s, "_", `\_`)
 }
 
 // NextBackoffAttempt returns the earliest future retry time among ACTIVE lenses, if

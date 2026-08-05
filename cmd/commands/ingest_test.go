@@ -301,3 +301,94 @@ func TestOneRecordPerSession(t *testing.T) {
 		t.Fatalf("file:y count = %d, want 1", n)
 	}
 }
+
+// idFromRecordKey must be the exact inverse of recordKey. recordKey APPENDS the hash
+// ("<id>:<hash>"), so the id must be recovered by splitting at the LAST colon — the id
+// itself may contain colons. Splitting at the FIRST colon truncated any such id (a URL
+// -> "https", "arxiv:2301.12345" -> "arxiv", an ISO timestamp -> "2026-08-04T12"), so the
+// dedup lookup missed and the record was re-appended on EVERY ingest.
+func TestIDFromRecordKeyRoundTripsColonBearingIDs(t *testing.T) {
+	for _, id := range []string{
+		"post-1",
+		"https://example.com/post-1",
+		"arxiv:2301.12345",
+		"2026-08-04T12:00:00Z",
+		"urn:isbn:0451450523",
+		"h", // a literal "h" id: key is "h:<8-byte hash>", still an id-keyed record
+	} {
+		key := recordKey(id, "some text")
+		got, ok := idFromRecordKey(key)
+		if id == "h" {
+			// Ambiguous with the hash-only namespace by construction; documented as such.
+			continue
+		}
+		if !ok || got != id {
+			t.Errorf("recordKey/idFromRecordKey round trip broken for %q: got %q ok=%v (key %q)", id, got, ok, key)
+		}
+	}
+	// The hash-only fallback has no stable id to merge on.
+	if _, ok := idFromRecordKey(recordKey("", "body")); ok {
+		t.Error(`the "h:<hash>" fallback must report ok=false (no stable id)`)
+	}
+	// Malformed keys.
+	for _, bad := range []string{"", "nocolon", ":leading"} {
+		if _, ok := idFromRecordKey(bad); ok {
+			t.Errorf("malformed key %q must report ok=false", bad)
+		}
+	}
+}
+
+// End to end: re-ingesting the SAME record with a colon-bearing id must be idempotent.
+// Before the fix each pass re-appended it — unbounded L0 growth for exactly the id shapes
+// a document/paper feed uses (URLs, arXiv ids, timestamps).
+func TestIngestIsIdempotentForColonBearingIDs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WITNESS_HOME", home)
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+
+	batch := `{"text":"a paper abstract","id":"arxiv:2301.12345","session":"papers"}
+{"text":"a blog post","id":"https://example.com/post-1","session":"papers"}
+`
+	for pass := 1; pass <= 3; pass++ {
+		if _, _, err := cmdIngest(strings.NewReader(batch), true); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		st, err := store.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := st.RawCount("file:papers")
+		st.Close()
+		if n != 2 {
+			t.Fatalf("pass %d: raw count = %d, want 2 (re-ingest must dedup, not re-append)", pass, n)
+		}
+	}
+
+	// An EDITED body under the same colon-bearing id must UPDATE, not duplicate.
+	edited := `{"text":"a paper abstract, revised","id":"arxiv:2301.12345","session":"papers"}
+`
+	if _, _, err := cmdIngest(strings.NewReader(edited), true); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if n := st.RawCount("file:papers"); n != 2 {
+		t.Fatalf("after an edit: raw count = %d, want 2 (update in place)", n)
+	}
+	recs, err := st.ReadRaw("file:papers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRevised bool
+	for _, r := range recs {
+		if strings.Contains(r.Text, "revised") {
+			sawRevised = true
+		}
+	}
+	if !sawRevised {
+		t.Fatalf("the edited body must be stored, got %+v", recs)
+	}
+}

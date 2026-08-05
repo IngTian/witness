@@ -464,7 +464,7 @@ func isConfigKeyLine(line, key string) bool {
 // StampReview records that a review just ran by advancing both review offsets.
 func (c *configFile) StampReview() error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	tx, err := c.db.Begin()
+	tx, err := beginImmediate(c.db)
 	if err != nil {
 		return err
 	}
