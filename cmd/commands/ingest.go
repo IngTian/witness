@@ -307,11 +307,40 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	var appends []int // indices in s.Records/Keys/IDs
 	updatedIndices := make(map[int]bool)
 
+	// Keys already stored, for the no-id dedup below. A key is "<id>:<hash>" or, with no id,
+	// "h:<hash>" — so for a no-id record the key IS the content identity.
+	oldKeySet := make(map[string]bool, len(oldKeys))
+	for _, k := range oldKeys {
+		oldKeySet[k] = true
+	}
+	// Guard against a duplicate WITHIN one batch too (the same body twice in one file), which
+	// oldKeySet cannot see because nothing is written until the end.
+	seenThisBatch := make(map[string]bool, len(s.Keys))
+
 	for i, id := range s.IDs {
 		key := s.Keys[i]
 		id = strings.TrimSpace(id)
 		if id == "" {
-			// No stable id → treat as append (hash-only keys never match by id).
+			// No stable id: dedup on the CONTENT KEY instead.
+			//
+			// This used to append unconditionally ("hash-only keys never match by id"), so
+			// re-ingesting the same id-less document appended it again every single time —
+			// unbounded L0 growth for the exact shape a "just pipe me some documents" feed
+			// uses, where the user supplies no ids at all. Measured before this fix: three
+			// ingests of one id-less record produced 3 raw rows and 3 IDENTICAL stored keys
+			// ("h:c52e…" x3). The observations mined from those duplicates then reinforce the
+			// same facet repeatedly, so the archive over-weights a document purely because it
+			// was ingested twice.
+			//
+			// Dedup by key is exactly right here and NOT a behavior change for anything else:
+			// the key is a content hash, so a matching key means byte-identical text, i.e. the
+			// idempotent no-op the schema promises. Text that CHANGED hashes differently and
+			// still appends — correct, since with no id there is nothing to identify it as an
+			// edit OF a prior record rather than a new one.
+			if oldKeySet[key] || seenThisBatch[key] {
+				continue
+			}
+			seenThisBatch[key] = true
 			appends = append(appends, i)
 			continue
 		}
