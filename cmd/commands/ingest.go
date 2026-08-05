@@ -236,6 +236,18 @@ func cmdIngest(reader io.Reader, quiet bool) (ingested, skipped int, err error) 
 		return 0, skipped, err
 	}
 	defer st.Close()
+	// Serialize the whole read-modify-write, the same way the OpenCode importer does for
+	// the same hazard. applyIngestSession reads the session's stored key list and raw row
+	// count, then writes both back — so a concurrent raw mutation (a second `witness
+	// ingest`, or `witness cleanup` reclaiming rows) desynchronizes oldKeys[i] from
+	// ReadRaw()[i], and the positional update then writes one record's text over a
+	// DIFFERENT record's row. Corrupting an already-durable record is worse than declining
+	// the batch, and `ingest` is a deliberate user action that can simply be re-run.
+	unlock, ok := st.ImportLock("file")
+	if !ok {
+		return 0, skipped, fmt.Errorf("another witness ingest or import is running; retry when it finishes")
+	}
+	defer unlock()
 	for _, s := range groupSessions(recs, time.Now()) {
 		n, err := applyIngestSession(st, s)
 		if err != nil {
