@@ -4,7 +4,7 @@
   "title": "witness",
   "description": "Second brain for Claude Code & OpenCode: distills how your patterns and knowledge evolve over time.",
   "websiteUrl": "https://github.com/IngTian/witness#readme",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "repository": {
     "url": "https://github.com/IngTian/witness",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@witness-ai/opencode",
-      "version": "0.7.1",
+      "version": "0.7.2",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
