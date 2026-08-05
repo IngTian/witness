@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/store"
 )
@@ -135,6 +136,16 @@ const chunkOverlapRecords = 2
 // Splitting is greedy: accumulate records until the next one would exceed maxChars,
 // emit that window, then rewind chunkOverlapRecords for the next. A single record
 // larger than the budget is emitted alone (never dropped, never infinite-loops).
+//
+// The budget is counted in CHARACTERS (runes), not bytes. That is what the name and the
+// ChunkPolicy contract say, and what the drain's own sizer measures — store.PendingInputChars
+// uses SQLite LENGTH(), which counts characters. Using Go len() here made the effective
+// budget 3x tighter for CJK text than for ASCII: measured on 10 records of 400 Chinese
+// characters each with a budget comfortably above the whole corpus's 4080 characters,
+// RenderChunks emitted 8 chunks where the identical character count in ASCII emitted 1.
+// That is not a cosmetic mismatch — chunking measurably degrades arc lenses (the reason
+// whole-session is the default), so the user whose archive is part Chinese silently got
+// the worst-quality path on content that fit.
 func RenderChunks(raw []store.RawRecord, policy ChunkPolicy) []string {
 	if len(raw) == 0 {
 		return nil
@@ -148,7 +159,7 @@ func RenderChunks(raw []store.RawRecord, policy ChunkPolicy) []string {
 		end := start
 		chars := 0
 		for end < len(raw) {
-			entryChars := len(raw[end].Role) + len(raw[end].Text) + 4
+			entryChars := utf8.RuneCountInString(raw[end].Role) + utf8.RuneCountInString(raw[end].Text) + 4
 			if end > start && chars+entryChars > policy.MaxChars {
 				break
 			}

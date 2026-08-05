@@ -169,6 +169,17 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		p, _ := st.PendingSessionsUpdatedBetween(lensNames, timeRange.since, timeRange.until)
 		return p
 	}
+	// A ranged drain filters on MAX(julianday(ts)), which is NULL when a session has no
+	// timestamp SQLite can read — and NULL fails both bounds. That exclusion is correct (a
+	// session with no known time can't be placed in a window) and such sessions are still
+	// drained by the ordinary no-range worker, but it used to be entirely SILENT: `distill
+	// start --since ...` printed "nothing pending" with no hint that anything was skipped.
+	if !timeRange.empty() {
+		if n := st.SessionsWithNoUsableTimestamp(); n > 0 {
+			slog.Warn("range drain skips sessions whose raw timestamps are unreadable; an unranged `witness distill start` still mines them",
+				"skipped_sessions", n)
+		}
+	}
 	// Resolve the SET of distillation runners the active lenses need and, if there's work,
 	// Open each for the whole drain (issue #75 slice 2). Slice 1 opened one default runner;
 	// now a lens may route to its own runtime, so the drain opens every distinct runtime
