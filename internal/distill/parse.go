@@ -35,10 +35,20 @@ var ErrNoJSONArray = errors.New("no JSON array found in reply")
 // A reply whose only array is an empty "[]" yields an empty slice (a genuinely
 // quiet session); a reply with no array at all is an error. The worker treats
 // both as "nothing to mine", but the distinction keeps the intent explicit.
+// It takes the LAST qualifying array, not the first. Models routinely restate the
+// prompt's own ```json example before answering ("The format you want is: … Here are the
+// observations for THIS session: …"), and every shipped extract/review prompt contains
+// such an example. First-wins therefore wrote the EXAMPLE into L1 as if the user had
+// really done those things, and silently discarded the real answer — fabricated evidence
+// in a personal growth archive, the worst failure mode this tool has. A model's genuine
+// answer always FOLLOWS anything it echoes, so last-wins is the correct tiebreak; for a
+// well-behaved single-array reply the two are identical.
 func ParseJSONArray[T any](reply string) ([]T, error) {
 	candidates := append(fencedBlocks(reply), reply)
 	sawEmpty := false
 	// Tier 1: top-level arrays only (the strict, correct shape).
+	var best []T
+	found := false
 	for _, c := range candidates {
 		for _, span := range arraySpans(c) {
 			if !span.topLevel {
@@ -46,22 +56,30 @@ func ParseJSONArray[T any](reply string) ([]T, error) {
 			}
 			if arr, ok, empty := decodeArray[T](span.text); ok {
 				if !empty {
-					return arr, nil
+					best, found = arr, true // keep scanning: later wins
+				} else {
+					sawEmpty = true
 				}
-				sawEmpty = true
 			}
 		}
+	}
+	if found {
+		return best, nil
 	}
 	// Tier 2: any array at any depth (object-wrapped result fallback).
 	for _, c := range candidates {
 		for _, span := range arraySpans(c) {
 			if arr, ok, empty := decodeArray[T](span.text); ok {
 				if !empty {
-					return arr, nil
+					best, found = arr, true
+				} else {
+					sawEmpty = true
 				}
-				sawEmpty = true
 			}
 		}
+	}
+	if found {
+		return best, nil
 	}
 	if sawEmpty {
 		return []T{}, nil

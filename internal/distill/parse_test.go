@@ -84,3 +84,55 @@ func TestParseJSONArrayObjectWrappedFallback(t *testing.T) {
 		t.Fatalf("object-wrapped array should still parse, got %+v", got)
 	}
 }
+
+// ParseJSONArray must take the LAST qualifying array, not the first. Models routinely
+// restate the prompt's own ```json example before answering, and EVERY shipped
+// extract/review prompt contains such an example — so first-wins wrote the EXAMPLE into L1
+// as if the user had really done those things and silently discarded the real answer.
+// That is fabricated evidence in a personal growth archive.
+func TestParseJSONArrayPrefersTheLastArrayOverAnEchoedExample(t *testing.T) {
+	type obs struct {
+		Dimension   string `json:"dimension"`
+		Observation string `json:"observation"`
+	}
+	const echoed = `Understood — the format you want is:
+
+` + "```json" + `
+[{"dimension":"thinking","observation":"EXAMPLE from the prompt"}]
+` + "```" + `
+
+Here are the observations for THIS session:
+
+` + "```json" + `
+[{"dimension":"debugging","observation":"REAL answer for this session"}]
+` + "```"
+	got, err := ParseJSONArray[obs](echoed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Observation != "REAL answer for this session" {
+		t.Fatalf("must take the model's real answer, not the echoed example; got %+v", got)
+	}
+
+	// A well-behaved single-array reply is unaffected by the tiebreak.
+	single, err := ParseJSONArray[obs]("```json\n[{\"dimension\":\"d\",\"observation\":\"only one\"}]\n```")
+	if err != nil || len(single) != 1 || single[0].Observation != "only one" {
+		t.Fatalf("single-array reply must still parse: %+v err=%v", single, err)
+	}
+
+	// An empty array LATER must not erase a real earlier one — an empty result is only
+	// reported when nothing non-empty was found anywhere.
+	mixed, err := ParseJSONArray[obs]("```json\n[{\"dimension\":\"d\",\"observation\":\"real\"}]\n```\n\nNothing else:\n```json\n[]\n```")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mixed) != 1 || mixed[0].Observation != "real" {
+		t.Fatalf("a trailing empty array must not discard a real one; got %+v", mixed)
+	}
+
+	// Genuinely empty stays empty (the "model found nothing" contract).
+	empty, err := ParseJSONArray[obs]("```json\n[]\n```")
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty array must report no observations, got %+v err=%v", empty, err)
+	}
+}
