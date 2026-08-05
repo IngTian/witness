@@ -147,7 +147,9 @@ const generateTimeout = 10 * time.Minute
 // with no error anywhere. Generous on purpose: these are all local operations (a loopback
 // request, a version print, a model list), so seconds-scale is already far beyond normal,
 // and the values must never be tight enough to abort healthy work on a loaded machine.
-const (
+// Vars, not consts, for the same reason openCodeAsyncPollInterval is: a test must be able to
+// shrink them to prove the bound actually fires, without waiting a real minute.
+var (
 	openCodeRequestTimeout = 60 * time.Second
 	openCodeProbeTimeout   = 60 * time.Second
 )
