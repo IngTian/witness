@@ -310,3 +310,24 @@ test("verified marker omits mtime so an external touch does not force a re-hash"
   utimesSync(path.join(assets, "model.onnx"), future, future)
   assert.equal(modelReady(root), true)
 })
+
+// The model downloader must not assume process.execPath is a JS runtime. Loaded from the
+// OpenCode plugin, execPath is the `opencode` Bun-compiled binary, which treats a script
+// path as its own CLI arg: verified against real OpenCode 1.18.13 it prints its usage
+// banner, exits 1, and download-model.js NEVER runs. npm OpenCode users therefore never
+// got the embedding model — and with no model, autoWorkerShouldStart refuses to start a
+// worker whenever work is pending, so distillation never happened at all.
+test("startModelDownload never spawns the opencode binary as a script runtime", () => {
+  const src = readFileSync(new URL("./model.js", import.meta.url), "utf8")
+  // The bug: handing the script straight to process.execPath.
+  assert.ok(
+    !/spawn\(\s*process\.execPath\s*,\s*\[\s*scriptPath/.test(src),
+    "must not spawn(process.execPath, [scriptPath, ...]) - under the plugin that is the opencode binary",
+  )
+  // The fix: a resolver that refuses an opencode exec and prefers a real runtime.
+  assert.match(src, /isOpenCodeExec/, "must detect an opencode exec path")
+  assert.match(src, /whichSync\("node"\)/, "must be able to fall back to node on PATH")
+  assert.match(src, /args: \["run"\]/, "must be able to use `bun run <script>` under Bun")
+  // And it must decline (release the lock) rather than spawn something bogus.
+  assert.match(src, /if \(!runner\)/, "must handle 'no usable runtime' explicitly")
+})

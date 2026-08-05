@@ -89,6 +89,48 @@ func idFromRecordKey(key string) (string, bool) {
 	return id, true
 }
 
+// ingestTSLayouts are the timestamp shapes a record's `ts` may use. The schema documents
+// examples like "2026-07-26", so a date-only value must be accepted, not just full RFC3339.
+var ingestTSLayouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+// normalizeIngestTS converts a record's caller-supplied ts into CANONICAL RFC3339 UTC,
+// falling back to now for anything it cannot parse.
+//
+// This is a data-integrity guard, not politeness. raw.ts was stored VERBATIM, and
+// `witness cleanup` selects what to delete with `MAX(ts) < cutoff` — a STRING compare
+// against an RFC3339 cutoff. So an unvalidated ts in any other shape sorts wrong: a
+// US-style "07/26/2026" or an epoch "1754300000" both compare BELOW "2026-…" (because
+// '0' and '1' < '2'), making a document ingested seconds ago immediately eligible for
+// irreversible L0 deletion — while the cleanup prompt promises only idle transcripts go.
+// Reproduced before this fix: two of three just-ingested docs were destroyed by the
+// DEFAULT 90-day cutoff.
+//
+// Normalizing at the boundary (rather than hardening every query) keeps the invariant in
+// one place: everything in raw.ts is comparable RFC3339, which is what the rest of the
+// engine — cleanup, the sample/prune previews, the newest-session ordering — assumes.
+func normalizeIngestTS(raw, fallback string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return fallback
+	}
+	for _, layout := range ingestTSLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	// Unparseable (US-style, epoch, prose, garbage): treat as "now" rather than storing a
+	// value that would misorder against every other row. Ingest is best-effort by
+	// contract, so this must not reject the record.
+	slog.Warn("ingest: unparseable ts, using now instead", "ts", s)
+	return fallback
+}
+
 // groupSessions turns parsed records into per-session L0 batches. A record's `session`
 // groups it; an empty `session` makes the record its own session (id-derived, else
 // hash-derived). Every RawRecord gets a non-empty ts (record ts, else now), a role
@@ -119,10 +161,7 @@ func groupSessions(recs []ingestRecord, now time.Time) []ingestSession {
 		if strings.TrimSpace(role) == "" {
 			role = "document"
 		}
-		ts := strings.TrimSpace(rec.TS)
-		if ts == "" {
-			ts = nowStr
-		}
+		ts := normalizeIngestTS(rec.TS, nowStr)
 		s.Records = append(s.Records, store.RawRecord{
 			Session: sid,
 			Seq:     len(s.Records),
@@ -197,6 +236,18 @@ func cmdIngest(reader io.Reader, quiet bool) (ingested, skipped int, err error) 
 		return 0, skipped, err
 	}
 	defer st.Close()
+	// Serialize the whole read-modify-write, the same way the OpenCode importer does for
+	// the same hazard. applyIngestSession reads the session's stored key list and raw row
+	// count, then writes both back — so a concurrent raw mutation (a second `witness
+	// ingest`, or `witness cleanup` reclaiming rows) desynchronizes oldKeys[i] from
+	// ReadRaw()[i], and the positional update then writes one record's text over a
+	// DIFFERENT record's row. Corrupting an already-durable record is worse than declining
+	// the batch, and `ingest` is a deliberate user action that can simply be re-run.
+	unlock, ok := st.ImportLock("file")
+	if !ok {
+		return 0, skipped, fmt.Errorf("another witness ingest or import is running; retry when it finishes")
+	}
+	defer unlock()
 	for _, s := range groupSessions(recs, time.Now()) {
 		n, err := applyIngestSession(st, s)
 		if err != nil {

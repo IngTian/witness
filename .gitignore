@@ -62,3 +62,7 @@ assets/e5-small/*.onnx_data
 /npm/opencode/node_modules/
 /npm/opencode/*.tgz
 /npm/platform/*/bin/
+
+# Throwaway probe/scaffolding dirs from audit runs (never source).
+tmpaudit/
+tmpvfy/

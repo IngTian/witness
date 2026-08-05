@@ -3,6 +3,8 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
 
 // procLocks is the cross-process advisory-lock concern: filesystem flocks under
@@ -25,6 +27,52 @@ func flockPath(root, name string) (unlock func(), ok bool) {
 		return func() {}, false
 	}
 	return flockFile(f)
+}
+
+// flockPathWaiting is flockPath for MUTUAL EXCLUSION rather than single-flight election.
+//
+// flockPath is deliberately non-blocking: WorkerLock uses "did I get it?" to elect one
+// live worker, and a caller that waited would defeat that. But a read-modify-write of a
+// shared file needs the opposite — it must WAIT its turn, because "failed to acquire, so
+// proceed anyway" is exactly how concurrent writers silently discard each other's edits.
+// So this retries briefly instead of giving up, and still degrades to proceeding rather
+// than failing a config write outright if the lock never frees.
+//
+// It also takes a PROCESS-level mutex, because flock is per-file-descriptor: two
+// goroutines in one process each open their own fd and both acquire the "exclusive" lock,
+// so the flock alone orders nothing within a process.
+func flockPathWaiting(root, name string, wait time.Duration) (unlock func(), ok bool) {
+	mu := procMutex(root + "\x00" + name)
+	mu.Lock()
+	deadline := time.Now().Add(wait)
+	for {
+		if release, got := flockPath(root, name); got {
+			return func() { release(); mu.Unlock() }, true
+		}
+		if time.Now().After(deadline) {
+			// Best-effort, matching the rest of this file: hold the in-process mutex so at
+			// least local writers stay ordered, and let the caller proceed.
+			return mu.Unlock, false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+var (
+	procMutexMu sync.Mutex
+	procMutexes = map[string]*sync.Mutex{}
+)
+
+// procMutex returns the one mutex for a lock identity within this process.
+func procMutex(key string) *sync.Mutex {
+	procMutexMu.Lock()
+	defer procMutexMu.Unlock()
+	m := procMutexes[key]
+	if m == nil {
+		m = &sync.Mutex{}
+		procMutexes[key] = m
+	}
+	return m
 }
 
 // workerLockName is the single filesystem-flock file that elects the one live
