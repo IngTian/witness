@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -62,13 +63,22 @@ func TestWriteAtomicConcurrentWritersDoNotCollide(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/target.txt"
 	const n = 12
+	// Each writer's payload is a DISTINCT letter repeated, so "the file equals exactly one
+	// writer's payload" is a precise check. (An earlier version repeated the writer's index
+	// and asserted via strings.Trim, which strips CHARACTERS — writers 10 and 11 emit
+	// multi-digit strings, so a perfectly intact file legitimately contains two distinct
+	// digits and the assertion failed on correct behavior. Compare whole payloads instead.)
+	payloads := make([]string, n)
+	for i := range payloads {
+		payloads[i] = strings.Repeat(string(rune('A'+i)), 4096)
+	}
 	var wg sync.WaitGroup
 	errs := make([]error, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = writeAtomic(path, []byte(strings.Repeat(fmt.Sprintf("%d", i), 4096)))
+			errs[i] = writeAtomic(path, []byte(payloads[i]))
 		}(i)
 	}
 	wg.Wait()
@@ -77,17 +87,15 @@ func TestWriteAtomicConcurrentWritersDoNotCollide(t *testing.T) {
 			t.Errorf("writer %d: %v", i, err)
 		}
 	}
-	// Last-writer-wins is fine; a TORN file is not. Every byte must come from one writer.
+	// Last-writer-wins is fine; a TORN or MIXED file is not. The result must be byte-equal
+	// to exactly one writer's payload.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(raw)
-	if len(got) == 0 {
-		t.Fatal("target is empty")
-	}
-	first := got[:1]
-	if strings.Trim(got, first) != "" {
-		t.Fatalf("torn write: file mixes content from multiple writers (starts %q, len %d)", first, len(got))
+	if !slices.Contains(payloads, got) {
+		t.Fatalf("file is not byte-equal to any single writer's payload: len %d, starts %q",
+			len(got), got[:min(len(got), 8)])
 	}
 }
