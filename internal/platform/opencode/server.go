@@ -136,6 +136,22 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 // below and the native retained-fork path (see runner.Run).
 const generateTimeout = 10 * time.Minute
 
+// openCodeRequestTimeout bounds ONE HTTP request to the local serve process, and
+// openCodeProbeTimeout bounds ONE `opencode` CLI probe (`--version`, `models`).
+//
+// Both are liveness backstops for the same hazard generateTimeout guards: the drain's ctx
+// is signal-cancellable but has no deadline, the shared http.Client has no Timeout, and
+// exec.CommandContext only kills on ctx cancellation. So a wedged serve process or a hung
+// `opencode` invocation blocked the worker indefinitely while holding the machine-WIDE
+// WorkerLock — which also stops `capture` from ever draining, so the whole tool goes quiet
+// with no error anywhere. Generous on purpose: these are all local operations (a loopback
+// request, a version print, a model list), so seconds-scale is already far beyond normal,
+// and the values must never be tight enough to abort healthy work on a loaded machine.
+const (
+	openCodeRequestTimeout = 60 * time.Second
+	openCodeProbeTimeout   = 60 * time.Second
+)
+
 // Run sends one isolated distillation request through the shared OpenCode serve
 // process. It uses OpenCode's async prompt endpoint so the HTTP request that
 // starts generation never has to stay open for the full model latency; completion
@@ -385,7 +401,16 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 		}
 		r = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, r)
+	// Bound every individual request. The caller's ctx is signal-cancellable but carries
+	// no deadline, and the shared http.Client has no Timeout, so a serve process that
+	// accepted the connection and then wedged left this blocked in Do() forever — pinning
+	// the machine-wide WorkerLock until someone sent a signal by hand. The timeout goes
+	// HERE rather than on the Client because generation is observed by POLLING: each poll
+	// is a short request (bounded by this), while the overall wait is bounded separately by
+	// generateTimeout. A Client.Timeout would apply the same ceiling to both.
+	reqCtx, cancel := context.WithTimeout(ctx, openCodeRequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, method, s.baseURL+path, r)
 	if err != nil {
 		return nil, err
 	}
@@ -448,6 +473,10 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 // ValidateOpenCodeCapability gates the export/import/fork protocol. Do not fall
 // back to a shared user DB: an unavailable capability leaves L0 pending for retry.
 func ValidateOpenCodeCapability(ctx context.Context) error {
+	// Bound the probe: a hung `opencode --version` would otherwise block Open (and doctor)
+	// for as long as the deadline-less drain ctx lives, holding the machine-wide WorkerLock.
+	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
+	defer cancel()
 	out, err := openCodeVersionCommand(ctx)
 	if err != nil {
 		return fmt.Errorf("opencode native session isolation unavailable; upgrade to OpenCode 1.18.0+: %w", err)
@@ -471,6 +500,11 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	if cached, ok := openCodeModelsCache.Load(provider); ok {
 		return cached.(openCodeModelList), nil
 	}
+	// Bound the probe (see openCodeProbeTimeout): `opencode models` opens its DB and
+	// applies migrations, so it can genuinely block — and with a deadline-less ctx it
+	// blocked Open/doctor forever while holding the machine-wide WorkerLock.
+	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, "opencode", "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
 	// Isolated env when we have a runtime root: `opencode models` opens its OPENCODE_DB

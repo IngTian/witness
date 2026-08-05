@@ -86,7 +86,13 @@ func TestUninstallClaudeReportsFailureInsteadOfClaimingSuccess(t *testing.T) {
 	})
 }
 
-// withClaudeDir points claudeDir() at a scratch directory and returns it.
+// withClaudeDir points claudeDir() at a scratch directory and stubs out the
+// `claude mcp remove` subprocess, returning the directory.
+//
+// The stub is not optional hygiene. Before it existed, every call to cmdUninstallClaude in
+// this test spawned a REAL `claude mcp remove witness`, and those children never exited —
+// 366 of them accumulated on a developer machine and pinned the CPU, several reparented to
+// PID 1 so nothing would reap them. A unit test must never shell out to the user's CLI.
 func withClaudeDir(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -98,5 +104,8 @@ func withClaudeDir(t *testing.T) string {
 	if claudeDir() != dir {
 		t.Fatalf("claudeDir() = %q, want the scratch dir %q — this test would otherwise touch the real ~/.claude", claudeDir(), dir)
 	}
+	prev := removeClaudeMCP
+	removeClaudeMCP = func() {}
+	t.Cleanup(func() { removeClaudeMCP = prev })
 	return dir
 }
