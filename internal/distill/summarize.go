@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -103,8 +104,29 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		lenses = append(lenses, l)
 	}
 	sort.Strings(lenses) // deterministic order
+
+	// Reap summaries whose lens no longer has facets, BEFORE the early return below.
+	//
+	// This loop only ever visits lenses that HAVE facets, so a lens whose facets were
+	// dropped — `lens backfill --fresh`, `lens deregister`, a cleanup that reclaimed its
+	// source — was never visited and its profile/<lens>.md stayed on disk forever. That file
+	// is what `witness profile <lens>` and the MCP get_profile tool read, so an agent was
+	// served a narrative built from facets that no longer exist, with nothing marking it
+	// stale. Verified before this fix: dropping a lens's facets and re-running Summarize left
+	// the old summary readable and unchanged.
+	//
+	// Deleting (not blank-writing) is deliberate and matches what the unified portrait
+	// already does below: readers then show the friendly "not generated yet" message instead
+	// of an empty document. The signature is cleared too, so if the lens is re-mined later
+	// nothing vouches for the deleted file and it regenerates.
+	sm.reapOrphanProfiles(byLens)
+
 	if len(lenses) == 0 {
-		return nil // no facets yet — nothing to summarize
+		// No facets anywhere. The unified cleanup below is unreachable from here, so do it
+		// now — otherwise dropping the LAST lens's facets stranded a cross-lens portrait
+		// describing lenses that no longer have any.
+		sm.deleteProfileAndSignature(store.ProfileUnified)
+		return nil
 	}
 
 	// Index the active lenses by name so each per-lens summary uses that lens's own
@@ -157,10 +179,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		// DELETE (not blank-write) any stale portrait so readers (get_profile /
 		// `witness profile`) show the clean "not generated yet" message rather than an
 		// empty document. Clear its signature too so a later return to ≥2 lenses rebuilds.
-		if _, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok {
-			_ = sm.Store.DeleteProfile(store.ProfileUnified)
-			_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), "")
-		}
+		sm.deleteProfileAndSignature(store.ProfileUnified)
 		return nil
 	}
 	// The unified portrait spans all lenses → no single lens → the default DistillModel
@@ -188,6 +207,54 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// Stamp after the write succeeds (same crash-safety as the per-lens stamp).
 	_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), unifiedSig)
 	return nil
+}
+
+// deleteProfileAndSignature removes a profile file that has stopped being applicable and
+// clears the signature vouching for it.
+//
+// Both halves matter. Deleting the file makes readers (`witness profile`, the MCP
+// get_profile tool) show "not generated yet" instead of a stale narrative. Clearing the
+// signature means that if the lens later regains facets, nothing claims the deleted file is
+// current — otherwise the skip-the-LLM-call fast path would match a signature for a file
+// that no longer exists. Best-effort: a failure here must never fail a review whose real
+// work already landed, and the next pass retries.
+func (sm *Summarizer) deleteProfileAndSignature(lens string) {
+	if _, ok, _ := sm.Store.ReadProfile(lens); !ok {
+		return // nothing on disk; don't churn the signature
+	}
+	if err := sm.Store.DeleteProfile(lens); err != nil {
+		slog.Warn("summarize: could not remove a stale profile", "lens", lens, "err", err)
+		return // leave the signature alone: the file is still there
+	}
+	_ = sm.Store.SetMetaString(profileSigKey(lens), "")
+}
+
+// reapOrphanProfiles deletes per-lens summaries whose lens has no facets in THIS pass.
+//
+// withFacets is the set the caller is about to summarize. Anything else on disk is an
+// orphan: its facets were dropped (`lens backfill --fresh`, `lens deregister`) and the main
+// loop, which iterates only lenses that HAVE facets, would never visit it again.
+//
+// The unified portrait is deliberately skipped here — it is not a per-lens summary and has
+// its own <2-lens rule downstream, so reaping it on this basis would fight that logic.
+func (sm *Summarizer) reapOrphanProfiles(withFacets map[string][]store.Facet) {
+	onDisk, err := sm.Store.ListProfiles()
+	if err != nil {
+		// Read-only enumeration failed: skip the reap rather than fail the review. The
+		// worst case is the pre-existing behavior (a stale file lingers one more pass).
+		slog.Warn("summarize: could not enumerate profiles to reap stale ones", "err", err)
+		return
+	}
+	for _, lens := range onDisk {
+		if lens == store.ProfileUnified {
+			continue
+		}
+		if _, ok := withFacets[lens]; ok {
+			continue // still has facets — the main loop owns it
+		}
+		slog.Info("summarize: removing a profile whose lens no longer has facets", "lens", lens)
+		sm.deleteProfileAndSignature(lens)
+	}
 }
 
 // renderFacetsForSummary formats one lens's active facets as readable input for

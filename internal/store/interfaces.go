@@ -183,6 +183,11 @@ type SummaryStore interface {
 	ReadProfile(lens string) (string, bool, error)
 	WriteProfile(lens, markdown string) error
 	DeleteProfile(lens string) error
+	// ListProfiles enumerates the summaries ON DISK (including the unified portrait), so
+	// the summarizer can reap one whose lens no longer has facets. Without it the
+	// summarizer only ever visits lenses that HAVE facets, so a dropped lens's stale
+	// narrative is served to agents forever.
+	ListProfiles() ([]string, error)
 }
 
 // Compile-time proof that *Store satisfies every consumer interface. If a concern

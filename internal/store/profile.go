@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -59,6 +60,44 @@ func (p *profileFS) DeleteProfile(lens string) error {
 		return err
 	}
 	return nil
+}
+
+// ListProfiles returns the lens names that currently have a summary file on disk, sorted.
+// The unified portrait is INCLUDED (as store.ProfileUnified) — callers that only want
+// per-lens summaries must filter it out, which is explicit at the call site rather than
+// hidden here.
+//
+// This exists so the summarizer can find ORPHANED summaries: it iterates lenses that have
+// facets, so a lens whose facets were dropped (`lens backfill --fresh`, `lens deregister`)
+// was never visited and its profile/<lens>.md was left on disk forever. `witness profile
+// <lens>` and the MCP get_profile tool read that file directly, so an agent was served a
+// narrative built from facets that no longer exist, with no indication it was stale.
+//
+// A missing profile dir is not an error (nothing generated yet → empty list); neither is an
+// unreadable entry name, which is simply skipped rather than failing the whole review.
+func (p *profileFS) ListProfiles() ([]string, error) {
+	entries, err := os.ReadDir(p.ProfileDir())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".md")
+		// Round-trip through the same path guard the writers use, so a hand-created file
+		// with a hostile name can never be handed back as a "lens".
+		if _, err := profileFileName(name); err != nil {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // ReadProfile returns a lens's narrative summary and whether it exists yet (a
