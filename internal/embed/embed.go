@@ -24,6 +24,8 @@ import (
 	"github.com/gomlx/onnx-gomlx/onnx/parser"
 	"github.com/sugarme/tokenizer"
 	"github.com/sugarme/tokenizer/pretrained"
+	"golang.org/x/text/unicode/norm"
+	"strings"
 )
 
 const (
@@ -131,10 +133,30 @@ func (e *Embedder) tokenize(text string) ([]int64, error) {
 }
 
 // Embed returns the L2-normalized, masked-mean-pooled 384-d vector for one text.
-// Mirrors the verified reference pipeline exactly.
-func (e *Embedder) Embed(text string) ([]float32, error) {
+// Mirrors the verified reference pipeline exactly. It normalizes and sanitizes text before tokenizing, and converts a tokenizer panic
+// into an error.
+//
+// Both guards are load-bearing, not defensive noise. The tokenizer indexes the input by
+// byte offsets and PANICS (index/slice out of range) on two ordinary inputs: text in NFD
+// form — which is what macOS filesystems and pastes produce, so "café" typed on a Mac
+// crashes while the visually identical NFC "café" is fine — and any non-UTF-8 byte
+// sequence (e.g. latin-1 text from an imported document). The mining path has a recover
+// barrier (distill/drain.go), but the READ paths did not: `witness observations search`
+// died with a raw Go stack trace, and because the MCP server is a long-lived process
+// serving on a jsonrpc2 handler goroutine, a panic there killed the whole server
+// mid-session — taking any staged record_observation writes with it. Normalizing to NFC
+// and replacing invalid bytes makes the common cases WORK rather than merely not-crash;
+// the recover is the backstop for whatever else the tokenizer dislikes.
+func (e *Embedder) Embed(text string) (vec []float32, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			vec, err = nil, fmt.Errorf("embed: tokenizer panicked on this input: %v", r)
+		}
+	}()
+
+	text = norm.NFC.String(strings.ToValidUTF8(text, "�"))
 
 	ids, err := e.tokenize("query: " + text)
 	if err != nil {
@@ -164,7 +186,7 @@ func (e *Embedder) Embed(text string) ([]float32, error) {
 		},
 		[][]int64{ids}, [][]int64{mask}, [][]int64{ttype})
 
-	vec, err := tensors.CopyFlatData[float32](out[0])
+	vec, err = tensors.CopyFlatData[float32](out[0])
 	if err != nil {
 		return nil, err
 	}
