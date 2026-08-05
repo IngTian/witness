@@ -94,13 +94,26 @@ func underTest() bool {
 // an unreapable orphan, 746 of them in one measured run). Tests that need to assert a spawn
 // was requested should assert on the state the caller is responsible for — the queue row,
 // the cleared stop flag — or inject a seam, not on a real child process.
-func spawnDetached(args ...string) {
+func spawnDetached(args ...string) { _ = spawnDetachedOK(args...) }
+
+// spawnDetachedOK is spawnDetached that REPORTS whether the child started.
+//
+// Callers that record "a child is now running" in durable state need this: the wakeup
+// scheduler stamped its meta key before spawning and discarded the error, so a failed spawn
+// left a phantom latch that suppressed the retry for the whole backoff window (see
+// scheduleWorkerWakeupWith). Fire-and-forget callers keep using spawnDetached.
+//
+// Under `go test` it is a no-op that reports SUCCESS: the spawn is suppressed deliberately
+// (see underTest), so reporting failure would make every test log a spurious "retry not
+// armed" error and would change the state the caller writes — the opposite of inert.
+func spawnDetachedOK(args ...string) bool {
 	if underTest() {
-		return
+		return true
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		return
+		slog.Error("could not resolve our own executable to spawn a detached child", "err", err)
+		return false
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Env = os.Environ()
@@ -111,10 +124,14 @@ func spawnDetached(args ...string) {
 	// doesn't kill it mid-distillation. proc.Detach is GOOS-split behind the port
 	// (setsid on Unix; DETACHED_PROCESS|NEW_PROCESS_GROUP on Windows).
 	procCtl.Detach(cmd)
-	_ = cmd.Start() // fire and forget
+	if err := cmd.Start(); err != nil {
+		slog.Error("could not spawn detached child", "args", args, "err", err)
+		return false
+	}
 	if cmd.Process != nil {
 		_ = cmd.Process.Release()
 	}
+	return true
 }
 
 // reportError prints err in the format matching the caller's output mode: a JSON
