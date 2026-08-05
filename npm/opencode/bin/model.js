@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, statSync, unlinkSync, closeSync, chmodSync, readFileSync, utimesSync, writeFileSync } from "node:fs"
+import { accessSync, constants as fsConstants, createReadStream, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, statSync, unlinkSync, closeSync, chmodSync, readFileSync, utimesSync, writeFileSync } from "node:fs"
 import { rename } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
 import { get as httpGet } from "node:http"
@@ -286,6 +286,59 @@ export function restampLockOwner(lock, token) {
   } catch {}
 }
 
+// resolveScriptRunner picks something that can actually EXECUTE download-model.js.
+//
+// It must not assume process.execPath is a JS runtime. When this module is loaded from the
+// OpenCode plugin, execPath is the `opencode` Bun-compiled binary, which treats a script
+// path as its own CLI argument: verified against real OpenCode 1.18.13, it prints its usage
+// banner, exits, and the script NEVER runs. That silently left npm OpenCode users without
+// the embedding model forever — and with no model, autoWorkerShouldStart refuses to start
+// a worker whenever there is pending work, so distillation never happened at all. Nothing
+// else covered for it either: the npm package ships no assets, and embed.go's error tells
+// the user to run scripts/fetch-model.sh, which that package does not contain.
+//
+// Preference order:
+//  1. `bun run <script>` when we are demonstrably under Bun (globalThis.Bun) — the plugin's
+//     own runtime, so no extra dependency. Bun.which finds the real bun binary; execPath is
+//     unusable precisely because it is the embedded opencode build.
+//  2. a plain `node` on PATH — the ordinary `npx`/CLI case.
+//  3. process.execPath ONLY when it is not the opencode binary (a genuine node/bun exec).
+// Returns null when nothing can run it, so the caller releases the lock and reports
+// "couldn't start" rather than leaving a lock behind for a child that never existed.
+function resolveScriptRunner() {
+  const isOpenCodeExec = /(^|[\\/])opencode(\.exe)?$/i.test(process.execPath || "")
+  if (typeof globalThis.Bun !== "undefined") {
+    const bun = (() => {
+      try {
+        return globalThis.Bun.which("bun")
+      } catch {
+        return null
+      }
+    })()
+    if (bun) return { cmd: bun, args: ["run"] }
+  }
+  const node = whichSync("node")
+  if (node) return { cmd: node, args: [] }
+  if (process.execPath && !isOpenCodeExec) return { cmd: process.execPath, args: [] }
+  return null
+}
+
+// whichSync is a dependency-free PATH lookup (Bun.which is unavailable under plain node).
+function whichSync(bin) {
+  const paths = (process.env.PATH || "").split(path.delimiter).filter(Boolean)
+  const exts = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""]
+  for (const dir of paths) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, bin + ext)
+      try {
+        accessSync(candidate, fsConstants.X_OK)
+        return candidate
+      } catch {}
+    }
+  }
+  return null
+}
+
 export function startModelDownload(packageRoot, options = {}) {
   if (process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(packageRoot)) return null
   const dir = modelDir(packageRoot)
@@ -306,9 +359,16 @@ export function startModelDownload(packageRoot, options = {}) {
   // PID so a hard-killed OpenCode process does not leave a long model download
   // running on battery; detached=true is reserved for explicit CLI use.
   if (options.detached !== true) env.WITNESS_MODEL_PARENT_PID = String(process.pid)
+  const runner = resolveScriptRunner()
+  if (!runner) {
+    try {
+      unlinkSync(lock.lock)
+    } catch {}
+    return null
+  }
   let child
   try {
-    child = spawn(process.execPath, [scriptPath, "--foreground", packageRoot, lock.lock, lock.token], {
+    child = spawn(runner.cmd, [...runner.args, scriptPath, "--foreground", packageRoot, lock.lock, lock.token], {
       detached: options.detached === true,
       stdio: "ignore",
       env,
