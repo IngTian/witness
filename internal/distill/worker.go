@@ -525,6 +525,15 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 		return nil, err
 	}
 	raw, perr := ParseJSONArray[minedObs](reply)
+	if errors.Is(perr, ErrTruncatedJSONArray) {
+		// The model DID extract; the reply was cut off mid-array (output-token cap, killed
+		// child, dropped stream). Returning this as drift would advance the watermark over
+		// turns whose observations were sitting in the truncated text — permanent loss,
+		// since the watermark counts raw records and they are never offered again. Surface
+		// it as an ordinary retryable failure instead: the lens backs off (5m/10m/20m…,
+		// capped at 6h) and re-mines the SAME delta, and raw is never dropped.
+		return nil, fmt.Errorf("%w (lens=%s reply_len=%d)", perr, ln.Name, len(strings.TrimSpace(reply)))
+	}
 	if perr != nil {
 		// The model replied (no transport error) but its reply contained NO parseable
 		// JSON array at all — prose drift (it conversed/refused instead of extracting).
