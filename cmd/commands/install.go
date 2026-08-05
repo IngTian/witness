@@ -647,13 +647,31 @@ func cmdUninstall(args []string) error {
 }
 
 func cmdUninstallClaude() error {
+	// Report what actually happened. This used to swallow BOTH the parse error and the
+	// write error and print "hooks removed" regardless — so an unparseable settings.json,
+	// or a read-only ~/.claude, left every witness hook wired while the user was told they
+	// were gone. They then delete the binary, and Claude Code fires a hook for a command
+	// that no longer exists on every single turn. Mirrors cmdUninstallOpenCode, which
+	// already surfaces both errors.
 	settings := filepath.Join(claudeDir(), "settings.json")
-	if data, err := os.ReadFile(settings); err == nil {
-		if cleaned, err := removeWitnessHooks(data); err == nil {
-			_ = writeFileAtomic(settings, cleaned)
-			fmt.Printf("hooks removed from %s\n", settings)
+	data, err := os.ReadFile(settings)
+	switch {
+	case err == nil:
+		cleaned, err := removeWitnessHooks(data)
+		if err != nil {
+			return fmt.Errorf("%s: %w (edit it by hand to remove the witness hooks)", settings, err)
 		}
+		if err := writeFileAtomic(settings, cleaned); err != nil {
+			return fmt.Errorf("write %s: %w", settings, err)
+		}
+		fmt.Printf("hooks removed from %s\n", settings)
+	case os.IsNotExist(err):
+		fmt.Printf("no %s, so no hooks to remove\n", settings)
+	default:
+		return fmt.Errorf("read %s: %w", settings, err)
 	}
+	// The MCP removal stays best-effort: `claude` may not be on PATH, and it exits
+	// non-zero when the server simply isn't registered — neither is a failure to report.
 	_ = exec.Command("claude", "mcp", "remove", "witness").Run()
 	fmt.Println("MCP server 'witness' removed (if it was present)")
 	return nil

@@ -314,14 +314,23 @@ func (r *rawIO) PruneSessionsBefore(cutoff string) (sessions, records int, err e
 			return 0, 0, err
 		}
 		// Per-session state parked in `meta` under a "<namespace>:<session>" key (today
-		// only opencode's "opencode_import_keys:<session>") would otherwise be orphaned
-		// when the session's raw/progress rows go — a slow leak of dead meta rows.
-		// Suffix-match ":"+session with substr (NOT LIKE: opencode session ids contain
-		// "_", a LIKE wildcard, which would over-match). Stays generic — the store never
-		// hardcodes the opencode key constant.
-		needle := ":" + sess
+		// opencode's "opencode_import_keys:<session>" and ingest's "file_import_keys:")
+		// would otherwise be orphaned when the session's raw/progress rows go — a slow
+		// leak of dead meta rows. Stays generic — the store never hardcodes either key
+		// constant. Not LIKE: opencode session ids contain "_", a LIKE wildcard.
+		//
+		// Anchor on the namespace's FIRST colon; do NOT suffix-match ":"+session. Session
+		// ids may themselves contain colons ("file:" + a caller-supplied id, which is an
+		// arbitrary string — a path, a URL, an arxiv id), so a bare suffix match also hits
+		// a DIFFERENT, LIVE session whose id happens to end in ":"+sess. Verified: with
+		// sessions "file:x" (stale) and "file:notes:file:x" (live), pruning the former
+		// deleted the LATTER's file_import_keys row. The live session then looks
+		// never-ingested, so the next `witness ingest` re-appends every already-durable
+		// record as new — silent L0 duplication of data the user cannot see is duplicated.
+		// Namespaces are single tokens with no colon, so the text after the first colon is
+		// exactly the session id.
 		if _, e := tx.Exec(
-			`DELETE FROM meta WHERE substr(key, length(key) - length(?) + 1) = ?`, needle, needle); e != nil {
+			`DELETE FROM meta WHERE instr(key, ':') > 0 AND substr(key, instr(key, ':') + 1) = ?`, sess); e != nil {
 			err = e
 			return 0, 0, err
 		}
