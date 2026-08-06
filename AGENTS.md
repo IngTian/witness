@@ -77,12 +77,25 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   the Unix shim `hooks/witness.sh` and `commands.Run()` check it — and on Windows
   (exec-form hooks, no shim) `commands.Run()` is the *only* guard, so keep it
   intact.
-- **Install is per-platform (`resolveClaudeInstall`, GOOS-split).** Unix wires
-  shell-form hooks through the `hooks/witness.sh` shim (in-repo working copy).
-  Windows has no guaranteed shell: `install_windows.go` COPIES the binary +
-  `prompts/` + model into `%LOCALAPPDATA%\witness` and wires **exec-form** hooks
-  (`{command: <exe>, args: [...]}`) pointing at the installed exe. Keep the two
-  paths separate — don't unify onto the shim.
+- **Install is per-platform (`resolveClaudeInstall` + `resolveOpenCodeInstall`, both
+  GOOS-split).** Unix points at the in-repo `hooks/witness.sh` shim. Windows has no
+  guaranteed shell, so `install_windows.go` COPIES the binary + `prompts/` + model
+  into `%LOCALAPPDATA%\witness` (shared `installSelf`) and targets the installed
+  `witness.exe`. Keep the two OS paths separate — don't unify onto the shim.
+  - Claude Code spawns the hook, so its Windows wiring is **exec-form** hooks
+    (`{command: <exe>, args: [...]}`) in `settings.json`.
+  - OpenCode's **plugin** spawns witness, so `wire opencode` bakes the target into
+    the plugin JS + MCP entry. Both JSON-encode the path, so a Windows backslash is
+    escaped by construction, and the plugin spawns an argv ARRAY (`Bun.spawn([target,
+    ...args])`) — never a command string, which would need a shell and would
+    word-split a path with spaces. Issue #10 was exactly this: `cmdInstallOpenCode`
+    called `repoShim()` unconditionally, so Windows got a `.sh` it could not run and
+    captured NOTHING while reporting success. It compiled and vetted clean, so the
+    guard is a source assertion (`install_opencode_wintarget_test.go`) that runs on
+    every OS — a `runtime.GOOS == "windows"` check can only fail on Windows.
+  - OpenCode's config dir is `~/.config/opencode` on Windows too (verified against
+    OpenCode's own resolution: `XDG_CONFIG_HOME` else `~/.config`, no OS branch), so
+    `opencodeDir()` needs no GOOS split.
 - **Hook name contract.** Installed hooks invoke `witness <session-start|capture|
   session-end>` (shell form) or the same tokens as exec-form `args`; the binary
   must keep cobra commands of exactly those names, and `isWitnessEntry` must
