@@ -150,9 +150,14 @@ func cmdConfigSet(key, value string, lensName string) error {
 	}
 	shown := value
 	if shown == "" {
-		if lensName != "" {
+		switch {
+		case lensName != "":
 			shown = "(cleared — inherits from default)"
-		} else {
+		case canonical == "runner":
+			// Say what actually happened. "(runner default)" implied a value had been chosen,
+			// while the effect is the opposite: the key is gone and resolution falls back.
+			shown = "(cleared — unbound; resolves from WITNESS_RUNNER, else the built-in default)"
+		default:
 			shown = "(runner default)"
 		}
 	}
@@ -270,6 +275,14 @@ func configApplySet(st *store.Store, key, value, lensName string) error {
 		// DEFAULT scope
 		switch key {
 		case "runner":
+			if value == "" {
+				// Clearing the runner must UNBIND it, not bind it to the template default.
+				// st.SetRunner("") wrote a line AND stamped runner_bound=1, so `config unset
+				// runner` did the opposite of what it says: measured on a fresh archive with
+				// WITNESS_RUNNER=opencode, resolution went from "opencode" to a BOUND "claude",
+				// and no env change could recover it.
+				return st.UnsetRunner()
+			}
 			return st.SetRunner(value)
 		case "mine_model":
 			return st.SetConfigString("triage_model", value)
