@@ -200,11 +200,14 @@ by hand):
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
 - `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
-- `witness distill start|status|stop` — manage the background distillation worker. Manual starts
-  accept `--since`/`--until` to select pending sessions by their latest raw timestamp; for example,
-  `witness distill start --since 7d` distills sessions updated in the last seven days. Bounds also
-  accept RFC3339 timestamps or UTC dates (`YYYY-MM-DD`) and do not discard sessions outside the
-  selected range.
+- `witness status` — what has been captured, whether the worker is running, and how fresh the
+  distilled data is (`--json` for scripts).
+- `witness worker run` / `witness worker stop` — the operator escape hatch for the background
+  distillation worker (hidden from `--help`; normally it runs off editor hooks). `run` drains in
+  the foreground, `--detach` backgrounds it. It accepts `--since`/`--until` to select pending
+  sessions by their latest raw timestamp — for example `witness worker run --since 7d` distills
+  sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates
+  (`YYYY-MM-DD`) and do not discard sessions outside the selected range.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness export <path>` — write a consistent single-file snapshot of the archive (safe to back up / cloud-sync).
 - `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
@@ -345,7 +348,7 @@ After the first download, verify the model, OpenCode runner, archive, and queue:
 
 ```sh
 npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
-npm exec --yes --package=@witness-ai/opencode@beta -- witness distill status
+npm exec --yes --package=@witness-ai/opencode@beta -- witness status
 ```
 
 > **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is
@@ -379,7 +382,7 @@ Manual verification path:
 witness lens register math prompts/lens/example   # optional: register an extra lens
 witness lens enable math
 witness import --agent opencode    # reconciles ~/.local/share/opencode/opencode.db and returns
-witness distill status             # watch non-blocking distillation progress
+witness status                    # watch non-blocking distillation progress
 witness review                     # forces L2 facets + L4 markdown profiles
 witness profile opencode           # per-lens L4 report
 witness profile                    # unified L4 report
@@ -401,7 +404,7 @@ auto_distill_session_budget = 0         # sessions per automatic run (0 = drain 
 ```
 
 Set `auto_distill = false` for capture-only mode on battery-constrained machines, then run
-`witness distill start` manually when plugged in. Automatic workers are short-lived: they load the
+`witness worker run --detach` manually when plugged in. Automatic workers are short-lived: they load the
 embed model only while draining queued sessions, then exit.
 
 When `runner = opencode`, `triage_model` and `distill_model` should use OpenCode model names such
