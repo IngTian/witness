@@ -302,6 +302,28 @@ func parseBool(v string) (bool, bool) {
 // the user does not have to hand-edit config. Other lines (comments, lenses,
 // other keys) are preserved verbatim. The value is quoted to match the format
 // EnsureConfigFile writes and to stay consistent with other string fields.
+// UnsetRunner makes the runner genuinely UNBOUND: it REMOVES the `runner` line from
+// config.toml and clears the runner-bound flag, so resolution falls back to WITNESS_RUNNER and
+// then the built-in default.
+//
+// This is not the same as SetRunner(""), which is what `config unset runner` used to call —
+// and which did the OPPOSITE of what the user asked. SetRunner writes a line and stamps
+// runner_bound=1, so "unset" left the user PINNED. Measured on a fresh archive with
+// WITNESS_RUNNER=opencode (the npm OpenCode user who never ran `install`): resolution was
+// "opencode" before, and "claude" with bound=1 after. Every drain then shells a `claude`
+// binary that user does not have, each (session,lens) fails and backs off, and no amount of
+// re-setting WITNESS_RUNNER recovers it.
+//
+// The line must be REMOVED rather than blanked: adoptRunnerBound (run once per Open) re-stamps
+// the flag whenever ANY `runner` line is present, so a `runner = ""` line would silently
+// re-bind on the very next command.
+func (c *configFile) UnsetRunner() error {
+	if err := c.removeConfigKey("runner"); err != nil {
+		return err
+	}
+	return metaSet(c.db, runnerBoundKey, "")
+}
+
 func (c *configFile) SetRunner(runner string) error {
 	if err := c.setConfigKey("runner", runner); err != nil {
 		return err
@@ -367,6 +389,45 @@ func (c *configFile) setConfigKey(key, value string) error {
 	}
 	if !set {
 		kept = append(kept, newLine)
+	}
+	out := strings.Join(kept, "\n") + "\n"
+	return writeAtomic(c.configPath(), []byte(out))
+}
+
+// removeConfigKey DELETES a key's line(s) from config.toml, preserving everything else.
+//
+// The counterpart to setConfigKey, for the case where "absent" and "present but empty" mean
+// different things. That distinction is load-bearing for `runner`: adoptRunnerBound re-stamps
+// the bound flag whenever ANY `runner` line exists, so blanking the value would silently
+// re-bind on the next Open (see UnsetRunner). Takes the same configMutationLock and writes
+// through the same writeAtomic staging, so it cannot lose a concurrent process's edit.
+//
+// A missing file is not an error: there is nothing to remove.
+func (c *configFile) removeConfigKey(key string) error {
+	if unlock, ok := c.configMutationLock(); ok {
+		defer unlock()
+	}
+	data, err := os.ReadFile(c.configPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var kept []string
+	removed := false
+	for _, line := range strings.Split(string(data), "\n") {
+		if isConfigKeyLine(line, key) {
+			removed = true
+			continue // drop every line for this key, including duplicates
+		}
+		kept = append(kept, line)
+	}
+	if !removed {
+		return nil // already absent; don't rewrite the file for nothing
+	}
+	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+		kept = kept[:len(kept)-1]
 	}
 	out := strings.Join(kept, "\n") + "\n"
 	return writeAtomic(c.configPath(), []byte(out))

@@ -267,6 +267,17 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		return fmt.Errorf("load lens %q: %w", name, err)
 	}
 	minedName := l.Name // the name the worker tags observations/facets/progress with
+	// releaseFresh releases the WorkerLock that --fresh holds across its destructive section.
+	// Declared out here (as an idempotent no-op by default) because the lock spans both the
+	// `if fresh` block AND the ResetLensWatermark below, but must be released before the drain.
+	released := false
+	var freshLockRelease func()
+	releaseFresh := func() {
+		if freshLockRelease != nil && !released {
+			released = true
+			freshLockRelease()
+		}
+	}
 	if fresh {
 		// --fresh is DESTRUCTIVE and #102 folded it in behind a safe-sounding flag, so
 		// gate it like every other irreversible op (mirror `witness cleanup`): (1) fail
@@ -275,9 +286,32 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// leaving the lens gutted; (2) warn that ACTIVE (hand-recorded) observations are NOT
 		// re-derivable from L0 and will be lost — the "safe, re-mined from L0" story only
 		// holds for MINED obs; (3) confirm unless --yes. Only then drop.
-		if st.WorkerActive() {
+		// HOLD the lock, don't probe it. WorkerActive is explicitly advisory (see its doc in
+		// internal/store/locks.go) and there is an unbounded human pause — the [y/N] prompt —
+		// between the probe and the delete, plus ~4 DB queries even under --yes.
+		//
+		// The race destroys data, verified at the store layer: a worker that starts in that
+		// window reads DistilledCount=N into memory; --fresh then deletes the lens's obs/facets
+		// and DELETEs its progress rows; the in-flight worker's trailing
+		// MarkDistilledIfCurrent re-stamps progress=N with ZERO observations written (its CAS
+		// only checks that the raw generation is unchanged, which it is — --fresh never touches
+		// raw). Measured outcome: DistilledCount=4, observations=0, PendingSessions=[] — the
+		// session is permanently marked fully distilled for this lens with no L1, invisible to
+		// every later drain, and the command's own recovery advice (`witness worker review`)
+		// cannot bring it back.
+		//
+		// Taking the real lock closes the window because a worker cannot start while we hold it.
+		// It must be released BEFORE runWorker below (see the explicit unlock, not a defer):
+		// runWorker takes WorkerLock on a FRESH descriptor in this same process, and flock is
+		// per-open-file-description — locks.go documents that a second descriptor is denied even
+		// against the process's own held lock — so a deferred unlock would make every --fresh
+		// self-deadlock into ran=false and the "another worker took the drain lock" error.
+		freshUnlock, gotLock := st.WorkerLock()
+		if !gotLock {
 			return fmt.Errorf("a distillation worker is running; backfill %q --fresh would drop this lens's data but couldn't re-mine it now — wait until `witness status` is idle, then retry", name)
 		}
+		freshLockRelease = freshUnlock
+		defer releaseFresh() // safety net for the error/abort returns below
 		obsAll, facetsN := st.LensDataCounts(minedName)
 		active := st.ActiveObservationCount(minedName)
 		// The SECOND non-reproducible class: mined obs whose session's L0 was reclaimed by
@@ -321,6 +355,13 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// report how many prose_drift events THIS backfill produced (#57) — a below-floor
 	// triage model surfaces here, at the moment of the backfill.
 	driftBefore := st.DriftTotal()
+	// Release the --fresh WorkerLock BEFORE the drain (no-op when !fresh). This ordering is
+	// load-bearing, not tidiness: runWorker takes WorkerLock on a fresh descriptor in THIS
+	// process, and flock is per-open-file-description, so holding ours would deny the drain its
+	// lock and turn every --fresh into ran=false. Releasing here is safe — the destructive
+	// section is fully committed, and a worker that starts in this instant sees the already-reset
+	// watermark and mines the same delta we were about to.
+	releaseFresh()
 	// Close our handle before the drain opens its own + takes the WorkerLock. The
 	// reset is already committed, so the worker's fresh store snapshot sees it.
 	st.Close()

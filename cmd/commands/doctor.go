@@ -144,7 +144,22 @@ func cmdDoctor(asJSON bool) error {
 				ENUnrelated: enUnrelated,
 			},
 		}
-		return emitJSON(out)
+		// Emit the payload, THEN surface the failure. Dropping deferredErr here made
+		// `witness doctor --json` exit 0 on an archive that cannot distill at all — a missing
+		// embedder model, a typo'd runner, an OpenCode model the provider rejects — while the
+		// human path returns it at the end of this function and exits 1. So the machine-readable
+		// health check, which is exactly the form a CI step or install-verify script uses
+		// (`witness doctor --json || fail`, the shape install.sh and `make doctor` point users
+		// at), reported healthy while nothing could ever be mined.
+		//
+		// Order matters: the report still goes to stdout in full, because that payload is the
+		// whole point of --json (a consumer must still see embedder.status / model_check).
+		// reportError renders {"error": …} on STDERR for --json callers, so `witness doctor
+		// --json | jq .` keeps parsing a clean document either way.
+		if err := emitJSON(out); err != nil {
+			return err
+		}
+		return deferredErr
 	}
 
 	// --- human-readable report (decorative; --json is handled above) ----------

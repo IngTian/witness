@@ -634,12 +634,12 @@ func TestStageObservationDedup(t *testing.T) {
 func TestStageObservationCap(t *testing.T) {
 	s := tempStore(t)
 	for i, id := range []string{"a", "b"} {
-		ok, err := s.StageObservationCapped(Observation{ID: id, Session: "s", Observation: id}, 2)
+		ok, err := s.StageObservationCapped(Observation{ID: id, Session: "s", Observation: id}, 2, 0)
 		if err != nil || !ok {
 			t.Fatalf("insert %d (%s) should succeed: ok=%v err=%v", i, id, ok, err)
 		}
 	}
-	ok, err := s.StageObservationCapped(Observation{ID: "c", Session: "s", Observation: "c"}, 2)
+	ok, err := s.StageObservationCapped(Observation{ID: "c", Session: "s", Observation: "c"}, 2, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +650,7 @@ func TestStageObservationCap(t *testing.T) {
 		t.Fatalf("cap not enforced: got %d staged, want 2", got)
 	}
 	// A different session is unaffected by another session's cap.
-	if ok, _ := s.StageObservationCapped(Observation{ID: "d", Session: "other", Observation: "d"}, 2); !ok {
+	if ok, _ := s.StageObservationCapped(Observation{ID: "d", Session: "other", Observation: "d"}, 2, 0); !ok {
 		t.Fatalf("a different session should still accept observations")
 	}
 
@@ -665,7 +665,7 @@ func TestStageObservationCap(t *testing.T) {
 	}
 	// Re-staging an existing id while the session is AT the cap: still not inserted,
 	// but it's a dedup, not a quota breach — StagedExists tells them apart.
-	if ok, _ := s.StageObservationCapped(Observation{ID: "a", Session: "s", Observation: "a"}, 2); ok {
+	if ok, _ := s.StageObservationCapped(Observation{ID: "a", Session: "s", Observation: "a"}, 2, 0); ok {
 		t.Fatalf("re-staging a duplicate must not insert")
 	}
 	if !s.StagedExists("s", "a") {

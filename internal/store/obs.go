@@ -18,7 +18,7 @@ type obsIO struct{ db *sql.DB }
 // cap. The session's worker drains it at session end, passing it through verbatim
 // (authoritative). Duplicate (session, obs_id) rows collapse to one.
 func (o *obsIO) StageObservation(ob Observation) error {
-	_, err := o.StageObservationCapped(ob, 0)
+	_, err := o.StageObservationCapped(ob, 0, 0)
 	return err
 }
 
@@ -28,8 +28,18 @@ func (o *obsIO) StageObservation(ob Observation) error {
 // a separate count check and race past the cap. INSERT OR IGNORE collapses a
 // duplicate (session, obs_id) — via idx_staged_unique — so a re-recorded
 // observation is a no-op, not a quota-burning extra row. Returns whether a row was actually
-// inserted (false = at the cap, or a duplicate).
-func (o *obsIO) StageObservationCapped(ob Observation, limit int) (bool, error) {
+// inserted (false = at either cap, or a duplicate).
+//
+// totalLimit is applied in ADDITION to the per-session limit, and bounds the whole staged
+// table. The per-session cap alone is evadable: the session id comes from the agent, so a
+// runaway or confused one that varies it (per-turn ids, a hallucinated id, an incrementing
+// counter) gets a fresh budget every call and can stage without bound — each row carrying up to
+// 2000 chars of observation plus 2000 of evidence, all durable in L1 and all fed to the review
+// model. A total cap cannot be evaded by choosing a different key, because it has no key.
+//
+// Both bounds live in the SAME atomic statement as the insert, so concurrent MCP processes
+// cannot each pass a check and race past it. limit/totalLimit <= 0 disable the respective bound.
+func (o *obsIO) StageObservationCapped(ob Observation, limit, totalLimit int) (bool, error) {
 	ob.Source = "active"
 	payload, err := json.Marshal(ob)
 	if err != nil {
@@ -38,13 +48,24 @@ func (o *obsIO) StageObservationCapped(ob Observation, limit int) (bool, error) 
 	res, err := o.db.Exec(
 		`INSERT OR IGNORE INTO staged(session, obs_id, payload)
 		 SELECT ?, ?, ?
-		 WHERE (? <= 0 OR (SELECT COUNT(*) FROM staged WHERE session = ?) < ?)`,
-		ob.Session, ob.ID, string(payload), limit, ob.Session, limit)
+		 WHERE (? <= 0 OR (SELECT COUNT(*) FROM staged WHERE session = ?) < ?)
+		   AND (? <= 0 OR (SELECT COUNT(*) FROM staged) < ?)`,
+		ob.Session, ob.ID, string(payload),
+		limit, ob.Session, limit,
+		totalLimit, totalLimit)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// StagedTotal is the count across ALL sessions — the quantity the total cap bounds. Used to tell
+// "hit the global cap" apart from "hit this session's cap" so the error names the right one.
+func (o *obsIO) StagedTotal() int {
+	var n int
+	_ = o.db.QueryRow(`SELECT COUNT(*) FROM staged`).Scan(&n)
+	return n
 }
 
 // DrainStaged returns staged active observations for a session along with the

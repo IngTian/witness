@@ -298,9 +298,13 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	// Partition incoming records: skip (identical key), update (same id, changed key), append (new id).
 	// We also track which old indices are touched by updates, so we know what to preserve.
 	type updateOp struct {
-		oldIdx     int
-		newRecIdx  int
-		newKey     string
+		oldIdx    int
+		newRecIdx int
+		// oldKey is the key ALREADY STORED at oldIdx, i.e. recordKey(id, the text currently in
+		// that row). It exists to verify the positional write before it happens — see the
+		// identity check in the apply loop. (This field was previously `newKey`, a dead
+		// duplicate of updatedKey.)
+		oldKey     string
 		updatedKey string
 	}
 	var updates []updateOp
@@ -350,7 +354,7 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 				continue
 			}
 			// Update: same id, but key changed (text edited).
-			updates = append(updates, updateOp{old.idx, i, key, key})
+			updates = append(updates, updateOp{old.idx, i, old.key, key})
 			updatedIndices[old.idx] = true
 		} else {
 			// Append: new id.
@@ -415,9 +419,26 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	// into an APPEND instead of a drop — the record is genuinely new to this L0 (its position
 	// is gone), so appending preserves it rather than losing the caller's text, and the key
 	// list is extended to match.
+	//
+	// A bounds check is NOT sufficient on its own. oldIdx indexes the stored KEY LIST while the
+	// write targets mergedRecs, indexed by RAW ROW — two lists that this very code path exists
+	// because they can disagree. When they are merely misaligned rather than shorter, an in-range
+	// oldIdx points at a DIFFERENT record and the write destroys it. Reproduced: with three rows
+	// a/b/c and the key list reordered to c/a/b, editing "c" overwrote row 0 — "body a" was
+	// GONE, and the real "body c" was left stale at row 2. That is silent destruction of an
+	// already-durable record, the worst outcome in this file.
+	//
+	// So the target row is VERIFIED before it is written: upd.oldKey is the key stored at
+	// oldIdx, computed as recordKey(id, that row's text), so recomputing it from the row we are
+	// about to overwrite and requiring equality proves the row really is the record being
+	// updated. On mismatch we fall through to the same append-instead branch, which preserves
+	// the caller's text instead of overwriting a stranger's.
 	applied := 0
 	for _, upd := range updates {
-		if upd.oldIdx < len(mergedRecs) && upd.oldIdx < len(mergedKeys) {
+		inRange := upd.oldIdx < len(mergedRecs) && upd.oldIdx < len(mergedKeys)
+		identityOK := inRange && recordKey(
+			strings.TrimSpace(s.IDs[upd.newRecIdx]), mergedRecs[upd.oldIdx].Text) == upd.oldKey
+		if inRange && identityOK {
 			// Preserve the original seq for the updated record (keep its position).
 			newRec := s.Records[upd.newRecIdx]
 			newRec.Seq = mergedRecs[upd.oldIdx].Seq
@@ -426,7 +447,12 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 			applied++
 			continue
 		}
-		slog.Warn("ingest: stored key list is out of step with L0; re-adding this record instead of updating in place",
+		reason := "stored key list is out of step with L0 (index past the rows that exist)"
+		if inRange && !identityOK {
+			reason = "the row at this index is a DIFFERENT record than the key list claims; " +
+				"refusing to overwrite it"
+		}
+		slog.Warn("ingest: re-adding this record instead of updating in place: "+reason,
 			"session", s.Session, "index", upd.oldIdx, "rows", len(mergedRecs))
 		rec := s.Records[upd.newRecIdx]
 		rec.Seq = len(mergedRecs)
