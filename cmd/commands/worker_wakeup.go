@@ -79,10 +79,29 @@ func scheduleRetryWakeup(st *store.Store) {
 }
 
 func scheduleWorkerWakeup(st *store.Store, next time.Time, mode string) {
-	scheduleWorkerWakeupWith(st, next, mode, spawnDetached)
+	scheduleWorkerWakeupWith(st, next, mode, spawnDetachedOK)
 }
 
-func scheduleWorkerWakeupWith(st *store.Store, next time.Time, mode string, spawn func(...string)) {
+// scheduleWorkerWakeupWith arms the single future wakeup that re-drives a backed-off
+// session. `spawn` reports whether the child actually started.
+//
+// The stamp is written only AFTER a successful spawn. It used to be written first, and the
+// spawn's error was discarded (spawnDetached returned nothing), so a failed spawn left a
+// PHANTOM LATCH: the dedup guard below sees a future stamp and suppresses every subsequent
+// attempt to arm the wakeup, including from other processes, for the whole remaining backoff
+// window — up to the 6h cap. Reproduced: with a spawn that does nothing, the stamp is still
+// written and the next two re-arm attempts spawn 0 children.
+//
+// No data is lost (raw L0 is durable and the watermark did not advance), but the automatic
+// retry never fires, so the delta waits for an unrelated external trigger — the user's next
+// session-start/-end, or the OpenCode plugin's quiet-period kick. On a machine that just hit
+// a transient rate limit, that is exactly when the retry was supposed to be automatic.
+//
+// Ordering is safe the other way round: stamping after the spawn cannot cause a double-spawn,
+// because the child re-reads the stamp on wake and exits if it does not match (see
+// cmdWorkerWakeup's expectedStamp check). A brief window where a spawned-but-unstamped child
+// exists is therefore self-correcting, whereas a stamped-but-unspawned latch is not.
+func scheduleWorkerWakeupWith(st *store.Store, next time.Time, mode string, spawn func(...string) bool) {
 	if mode != "auto" {
 		mode = "manual"
 	}
@@ -91,13 +110,19 @@ func scheduleWorkerWakeupWith(st *store.Store, next time.Time, mode string, spaw
 	if current, err := time.Parse(time.RFC3339Nano, st.MetaString(key)); err == nil && current.After(time.Now()) && !current.After(next) {
 		return // an earlier wakeup already covers this work
 	}
-	_ = st.SetMetaString(key, stamp)
 	delay := time.Until(next)
 	if delay < 0 {
 		delay = 0
 	}
 	seconds := int(delay/time.Second) + 1
-	spawn("worker-wakeup", strconv.Itoa(seconds), stamp, mode)
+	if !spawn("worker-wakeup", strconv.Itoa(seconds), stamp, mode) {
+		// Leave the stamp untouched so the NEXT trigger re-attempts instead of trusting a
+		// wakeup that does not exist. Loud, because the automatic retry is now not armed.
+		slog.Error("distill: could not spawn the worker wakeup; the automatic retry is NOT armed "+
+			"(a later trigger will re-attempt)", "at", stamp, "mode", mode)
+		return
+	}
+	_ = st.SetMetaString(key, stamp)
 	slog.Info("distill: scheduled worker wakeup", "at", stamp, "delay", delay.String(), "mode", mode)
 }
 

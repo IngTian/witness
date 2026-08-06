@@ -412,6 +412,23 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 	byKey := indexFacets(facets)
 	rv := &Reviewer{} // borrow applyFacet's bi-temporal merge logic (no store/runner needed)
 
+	// ACCEPTED signatures are held back until L2 is durable. markSeen used to run for both
+	// outcomes right after verify, but the arc facets are only written at the END of the
+	// pass — so a failing WriteFacets, or a crash/SIGKILL anywhere in the remaining lenses,
+	// left the cluster recorded as verified-and-accepted with its facet never stored.
+	// seenUnchanged then skips it on every future pass: the arc is lost permanently, and
+	// silently, because the signature is a pure function of the member ids (a re-mine
+	// reproduces identical obs ids, so nothing ever perturbs it back into the queue).
+	//
+	// REJECTIONS are stamped immediately and deliberately: there is nothing to persist for
+	// them, so they carry no such ordering hazard, and stamping them as we go means a later
+	// failure doesn't buy a re-run of every expensive no-op verify.
+	type pendingMark struct {
+		lens, sig string
+		cand      CandidateArc
+	}
+	var accepted []pendingMark
+
 	dirty := false
 	for _, ln := range r.Lenses {
 		obs, err := r.Store.ReadObservations(ln.Name)
@@ -435,19 +452,34 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 				continue // NOT marked seen → re-proposed next pass
 			}
 			verified++
-			r.markSeen(ln.Name, sig, c, ok) // record outcome ONLY for actually-verified candidates
 			if !ok {
-				continue // rejected — nothing merged
+				r.markSeen(ln.Name, sig, c, false) // rejected: nothing to persist, safe to stamp now
+				continue
 			}
 			rf.BecauseOf = memberIDs(c.Members) // ground the facet in the whole cluster
-			rv.applyFacet(byKey, ln.Name, rf, nowStr)
+			// verify() already screens for a well-formed facet, so applyFacet's own guard
+			// should never fire here; only set dirty when something actually merged, so a
+			// rejected assertion can't trigger a no-op L2 rewrite.
+			if !rv.applyFacet(byKey, ln.Name, rf, nowStr) {
+				slog.Warn("emergent: dropped a malformed arc facet", "lens", ln.Name,
+					"dimension", rf.Dimension, "key", rf.Key)
+				continue
+			}
 			dirty = true
+			accepted = append(accepted, pendingMark{ln.Name, sig, c})
 		}
 	}
 	if dirty {
 		if err := r.Store.WriteFacets(collectFacets(byKey)); err != nil {
+			// Leave every accepted signature UNSTAMPED so the next pass re-verifies and
+			// re-merges these arcs. Re-running verify costs model calls; losing the arc
+			// forever does not cost anything visible, which is exactly why it is worse.
 			return fmt.Errorf("write L2: %w", err)
 		}
+	}
+	// L2 is durable — now it is safe to say these clusters were handled.
+	for _, m := range accepted {
+		r.markSeen(m.lens, m.sig, m.cand, true)
 	}
 	return nil
 }

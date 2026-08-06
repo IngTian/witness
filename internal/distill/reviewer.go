@@ -126,7 +126,14 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 		}
 		byKey := indexFacets(prior)
 		for _, rf := range reviewed {
-			r.applyFacet(byKey, ln.Name, rf, nowStr)
+			// A malformed assertion is dropped, not merged (see wellFormed). Log it: it
+			// means this lens's review prompt is returning entries the schema forbids, and
+			// silence there is how a prompt regression goes unnoticed for weeks.
+			if !r.applyFacet(byKey, ln.Name, rf, nowStr) {
+				slog.Warn("review: dropped a malformed facet assertion (empty dimension, key, or value)",
+					"lens", ln.Name, "dimension", rf.Dimension, "key", rf.Key,
+					"value_empty", strings.TrimSpace(rf.Value) == "", "contradicts_prior", rf.Contradicts)
+			}
 		}
 		if err := r.Store.WriteFacets(collectFacets(byKey)); err != nil {
 			return fmt.Errorf("write L2: %w", err)
@@ -160,8 +167,13 @@ func windowEnd(obs []store.Observation, start, budget int) int {
 	return end
 }
 
-// applyFacet enforces the bi-temporal rule deterministically.
-func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf reviewedFacet, nowStr string) {
+// applyFacet enforces the bi-temporal rule deterministically. It reports whether the
+// asserted facet was applied; a malformed one is REJECTED rather than merged (see
+// wellFormed) so the caller can log it instead of silently corrupting L2.
+func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf reviewedFacet, nowStr string) bool {
+	if !wellFormed(rf) {
+		return false
+	}
 	id := lensName + "|" + rf.Dimension + "|" + rf.Key
 	f, ok := byKey[id]
 	if !ok {
@@ -173,7 +185,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 				BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
 			}},
 		}
-		return
+		return true
 	}
 
 	cur := f.Current()
@@ -199,6 +211,31 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		cur.Confidence = clampConf(maxF(cur.Confidence, rf.Confidence))
 		cur.BecauseOf = mergeIDs(cur.BecauseOf, rf.BecauseOf)
 	}
+	return true
+}
+
+// wellFormed rejects a facet assertion that cannot identify or state anything.
+//
+// A reply is model output, so every field is optional in practice, and applyFacet used to
+// trust all three. Two ways that destroyed L2, both reproduced before this guard existed:
+//
+//   - contradicts_prior:true with an EMPTY value closed the good current version (stamping
+//     ValidTo) and opened an empty one — so the facet's current stance became "", and the
+//     real value was now historical. The profile then rendered a blank, and because the
+//     watermark had advanced past those observations, nothing would ever re-assert it.
+//   - an empty dimension/key minted a junk facet under the id "<lens>||", which no lens
+//     prompt can ever reinforce or supersede, so it lingers in L2 and in the profile input
+//     forever.
+//
+// Dimension and key are the facet's IDENTITY and value is its entire content, so an empty
+// one is not a weak assertion — it is not an assertion. The emergent path already applied
+// exactly this check on its own verify replies (emergent.go); this moves the rule to where
+// BOTH paths pass through. Confidence is deliberately NOT screened: 0 is a meaningful
+// "asserted but unsure", and clampConf already bounds it.
+func wellFormed(rf reviewedFacet) bool {
+	return strings.TrimSpace(rf.Dimension) != "" &&
+		strings.TrimSpace(rf.Key) != "" &&
+		strings.TrimSpace(rf.Value) != ""
 }
 
 func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]reviewedFacet, error) {

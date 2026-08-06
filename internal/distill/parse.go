@@ -17,6 +17,24 @@ import (
 // per-lens drift bookkeeping; the reviewer/preview paths match ErrNoJSONArray directly.)
 var ErrNoJSONArray = errors.New("no JSON array found in reply")
 
+// ErrTruncatedJSONArray is returned when the reply clearly BEGAN the required array but
+// never closed it — an unterminated '[' whose text holds at least one plausible element.
+//
+// It must never be conflated with ErrNoJSONArray. Drift means "the model chose to converse
+// instead of extracting", so the worker deliberately advances the watermark (a below-floor
+// model would otherwise wedge the queue forever). Truncation is the opposite: the model DID
+// extract, and the reply was cut off — by an output-token cap, a killed child, or a dropped
+// stream. Treating that as drift advanced the watermark over turns whose observations were
+// sitting right there in the truncated text, discarding them permanently: the watermark
+// counts raw records, so those turns are never offered again.
+//
+// Reproduced before this existed: a reply containing two complete observation objects and a
+// third cut mid-string returned ErrNoJSONArray, so the mine "succeeded" as drift and all
+// three were lost. Retrying is safe and bounded — mine failures back off 5m/10m/20m… capped
+// at 6h and NEVER drop raw turns, so a genuinely repeatable truncation just delays that
+// session's delta instead of silently emptying it.
+var ErrTruncatedJSONArray = errors.New("reply began a JSON array but never closed it (truncated output)")
+
 // ParseJSONArray extracts the intended JSON array from a model reply. Real models
 // wrap output in prose and/or a ```json fence, may emit a stray "[]" or
 // "[the user]" in the prose BEFORE the real array, and may put an example array
@@ -57,7 +75,7 @@ func ParseJSONArray[T any](reply string) ([]T, error) {
 			if arr, ok, empty := decodeArray[T](span.text); ok {
 				if !empty {
 					best, found = arr, true // keep scanning: later wins
-				} else {
+				} else if !markdownCheckbox(c, span.start) {
 					sawEmpty = true
 				}
 			}
@@ -72,7 +90,7 @@ func ParseJSONArray[T any](reply string) ([]T, error) {
 			if arr, ok, empty := decodeArray[T](span.text); ok {
 				if !empty {
 					best, found = arr, true
-				} else {
+				} else if !markdownCheckbox(c, span.start) {
 					sawEmpty = true
 				}
 			}
@@ -84,7 +102,58 @@ func ParseJSONArray[T any](reply string) ([]T, error) {
 	if sawEmpty {
 		return []T{}, nil
 	}
+	// No usable array. Before calling this drift (which ADVANCES the watermark), check
+	// whether the reply was cut off mid-array — that is a retryable output failure, and the
+	// observations it was in the middle of listing must not be thrown away.
+	if truncatedArray(reply) {
+		return nil, ErrTruncatedJSONArray
+	}
 	return nil, ErrNoJSONArray
+}
+
+// truncatedArray reports whether s contains an UNCLOSED '[' that plausibly held array
+// elements — i.e. the reply began the required array and was cut off.
+//
+// Deliberately conservative, because a false positive turns a genuinely drifting model into
+// an endlessly backing-off session. Two guards:
+//
+//   - the '[' must be unbalanced (matchBracket finds no closing ']'), so any complete array
+//     anywhere in the reply is unaffected;
+//   - the text after it must contain '{' or '"' — evidence of a real element in progress.
+//     This is what keeps prose out: a markdown checkbox ("- [ ] todo"), an unmatched
+//     bracket in a sentence, or "[the user]" mid-paragraph has no such element and stays
+//     ErrNoJSONArray, i.e. drift.
+//
+// String literals are respected via the same scan arraySpans uses, so a '[' inside a quoted
+// string is not mistaken for the start of an array.
+func truncatedArray(s string) bool {
+	inStr, esc := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '[':
+			if end := matchBracket(s, i); end > i {
+				i = end // balanced: skip it whole, it is not the truncation
+				continue
+			}
+			// Unclosed. Only truncation if something element-like follows.
+			return strings.ContainsAny(s[i+1:], `{"`)
+		}
+	}
+	return false
 }
 
 func decodeArray[T any](span string) (arr []T, ok bool, empty bool) {
@@ -95,10 +164,38 @@ func decodeArray[T any](span string) (arr []T, ok bool, empty bool) {
 }
 
 // arraySpan is a balanced [...] found in a string, flagged topLevel if its '['
-// sits outside any enclosing object.
+// sits outside any enclosing object. start is the byte index of that '[' in the
+// scanned string, so callers can inspect the surrounding text (see markdownCheckbox).
 type arraySpan struct {
 	text     string
 	topLevel bool
+	start    int
+}
+
+// markdownCheckbox reports whether the '[' at index start begins a markdown task-list
+// checkbox ("- [ ] item") rather than a JSON array.
+//
+// It matters because "[ ]" is valid JSON for an empty array. A model that drifts into a
+// prose checklist ("- [ ] nothing to report") therefore parsed as an EXPLICIT empty array,
+// i.e. "the lens looked and found nothing" — so the reply was recorded as a genuinely quiet
+// session and the #57 drift signal was lost. The data outcome is the same either way (both
+// advance the watermark), but the user never learns their model is below the lens's floor,
+// which is the whole reason that signal exists.
+//
+// The test is deliberately narrow: the '[' must be at the start of its line apart from
+// whitespace and a single list bullet (-, *, + or "1.").
+func markdownCheckbox(s string, start int) bool {
+	lineStart := strings.LastIndexByte(s[:start], '\n') + 1
+	prefix := strings.TrimSpace(s[lineStart:start])
+	switch prefix {
+	case "-", "*", "+":
+		return true
+	}
+	// An ordered-list marker: digits followed by '.' or ')'.
+	if n := len(prefix); n >= 2 && (prefix[n-1] == '.' || prefix[n-1] == ')') {
+		return strings.IndexFunc(prefix[:n-1], func(r rune) bool { return r < '0' || r > '9' }) < 0
+	}
+	return false
 }
 
 // arraySpans returns every balanced [...] in s (respecting JSON string literals
@@ -136,7 +233,7 @@ func arraySpans(s string) []arraySpan {
 			}
 		case '[':
 			if end := matchBracket(s, i); end > i {
-				spans = append(spans, arraySpan{text: s[i : end+1], topLevel: curly == 0})
+				spans = append(spans, arraySpan{text: s[i : end+1], topLevel: curly == 0, start: i})
 				i = end + 1 // jump past; the array is balanced so curly stays consistent
 				continue
 			}

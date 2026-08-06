@@ -399,6 +399,25 @@ func (q *queue) OrphanedL0ObservationCount(lens string) int {
 	return n
 }
 
+// SessionsWithNoUsableTimestamp counts sessions whose raw rows carry NO timestamp
+// julianday() can read — so they are invisible to any --since/--until drain.
+//
+// PendingSessionsUpdatedBetween filters on MAX(julianday(ts)), which is NULL when every
+// row's ts is unparseable (or empty), and a NULL fails both range comparisons. That is the
+// intended reading — a session with no known time cannot claim to fall inside a window —
+// and the DEFAULT drain (no range) still picks these up, so nothing is stranded outright.
+// What was wrong is that the skip was SILENT: `witness distill start --since ...` reported
+// "nothing pending" while sessions sat there excluded for a reason the user could not see.
+// MAX ignores NULLs, so a session with even one usable ts is NOT counted here. Read-only.
+func (q *queue) SessionsWithNoUsableTimestamp() int {
+	var n int
+	_ = q.db.QueryRow(
+		`SELECT COUNT(*) FROM (
+		    SELECT session FROM raw GROUP BY session HAVING MAX(julianday(ts)) IS NULL
+		 )`).Scan(&n)
+	return n
+}
+
 // DeleteLensData removes one lens's derived L1 observations and L2 facets (for a
 // `lens backfill --fresh`: re-mine a lens from scratch after its prompt changed). Raw L0
 // is the durable record and is NOT touched. facet_versions cascade via the ON DELETE

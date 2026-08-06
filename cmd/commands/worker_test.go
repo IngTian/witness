@@ -309,9 +309,10 @@ func TestScheduleWorkerWakeupPreservesMode(t *testing.T) {
 	next := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
 	var spawned []string
 	spawnCount := 0
-	spawn := func(args ...string) {
+	spawn := func(args ...string) bool {
 		spawnCount++
 		spawned = append([]string(nil), args...)
+		return true
 	}
 	scheduleWorkerWakeupWith(st, next, "manual", spawn)
 	scheduleWorkerWakeupWith(st, next.Add(time.Minute), "manual", spawn)

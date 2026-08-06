@@ -151,23 +151,33 @@ func (s *Store) Export(dst string, force bool) error {
 // read-then-write transaction hits when another process commits mid-transaction.
 //
 // database/sql exposes no isolation level for SQLite's BEGIN IMMEDIATE, so we take a
-// normal (DEFERRED) transaction and immediately force it to acquire the write lock with
-// a no-op write. `PRAGMA user_version = <current>` is ideal: it is a genuine write (it
-// promotes the transaction) but sets the value it already has, so it is a semantic
-// no-op even if the transaction later rolls back. Contention on that write IS retryable
-// via busy_timeout, which is the whole point.
+// normal (DEFERRED) transaction and immediately force it to acquire the write lock with a
+// write that carries no state.
+//
+// It must NOT be `PRAGMA user_version = <value read beforehand>`, which is what this
+// originally did: the read happened OUTSIDE the transaction, so when another process
+// migrated the schema in that window, the stale value was written back INSIDE — silently
+// REVERTING the recorded schema version while the new schema sat on disk (reproduced:
+// 8 -> 3), after which a later Open re-runs migrate() against an already-migrated DB.
+//
+// Instead we CREATE and immediately DROP a scratch table: two genuine writes that force
+// the lock, read nothing, and leave the schema exactly as it was. It must not be a write
+// to a real table either — migrate() calls this BEFORE applying schemaV1, so on a fresh
+// database no witness table exists yet. Contention on that write IS retryable via
+// busy_timeout, which is the whole point of taking the lock up front.
 func beginImmediate(db *sql.DB) (*sql.Tx, error) {
-	var v int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
-		return nil, fmt.Errorf("read user_version: %w", err)
-	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", v)); err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("acquire write lock: %w", err)
+	for _, q := range []string{
+		`CREATE TABLE IF NOT EXISTS witness_write_lock_probe (x INTEGER)`,
+		`DROP TABLE IF EXISTS witness_write_lock_probe`,
+	} {
+		if _, err := tx.Exec(q); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("acquire write lock: %w", err)
+		}
 	}
 	return tx, nil
 }

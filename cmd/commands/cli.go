@@ -4,10 +4,12 @@ package commands
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/IngTian/witness/internal/proc"
@@ -53,12 +55,65 @@ func setupLogging(st *store.Store) func() {
 	return func() { _ = f.Close() }
 }
 
-// spawnDetached re-execs this binary with the given args as a detached process,
-// so hooks return instantly and the heavy work never blocks the session.
-func spawnDetached(args ...string) {
+// underTest reports whether this process is a `go test` binary rather than the real witness
+// executable.
+//
+// It exists because spawnDetached re-execs os.Executable() — which under `go test` is the
+// TEST binary, not witness. That test binary re-runs the whole package's TestMain with
+// `worker-run` as its argv, does not recognize the flag, and (being setsid'd and Released)
+// is fully orphaned: nothing reaps it, and `go test` cannot kill it either. Measured on a
+// real machine: a single `go test ./...` left 746 orphaned `commands.test worker-run`
+// processes and drove load average past 20; the run then blew its own 600s timeout, in a
+// package that passes in ~1.3s when quiet.
+//
+// The hazard was already known and worked around per-test (see the comment in
+// autoworker_stopflag_test.go) rather than prevented, so every NEW test that happened to
+// reach a spawn point re-created it. Detecting it here fixes it once, for every caller.
+//
+// Detection uses the two signals the Go toolchain itself guarantees: the test binary's name
+// always ends in ".test" (".test.exe" on Windows), and `go test` always defines -test.*
+// flags in the default FlagSet. Either alone is enough; both together avoid depending on a
+// single implementation detail. Deliberately NOT an env var a user could set, since that
+// would let a misconfigured environment silently disable real distillation.
+func underTest() bool {
+	if flag.Lookup("test.v") != nil || flag.Lookup("test.run") != nil {
+		return true
+	}
 	exe, err := os.Executable()
 	if err != nil {
-		return
+		return false
+	}
+	base := strings.ToLower(filepath.Base(exe))
+	return strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe")
+}
+
+// spawnDetached re-execs this binary with the given args as a detached process,
+// so hooks return instantly and the heavy work never blocks the session.
+//
+// Under `go test` this is a NO-OP: see underTest for why (it would fork the test binary into
+// an unreapable orphan, 746 of them in one measured run). Tests that need to assert a spawn
+// was requested should assert on the state the caller is responsible for — the queue row,
+// the cleared stop flag — or inject a seam, not on a real child process.
+func spawnDetached(args ...string) { _ = spawnDetachedOK(args...) }
+
+// spawnDetachedOK is spawnDetached that REPORTS whether the child started.
+//
+// Callers that record "a child is now running" in durable state need this: the wakeup
+// scheduler stamped its meta key before spawning and discarded the error, so a failed spawn
+// left a phantom latch that suppressed the retry for the whole backoff window (see
+// scheduleWorkerWakeupWith). Fire-and-forget callers keep using spawnDetached.
+//
+// Under `go test` it is a no-op that reports SUCCESS: the spawn is suppressed deliberately
+// (see underTest), so reporting failure would make every test log a spurious "retry not
+// armed" error and would change the state the caller writes — the opposite of inert.
+func spawnDetachedOK(args ...string) bool {
+	if underTest() {
+		return true
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		slog.Error("could not resolve our own executable to spawn a detached child", "err", err)
+		return false
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Env = os.Environ()
@@ -69,10 +124,14 @@ func spawnDetached(args ...string) {
 	// doesn't kill it mid-distillation. proc.Detach is GOOS-split behind the port
 	// (setsid on Unix; DETACHED_PROCESS|NEW_PROCESS_GROUP on Windows).
 	procCtl.Detach(cmd)
-	_ = cmd.Start() // fire and forget
+	if err := cmd.Start(); err != nil {
+		slog.Error("could not spawn detached child", "args", args, "err", err)
+		return false
+	}
 	if cmd.Process != nil {
 		_ = cmd.Process.Release()
 	}
+	return true
 }
 
 // reportError prints err in the format matching the caller's output mode: a JSON

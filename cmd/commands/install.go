@@ -1,12 +1,15 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/IngTian/witness/internal/platform"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
@@ -559,9 +562,11 @@ func cmdInstallClaude() error {
 	}
 	fmt.Printf("hooks wired into %s\n", settings)
 
-	// Register the MCP server (idempotent: skip if already present).
-	if out, _ := exec.Command("claude", "mcp", "list").CombinedOutput(); !mcpServerRegistered(string(out), "witness") {
-		if err := exec.Command("claude", "mcp", "add", "-s", "user", "witness", inv.mcpTarget(), "mcp").Run(); err != nil {
+	// Register the MCP server (idempotent: skip if already present). Both probes are
+	// bounded — see claudeMCPRemoveTimeout for why: an unbounded `claude` child hung
+	// `witness wire` forever and orphaned itself to PID 1, unreapable.
+	if out, _ := claudeCLIOutput("mcp", "list"); !mcpServerRegistered(out, "witness") {
+		if err := claudeCLIRun("mcp", "add", "-s", "user", "witness", inv.mcpTarget(), "mcp"); err != nil {
 			fmt.Fprintf(os.Stderr, "witness: could not register MCP server (is `claude` on PATH?): %v\n", err)
 		} else {
 			fmt.Println("MCP server 'witness' registered")
@@ -647,16 +652,99 @@ func cmdUninstall(args []string) error {
 }
 
 func cmdUninstallClaude() error {
+	// Report what actually happened. This used to swallow BOTH the parse error and the
+	// write error and print "hooks removed" regardless — so an unparseable settings.json,
+	// or a read-only ~/.claude, left every witness hook wired while the user was told they
+	// were gone. They then delete the binary, and Claude Code fires a hook for a command
+	// that no longer exists on every single turn. Mirrors cmdUninstallOpenCode, which
+	// already surfaces both errors.
 	settings := filepath.Join(claudeDir(), "settings.json")
-	if data, err := os.ReadFile(settings); err == nil {
-		if cleaned, err := removeWitnessHooks(data); err == nil {
-			_ = writeFileAtomic(settings, cleaned)
-			fmt.Printf("hooks removed from %s\n", settings)
+	data, err := os.ReadFile(settings)
+	switch {
+	case err == nil:
+		cleaned, err := removeWitnessHooks(data)
+		if err != nil {
+			return fmt.Errorf("%s: %w (edit it by hand to remove the witness hooks)", settings, err)
 		}
+		if err := writeFileAtomic(settings, cleaned); err != nil {
+			return fmt.Errorf("write %s: %w", settings, err)
+		}
+		fmt.Printf("hooks removed from %s\n", settings)
+	case os.IsNotExist(err):
+		fmt.Printf("no %s, so no hooks to remove\n", settings)
+	default:
+		return fmt.Errorf("read %s: %w", settings, err)
 	}
-	_ = exec.Command("claude", "mcp", "remove", "witness").Run()
+	// The MCP removal stays best-effort: `claude` may not be on PATH, and it exits
+	// non-zero when the server simply isn't registered — neither is a failure to report.
+	// It is a package var so tests never spawn the real CLI (see removeClaudeMCPServer).
+	removeClaudeMCP()
 	fmt.Println("MCP server 'witness' removed (if it was present)")
 	return nil
+}
+
+// claudeMCPRemoveTimeout bounds the `claude mcp remove` subprocess.
+//
+// This is not hypothetical caution. The call used to be a bare exec.Command(...).Run() with
+// no deadline and no way to kill the child, and I watched 366 of them accumulate on a real
+// machine and pin the CPU: each invocation never exited, and several had reparented to PID 1
+// (init) — so they outlived the process that spawned them and nothing would ever reap them.
+// `witness unwire claude` would simply hang forever in that state, with no output and no
+// way out but Ctrl-C, and every retry would leak another immortal child.
+//
+// CommandContext + a deadline makes the child killable, so the worst case is a bounded wait
+// and a best-effort skip rather than an unbounded pile of orphans.
+const claudeMCPRemoveTimeout = 20 * time.Second
+
+// removeClaudeMCP is the seam that keeps `claude mcp remove` out of tests. Overridden in
+// tests so uninstall can be exercised without spawning the real CLI — which is exactly how
+// the orphan pile above got created.
+var removeClaudeMCP = removeClaudeMCPServer
+
+func removeClaudeMCPServer() {
+	if err := claudeCLIRun("mcp", "remove", "witness"); err != nil && errors.Is(err, context.DeadlineExceeded) {
+		fmt.Fprintf(os.Stderr, "witness: `claude mcp remove witness` did not finish within %s; skipping (remove it by hand with that command)\n",
+			claudeMCPRemoveTimeout)
+	}
+}
+
+// claudeCLICommand builds a BOUNDED `claude` invocation. Every call into the Claude CLI must
+// go through here (enforced by TestUninstallDoesNotSpawnClaudeWithoutAContext): exec.Command
+// has no cancellation, so a `claude` that never exits can neither be killed nor reaped, and
+// it takes the witness command down with it. Stdio is detached so the child can't block on a
+// pipe nobody drains — another way a "best-effort" call becomes a permanent hang.
+func claudeCLICommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Stdin = nil
+	return cmd
+}
+
+// claudeCLIRun runs a bounded `claude` subcommand, discarding its output. A deadline
+// overrun is reported as context.DeadlineExceeded so callers can distinguish "the CLI is
+// wedged" from "the CLI said no".
+func claudeCLIRun(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), claudeMCPRemoveTimeout)
+	defer cancel()
+	cmd := claudeCLICommand(ctx, args...)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return fmt.Errorf("claude %s timed out after %s: %w", strings.Join(args, " "), claudeMCPRemoveTimeout, context.DeadlineExceeded)
+	}
+	return err
+}
+
+// claudeCLIOutput runs a bounded `claude` subcommand and returns its combined output. A
+// timeout yields the empty string, which the caller treats as "not registered" — the
+// idempotent path then attempts an add, which is itself bounded and merely reports failure.
+func claudeCLIOutput(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), claudeMCPRemoveTimeout)
+	defer cancel()
+	out, err := claudeCLICommand(ctx, args...).CombinedOutput()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("claude %s timed out after %s: %w", strings.Join(args, " "), claudeMCPRemoveTimeout, context.DeadlineExceeded)
+	}
+	return string(out), err
 }
 
 func cmdUninstallOpenCode() error {
