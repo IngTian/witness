@@ -89,7 +89,11 @@ type ObservationReader interface {
 // ActiveObservationSink is the in-session staging surface the MCP record tool uses:
 // stage under a per-session cap, and disambiguate a cap-hit from a benign duplicate.
 type ActiveObservationSink interface {
-	StageObservationCapped(o Observation, limit int) (bool, error)
+	StageObservationCapped(o Observation, limit, totalLimit int) (bool, error)
+	// StagedTotal is the staged count across ALL sessions, so a caller can tell the
+	// global cap apart from a per-session one (the session id is agent-supplied, so a
+	// per-session cap alone is evadable by varying it).
+	StagedTotal() int
 	StagedExists(session, obsID string) bool
 }
 

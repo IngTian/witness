@@ -19,19 +19,32 @@ type fakeMCPStore struct {
 	facets   []store.Facet
 	profiles map[string]string
 
-	stagedCalls  int
-	lastStaged   store.Observation
-	deletedIDs   []string
-	existsReturn bool
+	stagedCalls       int
+	stagedTotalReturn int
+	lastStaged        store.Observation
+	deletedIDs        []string
+	existsReturn      bool
+	// readCalls counts full-corpus reads, so a test can prove search short-circuits an
+	// oversized query BEFORE paying for one.
+	readCalls int
+	// stagedReturn is what StageObservationCapped reports. Defaults to false via the zero
+	// value, so tests that need a successful stage set it explicitly; the pre-existing
+	// TestServerRecordDeleteSearch sets it to true.
+	stagedReturn bool
 }
 
 func (f *fakeMCPStore) ReadObservations(lens string) ([]store.Observation, error) {
+	f.readCalls++
 	return f.obs, nil
 }
-func (f *fakeMCPStore) StageObservationCapped(o store.Observation, limit int) (bool, error) {
+
+// stagedTotalReturn lets a test drive the global-cap branch without staging 5000 rows.
+func (f *fakeMCPStore) StagedTotal() int { return f.stagedTotalReturn }
+
+func (f *fakeMCPStore) StageObservationCapped(o store.Observation, limit, totalLimit int) (bool, error) {
 	f.stagedCalls++
 	f.lastStaged = o
-	return true, nil
+	return f.stagedReturn, nil
 }
 func (f *fakeMCPStore) StagedExists(session, obsID string) bool { return f.existsReturn }
 func (f *fakeMCPStore) ReadFacets() ([]store.Facet, error)      { return f.facets, nil }
@@ -107,6 +120,7 @@ func TestServerRecordDeleteSearch(t *testing.T) {
 		}},
 		profiles:     map[string]string{},
 		existsReturn: false, // dedup: not already staged
+		stagedReturn: true,  // the store accepts the insert
 	}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()

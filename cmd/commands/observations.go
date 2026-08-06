@@ -12,7 +12,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const maxCLIStagedPerSession = 200
+const (
+	maxCLIStagedPerSession = 200
+	// maxCLIStagedTotal mirrors the MCP server's global bound so both writers into `staged`
+	// share one ceiling on the buffer, rather than each policing only its own sessions.
+	maxCLIStagedTotal = 5000
+)
 
 func newObservationsCmd() *cobra.Command {
 	obsCmd := &cobra.Command{
@@ -199,7 +204,10 @@ func cmdObservationRecord(session, lensName, dimension, observation, evidence st
 		Poignancy:   poignancy,
 		Source:      "active",
 	}
-	inserted, err := st.StageObservationCapped(o, maxCLIStagedPerSession)
+	// The CLI path is human-driven (one `witness observations record` per invocation), so the
+	// agent-rotates-the-session-id evasion the MCP path guards against does not apply here.
+	// It still passes the same TOTAL cap so both writers share one bound on the staged buffer.
+	inserted, err := st.StageObservationCapped(o, maxCLIStagedPerSession, maxCLIStagedTotal)
 	if err != nil {
 		return err
 	}

@@ -61,6 +61,24 @@ const (
 	maxDimensionLen     = 100
 	maxPoignancy        = 10
 	maxStagedPerSession = 200
+	// maxStagedTotal bounds the staged buffer across ALL sessions. Generous relative to the
+	// per-session cap (many concurrent sessions are legitimate) but finite, because the
+	// per-session cap is keyed on an agent-supplied session id and so is evadable on its own.
+	maxStagedTotal = 5000
+	// maxLensLen bounds the lens name. It was the ONE recordInput field neither trimmed nor
+	// length-checked, so `{"lens": "default "}` — exactly the trailing-whitespace noise the other
+	// four fields are trimmed for — was stored as a DISTINCT lens from "default": the write
+	// reported success naming the lens, but the observation landed under a lens no drain, review,
+	// or `witness facets` call would ever look at. (There is no filesystem escape: profileFileName
+	// rejects separators and "..", so that half of the lead is wrong.)
+	maxLensLen = 100
+	// maxQueryLen bounds a search query before it reaches the tokenizer. The tokenizer allocates
+	// per-byte alignment tables and a per-byte ChangeMap, so a multi-megabyte query costs on the
+	// order of a gigabyte per megabyte of input inside the LONG-LIVED MCP server process — a
+	// confused agent pasting a whole file into search_observations could OOM the server that
+	// serves every other tool. 8000 chars is far above any real semantic query (the corpus is
+	// observation-sized text) and far below the danger zone.
+	maxQueryLen = 8000
 )
 
 // normalizeRecord validates and clamps record_observation input. Pure (no IO) so
@@ -81,6 +99,20 @@ func normalizeRecord(in recordInput) (recordInput, error) {
 	}
 	if len(in.Dimension) > maxDimensionLen {
 		return in, fmt.Errorf("dimension too long (%d > %d chars)", len(in.Dimension), maxDimensionLen)
+	}
+	// Lens gets the SAME trim + bound as every other field. It was the one that had neither, so
+	// `{"lens": "default "}` (trailing whitespace — precisely the noise the others are trimmed
+	// for) became a DISTINCT lens: the call reported `recorded (default /...)` while the
+	// observation landed under a lens name no drain, review, or `witness facets` will ever query.
+	in.Lens = strings.TrimSpace(in.Lens)
+	if len(in.Lens) > maxLensLen {
+		return in, fmt.Errorf("lens too long (%d > %d chars)", len(in.Lens), maxLensLen)
+	}
+	if strings.ContainsAny(in.Lens, "/\\") || strings.Contains(in.Lens, "..") {
+		// Defense in depth. profileFileName already rejects these, so there is no known escape
+		// — but a lens name reaches a FILE PATH there, and this is agent-supplied input, so
+		// refusing it at the boundary means a future writer cannot inherit a hole.
+		return in, fmt.Errorf("invalid lens name %q", in.Lens)
 	}
 	if in.Lens == "" {
 		in.Lens = store.LensDefault
@@ -143,11 +175,25 @@ func newServer(st store.MCPStore, emb Embedder, version string) *mcpsdk.Server {
 		if k <= 0 {
 			k = 8
 		}
+		// Bound the query BEFORE the expensive work. It went straight to the tokenizer, which
+		// allocates per-byte alignment tables plus a per-byte ChangeMap — on the order of a
+		// gigabyte per megabyte of input, inside the LONG-LIVED MCP server process that serves
+		// every other tool. A confused agent pasting a whole file into search_observations could
+		// therefore OOM the server rather than just get a bad answer. Refusing early also skips
+		// the full-corpus ReadObservations below, so an oversized call costs nothing.
+		query := strings.TrimSpace(in.Query)
+		if query == "" {
+			return errResult("query is required"), nil, nil
+		}
+		if len(query) > maxQueryLen {
+			return errResult(fmt.Sprintf("query too long (%d > %d chars); search takes a short "+
+				"semantic phrase, not a document", len(query), maxQueryLen)), nil, nil
+		}
 		obs, err := st.ReadObservations("") // read all; vector.Search filters by lens
 		if err != nil {
 			return errResult(fmt.Sprintf("read archive: %v", err)), nil, nil
 		}
-		qv, err := emb.Embed(in.Query)
+		qv, err := emb.Embed(query)
 		if err != nil {
 			return errResult(fmt.Sprintf("embed query: %v", err)), nil, nil
 		}
@@ -178,20 +224,33 @@ func newServer(st store.MCPStore, emb Embedder, version string) *mcpsdk.Server {
 			Poignancy:   in.Poignancy,
 			Source:      "active",
 		}
-		// Bound how many an agent can stage per session (caps disk growth and stops a
-		// runaway loop from flooding L1 / forcing reviews). Enforced atomically in the
-		// store so concurrent MCP processes can't both pass a check and race past it.
-		inserted, err := st.StageObservationCapped(o, maxStagedPerSession)
+		// Two bounds, both enforced atomically in the store so concurrent MCP processes can't
+		// each pass a check and race past them:
+		//   - per SESSION, the original cap on disk growth from a runaway loop;
+		//   - TOTAL, because the session id is AGENT-SUPPLIED. A confused or runaway agent that
+		//     varies it (per-turn ids, a hallucinated id, an incrementing counter) gets a fresh
+		//     per-session budget on every call, so the per-session cap alone bounds nothing —
+		//     and each row is up to 2000 chars of observation plus 2000 of evidence, durable in
+		//     L1 and fed to the review model. A total cap has no key, so it cannot be evaded by
+		//     picking a different one.
+		inserted, err := st.StageObservationCapped(o, maxStagedPerSession, maxStagedTotal)
 		if err != nil {
 			return errResult(fmt.Sprintf("stage: %v", err)), nil, nil
 		}
 		if !inserted {
-			// At the cap, or this exact observation was already recorded (a no-op
+			// At a cap, or this exact observation was already recorded (a no-op
 			// dedup). Check the dedup case FIRST: a duplicate recorded while the
 			// session is at the cap must report "already recorded", not a spurious
 			// "too many" error (a count>=limit check alone can't tell them apart).
 			if st.StagedExists(o.Session, o.ID) {
 				return textResult("already recorded (" + in.Lens + "/" + in.Dimension + ")"), nil, nil
+			}
+			// Name the cap that actually blocked it, so a client is not told to split work
+			// across sessions when the GLOBAL buffer is what is full (splitting would not help).
+			if st.StagedTotal() >= maxStagedTotal {
+				return errResult(fmt.Sprintf("the in-session observation buffer is full (%d staged "+
+					"across all sessions); they clear as sessions end and are distilled",
+					maxStagedTotal)), nil, nil
 			}
 			return errResult(fmt.Sprintf("too many in-session observations (limit %d per session)", maxStagedPerSession)), nil, nil
 		}
