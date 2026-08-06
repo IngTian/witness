@@ -97,6 +97,89 @@ func TestIngestReportedCountMatchesWhatLanded(t *testing.T) {
 	}
 }
 
+// An update must NEVER overwrite a different record's row.
+//
+// oldIdx indexes the stored KEY LIST, but the write targets mergedRecs, indexed by RAW ROW —
+// two lists this whole code path exists because they can disagree. A bounds check alone is not
+// enough: when they are MISALIGNED rather than shorter, an in-range oldIdx points at a
+// different record and the write destroys it.
+//
+// Reproduced before the fix: three rows a/b/c with the key list reordered to c/a/b, editing "c"
+// overwrote row 0 — "body a" was GONE and the real "body c" was left stale at row 2. Silent
+// destruction of an already-durable record, from a command whose documented contract is "NEVER
+// delete records the caller didn't mention".
+func TestIngestUpdateNeverOverwritesADifferentRecord(t *testing.T) {
+	ingestHome(t)
+	batch := `{"text":"body a","id":"a","session":"s"}` + "\n" +
+		`{"text":"body b","id":"b","session":"s"}` + "\n" +
+		`{"text":"body c","id":"c","session":"s"}` + "\n"
+	if _, _, err := cmdIngest(strings.NewReader(batch), true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Misalign the key list: rotate it so "c"'s key sits at index 0, where raw holds "body a".
+	// The hashes are recordKey's own, so each entry stays individually well-formed — only the
+	// POSITIONS lie, which is what a cleanup/crash that rewrote raw would leave behind.
+	desyncKeys(t, "file:s",
+		`["c:e15041ea78cf7294","a:68d3a6450cfc8466","b:c1c02f812f485815"]`)
+
+	if _, _, err := cmdIngest(strings.NewReader(`{"text":"body c EDITED","id":"c","session":"s"}`+"\n"), true); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := rawRows(t, "file:s")
+	var texts []string
+	for _, r := range rows {
+		texts = append(texts, r.Text)
+	}
+	joined := strings.Join(texts, " | ")
+
+	// The unrelated record MUST survive. This is the assertion that fails without the guard.
+	if !strings.Contains(joined, "body a") {
+		t.Errorf("editing \"c\" DESTROYED the unrelated record \"body a\": rows = %s", joined)
+	}
+	if !strings.Contains(joined, "body b") {
+		t.Errorf("\"body b\" was lost: rows = %s", joined)
+	}
+	// And the caller's text must not be dropped on the floor either.
+	if !strings.Contains(joined, "body c EDITED") {
+		t.Errorf("the edit was discarded entirely: rows = %s", joined)
+	}
+}
+
+// The identity check must not fire on the ALIGNED case — otherwise every ordinary edit becomes
+// an append, which would grow L0 without bound and defeat the merge contract.
+func TestIngestIdentityCheckPassesOnAlignedKeys(t *testing.T) {
+	ingestHome(t)
+	batch := `{"text":"body a","id":"a","session":"s"}` + "\n" +
+		`{"text":"body b","id":"b","session":"s"}` + "\n"
+	if _, _, err := cmdIngest(strings.NewReader(batch), true); err != nil {
+		t.Fatal(err)
+	}
+	// Edit each record in turn; every one must update IN PLACE (row count constant).
+	for _, e := range []struct{ id, text string }{{"a", "body a v2"}, {"b", "body b v2"}, {"a", "body a v3"}} {
+		if _, _, err := cmdIngest(strings.NewReader(
+			`{"text":"`+e.text+`","id":"`+e.id+`","session":"s"}`+"\n"), true); err != nil {
+			t.Fatal(err)
+		}
+		if rows := rawRows(t, "file:s"); len(rows) != 2 {
+			var got []string
+			for _, r := range rows {
+				got = append(got, r.Text)
+			}
+			t.Fatalf("editing %q appended instead of updating in place (%d rows): %v",
+				e.id, len(rows), got)
+		}
+	}
+	rows := rawRows(t, "file:s")
+	if !strings.Contains(rows[0].Text, "body a v3") {
+		t.Errorf("row 0 = %q, want the latest edit of a", rows[0].Text)
+	}
+	if !strings.Contains(rows[1].Text, "body b v2") {
+		t.Errorf("row 1 = %q, want the latest edit of b", rows[1].Text)
+	}
+}
+
 // A normal in-place update (no desync) must still be counted and still update in place —
 // the honest-count change must not turn ordinary edits into appends.
 func TestIngestInRangeUpdateStillUpdatesInPlaceAndCounts(t *testing.T) {

@@ -147,11 +147,17 @@ const generateTimeout = 10 * time.Minute
 // with no error anywhere. Generous on purpose: these are all local operations (a loopback
 // request, a version print, a model list), so seconds-scale is already far beyond normal,
 // and the values must never be tight enough to abort healthy work on a loaded machine.
+//
+// healthCheckBudget is the TOTAL wall clock waitHealthy will spend waiting for a freshly
+// started `opencode serve` to answer /global/health. Each individual probe now derives its
+// deadline from this budget (see waitHealthy), so a single wedged request cannot overrun it.
+//
 // Vars, not consts, for the same reason openCodeAsyncPollInterval is: a test must be able to
-// shrink them to prove the bound actually fires, without waiting a real minute.
+// shrink them to prove the bound actually fires, without waiting the real 30–60s.
 var (
 	openCodeRequestTimeout = 60 * time.Second
 	openCodeProbeTimeout   = 60 * time.Second
+	healthCheckBudget      = 30 * time.Second
 )
 
 // Run sends one isolated distillation request through the shared OpenCode serve
@@ -361,7 +367,7 @@ func (s *OpenCodeServer) deleteSession(ctx context.Context, sessionID string) er
 }
 
 func (s *OpenCodeServer) waitHealthy(ctx context.Context) error {
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(healthCheckBudget)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		select {
@@ -369,12 +375,32 @@ func (s *OpenCodeServer) waitHealthy(ctx context.Context) error {
 			return fmt.Errorf("opencode serve exited before health check: %w (logs: %s)", s.waitErr, s.logs.String())
 		default:
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/global/health", nil)
+		// Bound each probe by the REMAINING health budget, not by openCodeRequestTimeout.
+		//
+		// The loop condition is only evaluated BETWEEN iterations, so a single Do() that never
+		// returns made this unbounded: verified before this fix, a server that completes the TCP
+		// handshake and then never writes a response left waitHealthy blocked past 40s despite
+		// the documented 30s gate. That is the worst place for it — waitHealthy runs during
+		// Open, i.e. FIRST, while the caller holds the machine-wide WorkerLock, so `distill
+		// start` (and `doctor`, via validateRuntimeModels) hangs and `capture` never drains:
+		// the whole tool goes silent with no error anywhere.
+		//
+		// The per-request bound in doJSON does NOT cover this path — waitHealthy calls
+		// s.client.Do directly. And a flat openCodeRequestTimeout would be wrong here: at 60s it
+		// exceeds this 30s gate, so one hung probe could still overrun the budget it is meant to
+		// enforce. Deriving from `deadline` keeps the 30s promise exact.
+		//
+		// cancel() is called per iteration rather than deferred: this loop can run ~120 times, so
+		// deferring would pile up 120 live contexts until waitHealthy returns.
+		reqCtx, cancel := context.WithDeadline(ctx, deadline)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, s.baseURL+"/global/health", nil)
 		if err != nil {
+			cancel()
 			return err
 		}
 		req.Header.Set("Authorization", s.authHeader)
 		resp, err := s.client.Do(req)
+		cancel()
 		if err == nil && resp != nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
