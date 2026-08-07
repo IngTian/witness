@@ -1,6 +1,34 @@
 package embed
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// useRepoModel points the embedder at the model committed in the repo.
+//
+// Without it this test SILENTLY SKIPPED EVERYWHERE — the NFD panic fix (a v0.7.2 critical: an
+// NFD paste crashed `observations search` and killed the long-lived MCP server) had zero
+// automated protection. The cause was mundane: New() resolves "assets/e5-small" relative to the
+// process cwd, and `go test` runs with the PACKAGE dir as cwd, so from internal/embed/ the path
+// missed a model that was sitting right there in the repo root. The skip then swallowed it.
+//
+// It returns false only if the model genuinely is not in the checkout, which is the one case
+// where skipping is honest.
+func useRepoModel(t *testing.T) bool {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		return false
+	}
+	dir := filepath.Join(root, "assets", "e5-small")
+	if _, err := os.Stat(filepath.Join(dir, "model.onnx")); err != nil {
+		return false
+	}
+	t.Setenv("WITNESS_ASSETS", dir)
+	return true
+}
 
 // The tokenizer indexes by byte offset and PANICS on NFD-decomposed text — which is what
 // macOS filesystems and pastes produce — and on non-UTF-8 bytes. The mining path has a
@@ -9,9 +37,13 @@ import "testing"
 // mid-session by a panic on its jsonrpc2 handler goroutine. Embed now normalizes to NFC,
 // replaces invalid bytes, and recovers as a backstop.
 func TestEmbedHandlesNFDAndInvalidUTF8(t *testing.T) {
+	if !useRepoModel(t) {
+		t.Skip("no embedding model in this checkout (assets/e5-small); run scripts/fetch-model.sh")
+	}
 	e, err := New()
 	if err != nil {
-		t.Skipf("model not available: %v", err)
+		t.Fatalf("the model is present, so New() must succeed — a skip here would hide the "+
+			"NFD panic regression this test exists to catch: %v", err)
 	}
 	const nfcCafe = "café"  // é precomposed
 	const nfdCafe = "café" // e + combining acute (macOS form)
