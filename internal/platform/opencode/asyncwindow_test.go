@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -221,5 +222,89 @@ func TestWaitForAsyncReplyWaitsOnceOurRequestIsPresent(t *testing.T) {
 	}
 	if !strings.Contains(reply, "observation") {
 		t.Errorf("got %q, want the assistant reply", reply)
+	}
+}
+
+// The distillation context must be seeded ONLY by witness's own turns — never by inheriting a
+// conversation witness did not author.
+//
+// This is the invariant every other stage already honours and that mining silently broke:
+//   - the Claude runner runs `claude -p --no-session-persistence`: a stateless one-shot process
+//     with zero conversation context (claude/runner.go);
+//   - the plain OpenCode path creates a session, prompts it, deletes it (server.go Run);
+//   - L2 review, L4 profile and `witness lens try` all take that plain path, because
+//     platform.WithNativeSession has exactly ONE producer (distill/worker.go, in MineSession).
+//
+// Only native MINING forked the user's session, so it alone started with ~the whole conversation
+// already in the model's context. That cost three things and bought nothing (see the comment at
+// the createSession call in native.go): it contradicted the "treat the user turn as untrusted"
+// system prompt, it pushed witness's own request outside the reply window on a long session —
+// producing the `context deadline exceeded` that made Windows distillation look like a slow model
+// — and it re-sent the whole history to the provider on every call.
+//
+// A source scan, because the property is "no code path forks", which no single behavioural test
+// can establish. The behavioural half is TestNativeRunUsesADistinctFreshScratchSessionPerJob,
+// whose fake server answers `POST /session` and would fail on a fork request.
+func TestNoCodePathForksAConversation(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src := readFileForTest(t, f)
+		scanned++
+		for n, line := range strings.Split(src, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue // prose about the old design is fine; a live request is not
+			}
+			// The OpenCode fork endpoint, in any spelling that would actually issue one.
+			if strings.Contains(line, `"/fork"`) || strings.Contains(line, `/fork"`) {
+				t.Errorf("%s:%d issues an OpenCode fork request: %s\n"+
+					"A distillation context must contain only witness's own turns — inheriting the "+
+					"user's conversation is what buried our request in the reply window.", f, n+1, trimmed)
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no files — the glob is wrong and this test is vacuous")
+	}
+}
+
+// The scratch session must be created, prompted and (after L1 is durable) deleted — the same
+// lifecycle the plain path uses. This pins that native mining calls createSession, so a future
+// change cannot quietly reintroduce a fork-shaped call under a different name.
+func TestNativeMiningCreatesItsOwnScratchSession(t *testing.T) {
+	src := readFileForTest(t, "native.go")
+	i := strings.Index(src, "func (n *nativeRuntime) run(")
+	if i < 0 {
+		t.Fatal("nativeRuntime.run not found")
+	}
+	end := strings.Index(src[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit nativeRuntime.run")
+	}
+	fn := src[i : i+end]
+
+	if !strings.Contains(fn, "n.server.createSession(ctx, model)") {
+		t.Error("native mining must create a FRESH session (n.server.createSession) — the same call " +
+			"the plain OpenCode path, L2 review, L4 profile and `lens try` all already use")
+	}
+	if strings.Contains(fn, "n.server.fork(") {
+		t.Error("native mining forks the user's conversation again")
+	}
+	if strings.Contains(fn, "importSnapshot(") {
+		t.Error("the snapshot is imported again; that step existed only to give fork() a parent, and " +
+			"the digest check reads the exported BYTES, before any import")
+	}
+	// The export MUST remain: its digest is what refuses to distill a session the user changed
+	// after L0 capture. Dropping it silently would remove that guard.
+	if !strings.Contains(fn, "n.export(ctx, w, snap)") {
+		t.Error("the export was removed; validateExportDigest is the only check that L0 still " +
+			"matches the user's session (`opencode native session changed after L0 capture`)")
 	}
 }

@@ -427,23 +427,6 @@ func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, message
 	return parseOpenCodeAsyncReply(data, messageID), nil
 }
 
-func (s *OpenCodeServer) fork(ctx context.Context, source string) (string, error) {
-	data, err := s.doJSON(ctx, http.MethodPost, "/session/"+source+"/fork", map[string]any{}, http.StatusOK)
-	if err != nil {
-		return "", err
-	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("decode opencode fork: %w", err)
-	}
-	if strings.TrimSpace(resp.ID) == "" {
-		return "", fmt.Errorf("opencode fork response had no id")
-	}
-	return resp.ID, nil
-}
-
 // asyncReplyWindow is how many trailing messages each poll fetches from the fork.
 //
 // It must exceed 1 (our request) + the assistant reply, and the window is a TAIL: witness

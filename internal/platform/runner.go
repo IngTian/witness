@@ -16,10 +16,16 @@ const DisableExternalRunnersEnv = "WITNESS_DISABLE_EXTERNAL_RUNNERS"
 
 func ExternalRunnersDisabled() bool { return os.Getenv(DisableExternalRunnersEnv) == "1" }
 
-// NativeSession identifies one OpenCode-owned L0 input. Runners that support
-// native isolation use it to retain an isolated fork until its L1 commit succeeds.
-// Other runners ignore it. The finalizer is set by the runner and called only by
-// distill after the generation CAS succeeds.
+// NativeSession identifies one L0 input whose owning runtime keeps its own conversation
+// store. Runners that support native isolation use it to RETAIN an isolated scratch context
+// until that input's L1 commit succeeds, so a crash mid-generation resumes instead of
+// re-billing the model. Other runners ignore it. The finalizer is set by the runner and
+// called only by distill after the generation CAS succeeds.
+//
+// "Scratch context", deliberately, not "fork": the retained thing must be seeded only by
+// witness's own turns (see the fresh-context invariant on Runner.Run). This port named it a
+// fork after OpenCode's /session/{id}/fork endpoint, which put one runtime's mechanism in
+// the cross-runtime vocabulary — and the fork's inherited history was itself the bug.
 type NativeSession struct {
 	Session  string
 	RawHigh  int64
@@ -41,8 +47,8 @@ func TranscriptDigest(entries []TranscriptEntry) string {
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
 
-// NativeSessionSupport is implemented only by runners that understand the
-// retained OpenCode-fork protocol.
+// NativeSessionSupport is implemented only by runners that understand the retained
+// scratch-context protocol (create once, prompt, resume on retry, delete after L1 is durable).
 type NativeSessionSupport interface{ SupportsNativeSession() bool }
 
 type nativeSessionKey struct{}
@@ -81,6 +87,30 @@ type Runner interface {
 	// Run performs one mining/review/summarize pass. systemPrompt is witness's own
 	// instruction; input is the corpus being analyzed — the platform fences it with
 	// WrapCorpus so it cannot impersonate instructions.
+	//
+	// FRESH-CONTEXT INVARIANT. The context a Run executes in must be seeded EXCLUSIVELY by
+	// witness's own turns: systemPrompt plus the fenced corpus, and nothing else. A runner may
+	// retain such a context across a crash to resume one generation, and may add its own retry
+	// turns to it, but must NEVER inherit a conversation witness did not author.
+	//
+	// This is a correctness requirement, not hygiene, and it is stated here because it was
+	// previously only implied — each adapter restated it in prose, nothing defined or enforced
+	// it, and one path silently drifted. Three things depend on it:
+	//
+	//   - The FENCE means what it says. WrapCorpus + CorpusNotice tell the model the user turn
+	//     is untrusted data. Inheriting that same material as the model's own context tells it
+	//     the opposite, in the same request.
+	//   - ConcurrentRunSafe (below) is justified by "an isolated session per call". Seeding a
+	//     context from somewhere else makes that justification false.
+	//   - The reply must be FINDABLE. A runner that collects its answer by scanning a
+	//     conversation for its own request needs that request near the start; inherited history
+	//     pushed it out of the window and the poll then spun to the timeout — the real cause of
+	//     `context deadline exceeded` on OpenCode, long misread as a slow model.
+	//
+	// Both runners satisfy it: Claude via `claude -p --no-session-persistence` (a stateless
+	// one-shot process), OpenCode by creating a fresh session in its private database, prompting
+	// it once, and deleting it after L1 is durable. internal/platform/opencode enforces the
+	// OpenCode half with a source scan (TestNoCodePathForksAConversation).
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
 	// Close releases engine resources.
 	Close() error
@@ -98,6 +128,10 @@ type Runner interface {
 	// nothing; OpenCode — Run holds its mutex only for a closed-check and drives an
 	// isolated session per call over the shared serve process, which a benchmark showed
 	// accepts many concurrent sessions (issue #22 narrowed the mutex to flip this true).
+	// "Isolated session per call" is load-bearing here, and is exactly the fresh-context
+	// invariant on Run: while native mining forked the user's conversation this claim was
+	// not true in its own stated terms, since the per-call session was not isolated from
+	// that conversation.
 	ConcurrentRunSafe() bool
 }
 
