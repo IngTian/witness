@@ -129,3 +129,84 @@ func facets(t *testing.T, s *store.Store) []store.Facet {
 	}
 	return f
 }
+
+// A TRUNCATED verify reply must not be recorded as a rejection.
+//
+// verify() collapsed every parse failure into "the judge rejected this arc", and RunFull stamps a
+// rejection with markSeen(…, false) — which is permanent: the signature is a pure function of the
+// member observation ids, so a re-mine reproduces identical ids and seenUnchanged skips the
+// cluster forever. So a reply cut off mid-array (an output-token cap, a killed child, a dropped
+// stream) permanently buried an arc the judge never actually ruled on.
+//
+// That is the same conflation the mine path already treats as a bug: ErrTruncatedJSONArray exists
+// precisely so truncation is retried instead of being read as a verdict. This asserts the emergent
+// path agrees — the arc must be re-proposed on the next pass, and then accepted.
+func TestRunFullDoesNotMarkAnArcRejectedWhenTheVerifyReplyIsTruncated(t *testing.T) {
+	s := newStore(t)
+	seedArc(t, s, "a", 6, []float32{1, 0, 0})
+
+	// A reply that BEGAN the required array and was cut off mid-element.
+	truncated := func(_ context.Context, _, _, _ string) (string, error) {
+		return `Here is the judgment:
+[{"dimension":"thinking","key":"abstracts_to_structure","value":"reflexively abs`, nil
+	}
+
+	// Pass 1: truncation must not be silently swallowed as a rejection.
+	if err := emergentReviewer(s, truncated).RunFull(context.Background(), time.Now()); err != nil {
+		t.Logf("pass 1 reported: %v", err) // reporting it is fine; what matters is pass 2
+	}
+	if fs, _ := s.ReadFacets(); len(fs) != 0 {
+		t.Fatalf("a truncated reply must not write L2: %d facets", len(fs))
+	}
+
+	// Pass 2: same store, a complete reply. The arc MUST be offered to the judge again.
+	calls := 0
+	good := func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		return `[{"dimension":"thinking","key":"abstracts_to_structure","value":"reflexively abstracts","confidence":0.8,"contradicts_prior":false}]`, nil
+	}
+	if err := emergentReviewer(s, good).RunFull(context.Background(), time.Now()); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("the arc was stamped as judged from a TRUNCATED reply — the judge never ruled on " +
+			"it, and it is now skipped on every future pass and lost permanently")
+	}
+	var found bool
+	for _, f := range facets(t, s) {
+		if f.Lens == "math" && f.Key == "abstracts_to_structure" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the re-proposed arc did not reach L2 on the retry")
+	}
+}
+
+// A genuine REJECTION must still be permanent, or every rejected arc is re-judged forever and the
+// verify budget is spent re-litigating settled clusters. This is the half the truncation fix could
+// break, so it is asserted alongside.
+func TestRunFullStillMarksAGenuineRejectionSeen(t *testing.T) {
+	s := newStore(t)
+	seedArc(t, s, "a", 6, []float32{1, 0, 0})
+
+	calls := 0
+	reject := func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		return `[]`, nil // the judge answered: not a real arc
+	}
+	if err := emergentReviewer(s, reject).RunFull(context.Background(), time.Now()); err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	first := calls
+	if first == 0 {
+		t.Fatal("the fixture produced no candidate arc; this test proves nothing")
+	}
+	if err := emergentReviewer(s, reject).RunFull(context.Background(), time.Now()); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if calls > first {
+		t.Errorf("a rejected arc was re-judged (%d then %d calls) — rejections must be permanent "+
+			"or the verify budget re-litigates settled clusters every pass", first, calls)
+	}
+}
