@@ -232,6 +232,16 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 // exactly this check on its own verify replies (emergent.go); this moves the rule to where
 // BOTH paths pass through. Confidence is deliberately NOT screened: 0 is a meaningful
 // "asserted but unsure", and clampConf already bounds it.
+//
+// Scope, stated plainly because the first bullet above invites the wrong inference: this guard
+// stops the L2 CORRUPTION, not the watermark advance. foldLensWindowed still stamps through the
+// window even when every assertion in it was dropped, so those observations are not re-offered.
+// That is deliberate — withholding the stamp would make one bad review prompt re-fold the same
+// window forever, the wedge the drift-advances rule exists to prevent — and it is why the drop is
+// logged at WARN rather than swallowed: the log is the only signal that a prompt regression is
+// eating a lens's assertions. The emergent path chooses the opposite tradeoff (it withholds
+// markSeen until after WriteFacets, so an unwritten arc is re-proposed) because a re-proposed arc
+// costs one verify call, while a re-folded window costs a full review of the whole window.
 func wellFormed(rf reviewedFacet) bool {
 	return strings.TrimSpace(rf.Dimension) != "" &&
 		strings.TrimSpace(rf.Key) != "" &&

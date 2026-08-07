@@ -43,6 +43,63 @@ func TestParseJSONArrayReportsTruncationSeparatelyFromDrift(t *testing.T) {
 	}
 }
 
+// Truncation must OUTRANK an echoed empty array — the field-realistic shape.
+//
+// The truncation check originally sat below the sawEmpty early return, so it was unreachable
+// whenever the reply contained a balanced `[]` anywhere. That is not a corner case: every shipped
+// extract prompt prints a literal `[]` while telling the model to return one for a quiet session
+// (prompts/default/extract.md has two), and models routinely restate the instruction before
+// answering — the same echoing behaviour the LAST-wins tiebreak was added to defend against. So
+// the realistic truncated reply mentions `[]` in prose, then starts the real array and gets cut
+// off. That returned ([], nil): a QUIET SESSION. The worker then advanced the watermark past turns
+// whose observations were sitting in the truncated text, and since the watermark counts raw
+// records they are never offered again — the exact permanent loss ErrTruncatedJSONArray exists to
+// prevent, reached through the one path the fix did not cover.
+func TestParseJSONArrayPrefersTruncationOverAnEchoedEmptyArray(t *testing.T) {
+	for _, tc := range []struct{ name, reply string }{
+		{"echoed instruction then a cut-off array",
+			"If the session is quiet I should return []. Here are the observations:\n" +
+				`[{"observation":"a real finding"},{"observation":"another one",`},
+		{"echoed empty array inside a fence, real array truncated after",
+			"```json\n[]\n```\nActually, here is what I found:\n" +
+				`[{"observation":"a"},{"observation":"b`},
+		{"prose mentions [] twice, as the prompt does",
+			"Return [] when nothing happened. Otherwise a list like []. My findings:\n" +
+				`[{"observation":"x"},{"obser`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseJSONArray[tobs](tc.reply)
+			if !errors.Is(err, ErrTruncatedJSONArray) {
+				t.Errorf("want ErrTruncatedJSONArray, got (%v, %v) — an echoed `[]` made a TRUNCATED "+
+					"reply look like a quiet session, so the watermark advances and the "+
+					"observations in the cut-off text are lost permanently", got, err)
+			}
+		})
+	}
+}
+
+// A genuinely quiet session must still be quiet: an empty array and NO truncation.
+// This is the half that prefering-truncation could break.
+func TestParseJSONArrayStillReportsAQuietSessionAsEmpty(t *testing.T) {
+	for _, tc := range []struct{ name, reply string }{
+		{"bare empty array", `[]`},
+		{"empty array in a fence", "```json\n[]\n```"},
+		{"prose then an empty array", "Nothing noteworthy happened here.\n[]"},
+		{"empty array after an echoed example", "The format is [] for quiet sessions.\n\n[]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseJSONArray[tobs](tc.reply)
+			if err != nil {
+				t.Errorf("a quiet session must not error: got %v (%v) — a false truncation makes the "+
+					"session back off forever instead of advancing", err, got)
+			}
+			if len(got) != 0 {
+				t.Errorf("want an empty slice for a quiet session, got %v", got)
+			}
+		})
+	}
+}
+
 // Genuine drift must stay drift. A false truncation is not harmless — it turns a
 // deterministically-drifting model into a session that backs off forever instead of
 // advancing, which is the wedge the drift-advances rule exists to prevent.

@@ -138,14 +138,21 @@ const chunkOverlapRecords = 2
 // larger than the budget is emitted alone (never dropped, never infinite-loops).
 //
 // The budget is counted in CHARACTERS (runes), not bytes. That is what the name and the
-// ChunkPolicy contract say, and what the drain's own sizer measures — store.PendingInputChars
-// uses SQLite LENGTH(), which counts characters. Using Go len() here made the effective
-// budget 3x tighter for CJK text than for ASCII: measured on 10 records of 400 Chinese
-// characters each with a budget comfortably above the whole corpus's 4080 characters,
-// RenderChunks emitted 8 chunks where the identical character count in ASCII emitted 1.
-// That is not a cosmetic mismatch — chunking measurably degrades arc lenses (the reason
-// whole-session is the default), so the user whose archive is part Chinese silently got
-// the worst-quality path on content that fit.
+// ChunkPolicy contract say, and it is the same UNIT the drain's sizer uses
+// (store.PendingInputChars sums SQLite LENGTH(), which counts characters). Using Go len() here
+// made the effective budget 3x tighter for CJK text than for ASCII: measured on 10 records of 400
+// Chinese characters each with a budget comfortably above the whole corpus's 4080 characters,
+// RenderChunks emitted 8 chunks where the identical character count in ASCII emitted 1. That is
+// not a cosmetic mismatch — chunking measurably degrades arc lenses (the reason whole-session is
+// the default), so the user whose archive is part Chinese silently got the worst-quality path on
+// content that fit.
+//
+// Same unit, not the same TOTAL: PendingInputChars sums LENGTH(text) alone, while the accounting
+// below also charges RuneCountInString(Role)+4 per record for the rendered "ROLE: …\n\n" framing.
+// So this budget runs higher than the drain's by about (len(role)+4)·N on a session of many short
+// turns. That is intended — the two gate different things (what one model call receives vs. how
+// much pending input a drain admits) — but they are not interchangeable numbers, so don't derive
+// one from the other.
 func RenderChunks(raw []store.RawRecord, policy ChunkPolicy) []string {
 	if len(raw) == 0 {
 		return nil
