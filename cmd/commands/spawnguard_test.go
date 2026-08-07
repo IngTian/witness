@@ -28,21 +28,32 @@ func TestUnderTestDetectsTheTestBinary(t *testing.T) {
 
 // The real witness binary must NOT be considered under test, or distillation would never
 // start for actual users. This is the half that a naive "always no-op" would break.
+//
+// It calls looksLikeTestBinary — the PRODUCTION predicate — deliberately. The earlier version of
+// this test re-implemented the suffix check inline (`strings.HasSuffix(base, ".test")`) and
+// asserted that copy against its own string literals, never invoking any witness code. That was a
+// tautology: underTest could have been rewritten to `return true`, silently disabling distillation
+// for every real user, and it still passed. The name half is also the ONLY half that runs in a
+// real binary, since -test.* flags are absent there and underTest's flag short-circuit misses.
 func TestUnderTestIsFalseForARealBinaryName(t *testing.T) {
-	// underTest short-circuits on the -test.* flags, which are always present here, so the
-	// NAME half is verified directly against the same predicate the function applies.
-	realNames := []string{"witness", "witness-darwin-arm64", "witness.exe", "witness-v0.7.2-linux-amd64"}
-	for _, name := range realNames {
-		base := strings.ToLower(filepath.Base(name))
-		if strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe") {
-			t.Errorf("%q would be misread as a test binary — real users would get no distillation", name)
+	for _, name := range []string{
+		"witness", "witness-darwin-arm64", "witness.exe", "witness-v0.7.2-linux-amd64",
+		"/usr/local/bin/witness", `C:\Users\tzy20\AppData\Local\witness\witness.exe`,
+		"witness-testing",   // "test" in the name but not the .test SUFFIX
+		"latest",            // ends in "test" — must not match, the suffix is ".test"
+		"my.test.d/witness", // ".test" in a PARENT dir, not the basename
+	} {
+		if looksLikeTestBinary(name) {
+			t.Errorf("%q was misread as a test binary — real users would get no distillation", name)
 		}
 	}
-	testNames := []string{"commands.test", "store.test", "commands.test.exe", "/tmp/go-build123/b396/commands.test"}
-	for _, name := range testNames {
-		base := strings.ToLower(filepath.Base(name))
-		if !strings.HasSuffix(base, ".test") && !strings.HasSuffix(base, ".test.exe") {
-			t.Errorf("%q must be recognized as a test binary", name)
+	for _, name := range []string{
+		"commands.test", "store.test", "commands.test.exe",
+		"/tmp/go-build123/b396/commands.test",
+		"COMMANDS.TEST", // the check lowercases first
+	} {
+		if !looksLikeTestBinary(name) {
+			t.Errorf("%q must be recognized as a test binary, or `go test` forks unreapable orphans", name)
 		}
 	}
 }

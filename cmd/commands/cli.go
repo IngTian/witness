@@ -83,6 +83,17 @@ func underTest() bool {
 	if err != nil {
 		return false
 	}
+	return looksLikeTestBinary(exe)
+}
+
+// looksLikeTestBinary is the NAME half of underTest, split out because it is the only half that
+// ever runs in production: the -test.* flags are never registered in the real witness binary, so
+// underTest's flag short-circuit always misses and this decides. Inlined, it was untestable —
+// every test reaches underTest through the flag branch, so the production branch had no coverage
+// and the "real binary" test could only re-implement the predicate and assert the copy against
+// itself, i.e. it passed even with underTest rewritten to `return true` (which would silently
+// disable distillation for every user). As a named function it can be table-tested directly.
+func looksLikeTestBinary(exe string) bool {
 	base := strings.ToLower(filepath.Base(exe))
 	return strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe")
 }

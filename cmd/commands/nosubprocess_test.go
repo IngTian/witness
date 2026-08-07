@@ -55,21 +55,45 @@ func TestClaudeMCPRemoveIsBoundedAndStubbable(t *testing.T) {
 		t.Errorf("claudeMCPRemoveTimeout = %s is too long to be a liveness bound", claudeMCPRemoveTimeout)
 	}
 
-	// And the real implementation must actually honor a deadline. Drive the same shape
-	// against a command that never exits, and require it to return.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "sleep", "60")
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
-		_ = cmd.Run()
-	}()
+	// And the PRODUCTION builder must actually honor a deadline.
+	//
+	// This drives claudeCLICommand itself. The earlier version of this block hand-built its own
+	// exec.CommandContext(ctx, "sleep", "60") and asserted that returned — which tests the Go
+	// standard library, not witness: reverting claudeCLICommand to a bare exec.Command (the exact
+	// 366-orphan defect) left it green. Here the child is the wedged one, so the assertion binds
+	// to the function under test.
+	//
+	// `claude` itself is never spawned: the builder takes the program name from the caller's
+	// args only, so we exercise it via a stand-in that hangs. cmd.Path is overwritten to a
+	// no-op-shell sleep, keeping the ctx wiring the builder installed.
+	if testing.Short() {
+		t.Skip("spawns one short-lived `sleep` child")
+	}
+	sleepPath, lookErr := exec.LookPath("sleep")
+	if lookErr != nil {
+		t.Skipf("no `sleep` on PATH to stand in for a wedged CLI: %v", lookErr)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	cmd := claudeCLICommand(ctx, "mcp", "remove", "witness")
+	if cmd.Cancel == nil {
+		t.Fatal("claudeCLICommand returned a Cmd with no Cancel — it was not built with " +
+			"exec.CommandContext, so a wedged `claude` can neither be killed nor reaped " +
+			"(this is what left 366 orphans on a real machine)")
+	}
+	// Redirect the SAME Cmd at a program that never exits, preserving the ctx plumbing.
+	cmd.Path, cmd.Args = sleepPath, []string{"sleep", "60"}
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
 	select {
 	case <-done:
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Errorf("the child ran %s before dying; the deadline is not effective", elapsed)
+		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("CommandContext did not kill a hung child — the bound is not effective")
+		t.Fatal("the Cmd built by claudeCLICommand did NOT die on its context deadline — a wedged " +
+			"`claude` would hang witness forever and leak an immortal child")
 	}
 }
 
@@ -99,10 +123,29 @@ func TestUninstallDoesNotSpawnClaudeWithoutAContext(t *testing.T) {
 			t.Errorf("install.go:%d spawns claude unbounded: %s", n+1, strings.TrimSpace(line))
 		}
 	}
-	// Both callers must route through the bounded helpers.
-	for _, want := range []string{"claudeCLIRun(", "claudeCLIOutput("} {
-		if !strings.Contains(src, want) {
-			t.Errorf("expected the bounded helper %s to be in use", want)
+	// Both callers must route through the bounded helpers — and be CALLED, not merely defined.
+	//
+	// Counting matters: `strings.Contains(src, "claudeCLIRun(")` is satisfied by the declaration
+	// `func claudeCLIRun(args ...string) error {` alone. Go permits unused package-level
+	// functions, so deleting every call site still compiled and still passed, leaving the helpers
+	// orphaned while the real spawns went unbounded again.
+	for _, want := range []string{"claudeCLIRun(", "claudeCLIOutput(", "claudeCLICommand("} {
+		total := strings.Count(src, want)
+		decls := strings.Count(src, "func "+want)
+		if calls := total - decls; calls < 1 {
+			t.Errorf("%s is defined but never called (%d occurrences, %d of them the declaration) — "+
+				"the bounded helper is orphaned and something else is spawning the CLI", want, total, decls)
+		}
+	}
+	// And no `claude` spawn may bypass the builder, in any exec form.
+	for n, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if strings.Contains(line, `"claude"`) && strings.Contains(line, "exec.Command") &&
+			!strings.Contains(line, "exec.CommandContext") {
+			t.Errorf("install.go:%d spawns claude without a context: %s", n+1, trimmed)
 		}
 	}
 }

@@ -132,6 +132,24 @@ func (e *Embedder) tokenize(text string) ([]int64, error) {
 	return ids, nil
 }
 
+// sanitizeForTokenizer makes text safe for the byte-offset-indexing tokenizer.
+//
+// Extracted from Embed so it is testable WITHOUT the 448MB model. That matters: the test that
+// guards this (a v0.7.2 critical — an NFD paste killed the long-lived MCP server) could only run
+// on a machine that had fetched the model, and the model is gitignored and CI never fetches it,
+// so the guard was green-by-skip on every CI run. A pure string function has no such excuse.
+//
+// Two transforms, both load-bearing (see Embed's comment for the panic details):
+//   - ToValidUTF8 replaces non-UTF-8 bytes, e.g. latin-1 text from an imported document.
+//   - NFC composition folds macOS's decomposed form, so "café" pasted on a Mac becomes the
+//     same string as the precomposed "café" — the two must embed IDENTICALLY, or a pasted
+//     query silently fails to match a stored observation.
+//
+// Order matters: composing invalid bytes is meaningless, so validate first.
+func sanitizeForTokenizer(text string) string {
+	return norm.NFC.String(strings.ToValidUTF8(text, "�"))
+}
+
 // Embed returns the L2-normalized, masked-mean-pooled 384-d vector for one text.
 // Mirrors the verified reference pipeline exactly. It normalizes and sanitizes text before tokenizing, and converts a tokenizer panic
 // into an error.
@@ -156,7 +174,7 @@ func (e *Embedder) Embed(text string) (vec []float32, err error) {
 		}
 	}()
 
-	text = norm.NFC.String(strings.ToValidUTF8(text, "�"))
+	text = sanitizeForTokenizer(text)
 
 	ids, err := e.tokenize("query: " + text)
 	if err != nil {

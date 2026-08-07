@@ -3,19 +3,72 @@ package embed
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+// The NFD fix, guarded WITHOUT the model — so it runs in CI.
+//
+// This is the second attempt at guarding it. The first was the model-loading test below, which
+// silently skipped everywhere; pointing it at the repo's model fixed my machine and NOT CI,
+// because assets/e5-small is gitignored (.gitignore:37-39, `git ls-files assets` = 0 files) and
+// ci.yml has no fetch-model step — its comment even says "No model or `claude` CLI needed". So
+// the v0.7.2 critical still had zero automated protection: a skip on a precondition CI never
+// satisfies is a deleted test that reads as green, and moving which precondition it was did not
+// change that.
+//
+// The durable fix is to test the seam that actually holds the property. Embed's normalization is
+// a pure string transform; only the tokenizer needs the model. Asserting on it directly needs no
+// assets, no network, and no 448MB download, so it cannot skip.
+func TestSanitizeForTokenizerFoldsNFDAndInvalidBytes(t *testing.T) {
+	// Written as explicit escapes, NOT as pasted literals. A decomposed literal in Go source is
+	// fragile — an editor, a normalizing paste, or a formatter can compose it, after which the
+	// test still passes while comparing NFC to NFC and proving nothing. That happened while
+	// writing this test: the "NFD" literal I typed arrived as 63 61 66 c3a9 (already NFC).
+	const nfc = "caf\u00e9"  // precomposed e-acute
+	const nfd = "cafe\u0301" // e + combining acute — what macOS pastes produce
+	if nfc == nfd {
+		t.Fatal("fixture is broken: the NFC and NFD forms are byte-identical, so this test is vacuous")
+	}
+	if len(nfd) != 6 || len(nfc) != 5 {
+		t.Fatalf("fixture is broken: want NFD=6 bytes and NFC=5, got %d and %d", len(nfd), len(nfc))
+	}
+	if got, want := sanitizeForTokenizer(nfd), nfc; got != want {
+		t.Errorf("NFD was not composed: got %q (% x), want %q (% x)", got, got, want, want)
+	}
+	// NFC input must be untouched — normalization is idempotent, not lossy.
+	if got := sanitizeForTokenizer(nfc); got != nfc {
+		t.Errorf("NFC input was altered: got %q, want %q", got, nfc)
+	}
+	// Both forms must converge, which is what makes a pasted query match a stored observation.
+	if sanitizeForTokenizer(nfc) != sanitizeForTokenizer(nfd) {
+		t.Error("NFC and NFD of the same word must sanitize to the same string, or a macOS-pasted " +
+			"query cannot match an NFC-stored observation")
+	}
+
+	// Invalid bytes must be replaced, not preserved: the tokenizer indexes by byte offset and
+	// panics on them. "caf\xe9" is latin-1 "café", the shape that arrives from imported documents.
+	if got := sanitizeForTokenizer("caf\xe9"); !utf8.ValidString(got) {
+		t.Errorf("invalid UTF-8 survived sanitization: %q (% x)", got, got)
+	}
+	if got := sanitizeForTokenizer("caf\xe9"); !strings.Contains(got, "�") {
+		t.Errorf("expected the replacement char for an invalid byte, got %q", got)
+	}
+	// Degenerate inputs must not blow up.
+	for _, s := range []string{"", "\x00", "\xff\xfe", strings.Repeat("é", 1000)} {
+		if got := sanitizeForTokenizer(s); !utf8.ValidString(got) {
+			t.Errorf("sanitizeForTokenizer(%q) produced invalid UTF-8: %q", s, got)
+		}
+	}
+}
 
 // useRepoModel points the embedder at the model committed in the repo.
 //
-// Without it this test SILENTLY SKIPPED EVERYWHERE — the NFD panic fix (a v0.7.2 critical: an
-// NFD paste crashed `observations search` and killed the long-lived MCP server) had zero
-// automated protection. The cause was mundane: New() resolves "assets/e5-small" relative to the
-// process cwd, and `go test` runs with the PACKAGE dir as cwd, so from internal/embed/ the path
-// missed a model that was sitting right there in the repo root. The skip then swallowed it.
-//
-// It returns false only if the model genuinely is not in the checkout, which is the one case
-// where skipping is honest.
+// The test below is the END-TO-END half: it proves the real tokenizer actually survives these
+// inputs, which the pure-string test above cannot. It requires the model and therefore skips in
+// CI — that is now acceptable, because the property is pinned unconditionally above. Keep BOTH:
+// this one is what would catch the tokenizer itself regressing.
 func useRepoModel(t *testing.T) bool {
 	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -45,8 +98,9 @@ func TestEmbedHandlesNFDAndInvalidUTF8(t *testing.T) {
 		t.Fatalf("the model is present, so New() must succeed — a skip here would hide the "+
 			"NFD panic regression this test exists to catch: %v", err)
 	}
-	const nfcCafe = "café"  // é precomposed
-	const nfdCafe = "café" // e + combining acute (macOS form)
+	const nfcCafe = "caf\u00e9"  // precomposed
+	const nfdCafe = "cafe\u0301" // decomposed (macOS form); escaped so a normalizing
+	//                                editor cannot silently turn this into a second NFC copy
 	for name, s := range map[string]string{
 		"NFC":          nfcCafe,
 		"NFD":          nfdCafe,
