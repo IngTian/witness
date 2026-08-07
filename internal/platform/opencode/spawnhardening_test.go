@@ -122,9 +122,21 @@ func TestReapPriorServeDoesNotKillAnUnrelatedProcess(t *testing.T) {
 	if victim <= 1 {
 		t.Skip("no usable parent pid to stand in for a recycled-pid victim")
 	}
-	// Owner 2 is not this process and is essentially certainly dead, so the live-owner gate does
-	// not fire and gates 2 and 3 are what must save the victim.
-	rec, err := json.Marshal(serveRecord{Serve: victim, Owner: 2, Port: 1, Password: "x"})
+	// The OWNER must be a pid that is genuinely dead, or gate 1 short-circuits and the identity
+	// gates are never reached. Searching for one beats hardcoding: a low literal like 2 is a live
+	// kernel thread in a Linux container (that assumption failed in CI on the first attempt),
+	// while a high pid is free on a fresh container but taken on a long-running desktop.
+	deadOwner := 0
+	for _, cand := range []int{0x7FFFFFF0, 0x7FFFFF00, 0x3FFFFFF0, 999983, 999979} {
+		if !processAlive(cand) {
+			deadOwner = cand
+			break
+		}
+	}
+	if deadOwner == 0 {
+		t.Skip("could not find a dead pid to use as the record's owner on this machine")
+	}
+	rec, err := json.Marshal(serveRecord{Serve: victim, Owner: deadOwner, Port: 1, Password: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,12 +146,14 @@ func TestReapPriorServeDoesNotKillAnUnrelatedProcess(t *testing.T) {
 
 	reapPriorServe(root) // must not signal our parent
 
-	// The victim must still be alive — that is the real assertion.
+	// THE assertion: the victim is still alive. Everything else here is bookkeeping.
 	if !processAlive(victim) {
 		t.Fatalf("reapPriorServe killed pid %d, which was NOT a witness serve — a recycled pid in "+
 			"the record is then enough to destroy an unrelated process", victim)
 	}
-	// And the unusable record must be cleared so later starts do not re-evaluate it.
+	// The record must also be cleared, so a later start does not re-evaluate the same dead
+	// record forever. This only holds because we established the owner is dead above; with a live
+	// owner, keeping the record is the CORRECT behavior (see the live-sibling test).
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Errorf("the stale record survived (err=%v); each later start would re-evaluate it", err)
 	}
