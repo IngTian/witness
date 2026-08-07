@@ -649,7 +649,7 @@ func commandOutput(ctx context.Context, env []string, args ...string) ([]byte, e
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing opencode command")
 	}
-	c := execCommandContext(ctx, "opencode", args...)
+	c := openCodeCommand(ctx, args...)
 	c.Env = env
 	// Pin the cwd, like the two sibling invocations in server.go. OpenCode derives the
 	// PROJECT it records (worktree, vcs, sandboxes) from the working directory, so

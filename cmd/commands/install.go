@@ -599,8 +599,15 @@ func mcpServerRegistered(out, name string) bool {
 
 // cmdInstallOpenCode installs a global OpenCode plugin that mirrors completed
 // OpenCode sessions into witness, and registers the same MCP server OpenCode-side.
+//
+// `target` is what the plugin and the MCP entry invoke, resolved per-platform by
+// resolveOpenCodeInstall (issue #10): the in-repo witness.sh shim on Unix, and the
+// self-installed witness.exe under %LOCALAPPDATA% on Windows, which has no guaranteed
+// shell to run a .sh. Everything downstream is platform-agnostic — the plugin spawns an
+// argv array (no shell), and both the plugin source and the MCP config JSON-encode the
+// path, so a Windows path's backslashes are escaped correctly by construction.
 func cmdInstallOpenCode() error {
-	shim, err := repoShim()
+	target, err := resolveOpenCodeInstall()
 	if err != nil {
 		return err
 	}
@@ -613,7 +620,7 @@ func cmdInstallOpenCode() error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	merged, err := mergeOpenCodeMCP(data, shim)
+	merged, err := mergeOpenCodeMCP(data, target)
 	if err != nil {
 		return err
 	}
@@ -626,7 +633,7 @@ func cmdInstallOpenCode() error {
 		return err
 	}
 	pluginPath := openCodePluginPath(dir, openCodePluginName)
-	if err := writeFileAtomic(pluginPath, []byte(opencodeplugin.Source(shim))); err != nil {
+	if err := writeFileAtomic(pluginPath, []byte(opencodeplugin.Source(target))); err != nil {
 		return err
 	}
 	removeLegacyOpenCodePlugins(dir)

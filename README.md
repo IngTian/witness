@@ -253,15 +253,24 @@ to a `witness\` folder holding `witness.exe` and the embedding model. Then, from
 inside that folder in PowerShell:
 
 ```powershell
-.\witness.exe wire claude
+.\witness.exe wire claude      # Claude Code
+.\witness.exe wire opencode    # OpenCode
 ```
 
-This copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user PATH,
-provisions the archive, and wires Claude Code with **exec-form hooks** pointing at
-`witness.exe` (no shell, no Git Bash needed). The zip carries the prompt templates
-and the ~448MB model alongside the exe; the binary resolves both relative to itself.
-To remove the editor integration: `witness.exe unwire claude` (strips hooks + MCP);
-the copied files and PATH entry are left in place for now.
+Either command copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user
+PATH, and provisions the archive. The zip carries the prompt templates and the ~448MB
+model alongside the exe; the binary resolves both relative to itself. Running both is
+fine — the copy is idempotent, and they wire different editors.
+
+What each wires, and why they differ: Claude Code spawns the hook itself, so `wire
+claude` writes **exec-form hooks** (`{command: witness.exe, args: [...]}`) into
+`settings.json`. OpenCode is the other way round — its *plugin* spawns witness, so
+`wire opencode` bakes the installed `witness.exe` path into the plugin and the MCP
+entry. Neither needs a shell or Git Bash.
+
+To remove an editor integration: `witness.exe unwire claude` / `unwire opencode`
+(strips the hooks/plugin + MCP entry). The copied files and PATH entry are left in
+place, since the other integration may still be using them.
 
 ### OpenCode support
 
@@ -270,7 +279,9 @@ OpenCode support has two pieces:
 - A plugin reconciles OpenCode's SQLite DB on startup and when a session goes idle, then asks the
   laptop-friendly auto-start gate to distill when allowed. From-source installs write a
   local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm plugin
-  `@witness-ai/opencode`.
+  `@witness-ai/opencode`. (That path is the same on Windows — OpenCode resolves its config as
+  `XDG_CONFIG_HOME` else `~/.config`, with no Windows-specific branch, so the plugin lands in
+  `%USERPROFILE%\.config\opencode\plugins\`.)
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.
