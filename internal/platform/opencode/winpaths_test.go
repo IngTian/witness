@@ -199,6 +199,46 @@ func TestParseOpenCodeVersionHandlesWindowsCrashReporterNoise(t *testing.T) {
 	}
 }
 
+// The LABELED pattern must be tried before the bare one, and this is the case that proves it.
+//
+// Found by reverting: with `openCodeVersionLabeled` deleted, every other version test still
+// passed — so nothing justified having two patterns, and the labeled one looked like dead
+// complexity. It is not. When ANY other version-shaped number precedes the real one, the bare
+// pattern picks the wrong value and the 1.18 gate then decides on it:
+//
+//	"loaded plugin 2.3.4 …  version: '1.18.14'"   bare -> 2.3.4  (passes the gate for the
+//	                                               wrong reason — a 2.x plugin, not opencode)
+//	"config schema 0.9.1 ok; version: 1.18.14"    bare -> 0.9.1  (FAILS the gate, refusing a
+//	                                               perfectly good install)
+//
+// The second is the dangerous direction: it is exactly the class of false "upgrade to 1.18.0+"
+// rejection this whole fix exists to stop.
+func TestParseOpenCodeVersionPrefersTheLabelledVersionOverAnEarlierNumber(t *testing.T) {
+	for _, tc := range []struct {
+		name, in     string
+		major, minor int
+	}{
+		{"a plugin version precedes it",
+			"loaded plugin 2.3.4 from disk\napp starting { version: '1.18.14', packaged: true }", 1, 18},
+		{"a schema version precedes it",
+			"config schema 0.9.1 ok; version: 1.18.14", 1, 18},
+		{"a build number precedes it",
+			"build 20.1.3\n> app starting { version: '1.19.0' }", 1, 19},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			major, minor, _, ok := parseOpenCodeVersion(tc.in)
+			if !ok {
+				t.Fatal("no version found at all")
+			}
+			if major != tc.major || minor != tc.minor {
+				t.Errorf("parsed %d.%d, want %d.%d — an earlier number was mistaken for the "+
+					"version, so the 1.18 gate decides on the wrong value",
+					major, minor, tc.major, tc.minor)
+			}
+		})
+	}
+}
+
 func TestParseOpenCodeVersionShapes(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
