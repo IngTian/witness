@@ -419,7 +419,8 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 }
 
 func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, messageID string) (string, error) {
-	data, err := s.doJSON(ctx, http.MethodGet, "/session/"+sessionID+"/message?limit=20", nil, http.StatusOK)
+	path := fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
+	data, err := s.doJSON(ctx, http.MethodGet, path, nil, http.StatusOK)
 	if err != nil {
 		return "", err
 	}
@@ -443,15 +444,49 @@ func (s *OpenCodeServer) fork(ctx context.Context, source string) (string, error
 	return resp.ID, nil
 }
 
+// asyncReplyWindow is how many trailing messages each poll fetches from the fork.
+//
+// It must exceed 1 (our request) + the assistant reply, and the window is a TAIL: witness
+// prompts a fork of the user's session, so the fork already contains that entire conversation
+// (see parseOpenCodeAsyncReply). If the window were the OLDEST n messages, our request would
+// never appear in it on any session longer than n and the poll would spin to the timeout with
+// no reply and no error — a permanent stall that looks exactly like a slow model. The window
+// being a tail is what makes this safe, and requestMissingStreak below is the guard for it
+// being wrong: rather than trust the assumption for the full generateTimeout, we surface it.
+const asyncReplyWindow = 50
+
+// requestMissingLimit is how many consecutive polls may come back WITHOUT our request message
+// before we stop waiting. The server echoes a prompt_async request into the message list
+// promptly, so more than a handful of polls without it means it is not coming — the window
+// does not reach it, the id was rejected, or the session was reset. Failing here yields an
+// actionable error in seconds instead of a generateTimeout-long silence.
+const requestMissingLimit = 10
+
 func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, requestMessageID string) (string, error) {
 	ticker := time.NewTicker(openCodeAsyncPollInterval)
 	defer ticker.Stop()
 	var lastErr error
+	requestMissingStreak := 0
+	path := fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
 	for {
-		data, err := s.doJSON(ctx, http.MethodGet, "/session/"+sessionID+"/message?limit=20", nil, http.StatusOK)
+		data, err := s.doJSON(ctx, http.MethodGet, path, nil, http.StatusOK)
 		if err == nil {
 			if reply := parseOpenCodeAsyncReply(data, requestMessageID); strings.TrimSpace(reply) != "" {
 				return reply, nil
+			}
+			// Our own request must show up in the window; until it does, nothing here is
+			// attributable to this run (see parseOpenCodeAsyncReply). If it NEVER shows up we
+			// must not keep polling: that is the stall shape above, and it burns a full
+			// generateTimeout while holding the machine-wide WorkerLock.
+			if !hasOpenCodeRequestMessage(data, requestMessageID) {
+				requestMissingStreak++
+				if requestMissingStreak >= requestMissingLimit {
+					return "", fmt.Errorf("opencode never echoed our prompt (message %s) into the last %d "+
+						"messages of session %s after %d polls; the reply window may not reach it",
+						requestMessageID, asyncReplyWindow, sessionID, requestMissingStreak)
+				}
+			} else {
+				requestMissingStreak = 0
 			}
 			// FAIL FAST on a generation that completed with a provider error. Such a
 			// message has no text parts, so it is indistinguishable from "still
@@ -1033,6 +1068,26 @@ func isOpenCodeRequestMessage(data []byte, requestMessageID string) bool {
 		return false
 	}
 	return openCodeMessageID(data) == requestMessageID
+}
+
+// hasOpenCodeRequestMessage reports whether our own prompt_async request appears anywhere in a
+// message-list response. It is the guard for the reply window actually REACHING our request: a
+// native fork carries the source conversation, so on a long session a window that is not a tail
+// (or is too small) would never include it, and the poll would spin silently to the timeout.
+func hasOpenCodeRequestMessage(data []byte, requestMessageID string) bool {
+	if requestMessageID == "" {
+		return false
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		return isOpenCodeRequestMessage(data, requestMessageID)
+	}
+	for i := range list {
+		if isOpenCodeRequestMessage(list[i], requestMessageID) {
+			return true
+		}
+	}
+	return false
 }
 
 func openCodeMessageID(data []byte) string {
