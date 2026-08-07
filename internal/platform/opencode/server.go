@@ -34,7 +34,7 @@ var procCtl proc.Control = proc.System()
 var openCodeModelsCache sync.Map // provider -> openCodeModelList
 
 var openCodeVersionCommand = func(ctx context.Context) ([]byte, error) {
-	return exec.CommandContext(ctx, "opencode", "--version").Output()
+	return openCodeCommand(ctx, "--version").Output()
 }
 
 var openCodeAsyncPollInterval = time.Second
@@ -65,8 +65,41 @@ type OpenCodeServer struct {
 	waitDone chan struct{}
 	waitErr  error
 
-	mu     sync.Mutex
-	closed bool
+	mu      sync.Mutex
+	closed  bool
+	pidFile string // path to PID file, removed on Close; empty = no tracking
+}
+
+func servePIDPath(runtimeRoot string) string {
+	if runtimeRoot == "" {
+		return ""
+	}
+	return filepath.Join(runtimeRoot, ".witness-serve.pid")
+}
+
+func reapPriorServe(runtimeRoot string) {
+	pidFile := servePIDPath(runtimeRoot)
+	if pidFile == "" {
+		return
+	}
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		_ = os.Remove(pidFile)
+		return
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		_ = os.Remove(pidFile)
+		return
+	}
+	if err := p.Kill(); err == nil {
+		slog.Info("proc reap: killed orphaned opencode serve", "pid", pid)
+	}
+	_ = os.Remove(pidFile)
 }
 
 // StartOpenCodeServer starts a private OpenCode HTTP server for witness
@@ -96,6 +129,7 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 	// guarantees a live sibling (still parented by its worker) is never a candidate.
 	// isStrayServeLine is our private-serve fingerprint (see below).
 	procCtl.ReapOrphans(isStrayServeLine)
+	reapPriorServe(runtimeRoot)
 	port, err := freeTCPPort()
 	if err != nil {
 		return nil, err
@@ -118,6 +152,7 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 		waitDone:   make(chan struct{}),
 		client:     &http.Client{},
 		logs:       logs,
+		pidFile:    servePIDPath(runtimeRoot),
 	}
 	go func() {
 		srv.waitErr = cmd.Wait()
@@ -126,6 +161,9 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 	if err := srv.waitHealthy(ctx); err != nil {
 		srv.Close()
 		return nil, err
+	}
+	if srv.pidFile != "" {
+		_ = os.WriteFile(srv.pidFile, []byte(strconv.Itoa(srv.cmd.Process.Pid)), 0600)
 	}
 	return srv, nil
 }
@@ -310,6 +348,12 @@ func (s *OpenCodeServer) Close() error {
 	cmd := s.cmd
 	waitDone := s.waitDone
 	s.mu.Unlock()
+
+	defer func() {
+		if s.pidFile != "" {
+			_ = os.Remove(s.pidFile)
+		}
+	}()
 
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -566,7 +610,7 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	// blocked Open/doctor forever while holding the machine-wide WorkerLock.
 	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "opencode", "models", "--pure", provider)
+	cmd := openCodeCommand(ctx, "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
 	// Isolated env when we have a runtime root: `opencode models` opens its OPENCODE_DB
 	// read-WRITE (and applies schema migrations), so inheriting the ambient env would
@@ -632,7 +676,7 @@ func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec
 }
 
 func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "opencode", "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
+	cmd := openCodeCommand(ctx, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
 	cmd.Dir = os.TempDir()
 	cmd.Env = replaceEnv(os.Environ(), []string{
 		"WITNESS_WORKER=1",
