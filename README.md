@@ -113,8 +113,16 @@ witness lens enable  math               # start running it on every session
 
 **Per-lens models (optional).** By default every lens rides the default models (`witness config set
 triage_model / distill_model`). A rare heavy lens can pin a stronger model just for itself —
-without paying for it on every session — with `witness lens set math --extract-model <m>`
-(and `--review-model <m>`); pass an empty value to clear it and ride the default again.
+without paying for it on every session — by adding `extract_model` / `review_model` to its
+`lens.json`:
+
+```json
+{ "name": "math", "dimensions": ["proof_rigor"], "extract_model": "claude-sonnet-5" }
+```
+
+Omit a field (or leave it empty) to ride the default. Since `register` stores a snapshot, edit the
+registered copy under `<witness-data-dir>/lenses/<name>/lens.json` — or edit the source and
+re-register. Verify what a lens resolved to with `witness lens show <name>`.
 
 The source directory may live anywhere. As a recommended canonical location, witness keeps the
 registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/` (normally
@@ -182,16 +190,29 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 
 ## Commands
 
-`witness <doctor | profile | facets | observations | review | lens | import | distill | cleanup | export | install | wire | unwire | ingest>` (capture,
-the worker, and the MCP server are internal entry points invoked by Claude Code/OpenCode, not typed
-by hand):
+The visible front door, exactly as `witness --help` groups it:
+
+| group | commands |
+|---|---|
+| Read your archive | `status` · `profile` · `facets` · `observations` · `ingest` |
+| Lenses | `lens` |
+| Configure | `config` |
+| Setup | `doctor` · `install` · `wire` · `unwire` |
+| Maintenance | `cleanup` · `export` |
+
+Capture, the worker, and the MCP server are **internal** entry points invoked by
+Claude Code/OpenCode, not typed by hand. `witness import` and `witness worker …` are hidden:
+they exist for recovery and debugging, and everything they do also happens automatically.
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
 - `witness facets [lens]` — print current structured facets (CLI equivalent of MCP `get_facets`).
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
 - `witness observations record --session <id> --dimension <name> --observation <text>` — stage an active observation and kick the worker.
 - `witness observations delete <obs_id>` — prune a wrong observation.
-- `witness review` — force an L2 review and regenerate L4 profiles from existing observations.
+- `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
+  observations. (Hidden, like the rest of `worker`: review normally runs on its own schedule —
+  `review_every` / `review_poignancy` — so reaching for this by hand is the exception. `--full`
+  also runs the emergent long-arc pass.)
 - `witness lens register|enable|disable|list` — manage lenses.
 - `witness lens backfill <name> [--fresh]` — re-mine one lens over the whole history and refresh its
   facets; `--fresh` first drops the lens's observations + facets (for a changed prompt).
@@ -372,7 +393,7 @@ witness lens register math prompts/lens/example   # optional: register an extra 
 witness lens enable math
 witness import --agent opencode    # reconciles ~/.local/share/opencode/opencode.db and returns
 witness status                    # watch non-blocking distillation progress
-witness review                     # forces L2 facets + L4 markdown profiles
+witness worker review              # forces L2 facets + L4 markdown profiles (hidden cmd)
 witness profile opencode           # per-lens L4 report
 witness profile                    # unified L4 report
 ```
@@ -382,15 +403,21 @@ witness profile                    # unified L4 report
 `~/.local/share/witness/config.toml` (all optional; sensible defaults):
 
 ```toml
-runner           = "claude"            # "claude" (default) or "opencode"
-triage_model     = "claude-haiku-4-5"   # cheap per-session mining ("" = claude -p default)
-distill_model    = "claude-opus-4-8"    # the reviewer ("" = claude -p default)
-review_every     = 5                    # run the reviewer every N distilled sessions...
-review_poignancy = 30                   # ...or sooner once accumulated salience crosses this (0 = off)
-auto_distill = true                     # hooks/plugins may start model work automatically
-auto_distill_interval_minutes = 10      # minimum gap between automatic worker starts
-auto_distill_session_budget = 0         # sessions per automatic run (0 = drain current queue)
+runner           = "claude"   # "claude" (default) or "opencode"
+triage_model     = ""         # MINING (L0 -> L1), once per session; "" = the runner's default
+distill_model    = ""         # REVIEW (L1 -> L2/L4), batched; "" falls back to triage_model
+review_every     = 5          # run the reviewer every N distilled sessions...
+review_poignancy = 30         # ...or sooner once accumulated salience crosses this (0 = off)
+auto_distill     = true       # hooks/plugins may start model work automatically
+mine_concurrency = 4          # parallel per-session miners (<= 0 restores the default)
 ```
+
+Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
+`claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
+`runner = "opencode"`. Leaving both empty is the safe default and what `witness install` writes;
+note that an empty `triage_model` under the claude runner inherits your *ambient interactive*
+model, which may be heavier than you want for per-session mining, so pinning a light one is
+usually worth it.
 
 Set `auto_distill = false` for capture-only mode on battery-constrained machines, then run
 `witness worker run --detach` manually when plugged in. Automatic workers are short-lived: they load the
@@ -428,7 +455,7 @@ witness export ~/Dropbox/witness-backup.db --force   # consistent snapshot, safe
 ```
 
 To restore, stop witness and copy a snapshot into your data dir as `witness.db` (or set `WITNESS_HOME`
-to its folder), then run `witness review` — the snapshot holds the source of truth (raw turns,
+to its folder), then run `witness worker review` — the snapshot holds the source of truth (raw turns,
 observations, facets); the narrative profile is regenerated from it.
 
 ## License

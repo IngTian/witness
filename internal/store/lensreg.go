@@ -71,6 +71,13 @@ const (
 	lensConfigFile  = "lens.json"
 	lensExtractFile = "extract.md"
 	lensReviewFile  = "review.md"
+	// emerge.md is the S3 long-arc verify prompt. OPTIONAL, but it MUST be copied: the
+	// loader reads it (internal/lens loadDir/readPromptPair via lens.EmergeFile), so a lens
+	// that ships one and is not copied here silently loses it — RegisterLens stores a
+	// snapshot, so the file simply is not in the registered copy and the reviewer falls back
+	// to review.md with no warning. prompts/default/ ships an emerge.md, which is how this
+	// was found.
+	lensEmergeFile = "emerge.md"
 )
 
 // RegisterLens copies a lens definition DIRECTORY into the registry under `name`,
@@ -182,7 +189,7 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 		return fmt.Errorf("lens source %s is empty (the mining prompt is required)", lensExtractFile)
 	}
 	files := map[string][]byte{lensExtractFile: extract}
-	for _, fn := range []string{lensReviewFile, lensConfigFile} { // both optional
+	for _, fn := range []string{lensReviewFile, lensConfigFile, lensEmergeFile} { // all optional
 		if data, rerr := os.ReadFile(filepath.Join(srcDir, fn)); rerr == nil {
 			files[fn] = data
 		} else if !os.IsNotExist(rerr) {

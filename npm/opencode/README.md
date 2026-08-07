@@ -27,7 +27,7 @@ To test a prerelease, pin the plugin entry to the beta version instead of the un
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@witness-ai/opencode@beta"]
+  "plugin": ["@witness-ai/opencode"]
 }
 ```
 
@@ -48,8 +48,8 @@ The main package includes the plugin, CLI wrapper, and prompts. npm installs one
 After the download completes, verify the model, OpenCode runner, archive, and queue:
 
 ```sh
-npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
-npm exec --yes --package=@witness-ai/opencode@beta -- witness distill status
+npm exec --yes --package=@witness-ai/opencode -- witness doctor
+npm exec --yes --package=@witness-ai/opencode -- witness status
 ```
 
 > **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is

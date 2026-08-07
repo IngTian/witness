@@ -118,6 +118,44 @@ func TestRegisterLensRebuildsDropsStaleFiles(t *testing.T) {
 	}
 }
 
+// emerge.md must be copied into the registry, like review.md and lens.json.
+//
+// It is the S3 long-arc verify prompt, and the LOADER reads it (internal/lens EmergeFile, via
+// loadDir/readPromptPair). RegisterLens copied only extract.md, review.md and lens.json — and
+// because register stores a SNAPSHOT, a lens that shipped an emerge.md simply did not have one in
+// its registered copy. Nothing failed: the reviewer silently falls back to review.md, so a lens
+// author who wrote a long-arc prompt got the generic behavior with no warning. prompts/default/
+// ships an emerge.md, which is how the gap surfaced.
+func TestRegisterLensCopiesTheEmergePrompt(t *testing.T) {
+	s := tempStore(t)
+	src := writeLensSrcDir(t, "math", "mine", "rev")
+	const emerge = "EMERGE PROMPT: verify this long arc"
+	if err := os.WriteFile(filepath.Join(src, "emerge.md"), []byte(emerge), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.RegisterLens("math", src); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(s.LensesDir(), "math", "emerge.md"))
+	if err != nil {
+		t.Fatalf("emerge.md was not copied into the registry (%v) — the lens author's long-arc "+
+			"prompt is silently dropped and the reviewer falls back to review.md", err)
+	}
+	if string(got) != emerge {
+		t.Errorf("emerge.md content changed: got %q, want %q", got, emerge)
+	}
+
+	// And a source WITHOUT one must still register (it is optional), not error.
+	if err := s.RegisterLens("plain", writeLensSrcDir(t, "plain", "mine", "rev")); err != nil {
+		t.Fatalf("a lens with no emerge.md must still register: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.LensesDir(), "plain", "emerge.md")); !os.IsNotExist(err) {
+		t.Errorf("emerge.md appeared for a source that had none (err=%v)", err)
+	}
+}
+
 // SELF-REGISTER must be lossless: re-registering a lens FROM its own registry directory
 // (the "edit the registered copy in place, then re-register" workflow) must not lose
 // review.md/lens.json to the destination wipe. Regression for the audit finding where
