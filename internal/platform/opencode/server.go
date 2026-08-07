@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -510,18 +512,49 @@ func ValidateOpenCodeCapability(ctx context.Context) error {
 		return fmt.Errorf("opencode native session isolation unavailable; upgrade to OpenCode 1.18.0+: %w", err)
 	}
 	v := strings.TrimSpace(string(out))
-	var major, minor, patch int
-	parsed := false
-	for _, field := range strings.Fields(v) {
-		if _, err := fmt.Sscanf(strings.TrimPrefix(field, "v"), "%d.%d.%d", &major, &minor, &patch); err == nil {
-			parsed = true
-			break
-		}
-	}
+	major, minor, _, parsed := parseOpenCodeVersion(v)
 	if !parsed || major < 1 || (major == 1 && minor < 18) {
 		return fmt.Errorf("opencode native session isolation unavailable in %q; upgrade to OpenCode 1.18.0+", v)
 	}
 	return nil
+}
+
+// openCodeVersionLabeled / openCodeVersionBare extract the semver from `opencode --version`.
+//
+// The old parser split on whitespace and Sscanf'd each field, which assumed the output is a
+// bare "1.18.13". On Windows it is not: the packaged build writes crash-reporter and startup
+// logging to the same stream, so a real 1.18.14 install produced (verbatim, from issue #10)
+//
+//	17:41:48.929 (crash) > crash reporter started {
+//	  path: 'C:\Users\tzy20\AppData\Roaming\ai.opencode.desktop\Crashpad'
+//	}
+//	17:41:48.947         > app starting { version: '1.18.14', packaged: true, ... }
+//
+// and every field failed to parse: the version is QUOTED ('1.18.14',) so Sscanf rejects the
+// leading quote, and the clock timestamps are not N.N.N either. So witness reported "native
+// session isolation unavailable … upgrade to 1.18.0+" against an install that was already
+// new enough — blocking distillation entirely, with a message pointing at the wrong problem.
+//
+// Two patterns, tried in order:
+//   - labeled: a `version: 'X.Y.Z'` (or version=X.Y.Z) key wins, because when the tool names
+//     its own version that is authoritative;
+//   - bare: any X.Y.Z not preceded by a digit, '.' or ':' — the ':' exclusion is what stops a
+//     clock like 17:41:48.929 from being read as version 41.48.929.
+var (
+	openCodeVersionLabeled = regexp.MustCompile(`(?i)version['"\s:=]+v?(\d+)\.(\d+)\.(\d+)`)
+	openCodeVersionBare    = regexp.MustCompile(`(?:^|[^\d.:])v?(\d+)\.(\d+)\.(\d+)(?:[^\d.]|$)`)
+)
+
+func parseOpenCodeVersion(out string) (major, minor, patch int, ok bool) {
+	for _, re := range []*regexp.Regexp{openCodeVersionLabeled, openCodeVersionBare} {
+		if m := re.FindStringSubmatch(out); m != nil {
+			major, _ = strconv.Atoi(m[1])
+			minor, _ = strconv.Atoi(m[2])
+			patch, _ = strconv.Atoi(m[3])
+			return major, minor, patch, true
+		}
+	}
+	return 0, 0, 0, false
 }
 
 func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (openCodeModelList, error) {

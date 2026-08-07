@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -124,17 +123,14 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 	return stats, nil
 }
 
+// sqliteURI opens the user's own OpenCode database READ-ONLY with a shared cache.
+//
+// Routed through the shared sqliteFileURI (native.go) because this was previously a second,
+// independent copy of the same url.URL composition — and both copies were broken on Windows
+// the same way, turning the drive letter into a URI authority. See readOnlyURI for the full
+// explanation and the real error from Windows.
 func sqliteURI(path string) string {
-	abs, err := filepath.Abs(path)
-	if err == nil {
-		path = abs
-	}
-	u := url.URL{Scheme: "file", Path: path}
-	q := u.Query()
-	q.Set("mode", "ro")
-	q.Set("cache", "shared")
-	u.RawQuery = q.Encode()
-	return u.String()
+	return sqliteFileURI(path, "mode=ro&cache=shared")
 }
 
 // legacyMarkerName is the label the PRE-isolation design stamped on the scratch
