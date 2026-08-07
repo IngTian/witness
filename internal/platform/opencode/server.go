@@ -34,7 +34,7 @@ var procCtl proc.Control = proc.System()
 var openCodeModelsCache sync.Map // provider -> openCodeModelList
 
 var openCodeVersionCommand = func(ctx context.Context) ([]byte, error) {
-	return exec.CommandContext(ctx, "opencode", "--version").Output()
+	return openCodeCommand(ctx, "--version").Output()
 }
 
 var openCodeAsyncPollInterval = time.Second
@@ -65,8 +65,148 @@ type OpenCodeServer struct {
 	waitDone chan struct{}
 	waitErr  error
 
-	mu     sync.Mutex
-	closed bool
+	mu      sync.Mutex
+	closed  bool
+	pidFile string // where this serve's pid is recorded; "" = no tracking (no runtimeRoot)
+}
+
+// servePIDPath is where a private serve records its pid, inside the witness-owned OpenCode
+// runtime root. Empty runtimeRoot (the legacy shared-DB path) means no tracking.
+func servePIDPath(runtimeRoot string) string {
+	if runtimeRoot == "" {
+		return ""
+	}
+	return filepath.Join(runtimeRoot, ".witness-serve.pid")
+}
+
+// serveRecord is what a private serve writes to the pid file: enough to decide, later and
+// from a different process, whether that serve is an ORPHAN worth killing.
+//
+// The serve pid alone is not enough, for two independent reasons — both of which produced a
+// wrong kill in the first version of this code:
+//
+//   - Pids are RECYCLED. This code runs precisely when a previous worker died without
+//     cleaning up, so the record is stale exactly when it is read. After a reboot that number
+//     very likely belongs to an unrelated live process (Windows recycles aggressively), and
+//     `os.FindProcess` does not help: on Unix it never errors for a missing pid, and on
+//     Windows it succeeds exactly when the pid IS live — i.e. exactly in the reuse case.
+//   - The record is MACHINE-WIDE, not per-process. runtimeRoot is <store root>/runtime
+//     (store/config.go), so every witness process shares this one file. A live sibling's
+//     serve therefore matches any identity check based on process shape alone, and the
+//     OpenCode runner reports SweepsOnClose()==false, which means `witness lens try` opens a
+//     runner WITHOUT taking WorkerLock — so this can and does run concurrently with a
+//     draining worker.
+//
+// Owner is the pid of the WITNESS process that started the serve, and it is the field that
+// separates the two cases: a serve whose owner is still alive is a live sibling's, not an
+// orphan, however much it looks like ours. Port + Password prove the serve is one WE started
+// (only our serve accepts our password), which is what rules out pid reuse.
+type serveRecord struct {
+	Serve    int    `json:"serve"`    // pid of the `opencode serve` process
+	Owner    int    `json:"owner"`    // pid of the witness process that started it
+	Port     int    `json:"port"`     // where it listens, for the ownership probe
+	Password string `json:"password"` // its per-serve random basic-auth password
+}
+
+// reapPriorServe kills the recorded serve only if it is an ORPHAN of ours.
+//
+// It is the Windows counterpart to procCtl.ReapOrphans. That sweep parses `ps` for a ppid
+// column and gates on ppid==1, which is a Unix shape and a no-op on Windows — so a
+// hard-killed worker there left its `opencode serve` running, and every later drain started
+// another, piling up servers that hold ports and the private DB.
+//
+// Three gates, all required, in cheapest-first order:
+//  1. the owning witness process must be GONE (else this is a live sibling's serve);
+//  2. the serve pid must still look like a witness private serve (isOurServePID — the same
+//     fingerprint the ps sweep uses);
+//  3. the serve must answer OUR password on its recorded port (proves it is the very serve
+//     that record describes, not a pid-reuse coincidence).
+//
+// Failing closed is the right bias: a serve we decline to kill costs a port and some memory
+// until the OS reclaims it, and the next drain gets another chance. Killing the wrong process
+// costs the user their work.
+func reapPriorServe(runtimeRoot string) {
+	pidFile := servePIDPath(runtimeRoot)
+	if pidFile == "" {
+		return
+	}
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return // no record: nothing to reap
+	}
+	var rec serveRecord
+	// Unreadable or nonsensical => unusable by anyone, so drop it rather than let every later
+	// start re-evaluate the same garbage. `Serve <= 1` is load-bearing beyond hygiene: pid 1 is
+	// init/launchd and, on Unix, Kill(0) signals the ENTIRE PROCESS GROUP — so a truncated or
+	// zeroed record must never reach the kill below. `Serve == os.Getpid()` cannot be a serve we
+	// started (we are witness, not opencode) and would be self-destruction.
+	if err := json.Unmarshal(data, &rec); err != nil || rec.Serve <= 1 || rec.Serve == os.Getpid() {
+		_ = os.Remove(pidFile)
+		return
+	}
+	// GATE 1 — is the owner still alive? A live owner means the serve is not an orphan: leave
+	// BOTH it and the record alone, because that owner removes the record on its own Close.
+	//
+	// "Alive" deliberately INCLUDES our own pid. An earlier version excluded it, reasoning that
+	// our own record cannot describe a sibling — but this process can legitimately reach here
+	// holding a record it wrote itself (a second runner opened in the same process, or a retry
+	// after a failed waitHealthy), and treating that as reapable deletes the record for a serve
+	// that is still running. The record then describes nothing and the serve becomes
+	// unreapable, which on Windows means it leaks until reboot.
+	if rec.Owner > 1 && processAlive(rec.Owner) {
+		slog.Debug("proc reap: the recorded serve still has a live owner; not an orphan",
+			"serve", rec.Serve, "owner", rec.Owner)
+		return
+	}
+	// GATE 2 — does the pid still look like a witness private serve?
+	if !isOurServePID(rec.Serve) {
+		slog.Debug("proc reap: recorded serve pid is no longer a witness serve; leaving it alone",
+			"serve", rec.Serve)
+		_ = os.Remove(pidFile)
+		return
+	}
+	// GATE 3 — does it answer OUR password? Only a serve we started does, so this is what
+	// distinguishes our orphan from an unrelated process that happens to match the shape.
+	if !serveAnswersOurPassword(rec) {
+		slog.Debug("proc reap: recorded serve did not authenticate as ours; leaving it alone",
+			"serve", rec.Serve, "port", rec.Port)
+		_ = os.Remove(pidFile)
+		return
+	}
+	p, err := os.FindProcess(rec.Serve)
+	if err != nil {
+		_ = os.Remove(pidFile)
+		return
+	}
+	if err := p.Kill(); err == nil {
+		slog.Info("proc reap: killed an orphaned opencode serve left by a dead worker",
+			"serve", rec.Serve, "owner", rec.Owner)
+	}
+	_ = os.Remove(pidFile)
+}
+
+// serveAnswersOurPassword probes the recorded port for a serve that accepts the recorded
+// per-serve password. A short, bounded probe: this runs on the start path, so it must never
+// become a stall. No port or password recorded (an older file) => not provable => no kill.
+func serveAnswersOurPassword(rec serveRecord) bool {
+	if rec.Port <= 0 || rec.Password == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), openCodeProbeTimeout)
+	defer cancel()
+	url := fmt.Sprintf("http://127.0.0.1:%d/global/health", rec.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Basic "+basicAuthToken("opencode", rec.Password))
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusOK
 }
 
 // StartOpenCodeServer starts a private OpenCode HTTP server for witness
@@ -96,6 +236,11 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 	// guarantees a live sibling (still parented by its worker) is never a candidate.
 	// isStrayServeLine is our private-serve fingerprint (see below).
 	procCtl.ReapOrphans(isStrayServeLine)
+	// The ps-based sweep above needs a ppid column and the ppid==1 orphan gate, which is a
+	// Unix shape — so on Windows it cannot see a serve orphaned by a hard-killed worker.
+	// reapPriorServe covers that case from the recorded pid, corroborating the pid against
+	// the process's identity before signalling (pids get recycled).
+	reapPriorServe(runtimeRoot)
 	port, err := freeTCPPort()
 	if err != nil {
 		return nil, err
@@ -118,6 +263,38 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 		waitDone:   make(chan struct{}),
 		client:     &http.Client{},
 		logs:       logs,
+		pidFile:    servePIDPath(runtimeRoot),
+	}
+	// Record the serve BEFORE waiting for health, not after.
+	//
+	// The process exists the moment Start returns, and the case this record exists for is
+	// precisely a serve that is alive but not yet (or never) healthy: if the worker is
+	// hard-killed while waitHealthy is still polling, an unrecorded serve is an orphan nobody
+	// can find later. Writing it after a successful health check would leave exactly the
+	// startup window uncovered. Close removes the file, so a clean shutdown leaves no record.
+	//
+	// Owner is OUR pid, and it is what lets a later reap tell an orphan from a live sibling's
+	// serve — the record lives at a machine-wide path, so "looks like our serve" is not enough
+	// (see serveRecord).
+	if srv.pidFile != "" && srv.cmd.Process != nil {
+		rec, mErr := json.Marshal(serveRecord{
+			Serve:    srv.cmd.Process.Pid,
+			Owner:    os.Getpid(),
+			Port:     port,
+			Password: password,
+		})
+		if mErr == nil {
+			// 0600: the record carries this serve's basic-auth password. Anyone who can read it
+			// can drive the private serve, so it must not be group/world readable.
+			mErr = os.WriteFile(srv.pidFile, rec, 0o600)
+		}
+		if mErr != nil {
+			// Non-fatal: the record is a cleanup aid, not a correctness requirement, and the ps
+			// sweep still covers Unix. Log it so a permanently unwritable runtime root is
+			// visible rather than silently disabling Windows reaping forever.
+			slog.Warn("could not record the opencode serve pid; a hard-killed worker may leak this serve",
+				"path", srv.pidFile, "err", mErr)
+		}
 	}
 	go func() {
 		srv.waitErr = cmd.Wait()
@@ -136,6 +313,16 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 // dead serve process would poll forever and pin the machine-wide WorkerLock until
 // someone sent a signal by hand. Every generation path must apply it — the legacy Run
 // below and the native retained-fork path (see runner.Run).
+//
+// Do NOT raise this to "give a slow/queued free-tier model more room" — that was tried and
+// reverted. The reasoning: a timeout here is NOT lossy. mine failures back off
+// 5m/10m/20m…/6h (distill.backoffDelay) and NEVER drop the pending delta, so a request stuck
+// behind a saturated provider queue is retried later either way. Raising the ceiling does not
+// make that request succeed; it only holds the machine-wide WorkerLock — one drain at a time,
+// across every lens and both runtimes — for that much longer, during which nothing else
+// distills and a hard-killed worker leaves a longer-lived orphan. The correct lever for a
+// rate-limited provider is the model choice (config triage_model/distill_model) or waiting,
+// not the liveness bound.
 const generateTimeout = 10 * time.Minute
 
 // openCodeRequestTimeout bounds ONE HTTP request to the local serve process, and
@@ -309,7 +496,39 @@ func (s *OpenCodeServer) Close() error {
 	s.closed = true
 	cmd := s.cmd
 	waitDone := s.waitDone
+	pidFile := s.pidFile
 	s.mu.Unlock()
+
+	// Drop the pid record on EVERY exit path — the early return below and the escalation
+	// timeout included. Leaving it only on the happy path is how "cleanup on close" quietly
+	// becomes cleanup-sometimes, so this is deferred rather than inline.
+	//
+	// But remove it only if it is still OURS. The path is machine-wide (runtimeRoot is
+	// <store root>/runtime), so a concurrent process may have started its own serve and
+	// overwritten the record since we wrote it — `witness lens try` opens a runner without
+	// WorkerLock, which makes that overlap reachable. Deleting another live serve's record
+	// would leave it untracked, i.e. unreapable on Windows, where this record is the ONLY
+	// cleanup path. Compare-then-delete keeps that from happening.
+	defer func() {
+		if pidFile == "" {
+			return
+		}
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return // already gone
+		}
+		var rec serveRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			_ = os.Remove(pidFile) // unreadable: nobody can use it, clear it
+			return
+		}
+		if rec.Owner != os.Getpid() {
+			slog.Debug("leaving the opencode serve record alone: it belongs to another witness process",
+				"owner", rec.Owner)
+			return
+		}
+		_ = os.Remove(pidFile)
+	}()
 
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -566,7 +785,7 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	// blocked Open/doctor forever while holding the machine-wide WorkerLock.
 	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "opencode", "models", "--pure", provider)
+	cmd := openCodeCommand(ctx, "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
 	// Isolated env when we have a runtime root: `opencode models` opens its OPENCODE_DB
 	// read-WRITE (and applies schema migrations), so inheriting the ambient env would
@@ -632,7 +851,7 @@ func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec
 }
 
 func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "opencode", "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
+	cmd := openCodeCommand(ctx, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
 	cmd.Dir = os.TempDir()
 	cmd.Env = replaceEnv(os.Environ(), []string{
 		"WITNESS_WORKER=1",
