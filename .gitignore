@@ -27,10 +27,16 @@ tmp/
 archive-data/
 my-archive/
 
-# Internal working notes — design docs and any superpowers scaffolding.
+# Internal working notes — design docs and agent-harness scaffolding.
 # These are our process artifacts, irrelevant to people installing the plugin.
+#
+# Both spellings matter: the pattern only covered docs/superpowers/, so a report written
+# to the top-level .superpowers/ was committed and shipped in v0.5.0 — a 148-line internal
+# bugfix writeup about issues that had already closed, published to a public repo for no
+# reason. Ignore the tool's directory wherever it lands.
 docs/design/
 docs/superpowers/
+.superpowers/
 
 # Embedding model assets — fetched via scripts/fetch-model.sh, never committed
 # (the .onnx is ~470MB). The repo ships code; users fetch the model once.
