@@ -118,7 +118,16 @@ func readFileForTest(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(b)
+	return normalizeOpenCodeNewlines(string(b))
+}
+
+// normalizeOpenCodeNewlines converts CRLF and lone CR to LF so this package's source scans see
+// one line-ending form. Without it a CRLF checkout (git's Windows default) made the "\n}\n"
+// body-delimiter scans miss entirely: three such tests panicked on the resulting negative slice
+// bound and two silently stopped asserting. Reported from a real Windows run.
+func normalizeOpenCodeNewlines(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
 }
 
 // A fork whose window never contains our request must FAIL FAST, not spin to generateTimeout.

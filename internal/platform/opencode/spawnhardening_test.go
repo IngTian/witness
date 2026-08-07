@@ -34,7 +34,7 @@ func TestEveryOpenCodeSpawnGoesThroughTheOneHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 		scanned++
-		for n, line := range strings.Split(string(b), "\n") {
+		for n, line := range strings.Split(normalizeOpenCodeNewlines(string(b)), "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "//") {
 				continue

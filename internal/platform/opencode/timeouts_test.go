@@ -361,6 +361,10 @@ func TestEveryOpenCodeSpawnIsContextBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// LF-normalize: a CRLF checkout (git's Windows default) makes the "\n}\n" scan below
+	// miss, and the slice that follows then panics on a negative bound. Seen on a real
+	// Windows run. .gitattributes pins *.go to LF too; this keeps the test honest regardless.
+	src = []byte(normalizeOpenCodeNewlines(string(src)))
 	for n, line := range strings.Split(string(src), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "//") {
@@ -376,6 +380,9 @@ func TestEveryOpenCodeSpawnIsContextBound(t *testing.T) {
 		t.Fatal("loadOpenCodeModels not found")
 	}
 	end := strings.Index(string(src)[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit loadOpenCodeModels; the scan would slice out of range")
+	}
 	fn := string(src)[i : i+end]
 	if !strings.Contains(fn, "openCodeProbeTimeout") {
 		t.Error("loadOpenCodeModels must bound its `opencode models` probe: a hung one blocks " +

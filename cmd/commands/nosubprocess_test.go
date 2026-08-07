@@ -9,13 +9,29 @@ import (
 	"time"
 )
 
+// readSource reads a source file for the scan-based tests, with line endings NORMALIZED to LF.
+//
+// The normalization is load-bearing, not tidiness. These tests locate a function body with
+// strings.Index(src, "\n}\n"), which does not match "\r\n}\r\n" — and git on Windows checks out
+// CRLF by default. On a real Windows machine that made three such tests PANIC (Index returned -1
+// and the slice bound went negative) and two others silently stop guarding anything. A test that
+// cannot run on a platform protects nothing there.
+//
+// .gitattributes now pins *.go to LF so the checkout itself is consistent; normalizing here as
+// well means these tests hold even in a tree that predates it, or one a tool rewrote.
 func readSource(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(b)
+	return normalizeNewlines(string(b))
+}
+
+// normalizeNewlines converts CRLF and lone CR to LF, so source scans see one line-ending form.
+func normalizeNewlines(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
 }
 
 // No test may spawn the real `claude` CLI, and the production call must be killable.
