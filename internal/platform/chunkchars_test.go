@@ -63,10 +63,25 @@ func TestRenderChunksStillSplitsOnCharacterOverflow(t *testing.T) {
 	if len(chunks) < 2 {
 		t.Fatalf("a corpus over budget must split: got %d chunk(s)", len(chunks))
 	}
-	// Each chunk must respect the budget in characters, allowing the lone-giant exception.
+	// Each chunk must respect the budget, in CHARACTERS.
+	//
+	// Asserted unconditionally. The earlier version guarded this with
+	// `n > 250 && !strings.Contains(c, strings.Repeat("观", 100))`, meaning to allow the
+	// lone-oversized-record exception — but every record here IS that 100-char string and
+	// RenderTranscript copies Text verbatim, so EVERY chunk contains it and the exception
+	// swallowed all of them. The loop body was unreachable and asserted nothing. The exception is
+	// not needed anyway: no single record here exceeds the budget (108 chars each), so every
+	// chunk must fit, and the dedicated lone-giant case is
+	// TestRenderChunksEmitsAnOversizedMultibyteRecordAlone below.
 	for i, c := range chunks {
-		if n := utf8.RuneCountInString(c); n > 250 && !strings.Contains(c, strings.Repeat("观", 100)) {
-			t.Errorf("chunk %d is %d characters, over the 250 budget", i, n)
+		if n := utf8.RuneCountInString(c); n > 250 {
+			t.Errorf("chunk %d is %d characters, over the 250-character budget", i, n)
+		}
+		// Byte length exceeding the budget is expected and fine for CJK — that is the whole
+		// point. Assert it, so a silent regression to byte-budgeting is visible here too.
+		if len(c) <= utf8.RuneCountInString(c) {
+			t.Errorf("chunk %d is not multi-byte (%d bytes, %d chars); the fixture no longer "+
+				"exercises the bytes-vs-characters distinction", i, len(c), utf8.RuneCountInString(c))
 		}
 	}
 	// No record is dropped.

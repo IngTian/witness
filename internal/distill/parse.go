@@ -99,14 +99,24 @@ func ParseJSONArray[T any](reply string) ([]T, error) {
 	if found {
 		return best, nil
 	}
-	if sawEmpty {
-		return []T{}, nil
-	}
-	// No usable array. Before calling this drift (which ADVANCES the watermark), check
-	// whether the reply was cut off mid-array — that is a retryable output failure, and the
-	// observations it was in the middle of listing must not be thrown away.
+	// No usable array. Before treating this as either a quiet session or drift — BOTH of which
+	// advance the watermark — check whether the reply was cut off mid-array. That is a retryable
+	// output failure, and the observations it was in the middle of listing must not be thrown away.
+	//
+	// This check must come BEFORE the sawEmpty return, not after it. Below it, sawEmpty shadowed
+	// truncation for the most likely shape in the field: every shipped extract prompt prints a
+	// literal `[]` while instructing the model to return one for a quiet session, and models
+	// routinely restate that instruction before answering (the same echoing the LAST-wins tiebreak
+	// defends against). A reply that echoes `[]` in prose and is then cut off mid-array set
+	// sawEmpty, returned "quiet session", and the watermark advanced past turns whose observations
+	// were sitting in the truncated text — permanent loss, through the one path the truncation fix
+	// did not cover. A balanced `[]` is weak evidence of intent; an unclosed array mid-element is
+	// strong evidence of a cut-off reply, so truncation outranks it.
 	if truncatedArray(reply) {
 		return nil, ErrTruncatedJSONArray
+	}
+	if sawEmpty {
+		return []T{}, nil
 	}
 	return nil, ErrNoJSONArray
 }

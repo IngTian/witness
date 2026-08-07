@@ -260,6 +260,24 @@ func (r *rawIO) RawPruneStats(cutoff string) (sessions, records int, err error) 
 	return
 }
 
+// PerSessionMetaNamespaces lists the `meta` namespaces whose key is "<namespace>:<session>",
+// i.e. the rows PruneSessionsBefore must reclaim when a session's L0 is purged.
+//
+// It is an explicit ALLOWLIST rather than a positional match on the key, because `meta` also
+// holds namespaces of the same shape that key on a LENS (review_rowid, profile_sig,
+// emerge_seen). A positional predicate cannot tell them apart, and deleting the wrong one is
+// silently destructive — a wiped review watermark re-folds the whole L1 history into L2 —
+// whereas a namespace this list forgets merely leaks one dead row. Fail safe, not destructive.
+//
+// The store deliberately does not import the platform packages that own these constants (the
+// bottom of the stack imports nothing internal), so the strings are duplicated here; the paired
+// constants live at internal/platform/opencode/import.go and cmd/commands/ingest.go, and
+// prunemeta_lens_test.go pins that this list stays in sync with them.
+var PerSessionMetaNamespaces = []string{
+	"opencode_import_keys", // OpenCode import dedup state
+	"file_import_keys",     // `witness ingest` dedup state
+}
+
 // PruneSessionsBefore deletes the raw transcript (L0) plus the queue/meta rows of
 // every session whose most recent L0 record predates cutoff (RFC3339). Derived
 // L1/L2 (observations, facets) are deliberately KEPT — they're the durable
@@ -313,26 +331,36 @@ func (r *rawIO) PruneSessionsBefore(cutoff string) (sessions, records int, err e
 			err = e
 			return 0, 0, err
 		}
-		// Per-session state parked in `meta` under a "<namespace>:<session>" key (today
-		// opencode's "opencode_import_keys:<session>" and ingest's "file_import_keys:")
-		// would otherwise be orphaned when the session's raw/progress rows go — a slow
-		// leak of dead meta rows. Stays generic — the store never hardcodes either key
-		// constant. Not LIKE: opencode session ids contain "_", a LIKE wildcard.
+		// Per-session state parked in `meta` under a "<namespace>:<session>" key would
+		// otherwise be orphaned when the session's raw/progress rows go — a slow leak of dead
+		// meta rows. Not LIKE: opencode session ids contain "_", a LIKE wildcard.
 		//
-		// Anchor on the namespace's FIRST colon; do NOT suffix-match ":"+session. Session
-		// ids may themselves contain colons ("file:" + a caller-supplied id, which is an
-		// arbitrary string — a path, a URL, an arxiv id), so a bare suffix match also hits
-		// a DIFFERENT, LIVE session whose id happens to end in ":"+sess. Verified: with
-		// sessions "file:x" (stale) and "file:notes:file:x" (live), pruning the former
-		// deleted the LATTER's file_import_keys row. The live session then looks
-		// never-ingested, so the next `witness ingest` re-appends every already-durable
-		// record as new — silent L0 duplication of data the user cannot see is duplicated.
-		// Namespaces are single tokens with no colon, so the text after the first colon is
-		// exactly the session id.
-		if _, e := tx.Exec(
-			`DELETE FROM meta WHERE instr(key, ':') > 0 AND substr(key, instr(key, ':') + 1) = ?`, sess); e != nil {
-			err = e
-			return 0, 0, err
+		// Two independent traps, so this predicate is deliberately narrow on BOTH axes.
+		//
+		// The SESSION axis: anchor on the namespace's first colon, do NOT suffix-match
+		// ":"+session. Session ids may themselves contain colons ("file:" + a caller-supplied
+		// id, which is an arbitrary string — a path, a URL, an arxiv id), so a bare suffix
+		// match also hits a DIFFERENT, LIVE session whose id happens to end in ":"+sess.
+		// Verified: with sessions "file:x" (stale) and "file:notes:file:x" (live), pruning the
+		// former deleted the LATTER's file_import_keys row. The live session then looks
+		// never-ingested, so the next `witness ingest` re-appends every already-durable record.
+		//
+		// The NAMESPACE axis: match only the per-session namespaces, by name. A positional
+		// `substr(key, instr(key,':')+1) = ?` is namespace-BLIND, and three live namespaces
+		// share the same "<ns>:<x>" shape while keying on a LENS: review_rowid:<lens>,
+		// profile_sig:<lens>, emerge_seen:<lens>:<sig>. Nothing constrains a session id to a
+		// UUID (capture takes it from the hook payload, ingest from the caller), so a session
+		// named like a lens wiped that lens's review watermark — re-folding the entire L1
+		// history into L2 on the next review. Verified: pruning a session "default" deleted
+		// review_rowid:default and profile_sig:default.
+		//
+		// Adding a per-session namespace means adding it here. That coupling is the point: an
+		// allowlist fails safe (a leaked row) where a positional match fails destructively.
+		for _, ns := range PerSessionMetaNamespaces {
+			if _, e := tx.Exec(`DELETE FROM meta WHERE key = ?`, ns+":"+sess); e != nil {
+				err = e
+				return 0, 0, err
+			}
 		}
 	}
 	if err = tx.Commit(); err != nil {

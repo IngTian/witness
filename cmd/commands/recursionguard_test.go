@@ -83,15 +83,28 @@ func TestRecursionGuardExemptsDoctor(t *testing.T) {
 
 // Every OTHER command is guarded, not just capture — the guard keys on the env var, so a new
 // subcommand is covered automatically and must stay that way.
+//
+// The assertion is that the archive was never even OPENED. Exit-0-and-zero-raw-rows, which this
+// table checked before, is vacuous for three of the four tokens: cmdSessionStart and cmdSessionEnd
+// never call AppendRaw and unconditionally return nil, so with the guard deleted they still exit 0
+// with zero rows and the subtests still passed. `witness.db` not existing is different — it is
+// created by store.Open(), which every one of these commands reaches immediately, so its absence
+// proves the short-circuit happened BEFORE cobra dispatched anything.
 func TestRecursionGuardCoversOtherCommands(t *testing.T) {
 	for _, tok := range []string{"capture", "session-start", "session-end", "worker-run"} {
 		t.Run(tok, func(t *testing.T) {
-			t.Setenv("WITNESS_HOME", t.TempDir())
+			home := t.TempDir()
+			t.Setenv("WITNESS_HOME", home)
 			t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
 			t.Setenv("WITNESS_WORKER", "1")
 			withArgsAndStdin(t, []string{"witness", tok}, `{"session_id":"s","prompt":"x"}`)
 			if code := Run(); code != 0 {
 				t.Errorf("%s must be short-circuited to 0 inside a worker subprocess, got %d", tok, code)
+			}
+			// The load-bearing assertion: the command never ran at all.
+			if _, err := os.Stat(filepath.Join(home, "witness.db")); err == nil {
+				t.Errorf("%s opened the archive inside a worker subprocess — the guard did not "+
+					"short-circuit before cobra dispatched the command", tok)
 			}
 			if n := rawRowCount(t); n != 0 {
 				t.Errorf("%s wrote %d raw rows inside a worker subprocess", tok, n)

@@ -117,8 +117,14 @@ func TestFreshRaceWouldStampPhantomProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !accepted {
-		t.Skip("the CAS rejected the stale stamp; the hazard this lock guards no longer exists " +
-			"— re-derive whether the lock is still needed before removing it")
+		// FATAL, not a skip. A skip here would silently retire the test the moment
+		// MarkDistilledIfCurrent's CAS is tightened, and the same shape (skipping on a
+		// precondition that stopped holding) is how the NFD-panic guard went green-by-skip for a
+		// whole release. If the CAS now rejects the stale stamp that is real news: the lock may be
+		// removable, and someone should decide that deliberately rather than inherit a dead test.
+		t.Fatal("the CAS rejected the stale stamp, so the phantom-progress hazard no longer " +
+			"reproduces at the store layer. That may mean the --fresh WorkerLock is no longer " +
+			"needed — re-derive it deliberately and update this test, do not just delete it")
 	}
 	obs, _ := st.ReadObservations("default")
 	pending, _ := st.PendingSessions([]string{"default"})
