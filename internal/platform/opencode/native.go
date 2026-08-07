@@ -654,6 +654,7 @@ func commandOutput(ctx context.Context, env []string, args ...string) ([]byte, e
 		binary = "opencode"
 	}
 	c := execCommandContext(ctx, binary, args...)
+	hideOpenCodeWindow(c)
 	c.Env = env
 	// Pin the cwd, like the two sibling invocations in server.go. OpenCode derives the
 	// PROJECT it records (worktree, vcs, sandboxes) from the working directory, so

@@ -174,7 +174,7 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 // dead serve process would poll forever and pin the machine-wide WorkerLock until
 // someone sent a signal by hand. Every generation path must apply it — the legacy Run
 // below and the native retained-fork path (see runner.Run).
-const generateTimeout = 10 * time.Minute
+const generateTimeout = 60 * time.Minute
 
 // openCodeRequestTimeout bounds ONE HTTP request to the local serve process, and
 // openCodeProbeTimeout bounds ONE `opencode` CLI probe (`--version`, `models`).
