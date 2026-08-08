@@ -21,6 +21,12 @@ func (Platform) Name() string { return "opencode" }
 
 func (Platform) SessionPrefix() string { return SessionPrefix }
 
+// SupportsNativeSessions marks OpenCode as a platform whose sessions live in its own conversation
+// store, so a runner may retain a scratch context keyed to one and resume it after a crash. This is
+// the platform.NativeSessionSource capability — it replaces an `== platform.AgentOpenCode` name
+// comparison the engine used to make on its own.
+func (Platform) SupportsNativeSessions() bool { return true }
+
 // RenderInputs shapes the session by the shared, source-agnostic policy: whole by
 // default (policy.MaxChars <= 0), split into overlapping windows only when a session
 // overflows a positive budget. OpenCode used to chunk UNCONDITIONALLY at a fixed 24K

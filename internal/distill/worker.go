@@ -251,7 +251,14 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			// anywhere AND at least one input drifted — so a long session where one chunk
 			// extracts fine is never miscounted as drift (see LensMining.Drifted).
 			producedObs, sawDrift := false, false
-			isNative := platform.ForSession(w.Store, session).Name() == platform.AgentOpenCode && w.NativeFor != nil && w.NativeFor(ln)
+			// Ask the platform whether its sessions can host a retained scratch context, rather
+			// than comparing its NAME. Both halves of this decision are now capabilities: the
+			// session owner via SupportsNativeSessionSource, and the runner via w.NativeFor
+			// (which asserts platform.NativeSessionSupport). The name compare that used to be
+			// here was the engine's only piece of hardcoded platform knowledge, and the
+			// acceptance guard that forbids exactly that could not see it.
+			isNative := platform.SupportsNativeSessionSource(platform.ForSession(w.Store, session)) &&
+				w.NativeFor != nil && w.NativeFor(ln)
 			var nativeDigest string
 			if isNative {
 				entries := make([]platform.TranscriptEntry, len(raw))

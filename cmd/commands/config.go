@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -136,8 +137,13 @@ func cmdConfigSet(key, value string, lensName string) error {
 	// runner validation ONLY at default scope; at lens scope allow any runner string
 	// (a lens may target a runtime that isn't the default — matches today's `lens set --runner`).
 	if canonical == "runner" && lensName == "" && value != "" {
-		if value != store.RunnerClaude && value != store.RunnerOpenCode {
-			return fmt.Errorf("runner must be %q or %q, got %q", store.RunnerClaude, store.RunnerOpenCode, value)
+		// Ask the platform registry, not a hardcoded pair. The old allowlist was a closed
+		// set in a system that is otherwise uniformly registry-driven, and it DISAGREED with
+		// the other writer of this same key: `witness install <target>` → bindRunner writes
+		// it with no validation at all. Both now go through platform.ValidateRunnerName, so a
+		// newly registered runtime is accepted without editing this file.
+		if err := platform.ValidateRunnerName(value); err != nil {
+			return err
 		}
 	}
 	st, err := store.Open()

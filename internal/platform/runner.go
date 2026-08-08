@@ -51,6 +51,34 @@ func TranscriptDigest(entries []TranscriptEntry) string {
 // scratch-context protocol (create once, prompt, resume on retry, delete after L1 is durable).
 type NativeSessionSupport interface{ SupportsNativeSession() bool }
 
+// NativeSessionSource is the PLATFORM-side half of the same capability: a platform whose sessions
+// live in its own conversation store, so a runner can retain a scratch context keyed to one of
+// them and resume it after a crash.
+//
+// Both halves are needed, and until now only one was a capability. The runner half was already
+// asked politely (runnerSet.NativeFor asserts NativeSessionSupport); the SESSION half was a
+// hardcoded string compare in the engine — `ForSession(...).Name() == AgentOpenCode` in
+// internal/distill — which is exactly the platform-name dispatch the architecture forbids and
+// internal/platform/acceptance_test.go exists to catch. That guard missed it: none of its patterns
+// match a `.Name() ==` equality, so the single real violation sat inside the fence it was written
+// to enforce. Asking here instead means a third runtime with its own session store implements a
+// method rather than editing the engine.
+//
+// Nil-safe access is SupportsNativeSessionSource below.
+type NativeSessionSource interface{ SupportsNativeSessions() bool }
+
+// SupportsNativeSessionSource reports whether p's sessions can host a retained scratch context —
+// nil-safe and assertion-safe, so the engine never has to know which platforms qualify. A platform
+// that does not implement the capability answers false, which is the correct default: without a
+// private conversation store there is nothing to retain.
+func SupportsNativeSessionSource(p Platform) bool {
+	if p == nil {
+		return false
+	}
+	src, ok := p.(NativeSessionSource)
+	return ok && src.SupportsNativeSessions()
+}
+
 type nativeSessionKey struct{}
 
 func WithNativeSession(ctx context.Context, n *NativeSession) context.Context {
