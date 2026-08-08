@@ -18,7 +18,25 @@ import (
 // process exits with output witness cannot parse) instead of the command running — which is
 // how a machine with both installed reported "native session isolation unavailable" while a
 // perfectly good CLI sat later on the same PATH.
-const desktopShimMarker = "@opencode-aidesktop"
+// desktopMarkers identify directories belonging to the OpenCode DESKTOP app rather than the
+// headless CLI. A match means "skip this PATH entry".
+//
+// More than one spelling is needed, from the Windows box's own reports: the npm-scoped package dir
+// is `@opencode-aidesktop`, while the app's own data lives under `ai.opencode.desktop` (its crash
+// reporter writes to ...\AppData\Roaming\ai.opencode.desktop\Crashpad). A single marker would
+// skip one layout and happily return the GUI launcher from the other.
+var desktopMarkers = []string{"@opencode-aidesktop", "ai.opencode.desktop", "opencode.desktop"}
+
+// isDesktopDir reports whether a PATH entry belongs to the desktop app.
+func isDesktopDir(dir string) bool {
+	lower := strings.ToLower(filepath.ToSlash(dir))
+	for _, m := range desktopMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // openCodeExe resolves the `opencode` CLI to an absolute path, preferring the headless CLI
 // over the desktop app's GUI launcher.
@@ -36,14 +54,25 @@ func openCodeExe() (string, error) {
 			continue
 		}
 		dir = filepath.Clean(dir)
-		if strings.Contains(strings.ToLower(filepath.ToSlash(dir)), desktopShimMarker) {
+		if isDesktopDir(dir) {
 			continue
 		}
 		for _, ext := range exts {
 			candidate := filepath.Join(dir, "opencode"+ext)
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				return candidate, nil
+			info, err := os.Stat(candidate)
+			if err != nil || info.IsDir() {
+				continue
 			}
+			// Windows os.Stat is CASE-INSENSITIVE, so this candidate can match a desktop
+			// `OpenCode.exe` sitting in a directory whose name carries no desktop marker. Check the
+			// name the filesystem actually reports: the headless CLI is lowercase `opencode`, the
+			// desktop build ships `OpenCode.exe`. Skipping on that difference is what stops witness
+			// spawning a GUI that can never serve — the failure that produced `context deadline
+			// exceeded` on every distillation until the exe was pinned.
+			if actual := info.Name(); actual != "" && !strings.HasPrefix(actual, "opencode") {
+				continue
+			}
+			return candidate, nil
 		}
 	}
 	return exec.LookPath("opencode")

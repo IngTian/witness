@@ -3,6 +3,7 @@
 package opencode
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -22,7 +23,12 @@ import (
 // unavailable. Implementing it here anyway keeps the reap logic identical on both platforms
 // rather than leaving a Windows-only code path that no one can exercise locally.
 func isOurServePID(pid int) bool {
-	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	// BOUNDED for the same reason as the Windows variant: this runs under the machine-wide
+	// WorkerLock (reapPriorServe <- StartOpenCodeServerIn), so an unbounded child would wedge every
+	// drain. `ps` is normally instant, but "normally" is not a bound.
+	ctx, cancel := context.WithTimeout(context.Background(), openCodeProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return false
 	}

@@ -3,6 +3,7 @@
 package opencode
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"strconv"
@@ -30,17 +31,46 @@ import (
 //     user's editor is not.
 //   - The command runs with a hidden window like every other opencode-adjacent spawn.
 func isOurServePID(pid int) bool {
-	cmd := exec.Command("wmic", "process", "where", "processid="+strconv.Itoa(pid), "get", "commandline")
+	// BOUNDED. This runs inside reapPriorServe, which runs from StartOpenCodeServerIn while the
+	// caller holds the machine-wide WorkerLock — the exact hazard the file's own comment on
+	// openCodeProbeTimeout describes ("a hung `opencode` invocation blocked the worker
+	// indefinitely while holding the machine-WIDE WorkerLock"). WMIC is a service call and can
+	// hang on a sick machine, so an unbounded exec.Command here would wedge every drain.
+	ctx, cancel := context.WithTimeout(context.Background(), openCodeProbeTimeout)
+	defer cancel()
+
+	// LIST format, not the default table. `wmic ... get commandline` emits the column HEADER
+	// ("CommandLine") as its first line, and isStrayServeLine treats the first whitespace-separated
+	// field as the EXECUTABLE — so the header became the executable, failed the "opencode" check,
+	// and this function returned false for EVERY pid. Gate 2 of reapPriorServe could then never
+	// pass, meaning the Windows reaper silently reaped nothing at all, which is the one platform it
+	// exists for. `/value` emits `CommandLine=<value>`, which we split on the first '=' below.
+	cmd := exec.CommandContext(ctx, "wmic", "process", "where", "processid="+strconv.Itoa(pid),
+		"get", "commandline", "/value")
 	hideOpenCodeWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return false
 	}
-	text := string(out)
-	if strings.Contains(text, "No Instance(s) Available") {
-		return false
+	line := wmicValue(string(out), "CommandLine")
+	if line == "" {
+		return false // no such process, or WMIC said "No Instance(s) Available"
 	}
-	return isStrayServeLine(text)
+	return isStrayServeLine(line)
+}
+
+// wmicValue extracts one `Key=value` field from WMIC /value output, which is CRLF-delimited and
+// padded with blank lines. Returns "" when the key is absent or its value is empty — both of which
+// mean "do not treat this pid as ours", the safe answer for a caller deciding whether to kill.
+func wmicValue(out, key string) string {
+	for _, raw := range strings.Split(out, "\n") {
+		l := strings.TrimSpace(raw)
+		if !strings.HasPrefix(l, key+"=") {
+			continue
+		}
+		return strings.TrimSpace(strings.TrimPrefix(l, key+"="))
+	}
+	return ""
 }
 
 // processAlive reports whether pid names a live process.

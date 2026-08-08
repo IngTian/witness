@@ -290,3 +290,45 @@ func TestServePIDPathIsEmptyWithoutARuntimeRoot(t *testing.T) {
 	}
 	reapPriorServe("") // must not panic
 }
+
+// isStrayServeLine treats the FIRST whitespace-separated field as the executable, which is why the
+// Windows probe must hand it a bare command line and nothing else.
+//
+// This pins the bug that made the Windows reaper a silent no-op. `wmic ... get commandline` in its
+// default TABLE format emits the column name as the first output line, so the blob handed to this
+// function began with "CommandLine" — and since strings.Fields splits on newlines too, fields[0] was
+// "CommandLine", whose basename does not contain "opencode". The executable check therefore failed
+// for EVERY pid, isOurServePID returned false always, gate 2 of reapPriorServe could never pass, and
+// the reaper reaped nothing on the one platform it exists for. It failed CLOSED, so nothing
+// complained.
+//
+// The fix is to query WMIC with /value and extract the value, which servepid_windows.go now does.
+// This test guards the shared predicate's side of that contract: a header-prefixed blob must NOT be
+// accepted as a serve (it is not a command line), while the bare line MUST be.
+func TestStrayServeFingerprintNeedsABareCommandLine(t *testing.T) {
+	const bare = `C:\Users\x\.opencode\bin\opencode.exe serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR`
+	if !isStrayServeLine(bare) {
+		t.Fatal("a real private-serve command line was not recognized; the reaper cannot work at all")
+	}
+
+	// WMIC table format: header, blank line, then the value. This must NOT be accepted — not
+	// because rejecting it is useful, but because accepting it would mean the fingerprint is
+	// matching on something other than the executable, and the caller must therefore strip the
+	// header before asking.
+	tableFormat := "CommandLine\n\n" + bare + "\n"
+	if isStrayServeLine(tableFormat) {
+		t.Error("a WMIC table-format blob was accepted as a serve command line — the fingerprint is " +
+			"no longer anchored on the executable field")
+	}
+
+	// And the /value shape must be stripped by the caller, not fed in raw: `CommandLine=<line>`
+	// leaves fields[0] as "CommandLine=C:\...\opencode.exe", whose basename DOES contain
+	// "opencode", so it would match for the wrong reason. Pinning it as rejected keeps the parsing
+	// responsibility where it belongs.
+	// NOTE, deliberately not an assertion: `CommandLine=<path>` IS accepted, because the key is
+	// glued to the path and the resulting token still contains "opencode". The shared predicate
+	// cannot defend against that — it would have to know WMIC's output format, which is precisely
+	// the platform detail it must not carry. So the obligation lives with the caller
+	// (servepid_windows.go strips the value via wmicValue), and this comment records why there is no
+	// test here rather than leaving the gap looking accidental.
+}
