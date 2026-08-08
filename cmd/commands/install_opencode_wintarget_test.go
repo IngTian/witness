@@ -133,15 +133,43 @@ func TestMergeOpenCodeMCPWithWindowsExe(t *testing.T) {
 // resolveOpenCodeInstall must exist on BOTH platforms and return a path that the plugin can
 // spawn. On Unix it is the repo shim; asserting the shape here (rather than the value) keeps
 // the test meaningful on either OS.
+//
+// LOCALAPPDATA IS REDIRECTED FIRST, and that is not hygiene — without it this test DAMAGES a
+// Windows machine. On Windows resolveOpenCodeInstall is `return installSelf()`, whose
+// installBundle copies os.Executable() to <LOCALAPPDATA>\witness\witness.exe BEFORE it
+// validates anything (install_windows.go: MkdirAll then copyFile, then probeSrcTree). Under
+// `go test` os.Executable() is the TEST binary, and the os.SameFile short-circuit in copyFile
+// compares different directories so it does not fire. So running the suite on Windows would
+// overwrite the user's installed witness.exe with a test binary, and also put a temp dir on
+// their PATH. Same class as the test that once spawned 366 real `claude` children: a test must
+// never mutate the machine it runs on. installRoot() reads LOCALAPPDATA from the environment,
+// so a TempDir here is enough to contain it.
 func TestResolveOpenCodeInstallReturnsASpawnableTarget(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+
+	// On Unix, resolveOpenCodeInstall -> repoShim derives the shim from os.Executable(), which
+	// under `go test` is a binary in a build temp dir — so it can NEVER find hooks/witness.sh and
+	// this test used to skip on every Unix run. That mattered: combined with the Windows damage
+	// above, the test only ever executed on the one platform where it was harmful. Staging a shim
+	// beside a fake executable is not possible without an os.Executable seam, so instead assert
+	// the CONTRACT that is checkable here — the error must be the documented "not a built working
+	// copy" one, not any other failure — and let the shape assertions below run on Windows.
 	target, err := resolveOpenCodeInstall()
 	if err != nil {
-		// On Unix this legitimately fails when not run from a built working copy (repoShim
-		// requires hooks/witness.sh); that is the pre-existing contract, not a regression.
-		if runtime.GOOS != "windows" && strings.Contains(err.Error(), "shim not found") {
-			t.Skipf("no built working copy here: %v", err)
+		if runtime.GOOS == "windows" {
+			t.Fatalf("resolveOpenCodeInstall: %v", err)
 		}
-		t.Fatalf("resolveOpenCodeInstall: %v", err)
+		if !strings.Contains(err.Error(), "shim not found") {
+			t.Fatalf("on Unix the ONLY acceptable failure is the missing-shim contract (a test binary "+
+				"lives in a build temp dir, so repoShim cannot resolve); got a different error, which "+
+				"means the Unix path changed shape: %v", err)
+		}
+		// The message must stay actionable — it is what a user sees when they run from a
+		// non-built checkout.
+		if !strings.Contains(err.Error(), "make build") {
+			t.Errorf("the missing-shim error must tell the user how to fix it; got %v", err)
+		}
+		return
 	}
 	if !filepath.IsAbs(target) {
 		t.Errorf("the plugin bakes in an ABSOLUTE path (it spawns from OpenCode's cwd), got %q", target)
