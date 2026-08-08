@@ -428,7 +428,7 @@ func runDistillLoop(d distillLoopDeps) {
 // swallowed, leaving the prior summaries in place — the profile is derived and
 // non-critical, and must never break the worker.
 func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc) {
-	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts()
+	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts(st.Root)
 	if err != nil {
 		slog.Warn("profile: summarizer prompts unavailable; skipping", "err", err)
 		return
