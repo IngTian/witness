@@ -2,6 +2,7 @@ package distill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -254,6 +255,25 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 
 	committed := 0
 
+	// ADAPTIVE WINDOW (backpressure). `sem` caps concurrency at `conc` for the whole call, but the
+	// EFFECTIVE window is `window`, which only ever shrinks. A mine that ends in a context
+	// deadline means the request was accepted and never served — the provider is not granting the
+	// parallelism we asked for — so continuing to dispatch that wide just queues more work behind
+	// a queue.
+	//
+	// Measured on a real Windows run: four simultaneous prompts, all four dead at exactly the 600s
+	// budget, then one solo retry completing in 41s. The two-phase request budget (see
+	// internal/platform/opencode: queue-wait and generation are bounded separately) is what makes
+	// those siblings SURVIVE rather than starve; this is the efficiency half — a queued miner still
+	// holds a goroutine and its share of the in-flight char budget for the whole wait, so slots are
+	// better given to sessions the provider will actually serve.
+	//
+	// Halving (not dropping to 1) keeps a healthy provider fast: one unlucky timeout among four
+	// must not collapse the drain. It never widens again within a call; the next worker run starts
+	// from config, so a transient limit cannot pin concurrency low forever.
+	window := conc
+	timedOut := 0
+
 	// In-flight char accounting for the budget gate. sizeByIdx holds the input size of
 	// every dispatched-but-not-yet-reaped job, so len(sizeByIdx)==0 means nothing is in
 	// flight (the floor condition) and inFlightChars is their running sum.
@@ -274,6 +294,31 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 	reap := func(r minedResult) {
 		inFlightChars -= sizeByIdx[r.idx]
 		delete(sizeByIdx, r.idx)
+		// A session counts as starved if the whole request deadlined, or if any of its lenses did
+		// (MineTimedOut). Per-session is the right unit: the window is a count of sessions.
+		starved := r.err != nil && errors.Is(r.err, context.DeadlineExceeded)
+		if !starved && r.m != nil {
+			for _, lm := range r.m.Lenses {
+				if lm.MineTimedOut {
+					starved = true
+					break
+				}
+			}
+		}
+		if starved {
+			timedOut++
+			// Narrow once half the CURRENT window has starved, so the very next dispatch asks for
+			// less. Waiting for the whole batch would be too late: the pending set is normally one
+			// batch, so a between-batches adjustment would never apply at all (learned the hard
+			// way — the first version of this narrowed in Drain and never fired).
+			if window > 1 && timedOut >= (window+1)/2 {
+				window /= 2
+				timedOut = 0
+				slog.Warn("distill: narrowing mine concurrency; the provider is not serving this "+
+					"many concurrent requests within the generation budget",
+					"now", window, "cap", conc)
+			}
+		}
 		w.commitResult(r.m, r.err, existing, onCommit)
 		committed++
 	}
@@ -295,6 +340,13 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 			reap(<-done)
 		}
 		attempted[w.attemptKey(s)] = true
+		// Honour a NARROWED window before taking a semaphore slot. sem's capacity is fixed at
+		// `conc`, so backpressure is enforced here: reap until in-flight work fits the smaller
+		// number. len(sizeByIdx) is the in-flight count, and a non-empty sizeByIdx guarantees a
+		// miner that will signal done, so this cannot block forever.
+		for len(sizeByIdx) >= window && len(sizeByIdx) > 0 {
+			reap(<-done)
+		}
 		sem <- struct{}{} // blocks until a slot frees — THIS is the rolling window (count cap)
 		// Drain any completions that arrived while we waited for a slot, freeing their
 		// buffer + char budget and advancing commits promptly.

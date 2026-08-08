@@ -326,6 +326,28 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 // not the liveness bound.
 const generateTimeout = 10 * time.Minute
 
+// queueWaitBudget bounds how long a request may sit UNSTARTED at the provider before witness
+// gives up on it. It is deliberately generous — several times generateTimeout — because a
+// provider that serves serially makes concurrent siblings wait by design, and killing them for
+// that is precisely the bug this exists to prevent: with mine_concurrency=4 and ~41s per
+// generation, the last sibling legitimately waits ~2 minutes before it starts.
+//
+// It is not unbounded, because a request that never starts must eventually surface rather than
+// pin a drain forever. The engine's own backoff then retries the session, and the drain's
+// adaptive narrowing reduces how many siblings compete next time.
+const queueWaitBudget = 30 * time.Minute
+
+// requestLifetimeBudget is the ABSOLUTE ceiling a single Run may occupy: the queue allowance plus
+// one generation, with slack so the phase checks above (which produce actionable messages naming
+// WHICH phase failed) always fire before this blunt ctx deadline does.
+//
+// The ctx bound must cover BOTH phases. It previously used generateTimeout alone, which meant a
+// request that legitimately waited its turn at a serially-serving provider was killed by the ctx
+// at 600s no matter what the phase logic decided — the very starvation the two-phase budget
+// exists to remove. It stays finite so a wedged serve can never pin the machine-wide WorkerLock
+// indefinitely.
+func requestLifetimeBudget() time.Duration { return queueWaitBudget + generateTimeout + time.Minute }
+
 // openCodeRequestTimeout bounds ONE HTTP request to the local serve process, and
 // openCodeProbeTimeout bounds ONE `opencode` CLI probe (`--version`, `models`).
 //
@@ -356,7 +378,7 @@ var (
 // is observed by polling the short message-list endpoint. It creates and deletes
 // an OpenCode session for this request only.
 func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, generateTimeout)
+	ctx, cancel := context.WithTimeout(ctx, requestLifetimeBudget())
 	defer cancel()
 
 	// Concurrency (issue #22): the lock guards ONLY the closed check, NOT the whole
@@ -473,6 +495,26 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 	var lastErr error
 	requestMissingStreak := 0
 	path := fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
+
+	// TWO-PHASE BUDGET: queue-wait and generation are bounded SEPARATELY.
+	//
+	// The caller's ctx carries generateTimeout, which used to run from the moment witness sent.
+	// That silently charged provider QUEUE TIME as generation time, and with several requests in
+	// flight against a provider that serves serially the ones at the back died having never been
+	// generated. Measured: four simultaneous prompts, all four dead at exactly 600s; one solo
+	// retry then completed in 41s. Four such generations total ~164s of real work — they fit
+	// inside a SINGLE request's budget, so the concurrency was never the problem. Charging the
+	// wait was.
+	//
+	// So the generation deadline now starts when the provider starts (generationStarted, keyed on
+	// the assistant message OpenCode creates at that moment), and queueing gets its own, much
+	// larger allowance. This keeps real concurrency — which is the point of parallel mining — and
+	// stops a queued request from being killed for waiting its turn.
+	//
+	// The ctx deadline still applies as the absolute ceiling for both phases together, so a
+	// cancelled drain (Ctrl-C, `worker stop`) still tears down promptly.
+	sent := time.Now()
+	var startedAt time.Time
 	for {
 		data, err := s.doJSON(ctx, http.MethodGet, path, nil, http.StatusOK)
 		if err == nil {
@@ -508,6 +550,27 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 			// most likely cause is a model that reached for a tool: witness's agent denies all
 			// tools, so the turn can finish with no prose. Retrying cannot help; the model already
 			// answered, just not in words.
+			// Phase transition: note when generation actually began, so the generation
+			// deadline is measured from there rather than from when we sent.
+			if startedAt.IsZero() && generationStarted(data, requestMessageID) {
+				startedAt = time.Now()
+				slog.Debug("opencode: generation started", "session", sessionID,
+					"queued", time.Since(sent).String())
+			}
+			// Enforce the two phases. While QUEUED, allow queueWaitBudget — generous, because a
+			// serial provider legitimately makes siblings wait. Once GENERATING, allow
+			// generateTimeout from that moment. Exceeding either is a real failure with an
+			// actionable message, rather than a bare deadline that names neither phase.
+			if startedAt.IsZero() {
+				if waited := time.Since(sent); waited > queueWaitBudget {
+					return "", fmt.Errorf("opencode never began generating after %s queued (the "+
+						"provider is serving other requests; reduce mine_concurrency or wait): %w",
+						waited.Truncate(time.Second), context.DeadlineExceeded)
+				}
+			} else if gen := time.Since(startedAt); gen > generateTimeout {
+				return "", fmt.Errorf("opencode generation exceeded %s after starting: %w",
+					generateTimeout, context.DeadlineExceeded)
+			}
 			if completedWithoutText(data, requestMessageID) {
 				return "", fmt.Errorf("opencode generation completed without emitting any text " +
 					"(the model may have attempted a tool call, which witness's agent denies, or " +
@@ -1007,6 +1070,44 @@ func parseOpenCodeMessageResponse(data []byte) string {
 // parseOpenCodeAsyncError returns the provider error from an assistant message that
 // belongs to THIS request, or "" if none does. It mirrors parseOpenCodeAsyncReply's scan
 // exactly — only messages AFTER the request index count, so a failure recorded in the
+// generationStarted reports whether the provider has begun generating OUR reply — i.e. an
+// assistant message exists after our request.
+//
+// This is the distinction that makes concurrency safe. OpenCode creates the assistant message
+// when it actually starts the completion (verified against the real 1.18.3 capture in
+// testdata/async_provider_error.json: the user turn is created at t, the assistant turn 203ms
+// later, and completes 865ms after that). So "no assistant message yet" means our request is
+// QUEUED at the provider, not slow.
+//
+// Why that matters: the generation deadline used to start when witness SENT, so a request waiting
+// its turn burned the same budget as one being generated. With several requests in flight against
+// a provider that serves serially, the ones at the back of the queue died having never been
+// touched — measured: four simultaneous prompts, all four dead at exactly 600s, then one solo
+// retry completing in 41s. Four x 41s is 164s of real work, comfortably inside ONE request's
+// budget; the failure was purely that waiting was charged as generating.
+func generationStarted(data []byte, requestMessageID string) bool {
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		return false
+	}
+	requestIndex := -1
+	for i := range list {
+		if isOpenCodeRequestMessage(list[i], requestMessageID) {
+			requestIndex = i
+			break
+		}
+	}
+	if requestIndex < 0 {
+		return false // our request is not even echoed yet
+	}
+	for i := requestIndex + 1; i < len(list); i++ {
+		if role := openCodeMessageRole(list[i]); role == "assistant" {
+			return true
+		}
+	}
+	return false
+}
+
 // completedWithoutText reports whether an assistant message after our request has FINISHED
 // generating yet produced no text — the second way a generation ends invisibly.
 //

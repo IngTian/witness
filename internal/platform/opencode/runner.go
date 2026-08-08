@@ -58,7 +58,7 @@ func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (st
 		// Same generation deadline the legacy path gets inside OpenCodeServer.Run: the
 		// native path bypasses that method, and the caller's ctx has no deadline, so
 		// without this wrap a stalled serve process polls forever holding WorkerLock.
-		ctx, cancel := context.WithTimeout(ctx, generateTimeout)
+		ctx, cancel := context.WithTimeout(ctx, requestLifetimeBudget())
 		defer cancel()
 		return r.native.run(ctx, n, model, systemPrompt, input)
 	}

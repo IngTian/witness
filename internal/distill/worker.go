@@ -148,6 +148,11 @@ type LensMining struct {
 	Done       int // this lens's watermark at read time (turns it had already mined)
 	Mined      []store.Observation
 	MineFailed bool // a transport error hit THIS lens — commit backs off this lens only
+	// MineTimedOut narrows MineFailed to "the request was accepted and never served" (a
+	// context deadline). It is the backpressure signal: unlike a 4xx or a network error,
+	// a deadline usually means WE asked for more concurrency than the provider grants, so
+	// the drain reduces its window rather than retrying the same burst.
+	MineTimedOut bool
 	// Drifted marks that this lens saw prose_drift (a reply with no JSON array,
 	// errNoArray) AND produced ZERO observations across ALL of its inputs (#57). It is
 	// set only in that all-inputs-drifted-nothing case: a multi-chunk session where one
@@ -311,6 +316,17 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 					// A real transport error (rate limit, network, timeout) — back this lens off.
 					slog.Error("mine failed", "session", session, "lens", ln.Name, "err", err)
 					lm.MineFailed = true
+					// A DEADLINE is a distinct signal from any other transport failure: it means
+					// the request was accepted and never served. When several fire at once against
+					// a rate-limiting provider, the excess sit in a provider queue and every one of
+					// them burns its full budget having never been generated — measured on a real
+					// Windows run: four simultaneous prompts at 21:11:01, all four dead at exactly
+					// 21:21:01 (600s), then ONE solo retry three seconds later completing in 41s.
+					// The drain uses this to narrow its own concurrency (see DrainOpts.Conc), so
+					// witness stops asking for more parallelism than the provider will serve.
+					if errors.Is(err, context.DeadlineExceeded) {
+						lm.MineTimedOut = true
+					}
 					continue
 				}
 				if len(obs) > 0 {

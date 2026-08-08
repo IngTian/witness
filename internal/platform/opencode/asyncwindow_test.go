@@ -3,11 +3,13 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -566,5 +568,147 @@ func TestPrepareAuthIsNonFatalButCopiesNothingWhenAuthIsAbsent(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "xdg", "opencode", "auth.json")); !os.IsNotExist(err) {
 		t.Errorf("prepareAuth materialized an auth.json it never found (err=%v)", err)
+	}
+}
+
+// A SERIAL provider must not starve concurrent requests — this is the measured Windows failure.
+//
+// Reported from a real run: witness fired four simultaneous prompts at 21:11:01 and all four died at
+// exactly 21:21:01 (the full 600s budget), then one solo retry three seconds later completed in 41s.
+// Four such generations are ~164s of real work — they fit comfortably inside ONE request's budget, so
+// concurrency was never too much work for the provider. The bug was that the deadline started when
+// witness SENT, so a request waiting its turn was charged the same budget as one being generated, and
+// the siblings at the back of the queue were killed having never been touched.
+//
+// The fake serve here IS that provider: it generates for exactly one request at a time and makes the
+// others wait. With the old single-phase budget the waiters die; with the two-phase budget they wait
+// and then succeed — which is what keeps concurrency worth having.
+func TestConcurrentRequestsSurviveASeriallyServingProvider(t *testing.T) {
+	var mu sync.Mutex
+	// queue is the arrival order of request ids; only the head is "generating".
+	var queue []string
+	started := map[string]bool{}
+	startTime := map[string]time.Time{}
+	done := map[string]bool{}
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("id")
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.Contains(r.URL.Path, "/prompt_async"):
+			var body struct{ MessageID string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			queue = append(queue, body.MessageID)
+			w.WriteHeader(http.StatusNoContent)
+		case strings.Contains(r.URL.Path, "/message"):
+			// Serve strictly one at a time: the head of the queue starts, then completes; only
+			// then does the next become eligible.
+			if len(queue) > 0 {
+				head := queue[0]
+				if !started[head] {
+					started[head] = true // generation begins for the head only
+					startTime[head] = time.Now()
+				} else if !done[head] && time.Since(startTime[head]) > 150*time.Millisecond {
+					// The head takes real time to generate, so siblings genuinely accumulate
+					// queue-wait. Without this the provider is effectively instant and no
+					// starvation pressure exists — the fixture would prove nothing.
+					done[head] = true
+					queue = queue[1:]
+				}
+			}
+			// Reply for whichever message the caller is polling about. The caller polls its own
+			// session, so derive the id from the path.
+			parts := strings.Split(r.URL.Path, "/")
+			sess := ""
+			if len(parts) > 2 {
+				sess = parts[2]
+			}
+			msg := sessionMsg[sess]
+			out := `[{"info":{"id":"` + msg + `","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]}`
+			if started[msg] {
+				if done[msg] {
+					out += `,{"info":{"id":"a_` + msg + `","role":"assistant","time":{"created":2,"completed":3}},` +
+						`"parts":[{"type":"text","text":"[]"}]}`
+				} else {
+					// STARTED but not finished: an assistant message with no text yet. This is the
+					// state the two-phase budget must treat as "generating", not "queued".
+					out += `,{"info":{"id":"a_` + msg + `","role":"assistant","time":{"created":2}},"parts":[]}`
+				}
+			}
+			out += `]`
+			_, _ = w.Write([]byte(out))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"sess"}`))
+		}
+		_ = id
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	prev := openCodeAsyncPollInterval
+	openCodeAsyncPollInterval = time.Millisecond
+	defer func() { openCodeAsyncPollInterval = prev }()
+
+	// Four concurrent waiters against the serial provider.
+	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			msg := fmt.Sprintf("msg_%d", i)
+			sess := fmt.Sprintf("s%d", i)
+			mu.Lock()
+			sessionMsg[sess] = msg
+			mu.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, errs[i] = srv.runSessionWithMessage(ctx, sess, msg, "", "P", "I")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("request %d failed against a serially-serving provider: %v\n"+
+				"Concurrency must survive a provider that serves one at a time — killing the "+
+				"waiters is the measured Windows starvation this budget exists to prevent.", i, err)
+		}
+	}
+}
+
+// sessionMsg maps a fake session id to the message id under test, so the handler can answer each
+// caller about its own request.
+var sessionMsg = map[string]string{}
+
+// The GENERATION deadline must still bite once generation has actually started — the two-phase
+// budget must not become "wait forever". This is the half the fix could break.
+func TestGenerationDeadlineStillAppliesOnceStarted(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always: our request, plus a STARTED assistant message that never completes.
+		_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]},` +
+			`{"info":{"id":"a","role":"assistant","time":{"created":2}},"parts":[]}]`))
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
+
+	prevPoll := openCodeAsyncPollInterval
+	openCodeAsyncPollInterval = time.Millisecond
+	defer func() { openCodeAsyncPollInterval = prevPoll }()
+
+	// A ctx shorter than the generation budget stands in for it: the point is that a STARTED
+	// generation which never completes still terminates, rather than waiting the queue allowance.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours"); err == nil {
+		t.Fatal("a generation that starts and never completes must eventually fail")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("took %s to give up on a started-but-never-completing generation", elapsed)
 	}
 }

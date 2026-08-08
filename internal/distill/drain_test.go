@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"fmt"
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
@@ -604,5 +605,165 @@ func TestDrainRollingWindowDoesNotHeadOfLineBlock(t *testing.T) {
 	}
 	if obs, _ := s.ReadObservations(""); len(obs) != n {
 		t.Fatalf("expected %d observations, got %d", n, len(obs))
+	}
+}
+
+// The drain must NARROW its concurrency when a provider starves concurrent requests.
+//
+// Measured on a real Windows run against a rate-limiting provider: witness fired four simultaneous
+// prompts at 21:11:01 and all four died at exactly 21:21:01 — the full 600s generation budget, never
+// served — then a single solo retry three seconds later completed in 41 seconds. Every batch of four
+// died; the one solo prompt lived. Our own default (mine_concurrency=4) was what turned a working
+// account into one that produced nothing, and the drain kept firing the same width because
+// concurrency was a static cap that never reacted to the outcome.
+//
+// The miner here models exactly that provider: it serves ONE request at a time and returns a context
+// deadline to anyone who arrives while another is in flight. With a static window the drain would
+// starve the same way forever; with backpressure it must halve until requests get served, and then
+// finish the batch.
+func TestDrainNarrowsConcurrencyWhenTheProviderStarvesParallelRequests(t *testing.T) {
+	s := newStore(t)
+
+	var mu sync.Mutex
+	inFlight := 0
+	// widths records the peak overlap observed in each "generation" of requests. Narrowing shows
+	// up as a DECLINE here; a static cap keeps re-fielding the same width forever.
+	var widths []int
+	cur := 0
+	served, starved := 0, 0
+
+	miner := func(ctx context.Context, model, prompt, input string) (string, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > cur {
+			cur = inFlight
+		}
+		busy := inFlight > 1
+		mu.Unlock()
+
+		time.Sleep(20 * time.Millisecond)
+
+		mu.Lock()
+		inFlight--
+		if inFlight == 0 { // a generation drained: record its peak and start the next
+			widths = append(widths, cur)
+			cur = 0
+		}
+		if busy {
+			starved++
+			mu.Unlock()
+			return "", fmt.Errorf("simulated provider queue: %w", context.DeadlineExceeded)
+		}
+		served++
+		mu.Unlock()
+		return `[{"dimension":"thinking","observation":"o","evidence":"e","poignancy":3}]`, nil
+	}
+
+	w := drainWorker(s, miner)
+	const n = 8
+	sessions := map[string]bool{}
+	for i := 0; i < n; i++ {
+		id := string(rune('a' + i))
+		capture(t, s, id, "user", "turn-"+id)
+		sessions[id] = true
+	}
+	var pmu sync.Mutex
+	pending := func() []string {
+		pmu.Lock()
+		defer pmu.Unlock()
+		out := []string{}
+		for k := range sessions {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	w.Drain(context.Background(), DrainOpts{
+		Conc:    4,
+		Pending: pending,
+		OnCommit: func(session string) {
+			pmu.Lock()
+			delete(sessions, session)
+			pmu.Unlock()
+		},
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	t.Logf("widths=%v served=%d starved=%d", widths, served, starved)
+	if starved == 0 {
+		t.Fatal("nothing was starved; the fixture created no contention and proves nothing")
+	}
+	if len(widths) < 2 {
+		t.Fatalf("only %d generation(s) observed (%v); the fixture cannot show a trend", len(widths), widths)
+	}
+	// THE assertion: the drain must stop asking for the width that starves. The first
+	// generation may be 4 (it has not learned yet); a later one must be narrower.
+	first, last := widths[0], widths[len(widths)-1]
+	if last >= first {
+		t.Errorf("request width never came down (first=%d last=%d, all=%v) — the drain kept firing "+
+			"the same parallelism the provider refuses, which is exactly the measured Windows "+
+			"failure: four simultaneous prompts, all four dead at the 600s budget, repeatedly",
+			first, last, widths)
+	}
+}
+
+// A HEALTHY provider must not be narrowed. A drain that reduces its window on any timeout would
+// permanently punish a single unlucky slow call, so the trigger is a MAJORITY of a batch.
+func TestDrainKeepsFullConcurrencyWhenNothingTimesOut(t *testing.T) {
+	s := newStore(t)
+	var mu sync.Mutex
+	maxInFlight, inFlight := 0, 0
+	miner := func(ctx context.Context, model, prompt, input string) (string, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(15 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return `[{"dimension":"thinking","observation":"o","evidence":"e","poignancy":3}]`, nil
+	}
+
+	w := drainWorker(s, miner)
+	const n = 8
+	sessions := map[string]bool{}
+	for i := 0; i < n; i++ {
+		id := string(rune('a' + i))
+		capture(t, s, id, "user", "turn-"+id)
+		sessions[id] = true
+	}
+	var pmu sync.Mutex
+	pending := func() []string {
+		pmu.Lock()
+		defer pmu.Unlock()
+		out := []string{}
+		for k := range sessions {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	processed := w.Drain(context.Background(), DrainOpts{
+		Conc:    4,
+		Pending: pending,
+		OnCommit: func(session string) {
+			pmu.Lock()
+			delete(sessions, session)
+			pmu.Unlock()
+		},
+	})
+	if processed != n {
+		t.Fatalf("committed %d of %d", processed, n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if maxInFlight < 2 {
+		t.Errorf("maxInFlight=%d — a healthy provider must keep real parallelism; narrowing on a "+
+			"clean run would make every drain serial", maxInFlight)
 	}
 }
