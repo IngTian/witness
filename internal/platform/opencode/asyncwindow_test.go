@@ -712,3 +712,70 @@ func TestGenerationDeadlineStillAppliesOnceStarted(t *testing.T) {
 		t.Errorf("took %s to give up on a started-but-never-completing generation", elapsed)
 	}
 }
+
+// A serve that accepts the prompt and then FAILS every poll must still be bounded by the phase
+// budgets — not left to run to the blunt ctx ceiling.
+//
+// Found by an adversarial audit of my own two-phase change, and it is the sharpest kind of finding:
+// my fix for one stall made a DIFFERENT stall worse. Every phase check originally sat inside the
+// `if err == nil` branch, so a poll that kept erroring was charged nothing — not the queue budget,
+// not the generation budget, not the request-missing streak. And because the two-phase change raised
+// the ctx ceiling from generateTimeout (10m) to requestLifetimeBudget (~41m), that unbudgeted path
+// got four times longer than before the "fix".
+//
+// The fake serve here is that failure: 204 on the prompt, then 500 on every message poll.
+func TestPollFailuresAreStillChargedAgainstThePhaseBudget(t *testing.T) {
+	polls := 0
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/prompt_async") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		polls++
+		w.WriteHeader(http.StatusInternalServerError) // every poll fails
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
+
+	prevPoll := openCodeAsyncPollInterval
+	openCodeAsyncPollInterval = time.Millisecond
+	defer func() { openCodeAsyncPollInterval = prevPoll }()
+	// Shrink the QUEUE budget so the assertion is about enforcement rather than about waiting 30
+	// real minutes. The ctx below is deliberately far longer than this, so whichever fires first
+	// tells us which mechanism actually bounded the request.
+	prevQueue := queueWaitBudget
+	queueWaitBudget = 200 * time.Millisecond
+	defer func() { queueWaitBudget = prevQueue }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	_, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
+	if err == nil {
+		t.Fatal("a serve that fails every poll must be an error")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("ran to the context deadline instead of a phase budget — in production that is the "+
+			"~41m requestLifetimeBudget ceiling, worse than the 10m it replaced: %v", err)
+	}
+	if polls < 2 {
+		t.Errorf("gave up after %d poll(s); a single transient 500 must not abort a request", polls)
+	}
+	// The error must NAME the transport failure. Reporting only a phase timeout would hide the
+	// actual cause, which is the mistake this whole investigation kept making.
+	if !strings.Contains(err.Error(), "every poll also failed") {
+		t.Errorf("the error must surface the underlying poll failure; got %v", err)
+	}
+}
+
+// lastPollNote must stay silent when polling was healthy, or every ordinary phase timeout would carry
+// a misleading "(every poll also failed)" clause.
+func TestLastPollNoteIsSilentOnHealthyPolling(t *testing.T) {
+	if got := lastPollNote(nil); got != "" {
+		t.Errorf("lastPollNote(nil) = %q, want empty", got)
+	}
+	if got := lastPollNote(fmt.Errorf("boom")); !strings.Contains(got, "boom") {
+		t.Errorf("lastPollNote must include the error; got %q", got)
+	}
+}

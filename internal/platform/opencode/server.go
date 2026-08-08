@@ -335,7 +335,10 @@ const generateTimeout = 10 * time.Minute
 // It is not unbounded, because a request that never starts must eventually surface rather than
 // pin a drain forever. The engine's own backoff then retries the session, and the drain's
 // adaptive narrowing reduces how many siblings compete next time.
-const queueWaitBudget = 30 * time.Minute
+// A var, not a const, for the same reason openCodeRequestTimeout and healthCheckBudget are: a test
+// must be able to shrink it to prove the budget is ENFORCED. Asserting on a 30-minute bound with a
+// real clock is not a test anyone will run.
+var queueWaitBudget = 30 * time.Minute
 
 // requestLifetimeBudget is the ABSOLUTE ceiling a single Run may occupy: the queue allowance plus
 // one generation, with slack so the phase checks above (which produce actionable messages naming
@@ -489,6 +492,16 @@ const asyncReplyWindow = 50
 // actionable error in seconds instead of a generateTimeout-long silence.
 const requestMissingLimit = 10
 
+// lastPollNote renders the most recent poll failure for inclusion in a phase-budget error, or "" when
+// polling was healthy. Without it a request whose polls were ALL failing would be reported purely as
+// a phase timeout, hiding the transport error that actually caused it.
+func lastPollNote(lastErr error) string {
+	if lastErr == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (every poll also failed; last: %v)", lastErr)
+}
+
 func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, requestMessageID string) (string, error) {
 	ticker := time.NewTicker(openCodeAsyncPollInterval)
 	defer ticker.Stop()
@@ -557,20 +570,6 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 				slog.Debug("opencode: generation started", "session", sessionID,
 					"queued", time.Since(sent).String())
 			}
-			// Enforce the two phases. While QUEUED, allow queueWaitBudget — generous, because a
-			// serial provider legitimately makes siblings wait. Once GENERATING, allow
-			// generateTimeout from that moment. Exceeding either is a real failure with an
-			// actionable message, rather than a bare deadline that names neither phase.
-			if startedAt.IsZero() {
-				if waited := time.Since(sent); waited > queueWaitBudget {
-					return "", fmt.Errorf("opencode never began generating after %s queued (the "+
-						"provider is serving other requests; reduce mine_concurrency or wait): %w",
-						waited.Truncate(time.Second), context.DeadlineExceeded)
-				}
-			} else if gen := time.Since(startedAt); gen > generateTimeout {
-				return "", fmt.Errorf("opencode generation exceeded %s after starting: %w",
-					generateTimeout, context.DeadlineExceeded)
-			}
 			if completedWithoutText(data, requestMessageID) {
 				return "", fmt.Errorf("opencode generation completed without emitting any text " +
 					"(the model may have attempted a tool call, which witness's agent denies, or " +
@@ -578,6 +577,27 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 			}
 		} else {
 			lastErr = err
+		}
+		// Enforce the two phases on EVERY iteration — including one whose poll FAILED.
+		//
+		// This deliberately sits outside the `if err == nil` branch above. When it lived inside,
+		// a poll that kept erroring was charged nothing: not the queue budget, not the generation
+		// budget, and not the request-missing streak. A serve that accepts the prompt and then
+		// fails or wedges every GET (a 500, or each GET burning openCodeRequestTimeout) would then
+		// run to the blunt requestLifetimeBudget ctx ceiling — which the two-phase change RAISED
+		// from 10m to ~41m. So the fix for one stall would have made a different stall four times
+		// worse. Charging time regardless of poll outcome is what keeps the budgets honest, and
+		// lastErr is still reported so the message names the transport failure rather than hiding
+		// it behind a phase.
+		if startedAt.IsZero() {
+			if waited := time.Since(sent); waited > queueWaitBudget {
+				return "", fmt.Errorf("opencode never began generating after %s queued (the provider "+
+					"is serving other requests; reduce mine_concurrency or wait)%s: %w",
+					waited.Truncate(time.Second), lastPollNote(lastErr), context.DeadlineExceeded)
+			}
+		} else if gen := time.Since(startedAt); gen > generateTimeout {
+			return "", fmt.Errorf("opencode generation exceeded %s after starting%s: %w",
+				generateTimeout, lastPollNote(lastErr), context.DeadlineExceeded)
 		}
 		select {
 		case <-ctx.Done():
