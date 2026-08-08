@@ -349,6 +349,24 @@ var queueWaitBudget = 30 * time.Minute
 // at 600s no matter what the phase logic decided — the very starvation the two-phase budget
 // exists to remove. It stays finite so a wedged serve can never pin the machine-wide WorkerLock
 // indefinitely.
+//
+// WHAT THIS COSTS AT THE DRAIN LEVEL, since the number is much larger than it looks: 30m + 10m +
+// 1m = 41m is the worst case for ONE Run, and a session with N enabled lenses issues N sequential
+// Runs, so a single wholly-unserved session can hold the WorkerLock for N*41m. At 3 lenses that is
+// ~2h. Nothing bounds a drain's total wall clock; only the per-request ceiling is bounded.
+//
+// That is deliberate but it is a real ceiling worth knowing before raising queueWaitBudget:
+//   - It is only reachable when the provider accepts requests and serves NONE of them. A provider
+//     that serves anything moves the request into the generation phase, where the bound is 10m.
+//   - Backoff is what stops the repeat. A lens whose mine deadlines is backed off (MineFailed), so
+//     the pathological case does not re-run immediately on the next drain.
+//   - The lock is held, not leaked: witness stays responsive, `witness distill status` reports the
+//     worker as running, and the drain's ctx cancellation still cuts every in-flight Run.
+//
+// The alternative — a drain-wide deadline — was not added because it would abandon a legitimately
+// queued backfill partway through with no way to distinguish it from starvation, and the queue is
+// already resumable by design (the watermark makes the next drain pick up exactly where this one
+// stopped).
 func requestLifetimeBudget() time.Duration { return queueWaitBudget + generateTimeout + time.Minute }
 
 // openCodeRequestTimeout bounds ONE HTTP request to the local serve process, and

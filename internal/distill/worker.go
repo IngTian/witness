@@ -148,10 +148,30 @@ type LensMining struct {
 	Done       int // this lens's watermark at read time (turns it had already mined)
 	Mined      []store.Observation
 	MineFailed bool // a transport error hit THIS lens — commit backs off this lens only
-	// MineTimedOut narrows MineFailed to "the request was accepted and never served" (a
-	// context deadline). It is the backpressure signal: unlike a 4xx or a network error,
-	// a deadline usually means WE asked for more concurrency than the provider grants, so
-	// the drain reduces its window rather than retrying the same burst.
+	// MineTimedOut narrows MineFailed to "the request hit a deadline" (errors.Is of
+	// context.DeadlineExceeded). It is the backpressure signal: unlike a 4xx or a network
+	// error, a deadline usually means WE asked for more concurrency than the provider
+	// grants, so the drain reduces its window rather than retrying the same burst.
+	//
+	// It deliberately CONFLATES two causes, which the runner can distinguish and does not:
+	// a request that never began generating (queue starvation — narrowing is the correct
+	// response) and one that began and generated too slowly (a slow model — narrowing does
+	// nothing for it). Both set this flag.
+	//
+	// Conflating them is the right trade here, for two reasons. Narrowing is per-batch and
+	// re-derived from Conc on the next batch (see drainWindow), so a spurious narrow costs
+	// some parallelism for one batch, not a persistent throttle. And the asymmetry of being
+	// wrong is lopsided: failing to narrow under real starvation is the measured Windows
+	// failure — four requests dead at exactly 600s having never been served, repeating
+	// every drain — while narrowing on a genuinely slow model just serializes work that
+	// was going to be slow anyway.
+	//
+	// If it ever needs splitting, the runner already has the fact: OpenCode tracks
+	// generationStarted and reports the two phases in distinct messages ("never began
+	// generating after ..." vs "generation exceeded ..."). The clean shape is a typed
+	// sentinel from the platform port, not string matching here. Not done because there is
+	// no evidence yet that the slow-model case actually fires — the flag would need to be
+	// observed narrowing a healthy drain first.
 	MineTimedOut bool
 	// Drifted marks that this lens saw prose_drift (a reply with no JSON array,
 	// errNoArray) AND produced ZERO observations across ALL of its inputs (#57). It is
