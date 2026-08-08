@@ -502,6 +502,17 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 			if provErr := parseOpenCodeAsyncError(data, requestMessageID); provErr != "" {
 				return "", fmt.Errorf("opencode generation failed: %s", provErr)
 			}
+			// FAIL FAST on a generation that COMPLETED without emitting any text. Same hazard as
+			// the error above and the same cost — indistinguishable from "still generating", so
+			// without this the poll burns the full generateTimeout and reports a deadline. The
+			// most likely cause is a model that reached for a tool: witness's agent denies all
+			// tools, so the turn can finish with no prose. Retrying cannot help; the model already
+			// answered, just not in words.
+			if completedWithoutText(data, requestMessageID) {
+				return "", fmt.Errorf("opencode generation completed without emitting any text " +
+					"(the model may have attempted a tool call, which witness's agent denies, or " +
+					"refused silently); the prompt asks for a JSON array only")
+			}
 		} else {
 			lastErr = err
 		}
@@ -996,6 +1007,69 @@ func parseOpenCodeMessageResponse(data []byte) string {
 // parseOpenCodeAsyncError returns the provider error from an assistant message that
 // belongs to THIS request, or "" if none does. It mirrors parseOpenCodeAsyncReply's scan
 // exactly — only messages AFTER the request index count, so a failure recorded in the
+// completedWithoutText reports whether an assistant message after our request has FINISHED
+// generating yet produced no text — the second way a generation ends invisibly.
+//
+// parseOpenCodeAsyncReply harvests only `type:"text"` parts, so a completed assistant message
+// whose parts are all TOOL CALLS (or empty) yields "" — identical to "still generating". The poll
+// then spins to the 10-minute generateTimeout and blames the deadline. We already fail fast on the
+// error-shaped version of this (info.error, see openCodeMessageError); this is the same hazard
+// without an error attached.
+//
+// Why it happens in practice: witness's distillation agent sets `permission: {"*": "deny"}`, so a
+// model that decides to reach for a tool has its call denied and can finish the turn having emitted
+// no prose at all. That is invisible on a trivial prompt (nothing to reach for) and likely on a
+// transcript full of file contents and tool output — which is exactly the pattern reported: a
+// hand-built "2+2=4" probe answered in 3s while every real code-reading session timed out.
+//
+// Completion is read from info.time.completed, whose shape is pinned by a VERBATIM OpenCode 1.18.3
+// capture (testdata/async_provider_error.json: an assistant message with
+// time:{created,completed} and parts:[]). Messages BEFORE our request are ignored, as everywhere
+// else in this file: they are not this run's outcome.
+func completedWithoutText(data []byte, requestMessageID string) bool {
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		return false
+	}
+	requestIndex := -1
+	for i := range list {
+		if isOpenCodeRequestMessage(list[i], requestMessageID) {
+			requestIndex = i
+			break
+		}
+	}
+	if requestIndex < 0 {
+		return false // our request is not here yet; nothing is attributable
+	}
+	for i := requestIndex + 1; i < len(list); i++ {
+		if role := openCodeMessageRole(list[i]); role != "" && role != "assistant" {
+			continue
+		}
+		if !openCodeMessageCompleted(list[i]) {
+			continue // still generating: keep waiting, which is correct
+		}
+		if strings.TrimSpace(parseOpenCodeMessageResponse(list[i])) == "" {
+			return true // finished, and said nothing we can use
+		}
+	}
+	return false
+}
+
+// openCodeMessageCompleted reports whether one message has a completion timestamp.
+func openCodeMessageCompleted(data []byte) bool {
+	var msg struct {
+		Info struct {
+			Time struct {
+				Completed *float64 `json:"completed"`
+			} `json:"time"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return false
+	}
+	return msg.Info.Time.Completed != nil
+}
+
 // forked source conversation (history witness did not create) is never mistaken for this
 // run's outcome. Requires the request to be present for the same reason.
 func parseOpenCodeAsyncError(data []byte, requestMessageID string) string {

@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -306,5 +307,137 @@ func TestNativeMiningCreatesItsOwnScratchSession(t *testing.T) {
 	if !strings.Contains(fn, "n.export(ctx, w, snap)") {
 		t.Error("the export was removed; validateExportDigest is the only check that L0 still " +
 			"matches the user's session (`opencode native session changed after L0 capture`)")
+	}
+}
+
+// A generation that COMPLETES without emitting text must fail fast, not poll to the deadline.
+//
+// This is the second invisible-completion shape, and the one the Windows reports kept landing on.
+// parseOpenCodeAsyncReply harvests only `type:"text"` parts, so an assistant message that finished
+// with TOOL-CALL parts (or none) yields "" — byte-for-byte what "still generating" looks like. The
+// poll then burned the full 10-minute generateTimeout and blamed `context deadline exceeded`, which
+// is why the cause was misdiagnosed three times (rate limits, the reply window, the session fork).
+//
+// Why it happens: witness's distillation agent sets permission {"*": "deny"}, so a model that
+// reaches for a tool has the call denied and can end its turn having said nothing. Invisible on a
+// trivial prompt (nothing to reach for), likely on a transcript full of file contents and tool
+// output — exactly the reported split, where a hand-built "2+2=4" probe answered in 3s while every
+// real code-reading session timed out.
+func TestCompletedWithoutTextIsDetected(t *testing.T) {
+	const req = `{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]}`
+
+	// A completed assistant turn whose only part is a TOOL CALL — the denied-tool shape.
+	toolOnly := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},` +
+		`"parts":[{"type":"tool","tool":"read","state":{"status":"error"}}]}`
+	if !completedWithoutText([]byte("["+req+","+toolOnly+"]"), "msg_ours") {
+		t.Error("a completed assistant message with only tool parts was not detected — the poll " +
+			"would spin to generateTimeout and blame the deadline")
+	}
+
+	// Completed with NO parts at all (the verbatim shape in testdata/async_provider_error.json).
+	empty := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},"parts":[]}`
+	if !completedWithoutText([]byte("["+req+","+empty+"]"), "msg_ours") {
+		t.Error("a completed assistant message with no parts was not detected")
+	}
+
+	// STILL GENERATING must NOT be reported: no completion timestamp. This is the half the fix
+	// could break — a false positive here aborts every healthy generation mid-flight.
+	pending := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2}},"parts":[]}`
+	if completedWithoutText([]byte("["+req+","+pending+"]"), "msg_ours") {
+		t.Error("an in-flight generation was reported as completed-without-text; every slow but " +
+			"healthy model call would be aborted")
+	}
+
+	// A real reply must NOT trip it, even when a tool part precedes the text.
+	withText := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},` +
+		`"parts":[{"type":"tool","tool":"read"},{"type":"text","text":"[]"}]}`
+	if completedWithoutText([]byte("["+req+","+withText+"]"), "msg_ours") {
+		t.Error("a completed reply that DID emit text was reported as textless")
+	}
+
+	// History BEFORE our request is never this run's outcome — the same rule the reply and error
+	// parsers follow. A textless completed message ahead of our request must be ignored.
+	history := `{"info":{"id":"msg_old","role":"assistant","time":{"created":0,"completed":1}},"parts":[]}`
+	if completedWithoutText([]byte("["+history+","+req+"]"), "msg_ours") {
+		t.Error("a textless message PRECEDING our request was attributed to this run")
+	}
+	// And with our request absent entirely, nothing is attributable yet.
+	if completedWithoutText([]byte("["+history+"]"), "msg_ours") {
+		t.Error("a verdict was reached before our request even appeared")
+	}
+
+	// Degenerate inputs must not panic or claim a completion.
+	for _, bad := range []string{"", "null", "{}", "[]", "not json", `[{"info":{}}]`} {
+		if completedWithoutText([]byte(bad), "msg_ours") {
+			t.Errorf("claimed completed-without-text for %q", bad)
+		}
+	}
+}
+
+// The real 1.18.3 capture must be classified as completed — that fixture is the ground truth for
+// the info.time.completed shape this detector depends on. If OpenCode ever changes it, this fails
+// here rather than silently reverting the fix to a 10-minute stall.
+func TestOpenCodeMessageCompletedMatchesTheRealCaptureShape(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "async_provider_error.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		t.Fatal(err)
+	}
+	var sawCompleted, sawPending bool
+	for _, m := range list {
+		if openCodeMessageCompleted(m) {
+			sawCompleted = true
+		} else {
+			sawPending = true
+		}
+	}
+	if !sawCompleted {
+		t.Error("no message in the real capture was seen as completed — info.time.completed is not " +
+			"being read, so completedWithoutText can never fire and the stall returns")
+	}
+	if !sawPending {
+		t.Error("every message read as completed, including the request; the check is too loose")
+	}
+}
+
+// The poll must SURFACE it, not just detect it. Behavioural half, against a fake serve that
+// answers with a completed-but-textless assistant turn forever.
+func TestWaitForAsyncReplyFailsFastOnACompletedTextlessGeneration(t *testing.T) {
+	polls := 0
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		polls++
+		_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]},` +
+			`{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},` +
+			`"parts":[{"type":"tool","tool":"read","state":{"status":"error"}}]}]`))
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
+
+	prev := openCodeAsyncPollInterval
+	openCodeAsyncPollInterval = time.Millisecond
+	defer func() { openCodeAsyncPollInterval = prev }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
+
+	if err == nil {
+		t.Fatal("a completed textless generation must be an error, not a silent success")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("spun to the context deadline (%s) instead of failing fast — in production that is "+
+			"a full 10-minute generateTimeout reported as `context deadline exceeded`: %v",
+			time.Since(start), err)
+	}
+	if !strings.Contains(err.Error(), "without emitting any text") {
+		t.Errorf("the error must name the actual outcome; got %v", err)
+	}
+	if polls > 3 {
+		t.Errorf("took %d polls to notice a completed message; it is visible on the first one", polls)
 	}
 }
