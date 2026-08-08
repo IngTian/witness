@@ -1272,8 +1272,9 @@ func isOpenCodeRequestMessage(data []byte, requestMessageID string) bool {
 
 // hasOpenCodeRequestMessage reports whether our own prompt_async request appears anywhere in a
 // message-list response. It is the guard for the reply window actually REACHING our request: a
-// native fork carries the source conversation, so on a long session a window that is not a tail
-// (or is too small) would never include it, and the poll would spin silently to the timeout.
+// retained scratch session can already hold an earlier attempt's turns, so a window that is not a
+// tail (or is too small) would not include our request, and the poll would spin silently to the
+// timeout.
 func hasOpenCodeRequestMessage(data []byte, requestMessageID string) bool {
 	if requestMessageID == "" {
 		return false

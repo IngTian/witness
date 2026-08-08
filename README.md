@@ -456,6 +456,13 @@ predating the rename keep using `~/.local/share/claude-witness/`, adopted automa
 (the DB and profile files `0600`), and never leaves your machine. The repo ships the framework,
 schema, and prompts — **never anyone's archive.**
 
+**Troubleshooting.** Distillation runs in a detached worker, so failures land in
+`$WITNESS_HOME/witness.log` (JSON lines) rather than on your terminal. It records the worker's
+startup steps, each mine's input size and duration, and each model call's outcome — enough to tell a
+slow model from a stalled one. For more detail, set `WITNESS_LOG_LEVEL=debug` (also accepts `warn` /
+`error`; anything unrecognized falls back to the `info` default, so a typo can never stop witness
+capturing).
+
 **Backup / sync.** To back the archive up or sync it (iCloud/Dropbox/Drive), use `witness export
 <path>` — it writes a single consistent `.db` snapshot you can point a syncer at. Do **not** sync the
 live data directory directly: the database runs in WAL mode (`.db` + `-wal` + `-shm`), and a syncer

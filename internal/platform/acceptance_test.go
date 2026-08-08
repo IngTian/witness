@@ -18,6 +18,12 @@ import (
 	"testing"
 
 	"github.com/IngTian/witness/internal/platform"
+	// Registered for its side effect ONLY, and load-bearing for
+	// TestValidateRunnerNameComesFromTheRegistry: `file` is the one platform that owns sessions
+	// WITHOUT supplying a RunnerProvider, so it is the only way to assert that runner validation
+	// rejects a registered-but-not-runnable name. Without this import ByName("file") is false and
+	// that assertion silently does not execute.
+	_ "github.com/IngTian/witness/internal/platform/file"
 )
 
 // dispatchPatterns are the shapes that mean "engine code is branching on a platform
@@ -174,15 +180,22 @@ func TestValidateRunnerNameComesFromTheRegistry(t *testing.T) {
 	}
 
 	// A platform that registers but supplies NO RunnerProvider can own sessions without being able
-	// to distill, so it must not be accepted as a runner. internal/platform/file is exactly that,
-	// and it is registered by the blank import in this package's tests.
-	if _, ok := platform.ByName("file"); ok {
-		if err := platform.ValidateRunnerName("file"); err == nil {
-			t.Error("the `file` platform has no RunnerProvider, so it must not validate as a runner")
-		}
-		if slicesContains(names, "file") {
-			t.Error("RunnerNames listed `file`, which cannot run a model")
-		}
+	// to distill, so it must not be accepted as a runner. internal/platform/file is exactly that.
+	//
+	// Asserted UNCONDITIONALLY. This was wrapped in `if _, ok := platform.ByName("file"); ok` with a
+	// comment claiming the blank import existed — it did not, so the guard was always false and the
+	// only assertion about a registered-but-not-runnable platform never ran. A conditional that is
+	// permanently false is a deleted test that reads as coverage; the import above is what makes
+	// this bind, and requiring the platform to be present is what keeps it honest.
+	if _, ok := platform.ByName("file"); !ok {
+		t.Fatal("the `file` platform is not registered — the blank import above is what makes the " +
+			"registered-but-not-runnable case testable at all")
+	}
+	if err := platform.ValidateRunnerName("file"); err == nil {
+		t.Error("the `file` platform has no RunnerProvider, so it must not validate as a runner")
+	}
+	if slicesContains(names, "file") {
+		t.Error("RunnerNames listed `file`, which cannot run a model")
 	}
 }
 

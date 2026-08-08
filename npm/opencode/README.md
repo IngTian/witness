@@ -22,14 +22,9 @@ Add the npm plugin to your OpenCode config. OpenCode installs the package automa
 }
 ```
 
-To test a prerelease, pin the plugin entry to the beta version instead of the unversioned package name:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@witness-ai/opencode"]
-}
-```
+To test a prerelease, pin an explicit version instead of the unversioned package name — e.g.
+`"plugin": ["@witness-ai/opencode@0.8.0-beta.1"]`. Use a real published version; the `beta` dist-tag
+is not kept current, so pinning it can silently install something several releases old.
 
 Optional: install it globally if you also want a `witness` CLI on your shell `PATH`:
 
