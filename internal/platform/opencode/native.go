@@ -405,18 +405,81 @@ func exportedTranscriptDigest(data []byte) (string, error) {
 	return platform.TranscriptDigest(entries), nil
 }
 
-// prepareAuth copies, never links or writes, user auth. Missing auth is normal for
-// environment-backed providers.
-func (n *nativeRuntime) prepareAuth() error {
-	db, err := DefaultDBPath()
-	if err != nil {
-		return err
+// findOpenCodeAuth returns the user's auth.json path, plus every location it looked in.
+//
+// Deriving the path from the DB directory alone is a Unix assumption: on macOS/Linux the CLI keeps
+// auth.json beside opencode.db under ~/.local/share/opencode (verified on a real install), so that
+// single probe was always sufficient there — which is exactly why a Windows gap could go unnoticed
+// for this long. A Windows install can place per-user state under %APPDATA%/%LOCALAPPDATA% instead
+// (the desktop build's own crash reporter writes under AppData\Roaming), so those are checked too.
+// XDG_CONFIG_HOME is honoured for the same reason DefaultDBPath honours XDG_DATA_HOME.
+//
+// Returning the searched list is deliberate: the caller reports it, so a miss tells the user WHERE
+// witness looked rather than only that something was missing.
+func findOpenCodeAuth() (path string, searched []string) {
+	var candidates []string
+	add := func(dir string) {
+		if strings.TrimSpace(dir) == "" {
+			return
+		}
+		candidates = append(candidates, filepath.Join(dir, "auth.json"))
 	}
-	src := filepath.Join(filepath.Dir(db), "auth.json")
-	si, err := os.Stat(src)
-	if os.IsNotExist(err) {
+	// Beside the database witness already resolved — the canonical Unix location.
+	if db, err := DefaultDBPath(); err == nil {
+		add(filepath.Dir(db))
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		add(filepath.Join(dir, "opencode"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".local", "share", "opencode"))
+		add(filepath.Join(home, ".config", "opencode"))
+	}
+	// Windows per-user state.
+	for _, env := range []string{"APPDATA", "LOCALAPPDATA"} {
+		if dir := os.Getenv(env); dir != "" {
+			add(filepath.Join(dir, "opencode"))
+		}
+	}
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		searched = append(searched, c)
+		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Size() > 0 {
+			return c, searched
+		}
+	}
+	return "", searched
+}
+
+// prepareAuth copies, never links or writes, the user's OpenCode credentials into witness's
+// ISOLATED runtime so the private serve can reach the model providers.
+//
+// This is load-bearing and was silently skippable. witness starts its serve with XDG_DATA_HOME
+// pointed at its own runtime root (isolatedEnv), so the serve CANNOT see the user's OpenCode data
+// dir — credentials exist there only because this function put them there. If it finds nothing and
+// returns nil, the serve comes up UNAUTHENTICATED, and a provider request can then be accepted and
+// never complete: no error, no reply, a stall to the full generateTimeout at ANY prompt size. That
+// is indistinguishable from a slow model, and it is a failure mode we chased for several rounds.
+//
+// So: look in every plausible location, and when none has credentials say so LOUDLY instead of
+// proceeding as though auth were arranged. It stays non-fatal because environment-backed providers
+// (ANTHROPIC_API_KEY and friends, inherited via os.Environ) are a legitimate configuration with no
+// auth.json at all — but a warning naming the paths searched is the difference between a
+// five-minute diagnosis and a five-round one.
+func (n *nativeRuntime) prepareAuth() error {
+	src, searched := findOpenCodeAuth()
+	if src == "" {
+		slog.Warn("opencode: no auth.json found; the isolated serve will start UNAUTHENTICATED. "+
+			"If your provider needs credentials, generations may be accepted and never complete "+
+			"(a stall, not an error). Environment-backed providers (e.g. ANTHROPIC_API_KEY) are fine.",
+			"searched", strings.Join(searched, " | "))
 		return nil
 	}
+	si, err := os.Stat(src)
 	if err != nil {
 		return err
 	}

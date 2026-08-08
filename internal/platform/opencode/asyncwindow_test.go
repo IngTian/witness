@@ -441,3 +441,130 @@ func TestWaitForAsyncReplyFailsFastOnACompletedTextlessGeneration(t *testing.T) 
 		t.Errorf("took %d polls to notice a completed message; it is visible on the first one", polls)
 	}
 }
+
+// Missing credentials must be LOUD, and must be searched for in more than one place.
+//
+// This is the defect that made an unauthenticated isolated serve indistinguishable from a slow
+// model. witness points the serve's XDG_DATA_HOME at its own runtime root, so the serve cannot see
+// the user's OpenCode data dir; credentials are there only because prepareAuth copied them. The old
+// code probed exactly ONE path — beside the database, which is the Unix layout — and returned nil
+// when it was absent. The serve then came up with no credentials and provider requests were accepted
+// and never completed: no error, no reply, a stall to the full 10-minute generateTimeout at ANY
+// prompt size, including a 40-character one. Several diagnostic rounds were spent on that shape.
+func TestFindOpenCodeAuthSearchesMoreThanTheUnixPath(t *testing.T) {
+	// A HOME with no auth.json anywhere: the miss must be reported, with the paths searched.
+	empty := t.TempDir()
+	t.Setenv("HOME", empty)
+	t.Setenv("USERPROFILE", empty) // Windows: os.UserHomeDir reads this
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(empty, "opencode", "opencode.db"))
+
+	path, searched := findOpenCodeAuth()
+	if path != "" {
+		t.Fatalf("found auth at %q in an empty HOME", path)
+	}
+	if len(searched) < 2 {
+		t.Errorf("searched only %v — one probe is what let a Windows layout go unnoticed; the miss "+
+			"must be reported against several plausible locations", searched)
+	}
+	// The report must be actionable: it has to name the canonical location.
+	var namesDBDir bool
+	for _, s := range searched {
+		if strings.Contains(s, "opencode") && strings.HasSuffix(s, "auth.json") {
+			namesDBDir = true
+		}
+	}
+	if !namesDBDir {
+		t.Errorf("the searched list %v does not name an opencode auth.json path, so the warning "+
+			"cannot tell the user where to look", searched)
+	}
+}
+
+// Each supported location must actually be honoured — a candidate list that never matches is worse
+// than one probe, because it reads as thorough.
+func TestFindOpenCodeAuthHonoursEachLocation(t *testing.T) {
+	for _, tc := range []struct{ name, env string }{
+		{"beside the database (Unix layout)", "db"},
+		{"XDG_CONFIG_HOME", "XDG_CONFIG_HOME"},
+		{"APPDATA (Windows)", "APPDATA"},
+		{"LOCALAPPDATA (Windows)", "LOCALAPPDATA"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CONFIG_HOME", "")
+			t.Setenv("APPDATA", "")
+			t.Setenv("LOCALAPPDATA", "")
+			t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(home, "nowhere", "opencode.db"))
+
+			var want string
+			if tc.env == "db" {
+				dir := filepath.Join(home, "dbdir")
+				t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(dir, "opencode.db"))
+				want = filepath.Join(dir, "auth.json")
+			} else {
+				dir := filepath.Join(home, tc.env)
+				t.Setenv(tc.env, dir)
+				want = filepath.Join(dir, "opencode", "auth.json")
+			}
+			if err := os.MkdirAll(filepath.Dir(want), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(want, []byte(`{"anthropic":{"type":"api","key":"k"}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			got, searched := findOpenCodeAuth()
+			if got != want {
+				t.Errorf("auth at %s was not found (got %q); searched %v", tc.name, got, searched)
+			}
+		})
+	}
+}
+
+// An EMPTY auth.json must not count as credentials: a zero-byte file left by a failed write would
+// otherwise satisfy the probe, get copied, and reproduce the unauthenticated stall while looking
+// like success.
+func TestFindOpenCodeAuthIgnoresAnEmptyFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
+	dir := filepath.Join(home, "dbdir")
+	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(dir, "opencode.db"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := findOpenCodeAuth(); got != "" {
+		t.Errorf("an empty auth.json was accepted as credentials: %q", got)
+	}
+}
+
+// prepareAuth must stay NON-FATAL on a miss (environment-backed providers like ANTHROPIC_API_KEY are
+// a legitimate configuration with no auth.json), while still not pretending it copied anything.
+func TestPrepareAuthIsNonFatalButCopiesNothingWhenAuthIsAbsent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("APPDATA", "")
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(home, "opencode", "opencode.db"))
+
+	root := t.TempDir()
+	n := newNativeRuntime(root, nil)
+	if err := n.prepareAuth(); err != nil {
+		t.Fatalf("a missing auth.json must not fail Open — env-backed providers need none: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "xdg", "opencode", "auth.json")); !os.IsNotExist(err) {
+		t.Errorf("prepareAuth materialized an auth.json it never found (err=%v)", err)
+	}
+}
