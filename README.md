@@ -51,7 +51,7 @@ Four layers — one ground-truth, three derived and **regenerable** from it:
 | **raw (L0)** | ground truth | Every turn captured verbatim — from stable Claude Code hook fields (`UserPromptSubmit.prompt`, `Stop.last_assistant_message`) or OpenCode's local SQLite session DB (`message`/`part` text). Append-only, never LLM-touched. |
 | **observations (L1)** | derived | A cheap per-session worker mines atomic, evidence-anchored observations about *you*, tagged by lens. Append-only. |
 | **facets (L2)** | derived, bi-temporal | A periodic reviewer synthesizes observations into evolving *facets*, each keeping its **change history** (`valid_from`/`valid_to`) — so the archive answers "how did I change," not just "who am I now." Old values are never deleted. |
-| **profile (L4)** | derived narrative | A short, human-readable markdown summary distilled from the facets, regenerated after each review: one per lens plus a cross-lens `unified` portrait. |
+| **profile (L4)** | derived narrative | A short, human-readable markdown summary distilled from the facets — one per lens plus a cross-lens `unified` portrait. Generated **on read**: `witness profile` (or MCP `get_profile`) rebuilds it only if the facets changed, so an unread profile costs nothing. A cached read is instant; a rebuild takes ~13s. |
 
 The archive is **collect-only / pull-only**: witness captures and distills everywhere, but never
 injects anything into a session. Nothing is pushed — you (or an agent) read the profile on demand.
@@ -176,6 +176,24 @@ default · thinking · diagnoses_before_acting                        confidence
 
 Nothing here is pushed into your sessions — you read it when you want it (`witness profile`), or an
 agent pulls the relevant facet on demand.
+
+### Writing your own summary prompt
+
+The shipped `unified` prompt writes a **personal growth portrait**. If your archive is something else
+— market records, research notes, a project log — drop your own prompt in and it wins:
+
+```
+<data-root>/summarize/unified.md    your prompt (overrides the built-in one)
+<data-root>/summarize/lens.md       same, for the per-lens summaries
+```
+
+`witness doctor` prints the data root. The file is the whole interface: no command to run, no
+registration step. Delete it to go back to the built-in prompt.
+
+The same facets can then produce a completely different document — a terse risk memo instead of a
+character portrait, say. Because the built-in prompt is still used when you have no override, a
+witness upgrade that ships an improved default still reaches you; once you override, your file is
+never touched by an upgrade.
 
 ## Reading the archive
 
