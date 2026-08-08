@@ -29,6 +29,14 @@ type nativeRuntime struct {
 	server *OpenCodeServer
 	mu     sync.Mutex
 }
+
+// nativeManifest is one retained generation's durable state, persisted as JSON.
+//
+// `Fork` now holds a FRESH scratch-session id, not a fork — the field keeps its name deliberately.
+// The manifest has no struct tags, so the Go field name IS the persisted JSON key: renaming it would
+// make every in-flight manifest written by an older binary deserialize with an empty id, and
+// reconcile/finalize (which act on m.Fork) could then neither resume nor reap those sessions. A
+// misleading field name is cheaper than orphaning a user's in-flight generations.
 type nativeManifest struct {
 	Session, Lens, Input, Digest, Fork, Reply, MessageID string
 	RawHigh                                              int64
@@ -189,15 +197,15 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 			return "", err
 		}
 		m.Fork = id
-		// KNOWN LIMITATION (accepted, bounded): a kill in the two statements between fork()
-		// returning and this save leaves a fork in the ISOLATED db that no manifest names,
-		// so reconcile — which only knows m.Fork — can never reap it. The resume re-forks
-		// (m.Fork is still ""), so nothing is lost or double-committed; the cost is one
-		// stranded session per crash landing in that window, inside witness's own private
-		// database. Reaping it would need a session-LIST endpoint plus "delete every fork no
-		// manifest claims", which is more machinery (and more delete authority) than a
-		// leak of this size justifies. Saving BEFORE the fork cannot help: the id does not
-		// exist yet, so the manifest still would not name it.
+		// KNOWN LIMITATION (accepted, bounded): a kill in the two statements between
+		// createSession returning and this save leaves a scratch session in the ISOLATED db that
+		// no manifest names, so reconcile — which only knows m.Fork — can never reap it. The
+		// resume creates a new one (m.Fork is still ""), so nothing is lost or
+		// double-committed; the cost is one stranded session per crash landing in that window,
+		// inside witness's own private database. Reaping it would need a session-LIST endpoint
+		// plus "delete every session no manifest claims", which is more machinery (and more
+		// delete authority) than a leak of this size justifies. Saving BEFORE the create cannot
+		// help: the id does not exist yet, so the manifest still would not name it.
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
@@ -210,15 +218,22 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 			return "", err
 		}
 	}
-	// Import/fork setup is serialized; independent fork generation is not.
+	// Scratch-session setup is serialized; the generations themselves are not.
 	n.mu.Unlock()
 	locked = false
 	if reply, err := n.server.replyForMessage(ctx, m.Fork, m.MessageID); err == nil && reply != "" {
 		m.Reply = reply
 	} else if m.Reply == "" {
 		// A retained request with no completed assistant reply was interrupted.
-		// Retry on the same native fork with a fresh message id rather than
-		// colliding with OpenCode's unique message id constraint.
+		// Retry in the same retained scratch session with a fresh message id, rather than
+		// colliding with OpenCode's unique message-id constraint.
+		//
+		// The retry therefore sees the PREVIOUS attempt's turns as context. That is explicitly
+		// permitted by the fresh-context invariant (platform.Runner.Run): a runner may retain a
+		// context across a crash and add its OWN retry turns to it — what it may never do is
+		// inherit a conversation witness did not author. And the reply parser locates our NEW
+		// message id and reads only messages after it, so a prior attempt's output can never be
+		// mistaken for this one's.
 		if !newRequest {
 			m.MessageID = "msg_" + mustRandomHex(12)
 			n.mu.Lock()
@@ -561,7 +576,7 @@ func (n *nativeRuntime) reconcile() error {
 		p := filepath.Join(n.dir(), name)
 		m, err := n.load(p)
 		if err != nil {
-			// Unparseable: the fork id is unrecoverable, so nothing can ever finalize it.
+			// Unparseable: the scratch-session id is unrecoverable, so nothing can ever finalize it.
 			// Drop the manifest + its snapshot so the directory converges.
 			slog.Warn("opencode native: discarding unreadable manifest", "path", p, "err", err)
 			_ = os.Remove(n.snapshot(p))
