@@ -8,8 +8,12 @@ OpenCode plugin for witness. It reconciles OpenCode's local session database on 
 | --- | --- | --- |
 | macOS | Apple Silicon (`darwin/arm64`) | `@witness-ai/opencode-darwin-arm64` |
 | Linux | x86-64 (`linux/x64`) | `@witness-ai/opencode-linux-x64` |
+| Windows | x86-64 (`win32/x64`) | `@witness-ai/opencode-win32-x64` |
+| Windows | ARM64 (`win32/arm64`) | `@witness-ai/opencode-win32-arm64` |
 
-These are the only platforms supported by the npm distribution. macOS Intel, Linux ARM, and Windows are not supported. The CLI exits with a clear supported-platform message on those systems.
+These are the only platforms supported by the npm distribution. macOS Intel and Linux ARM are not supported; the CLI exits with a clear supported-platform message on those systems.
+
+Windows requires **OpenCode 1.18.0 or newer**. If you prefer a self-contained install with the embedding model already included — no first-run download — use the zip from the [latest release](https://github.com/IngTian/witness/releases/latest) instead.
 
 ## Install
 

@@ -25,6 +25,8 @@ build-all:
 build-npm-platforms:
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/witness-darwin-arm64 ./cmd/witness
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/witness-linux-amd64 ./cmd/witness
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/witness-windows-amd64.exe ./cmd/witness
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/witness-windows-arm64.exe ./cmd/witness
 
 ## package-windows: build self-contained Windows zips (exe + prompts + model) for
 ## each arch. Needs the model present (make fetch-model). Each zip unpacks to a

@@ -22,7 +22,9 @@
   ],
   "optionalDependencies": {
     "@witness-ai/opencode-darwin-arm64": "0.7.4",
-    "@witness-ai/opencode-linux-x64": "0.7.4"
+    "@witness-ai/opencode-linux-x64": "0.7.4",
+    "@witness-ai/opencode-win32-x64": "0.7.4",
+    "@witness-ai/opencode-win32-arm64": "0.7.4"
   },
   "keywords": [
     "mcp",

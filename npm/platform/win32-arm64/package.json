@@ -1,0 +1,17 @@
+{
+  "name": "@witness-ai/opencode-win32-arm64",
+  "version": "0.7.4",
+  "description": "witness binary for OpenCode on Windows ARM64.",
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "files": ["bin/witness.exe", "README.md"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IngTian/witness.git",
+    "directory": "npm/platform/win32-arm64"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
