@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/proc"
@@ -403,15 +404,36 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	} else if ok {
 		body["model"] = map[string]string{"providerID": provider, "modelID": modelID}
 	}
+	// Log the request's SIZE and the model, before sending.
+	//
+	// A generation that never completes reports only `context deadline exceeded`, which names the
+	// deadline and describes nothing about what was asked. That blind spot cost three wrong
+	// diagnoses on a real Windows failure. The two numbers that matter are here and nowhere else:
+	// how much text this one prompt carries, and which model was asked. Note that the corpus is
+	// UNBOUNDED by default — chunking is off (ChunkMaxChars=0 renders the whole session as one
+	// transcript) — so a session with very few MESSAGES can still produce an enormous request when
+	// its turns contain tool output or file dumps.
+	promptChars := utf8.RuneCountInString(systemPrompt) + utf8.RuneCountInString(input)
+	slog.Info("opencode: prompting", "session", sessionID, "message", messageID, "model", model,
+		"corpus_chars", utf8.RuneCountInString(input), "total_chars", promptChars)
+	sent := time.Now()
 	_, err := s.doJSON(ctx, http.MethodPost, "/session/"+sessionID+"/prompt_async", body, http.StatusOK, http.StatusNoContent)
 	if err != nil {
 		return "", err
 	}
 	reply, err := s.waitForAsyncReply(ctx, sessionID, messageID)
 	if err != nil {
+		// Attribute the failure to a SIZE and a DURATION, so a stall is diagnosable from the log
+		// alone rather than by re-running with a debugger attached.
+		slog.Warn("opencode: generation did not complete", "session", sessionID, "model", model,
+			"corpus_chars", utf8.RuneCountInString(input), "total_chars", promptChars,
+			"waited", time.Since(sent).String(), "err", err.Error())
 		_ = s.abortSessionBestEffort(sessionID)
 		return "", err
 	}
+	slog.Info("opencode: generation complete", "session", sessionID, "model", model,
+		"corpus_chars", utf8.RuneCountInString(input), "reply_chars", utf8.RuneCountInString(reply),
+		"took", time.Since(sent).String())
 	if strings.TrimSpace(reply) == "" {
 		return "", fmt.Errorf("opencode message produced no text output")
 	}

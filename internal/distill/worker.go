@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
@@ -267,7 +268,26 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 					native = &platform.NativeSession{Session: session, RawHigh: rawHighID, Total: total, Lens: ln.Name, Input: fmt.Sprintf("%d:%x", chunkIndex, h[:]), Digest: nativeDigest}
 					callCtx = platform.WithNativeSession(callCtx, native)
 				}
+				// Log the SIZE of what we are about to send, and how long it took.
+				//
+				// This was a blind spot with real cost: a mine that times out reported only
+				// "context deadline exceeded", which names the deadline and says nothing about the
+				// request. Three separate wrong diagnoses on a real Windows failure (rate limits,
+				// then the reply window, then the session fork) all survived longer than they
+				// should have because nobody could see that the input was, or was not, enormous.
+				// Chunking defaults to OFF (ChunkMaxChars=0 => the whole session as ONE
+				// transcript), so a session with only a handful of MESSAGES can still carry a
+				// gigantic prompt — a few tool results that each dumped a file, for instance. Turns
+				// and characters are different units, and only one of them predicts a model stall.
+				started := time.Now()
+				slog.Info("mine: sending", "session", session, "lens", ln.Name,
+					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
+					"input_bytes", len(transcript), "records", len(raw[done:]))
 				obs, err := w.mine(callCtx, ln, session, transcript)
+				slog.Info("mine: returned", "session", session, "lens", ln.Name,
+					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
+					"took", time.Since(started).String(), "observations", len(obs),
+					"err", errText(err))
 				if native != nil {
 					lm.Native = append(lm.Native, native)
 				}
@@ -634,4 +654,13 @@ func obsID(session, lens, text string) string {
 func mustJSON(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b)
+}
+
+// errText renders an error for a structured log field without the caller needing a branch: slog
+// prints a nil error as "<nil>", which reads as a value rather than as "no failure".
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
