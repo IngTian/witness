@@ -1117,9 +1117,9 @@ func TestBeginImmediateHoldsWriteLockAndPreservesUserVersion(t *testing.T) {
 // (v0.5.0) and claimed the "file:" prefix.
 //
 // Why that is a real data bug and not a theoretical one:
-//   - the ” state is REACHABLE. store.ApplyRawImport inserts the session_meta row with no platform
-//     value, and the platform is written afterwards by a separate best-effort call whose error is
-//     DISCARDED (cmd/commands/ingest.go). A crash or a failed write between the two leaves ”.
+//   - the empty-platform state is REACHABLE. store.ApplyRawImport inserts the session_meta row
+//     with no platform value, and the platform is written afterwards by a separate best-effort
+//     call whose error is DISCARDED (cmd/commands/ingest.go). A crash between them leaves it empty.
 //   - the mislabel is STICKY. platform.ForSession prefers the persisted column over the session-id
 //     prefix, so once a `file:` session is stamped "claude" nothing ever re-derives it.
 //   - it is SILENT. file and claude render transcripts identically today, so the only symptom is a
@@ -1165,25 +1165,42 @@ func TestPlatformBackfillDoesNotReclassifyLaterSessions(t *testing.T) {
 	}
 }
 
-// The historical rule itself must still work: an unmarked, non-prefixed session IS Claude, and that
-// classification must happen when the column is introduced. This is the half a fix could break by
+// The historical rule itself must still work: a genuinely pre-v4 database gets its unmarked rows
+// classified exactly once, when the column is added. This is the half my fix could have broken by
 // simply deleting the backfill.
+//
+// It must actually SIMULATE v3, which the first version of this test did not: it inserted rows with
+// an empty platform but left the column and the schema version alone, so migrate() returned at its
+// `v >= schemaVersion` gate, addSessionPlatformColumn never ran, and the row stayed empty — the
+// assertion `got == "claude"` was then false for a reason unrelated to the code under test. A test
+// whose setup cannot reach the function it names is worse than no test, because the name reads as
+// coverage. Dropping the column and rewinding user_version is what makes the migration run.
 func TestPlatformBackfillStillClassifiesPreV4Sessions(t *testing.T) {
 	s := tempStore(t)
-	// Simulate a pre-v4 database: drop the column so migrate() re-adds it and backfills.
-	if _, err := s.db.Exec(`INSERT INTO session_meta(session, cwd, started, platform) VALUES ('legacy', '', '', '')`); err != nil {
-		t.Fatal(err)
+	for _, stmt := range []string{
+		`DROP TABLE session_meta`,
+		`CREATE TABLE session_meta (session TEXT PRIMARY KEY, cwd TEXT NOT NULL DEFAULT '', started TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO session_meta(session) VALUES ('opencode:oc')`,
+		`INSERT INTO session_meta(session) VALUES ('plain-cc-session')`,
+		`PRAGMA user_version=3`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v3 (%q): %v", stmt, err)
+		}
 	}
-	if _, err := s.db.Exec(`INSERT INTO session_meta(session, cwd, started, platform) VALUES ('opencode:oc', '', '', '')`); err != nil {
-		t.Fatal(err)
-	}
-	// The column already exists here, so this asserts the CURRENT behavior for rows that are
-	// unclassified at migrate time — whatever the fix chooses, an opencode-prefixed row must never
-	// be called claude.
+
 	if err := migrate(s.db); err != nil {
-		t.Fatal(err)
+		t.Fatalf("v3->v4 migrate: %v", err)
 	}
-	if got := s.SessionPlatform("opencode:oc"); got == "claude" {
-		t.Errorf("an opencode-prefixed session was classified as claude: %q", got)
+
+	// Both directions of the frozen v3-era rule, asserted POSITIVELY — the previous version only
+	// checked `!= "claude"`, which a bug that left everything unclassified would also satisfy.
+	if got := s.SessionPlatform("opencode:oc"); got != "opencode" {
+		t.Errorf("opencode-prefixed row: platform=%q, want opencode — the one-time v3 classification "+
+			"did not run, so scoping it to the column-add branch went too far", got)
+	}
+	if got := s.SessionPlatform("plain-cc-session"); got != "claude" {
+		t.Errorf("unmarked pre-v4 row: platform=%q, want claude — this is the historical rule and it "+
+			"must still be applied when the column is introduced", got)
 	}
 }
