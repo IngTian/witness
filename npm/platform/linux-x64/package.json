@@ -1,6 +1,6 @@
 {
   "name": "@witness-ai/opencode-linux-x64",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "witness binary for OpenCode on Linux x86-64.",
   "os": ["linux"],
   "cpu": ["x64"],
