@@ -8,7 +8,7 @@
     {
       "name": "witness",
       "source": "./",
-      "version": "0.7.3",
+      "version": "0.7.4",
       "description": "Local memory & self-improvement engine: quietly captures your coding sessions — and ingests your own records (notes, articles, any text) — then distills how your habits and knowledge evolve over time. A person-centric growth archive with provenance, served over an MCP read API + plain files. Global shareable lenses."
     }
   ]
