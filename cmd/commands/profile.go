@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/IngTian/witness/internal/store"
@@ -40,6 +41,14 @@ func cmdProfile(args []string, asJSON bool) error {
 	lensName := store.ProfileUnified
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		lensName = strings.TrimSpace(args[0])
+	}
+	// Regenerate on READ if stale (#100). Measured: a cached read is ~0.02s, a regeneration
+	// ~13s on a real `claude -p`. Non-fatal by design — if the profile cannot be rebuilt right
+	// now (no runner, a provider outage, a drain holding the lock) we still serve whatever is on
+	// disk, because a stale narrative beats no narrative. The notice goes to stderr so `witness
+	// profile > file` still captures only the markdown.
+	if _, err := ensureProfileFresh(st); err != nil && !asJSON {
+		fmt.Fprintf(os.Stderr, "%s could not refresh the profile (%v); showing the last one\n", dim("note:"), err)
 	}
 	md, ok, err := st.ReadProfile(lensName)
 	if err != nil {

@@ -357,7 +357,7 @@ func TestRecordStillReportsThePerSessionCap(t *testing.T) {
 func connectBounds(t *testing.T, ctx context.Context, fake *fakeMCPStore) (*mcpsdk.ClientSession, func()) {
 	t.Helper()
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake").Connect(ctx, serverT, nil)
+	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
