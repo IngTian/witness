@@ -69,7 +69,7 @@ func TestServerRunsAgainstFakeStore(t *testing.T) {
 	fake := &fakeMCPStore{profiles: map[string]string{"default": knownProfile}}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake").Connect(ctx, serverT, nil)
+	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestServerRecordDeleteSearch(t *testing.T) {
 	}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake").Connect(ctx, serverT, nil)
+	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}

@@ -137,9 +137,24 @@ type Embedder interface {
 // witness build version to report in the MCP initialize handshake; it is passed
 // in from cmd (which owns the ldflags-injected version) so this leaf package does
 // not import cmd. Empty falls back to "dev".
-func Serve(ctx context.Context, st store.MCPStore, emb Embedder, version string) error {
-	return newServer(st, emb, version).Run(ctx, &mcpsdk.StdioTransport{})
+func Serve(ctx context.Context, st store.MCPStore, emb Embedder, version string, refresh RefreshProfiles) error {
+	return newServer(st, emb, version, refresh).Run(ctx, &mcpsdk.StdioTransport{})
 }
+
+// RefreshProfiles regenerates stale L4 summaries before get_profile reads one (issue #100,
+// read-time generation). nil disables it — the tool then serves whatever is on disk, which is
+// exactly the pre-#100 behavior.
+//
+// It is a CALLBACK rather than a widening of store.MCPStore on purpose. Regenerating needs a
+// model runner, the lens registry, and the machine-wide WorkerLock — none of which belong in a
+// store interface, and all of which live in cmd. Injecting one function keeps this package's
+// dependency surface as it was (a read interface plus an embedder) and keeps the fake-driven
+// tests working unchanged with nil.
+//
+// The implementation is expected to be non-fatal and lock-guarded: it must serve cached rather
+// than queue behind a running drain (see cmd/commands/profilepull.go). An error here is
+// reported to the agent alongside the cached profile, never in place of it.
+type RefreshProfiles func() error
 
 // newServer builds the MCP server with all tools registered. Split from Serve so
 // tests can drive it over an in-memory transport.
@@ -151,7 +166,7 @@ func Serve(ctx context.Context, st store.MCPStore, emb Embedder, version string)
 // text Content — so a typed-but-empty return made every tool look like it
 // returned `{}` even though the real payload was in Content. Returning `any`/nil
 // suppresses the output schema so clients use Content. (See TestNoStructuredOutput.)
-func newServer(st store.MCPStore, emb Embedder, version string) *mcpsdk.Server {
+func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshProfiles) *mcpsdk.Server {
 	if strings.TrimSpace(version) == "" {
 		version = "dev"
 	}
@@ -297,14 +312,26 @@ func newServer(st store.MCPStore, emb Embedder, version string) *mcpsdk.Server {
 		if lensName == "" {
 			lensName = store.ProfileUnified
 		}
+		// Regenerate on read if stale (#100). Measured ~13s for a real regeneration and ~0.02s
+		// when the signature already matches, so blocking the tool call is acceptable and an
+		// unread profile costs nothing. NON-FATAL: a refresh failure still serves what is on
+		// disk — a stale narrative is strictly better than none — and the note is appended to
+		// the reply so the agent knows what it is holding rather than being misled.
+		var stale string
+		if refresh != nil {
+			if err := refresh(); err != nil {
+				stale = "\n\n---\n(note: this profile could not be refreshed just now — " +
+					err.Error() + " — so it may not reflect the newest facets.)"
+			}
+		}
 		md, ok, err := st.ReadProfile(lensName)
 		if err != nil {
 			return errResult(fmt.Sprintf("read profile: %v", err)), nil, nil
 		}
 		if !ok {
-			return textResult(fmt.Sprintf("No narrative profile for '%s' yet — it is generated in the background after the next review. Use get_facets for the current structured attributes.", lensName)), nil, nil
+			return textResult(fmt.Sprintf("No narrative profile for '%s' yet — nothing has been distilled for it. Use get_facets for the current structured attributes.", lensName)), nil, nil
 		}
-		return textResult(md), nil, nil
+		return textResult(md + stale), nil, nil
 	})
 
 	// delete_observation: prune one L1 observation by id. Facets are reviewer-owned

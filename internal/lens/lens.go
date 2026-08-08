@@ -96,21 +96,72 @@ func DefaultSeedDir() string {
 	return filepath.Join(promptsDir(), "default")
 }
 
-// LoadSummarizePrompts loads the L4 summarizer prompts from prompts/summarize/:
-// lens.md (per-lens narrative) and unified.md (cross-lens portrait). Same
-// on-disk resolution as the lens prompts. (These are summarizer prompts, unrelated to
-// the lens-registry directory format.)
-func LoadSummarizePrompts() (lensPrompt, unifiedPrompt string, err error) {
-	dir := filepath.Join(promptsDir(), "summarize")
-	l, err := os.ReadFile(filepath.Join(dir, "lens.md"))
+// SummarizeOverrideDir is the per-ARCHIVE summarizer-prompt directory, relative to the data
+// root: <root>/summarize/. A file here overrides the bundled prompt of the same name.
+const SummarizeOverrideDir = "summarize"
+
+// LoadSummarizePrompts loads the L4 summarizer prompts: lens.md (per-lens narrative) and
+// unified.md (cross-lens portrait). Each resolves ARCHIVE-LOCAL FIRST, then the bundle:
+//
+//	<root>/summarize/<name>.md      the user's own prompt, if present
+//	prompts/summarize/<name>.md     otherwise, the one witness ships
+//
+// The override exists because the shipped unified.md is written to produce a *personal
+// growth portrait* (issue #100). An archive of market records, or anyone who wants a
+// different frame, could not change that wording: the bundled prompt lives inside the
+// install, and every install path overwrites it — `make build` copies prompts/, the Windows
+// installer copies it into %LOCALAPPDATA%, npm ships it inside node_modules. So an edit in
+// place survives until the next upgrade and then silently reverts to person-growth wording,
+// with nothing telling the user their portrait changed back.
+//
+// It is a plain FILE, deliberately, not a registry: no register/deregister/list/set, no seed
+// marker, no migration. Dropping a file in is the whole interface, and an archive with no
+// override behaves exactly as before. (If multiple cross-lens summaries are ever wanted, this
+// extends to more files in the same directory — a strict superset that needs no rework here.)
+//
+// FALLING BACK TO THE BUNDLE IS LOAD-BEARING, not just a default. Because the bundled prompt
+// is re-read on every run, a witness upgrade that ships a better summarizer prompt reaches
+// every archive that has NOT overridden it (the summary signature includes the prompt text,
+// so those archives regenerate once, automatically). Seeding a copy into the archive instead
+// would freeze each one on whatever prompt was current at install time.
+//
+// root is the archive data root; "" disables override lookup (bundle only), which keeps this
+// usable from contexts that have no store open.
+func LoadSummarizePrompts(root string) (lensPrompt, unifiedPrompt string, err error) {
+	l, err := loadSummarizePrompt(root, "lens.md")
 	if err != nil {
 		return "", "", err
 	}
-	u, err := os.ReadFile(filepath.Join(dir, "unified.md"))
+	u, err := loadSummarizePrompt(root, "unified.md")
 	if err != nil {
 		return "", "", err
 	}
-	return string(l), string(u), nil
+	return l, u, nil
+}
+
+// loadSummarizePrompt reads one summarizer prompt, archive override first.
+//
+// An override that exists but is EMPTY (or whitespace) is ignored rather than honored: an
+// empty prompt would send the corpus to the model with no instruction, producing junk that
+// then gets written over the user's profile. Treating it as "not set" means a truncated or
+// accidentally-cleared file degrades to the shipped prompt instead of silently poisoning the
+// output. A read error other than not-exist IS returned — that is a real filesystem problem,
+// not an absent override, and hiding it would mask a permissions mistake.
+func loadSummarizePrompt(root, name string) (string, error) {
+	if strings.TrimSpace(root) != "" {
+		b, err := os.ReadFile(filepath.Join(root, SummarizeOverrideDir, name))
+		switch {
+		case err == nil && strings.TrimSpace(string(b)) != "":
+			return string(b), nil
+		case err != nil && !os.IsNotExist(err):
+			return "", fmt.Errorf("read summarizer override %s: %w", name, err)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(promptsDir(), "summarize", name))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // DefaultDimensions is the person-growth dimension scaffold for the "default" lens.

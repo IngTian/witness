@@ -38,7 +38,7 @@ func TestNoStructuredOutput(t *testing.T) {
 
 	ctx := context.Background()
 	clientT, serverT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(st, fakeEmbedder{}, "v9.9.9-test").Connect(ctx, serverT, nil)
+	ss, err := newServer(st, fakeEmbedder{}, "v9.9.9-test", nil).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestServerReportsInjectedVersion(t *testing.T) {
 		t.Helper()
 		ctx := context.Background()
 		clientT, serverT := mcpsdk.NewInMemoryTransports()
-		ss, err := newServer(st, fakeEmbedder{}, in).Connect(ctx, serverT, nil)
+		ss, err := newServer(st, fakeEmbedder{}, in, nil).Connect(ctx, serverT, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

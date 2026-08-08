@@ -173,12 +173,20 @@ func TestSummarizerRegeneratesWhenUnifiedPromptChanges(t *testing.T) {
 // unified portrait WITHOUT it — even when no surviving lens changed. The old
 // !anyChanged heuristic skipped the unified here, leaving it describing a lens that no
 // longer exists (an audit-found regression vs. always-rebuild). #73-S5.
-// TestSummarizerClearsUnifiedWhenDroppingToOneLens: the unified portrait is a CROSS-lens
-// synthesis (#44 slice 1a), so once only ONE lens has facets it is degenerate — the
-// summarizer must NOT regenerate it (no wasted LLM call restating the lone lens) and must
-// CLEAR any stale portrait left from when there were more (so it can't keep describing a
-// lens that's gone).
-func TestSummarizerClearsUnifiedWhenDroppingToOneLens(t *testing.T) {
+// A ONE-LENS archive still gets its cross-lens portrait (issue #100).
+//
+// This test previously asserted the OPPOSITE: that dropping to one lens must not regenerate the
+// portrait, and must delete any existing one. That rule was correct while summaries were PUSHED
+// on every review — a cross-lens synthesis of a single lens just restates it, so the call was
+// waste. Read-time generation removes the premise (an unread summary costs nothing) and the rule
+// actively broke the case #100 exists to serve: a single-lens archive (a market feed) whose whole
+// point is a differently-framed portrait via an overridden unified.md. It produced NOTHING,
+// silently, and deleted whatever a previous multi-lens state had left.
+//
+// So the expectation is inverted deliberately. What is still asserted, and is the part that
+// matters: the portrait REGENERATES rather than being deleted, and it is still driven by the
+// unified prompt over the per-lens summaries.
+func TestSummarizerKeepsTheUnifiedPortraitAtOneLens(t *testing.T) {
 	s := newStore(t)
 	seedFacets(t, s) // default + math (2 lenses → a real unified portrait)
 	var unifiedInputs []string
@@ -208,12 +216,18 @@ func TestSummarizerClearsUnifiedWhenDroppingToOneLens(t *testing.T) {
 	if err := sm.Summarize(context.Background()); err != nil {
 		t.Fatalf("second Summarize: %v", err)
 	}
-	// No unified LLM call at 1 lens, and the stale portrait is cleared.
-	if len(unifiedInputs) != 0 {
-		t.Fatalf("dropping to one lens must NOT regenerate the unified, got %d call(s)", len(unifiedInputs))
+	// The portrait is REBUILT at one lens, not suppressed: exactly one unified call, over the
+	// surviving lens's summary.
+	if len(unifiedInputs) != 1 {
+		t.Fatalf("a one-lens archive must still regenerate its portrait (the #100 case), got %d call(s)",
+			len(unifiedInputs))
 	}
-	if md, _, _ := s.ReadProfile("unified"); strings.TrimSpace(md) != "" {
-		t.Fatalf("stale unified portrait must be cleared at one lens, got: %q", md)
+	if !strings.Contains(unifiedInputs[0], "default") {
+		t.Errorf("the portrait input should carry the surviving lens's summary, got %q", unifiedInputs[0])
+	}
+	// And it is on disk, not deleted.
+	if md, ok, _ := s.ReadProfile("unified"); !ok || strings.TrimSpace(md) == "" {
+		t.Fatalf("the portrait must remain readable at one lens, got ok=%v md=%q", ok, md)
 	}
 }
 

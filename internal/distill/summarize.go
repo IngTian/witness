@@ -160,6 +160,12 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("summarize lens %s: %w", l, err)
 		}
+		// Never persist an empty summary (#148). The skip above tolerates an empty prior file
+		// (it regenerates), but nothing stopped this from WRITING one — replacing a good
+		// narrative with a blank and stamping a signature that vouches for it.
+		if strings.TrimSpace(md) == "" {
+			return fmt.Errorf("summarize lens %s: the model returned an empty summary; keeping the prior one", l)
+		}
 		if err := sm.Store.WriteProfile(l, md); err != nil {
 			return fmt.Errorf("write profile %s: %w", l, err)
 		}
@@ -169,19 +175,27 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, md)
 	}
 
-	// The unified portrait is a CROSS-lens synthesis — it only means something with ≥2
-	// lenses. With a single lens (common since #44 slice 1a: an install may run just one
-	// domain lens, e.g. a market-news archive) the "unified" portrait would merely restate
-	// that lone lens's summary, burning an extra LLM call for a duplicate. So skip it when
-	// <2 lenses have facets, and clear any stale unified profile left from when there were
-	// more (so a lens removal doesn't strand a portrait describing lenses that are gone).
-	if len(lenses) < 2 {
-		// DELETE (not blank-write) any stale portrait so readers (get_profile /
-		// `witness profile`) show the clean "not generated yet" message rather than an
-		// empty document. Clear its signature too so a later return to ≥2 lenses rebuilds.
-		sm.deleteProfileAndSignature(store.ProfileUnified)
-		return nil
-	}
+	// NO <2-LENS SKIP (issue #100). It used to return here when fewer than two lenses had
+	// facets, reasoning that a cross-lens portrait of ONE lens merely restates that lens's
+	// summary for an extra LLM call. Sound while summaries were PUSHED on every review: the
+	// call was unconditional, so dodging it mattered.
+	//
+	// Read-time generation removes the premise — an unread summary costs nothing — and the rule
+	// actively broke the case #100 exists to serve: a SINGLE-LENS archive (a market feed, say)
+	// whose whole point is a differently-framed portrait via an overridden unified.md. Verified
+	// live before deleting: one lens with facets produced NO unified profile at all, silently,
+	// and it deleted any portrait a previous multi-lens state had left.
+	//
+	// A user who overrides unified.md wants a re-framing, not a restatement. Whether that is
+	// worth one call on a one-lens archive is their call, and it now costs nothing until read.
+	//
+	// The zero-facets case above still clears the portrait, and reapOrphanProfiles still reaps a
+	// lens whose facets are gone — those answer "this narrative describes data that no longer
+	// exists", which is a DIFFERENT question from "is a cross-lens synthesis worth it", and they
+	// stay. (An earlier draft of this change deleted the reap too, on the theory that read-time
+	// generation answers staleness by itself. It does not: Summarize only ever visits lenses
+	// that HAVE facets, so a dropped lens is never revisited and its profile would keep being
+	// served. The reap is load-bearing; only the count gate was dead.)
 	// The unified portrait spans all lenses → no single lens → the default DistillModel
 	// (ModelFor with a nil lens).
 	unifiedModel := ModelFor(sm.Config, nil, PhaseReview)
@@ -192,14 +206,29 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// only prompt change, a DistillModel change under all-lens-overrides, and a removed
 	// lens (which would leave the portrait describing a lens that no longer exists).
 	unifiedSig := summarySignature(unifiedModel, sm.UnifiedPrompt, portrait.String())
+	// `prev != ""` matters as much as `ok`, and its absence here was a real bug (#148): the
+	// per-lens skip above required a NON-EMPTY prior file, this one checked existence only. So a
+	// runner returning "" (a refusal, a truncated reply) wrote a 0-byte portrait, stamped the
+	// signature, and every later pass matched and returned — permanently blank, no self-heal,
+	// while the per-lens path recovered from the identical input. Under read-time generation
+	// that is worse still, because the read IS the only generation path.
 	if sm.Store.MetaString(profileSigKey(store.ProfileUnified)) == unifiedSig {
-		if _, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok {
+		if prev, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok && prev != "" {
 			return nil
 		}
 	}
 	umd, err := sm.Run(ctx, unifiedModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {
 		return fmt.Errorf("summarize unified: %w", err)
+	}
+	// Refuse to persist an EMPTY summary at all (the other half of #148). Writing it would
+	// replace a good portrait with a blank one and — with the signature stamped — vouch for the
+	// blank as current. Erroring keeps the PRIOR file and its signature untouched, so the next
+	// read simply tries again. Returning an error rather than silently skipping is deliberate:
+	// the caller reports it, so a model that keeps refusing is visible instead of looking like
+	// an archive that has nothing to say.
+	if strings.TrimSpace(umd) == "" {
+		return fmt.Errorf("summarize unified: the model returned an empty summary; keeping the prior portrait")
 	}
 	if err := sm.Store.WriteProfile(store.ProfileUnified, umd); err != nil {
 		return err
