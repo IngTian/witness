@@ -1107,3 +1107,100 @@ func TestBeginImmediateHoldsWriteLockAndPreservesUserVersion(t *testing.T) {
 		t.Fatal("rollback did not undo the probe table")
 	}
 }
+
+// The v3→v4 platform backfill must run ONCE, when the column is added — never again.
+//
+// The two UPDATEs that classify existing rows sat OUTSIDE the `if hasColumn == 0` guard (only the
+// ALTER was inside it), so they re-ran on every migrate() that passed the version gate. Their rule
+// is "unmarked AND not opencode-prefixed → claude", which was correct in the v3→v4 era because
+// those were the only two platforms. It stopped being correct when the `file` platform shipped
+// (v0.5.0) and claimed the "file:" prefix.
+//
+// Why that is a real data bug and not a theoretical one:
+//   - the empty-platform state is REACHABLE. store.ApplyRawImport inserts the session_meta row
+//     with no platform value, and the platform is written afterwards by a separate best-effort
+//     call whose error is DISCARDED (cmd/commands/ingest.go). A crash between them leaves it empty.
+//   - the mislabel is STICKY. platform.ForSession prefers the persisted column over the session-id
+//     prefix, so once a `file:` session is stamped "claude" nothing ever re-derives it.
+//   - it is SILENT. file and claude render transcripts identically today, so the only symptom is a
+//     wrong owning platform in the DB — until a runtime with its own input shaper is added, at which
+//     point those sessions are quietly distilled through the wrong renderer.
+//
+// Historical rows keep their historical classification: this test pins that the rule is applied at
+// the moment the column appears and not re-applied to rows created in a later era.
+func TestPlatformBackfillDoesNotReclassifyLaterSessions(t *testing.T) {
+	s := tempStore(t)
+
+	// A `file:` session whose platform write did not land — exactly the ApplyRawImport-then-crash
+	// shape. Written directly, because that is the state on disk we care about.
+	if err := s.AppendRaw(RawRecord{
+		TS: "2026-01-01T00:00:00Z", Session: "file:notes", Role: "document", Text: "a note",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO session_meta(session, cwd, started, platform) VALUES (?, '', '', '')`,
+		"file:notes"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.SessionPlatform("file:notes"); got != "" {
+		t.Fatalf("precondition: want an unclassified row, got %q", got)
+	}
+
+	// Simulate a FUTURE schema bump: the gate at the top of migrate() returns early when the DB is
+	// already current (v >= schemaVersion), so the backfill only re-runs when a later version
+	// exists — which is exactly what the next release does. Rewinding user_version reproduces that
+	// without inventing a fake schema step.
+	if _, err := s.db.Exec("PRAGMA user_version=0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if got := s.SessionPlatform("file:notes"); got == "claude" {
+		t.Errorf("a `file:` session was stamped %q by the v3→v4 backfill — that rule predates the "+
+			"file platform, and ForSession prefers the persisted column over the prefix, so the "+
+			"mislabel is permanent and silent", got)
+	}
+}
+
+// The historical rule itself must still work: a genuinely pre-v4 database gets its unmarked rows
+// classified exactly once, when the column is added. This is the half my fix could have broken by
+// simply deleting the backfill.
+//
+// It must actually SIMULATE v3, which the first version of this test did not: it inserted rows with
+// an empty platform but left the column and the schema version alone, so migrate() returned at its
+// `v >= schemaVersion` gate, addSessionPlatformColumn never ran, and the row stayed empty — the
+// assertion `got == "claude"` was then false for a reason unrelated to the code under test. A test
+// whose setup cannot reach the function it names is worse than no test, because the name reads as
+// coverage. Dropping the column and rewinding user_version is what makes the migration run.
+func TestPlatformBackfillStillClassifiesPreV4Sessions(t *testing.T) {
+	s := tempStore(t)
+	for _, stmt := range []string{
+		`DROP TABLE session_meta`,
+		`CREATE TABLE session_meta (session TEXT PRIMARY KEY, cwd TEXT NOT NULL DEFAULT '', started TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO session_meta(session) VALUES ('opencode:oc')`,
+		`INSERT INTO session_meta(session) VALUES ('plain-cc-session')`,
+		`PRAGMA user_version=3`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v3 (%q): %v", stmt, err)
+		}
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v3->v4 migrate: %v", err)
+	}
+
+	// Both directions of the frozen v3-era rule, asserted POSITIVELY — the previous version only
+	// checked `!= "claude"`, which a bug that left everything unclassified would also satisfy.
+	if got := s.SessionPlatform("opencode:oc"); got != "opencode" {
+		t.Errorf("opencode-prefixed row: platform=%q, want opencode — the one-time v3 classification "+
+			"did not run, so scoping it to the column-add branch went too far", got)
+	}
+	if got := s.SessionPlatform("plain-cc-session"); got != "claude" {
+		t.Errorf("unmarked pre-v4 row: platform=%q, want claude — this is the historical rule and it "+
+			"must still be applied when the column is introduced", got)
+	}
+}

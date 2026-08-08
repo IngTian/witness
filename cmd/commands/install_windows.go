@@ -34,22 +34,55 @@ func installRoot() (string, error) {
 // env var, and root.go already enforces the recursion guard, so no shim jobs are
 // lost. Idempotent: re-running overwrites the install and re-merges the hooks.
 func resolveClaudeInstall() (hookInvocation, error) {
-	root, err := installRoot()
+	exe, err := installSelf()
 	if err != nil {
 		return hookInvocation{}, err
+	}
+	return execInvocation(exe), nil
+}
+
+// resolveOpenCodeInstall (Windows) returns the path to the INSTALLED witness.exe for the
+// OpenCode plugin + MCP entry to invoke, self-installing first exactly like the Claude path.
+//
+// This is issue #10. The plugin previously always had the bash shim baked in, because
+// cmdInstallOpenCode called repoShim() unconditionally — and Windows has no guaranteed shell
+// to run a .sh, so on Windows the plugin's Bun.spawn silently failed and NOTHING was ever
+// captured. Baking in the exe fixes it with no JS change at all: the plugin already spawns
+// an argv ARRAY (Bun.spawn([target, ...args])), which needs no shell, already passes the
+// event as a stdin Blob, and already honors the WITNESS_WORKER recursion guard. Only the
+// spawn target differs.
+//
+// It also must self-install for the same reason the Claude path does: the plugin holds an
+// ABSOLUTE path, so pointing it at a build checkout would break the moment that checkout is
+// moved or deleted, and bundle.Dir needs assets/ + prompts/ beside the exe to self-locate
+// the model and prompts without an env var.
+func resolveOpenCodeInstall() (string, error) {
+	return installSelf()
+}
+
+// installSelf copies the binary + assets into %LOCALAPPDATA%\witness and returns the
+// installed exe path, putting the install dir on the user PATH (best-effort).
+//
+// Shared by both integrations because both need the identical sequence, and because
+// installing twice (wire claude, then wire opencode) must be idempotent — installBundle
+// overwrites, and ensureOnUserPath is a no-op when the dir is already present.
+func installSelf() (string, error) {
+	root, err := installRoot()
+	if err != nil {
+		return "", err
 	}
 	exe, err := installBundle(root)
 	if err != nil {
-		return hookInvocation{}, err
+		return "", err
 	}
 	fmt.Printf("witness installed to %s\n", root)
 	// Put the install dir on the user PATH so `witness` runs from any new shell.
-	// Best-effort: the hooks use the absolute exe path and work regardless, so a
+	// Best-effort: the hooks/plugin use the absolute exe path and work regardless, so a
 	// PATH failure only affects the interactive `witness` command.
 	if err := ensureOnUserPath(root); err != nil {
 		fmt.Fprintf(os.Stderr, "witness: could not update PATH (add %s manually): %v\n", root, err)
 	}
-	return execInvocation(exe), nil
+	return exe, nil
 }
 
 // installBundle copies the running binary and its sibling assets/ and prompts/

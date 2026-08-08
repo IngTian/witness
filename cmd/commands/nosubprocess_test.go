@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -9,13 +11,29 @@ import (
 	"time"
 )
 
+// readSource reads a source file for the scan-based tests, with line endings NORMALIZED to LF.
+//
+// The normalization is load-bearing, not tidiness. These tests locate a function body with
+// strings.Index(src, "\n}\n"), which does not match "\r\n}\r\n" — and git on Windows checks out
+// CRLF by default. On a real Windows machine that made three such tests PANIC (Index returned -1
+// and the slice bound went negative) and two others silently stop guarding anything. A test that
+// cannot run on a platform protects nothing there.
+//
+// .gitattributes now pins *.go to LF so the checkout itself is consistent; normalizing here as
+// well means these tests hold even in a tree that predates it, or one a tool rewrote.
 func readSource(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(b)
+	return normalizeNewlines(string(b))
+}
+
+// normalizeNewlines converts CRLF and lone CR to LF, so source scans see one line-ending form.
+func normalizeNewlines(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
 }
 
 // No test may spawn the real `claude` CLI, and the production call must be killable.
@@ -146,6 +164,73 @@ func TestUninstallDoesNotSpawnClaudeWithoutAContext(t *testing.T) {
 		if strings.Contains(line, `"claude"`) && strings.Contains(line, "exec.Command") &&
 			!strings.Contains(line, "exec.CommandContext") {
 			t.Errorf("install.go:%d spawns claude without a context: %s", n+1, trimmed)
+		}
+	}
+}
+
+// WITNESS_LOG_LEVEL must actually change the level, and DEBUG must be reachable.
+//
+// The level was hardcoded to INFO with no way to raise it, which made every slog.Debug in the tree
+// unreachable — including five this branch added to the OpenCode reaper and the generation-phase
+// transition. Those are precisely the lines wanted when a distill misbehaves on a machine nobody can
+// attach a debugger to, and "rebuild witness" is not a diagnostic step a user can take.
+//
+// The behavioural half matters as much as the mapping: this drives a real slog handler and asserts a
+// Debug record is EMITTED at debug and SUPPRESSED at the default, so the knob is verified end to end
+// rather than by reading the switch.
+func TestLogLevelKnobMakesDebugReachable(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want slog.Level
+	}{
+		{"debug", slog.LevelDebug},
+		{"DEBUG", slog.LevelDebug}, // case-insensitive
+		{" debug ", slog.LevelDebug},
+		{"warn", slog.LevelWarn},
+		{"warning", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"", slog.LevelInfo},       // unset -> the default
+		{"chatty", slog.LevelInfo}, // a typo must NOT stop witness logging
+		{"trace", slog.LevelInfo},  // a plausible-but-unsupported value
+	} {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			t.Setenv("WITNESS_LOG_LEVEL", tc.env)
+			if got := logLevel(); got != tc.want {
+				t.Errorf("logLevel() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The PRODUCTION handler must use logLevel(), not a hardcoded level. Asserting on a handler the
+	// test builds itself proves nothing about setupLogging — I checked, and reverting cli.go to
+	// slog.LevelInfo left the self-built version green. So scan the one construction site.
+	src := readSource(t, "cli.go")
+	if !strings.Contains(src, "Level: logLevel()") {
+		t.Error("setupLogging must build its handler with logLevel(); a hardcoded level makes every " +
+			"slog.Debug in the tree unreachable no matter what the env var says")
+	}
+
+	// And the level mapping must actually filter: a Debug record survives at debug and is dropped
+	// at the default.
+	for _, tc := range []struct {
+		env       string
+		wantDebug bool
+	}{
+		{"debug", true},
+		{"", false},
+	} {
+		t.Setenv("WITNESS_LOG_LEVEL", tc.env)
+		var buf bytes.Buffer
+		lg := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: logLevel()}))
+		lg.Debug("probe-debug")
+		lg.Info("probe-info")
+		out := buf.String()
+		if !strings.Contains(out, "probe-info") {
+			t.Fatalf("INFO must always be emitted (env=%q): %s", tc.env, out)
+		}
+		if got := strings.Contains(out, "probe-debug"); got != tc.wantDebug {
+			t.Errorf("WITNESS_LOG_LEVEL=%q: debug emitted = %v, want %v — the knob does not reach the "+
+				"handler, so every slog.Debug in the tree stays dead", tc.env, got, tc.wantDebug)
 		}
 	}
 }

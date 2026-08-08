@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/proc"
@@ -34,7 +35,7 @@ var procCtl proc.Control = proc.System()
 var openCodeModelsCache sync.Map // provider -> openCodeModelList
 
 var openCodeVersionCommand = func(ctx context.Context) ([]byte, error) {
-	return exec.CommandContext(ctx, "opencode", "--version").Output()
+	return openCodeCommand(ctx, "--version").Output()
 }
 
 var openCodeAsyncPollInterval = time.Second
@@ -65,8 +66,148 @@ type OpenCodeServer struct {
 	waitDone chan struct{}
 	waitErr  error
 
-	mu     sync.Mutex
-	closed bool
+	mu      sync.Mutex
+	closed  bool
+	pidFile string // where this serve's pid is recorded; "" = no tracking (no runtimeRoot)
+}
+
+// servePIDPath is where a private serve records its pid, inside the witness-owned OpenCode
+// runtime root. Empty runtimeRoot (the legacy shared-DB path) means no tracking.
+func servePIDPath(runtimeRoot string) string {
+	if runtimeRoot == "" {
+		return ""
+	}
+	return filepath.Join(runtimeRoot, ".witness-serve.pid")
+}
+
+// serveRecord is what a private serve writes to the pid file: enough to decide, later and
+// from a different process, whether that serve is an ORPHAN worth killing.
+//
+// The serve pid alone is not enough, for two independent reasons — both of which produced a
+// wrong kill in the first version of this code:
+//
+//   - Pids are RECYCLED. This code runs precisely when a previous worker died without
+//     cleaning up, so the record is stale exactly when it is read. After a reboot that number
+//     very likely belongs to an unrelated live process (Windows recycles aggressively), and
+//     `os.FindProcess` does not help: on Unix it never errors for a missing pid, and on
+//     Windows it succeeds exactly when the pid IS live — i.e. exactly in the reuse case.
+//   - The record is MACHINE-WIDE, not per-process. runtimeRoot is <store root>/runtime
+//     (store/config.go), so every witness process shares this one file. A live sibling's
+//     serve therefore matches any identity check based on process shape alone, and the
+//     OpenCode runner reports SweepsOnClose()==false, which means `witness lens try` opens a
+//     runner WITHOUT taking WorkerLock — so this can and does run concurrently with a
+//     draining worker.
+//
+// Owner is the pid of the WITNESS process that started the serve, and it is the field that
+// separates the two cases: a serve whose owner is still alive is a live sibling's, not an
+// orphan, however much it looks like ours. Port + Password prove the serve is one WE started
+// (only our serve accepts our password), which is what rules out pid reuse.
+type serveRecord struct {
+	Serve    int    `json:"serve"`    // pid of the `opencode serve` process
+	Owner    int    `json:"owner"`    // pid of the witness process that started it
+	Port     int    `json:"port"`     // where it listens, for the ownership probe
+	Password string `json:"password"` // its per-serve random basic-auth password
+}
+
+// reapPriorServe kills the recorded serve only if it is an ORPHAN of ours.
+//
+// It is the Windows counterpart to procCtl.ReapOrphans. That sweep parses `ps` for a ppid
+// column and gates on ppid==1, which is a Unix shape and a no-op on Windows — so a
+// hard-killed worker there left its `opencode serve` running, and every later drain started
+// another, piling up servers that hold ports and the private DB.
+//
+// Three gates, all required, in cheapest-first order:
+//  1. the owning witness process must be GONE (else this is a live sibling's serve);
+//  2. the serve pid must still look like a witness private serve (isOurServePID — the same
+//     fingerprint the ps sweep uses);
+//  3. the serve must answer OUR password on its recorded port (proves it is the very serve
+//     that record describes, not a pid-reuse coincidence).
+//
+// Failing closed is the right bias: a serve we decline to kill costs a port and some memory
+// until the OS reclaims it, and the next drain gets another chance. Killing the wrong process
+// costs the user their work.
+func reapPriorServe(runtimeRoot string) {
+	pidFile := servePIDPath(runtimeRoot)
+	if pidFile == "" {
+		return
+	}
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return // no record: nothing to reap
+	}
+	var rec serveRecord
+	// Unreadable or nonsensical => unusable by anyone, so drop it rather than let every later
+	// start re-evaluate the same garbage. `Serve <= 1` is load-bearing beyond hygiene: pid 1 is
+	// init/launchd and, on Unix, Kill(0) signals the ENTIRE PROCESS GROUP — so a truncated or
+	// zeroed record must never reach the kill below. `Serve == os.Getpid()` cannot be a serve we
+	// started (we are witness, not opencode) and would be self-destruction.
+	if err := json.Unmarshal(data, &rec); err != nil || rec.Serve <= 1 || rec.Serve == os.Getpid() {
+		_ = os.Remove(pidFile)
+		return
+	}
+	// GATE 1 — is the owner still alive? A live owner means the serve is not an orphan: leave
+	// BOTH it and the record alone, because that owner removes the record on its own Close.
+	//
+	// "Alive" deliberately INCLUDES our own pid. An earlier version excluded it, reasoning that
+	// our own record cannot describe a sibling — but this process can legitimately reach here
+	// holding a record it wrote itself (a second runner opened in the same process, or a retry
+	// after a failed waitHealthy), and treating that as reapable deletes the record for a serve
+	// that is still running. The record then describes nothing and the serve becomes
+	// unreapable, which on Windows means it leaks until reboot.
+	if rec.Owner > 1 && processAlive(rec.Owner) {
+		slog.Debug("proc reap: the recorded serve still has a live owner; not an orphan",
+			"serve", rec.Serve, "owner", rec.Owner)
+		return
+	}
+	// GATE 2 — does the pid still look like a witness private serve?
+	if !isOurServePID(rec.Serve) {
+		slog.Debug("proc reap: recorded serve pid is no longer a witness serve; leaving it alone",
+			"serve", rec.Serve)
+		_ = os.Remove(pidFile)
+		return
+	}
+	// GATE 3 — does it answer OUR password? Only a serve we started does, so this is what
+	// distinguishes our orphan from an unrelated process that happens to match the shape.
+	if !serveAnswersOurPassword(rec) {
+		slog.Debug("proc reap: recorded serve did not authenticate as ours; leaving it alone",
+			"serve", rec.Serve, "port", rec.Port)
+		_ = os.Remove(pidFile)
+		return
+	}
+	p, err := os.FindProcess(rec.Serve)
+	if err != nil {
+		_ = os.Remove(pidFile)
+		return
+	}
+	if err := p.Kill(); err == nil {
+		slog.Info("proc reap: killed an orphaned opencode serve left by a dead worker",
+			"serve", rec.Serve, "owner", rec.Owner)
+	}
+	_ = os.Remove(pidFile)
+}
+
+// serveAnswersOurPassword probes the recorded port for a serve that accepts the recorded
+// per-serve password. A short, bounded probe: this runs on the start path, so it must never
+// become a stall. No port or password recorded (an older file) => not provable => no kill.
+func serveAnswersOurPassword(rec serveRecord) bool {
+	if rec.Port <= 0 || rec.Password == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), openCodeProbeTimeout)
+	defer cancel()
+	url := fmt.Sprintf("http://127.0.0.1:%d/global/health", rec.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Basic "+basicAuthToken("opencode", rec.Password))
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusOK
 }
 
 // StartOpenCodeServer starts a private OpenCode HTTP server for witness
@@ -96,6 +237,11 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 	// guarantees a live sibling (still parented by its worker) is never a candidate.
 	// isStrayServeLine is our private-serve fingerprint (see below).
 	procCtl.ReapOrphans(isStrayServeLine)
+	// The ps-based sweep above needs a ppid column and the ppid==1 orphan gate, which is a
+	// Unix shape — so on Windows it cannot see a serve orphaned by a hard-killed worker.
+	// reapPriorServe covers that case from the recorded pid, corroborating the pid against
+	// the process's identity before signalling (pids get recycled).
+	reapPriorServe(runtimeRoot)
 	port, err := freeTCPPort()
 	if err != nil {
 		return nil, err
@@ -118,6 +264,38 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 		waitDone:   make(chan struct{}),
 		client:     &http.Client{},
 		logs:       logs,
+		pidFile:    servePIDPath(runtimeRoot),
+	}
+	// Record the serve BEFORE waiting for health, not after.
+	//
+	// The process exists the moment Start returns, and the case this record exists for is
+	// precisely a serve that is alive but not yet (or never) healthy: if the worker is
+	// hard-killed while waitHealthy is still polling, an unrecorded serve is an orphan nobody
+	// can find later. Writing it after a successful health check would leave exactly the
+	// startup window uncovered. Close removes the file, so a clean shutdown leaves no record.
+	//
+	// Owner is OUR pid, and it is what lets a later reap tell an orphan from a live sibling's
+	// serve — the record lives at a machine-wide path, so "looks like our serve" is not enough
+	// (see serveRecord).
+	if srv.pidFile != "" && srv.cmd.Process != nil {
+		rec, mErr := json.Marshal(serveRecord{
+			Serve:    srv.cmd.Process.Pid,
+			Owner:    os.Getpid(),
+			Port:     port,
+			Password: password,
+		})
+		if mErr == nil {
+			// 0600: the record carries this serve's basic-auth password. Anyone who can read it
+			// can drive the private serve, so it must not be group/world readable.
+			mErr = os.WriteFile(srv.pidFile, rec, 0o600)
+		}
+		if mErr != nil {
+			// Non-fatal: the record is a cleanup aid, not a correctness requirement, and the ps
+			// sweep still covers Unix. Log it so a permanently unwritable runtime root is
+			// visible rather than silently disabling Windows reaping forever.
+			slog.Warn("could not record the opencode serve pid; a hard-killed worker may leak this serve",
+				"path", srv.pidFile, "err", mErr)
+		}
 	}
 	go func() {
 		srv.waitErr = cmd.Wait()
@@ -136,7 +314,60 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 // dead serve process would poll forever and pin the machine-wide WorkerLock until
 // someone sent a signal by hand. Every generation path must apply it — the legacy Run
 // below and the native retained-fork path (see runner.Run).
+//
+// Do NOT raise this to "give a slow/queued free-tier model more room" — that was tried and
+// reverted. The reasoning: a timeout here is NOT lossy. mine failures back off
+// 5m/10m/20m…/6h (distill.backoffDelay) and NEVER drop the pending delta, so a request stuck
+// behind a saturated provider queue is retried later either way. Raising the ceiling does not
+// make that request succeed; it only holds the machine-wide WorkerLock — one drain at a time,
+// across every lens and both runtimes — for that much longer, during which nothing else
+// distills and a hard-killed worker leaves a longer-lived orphan. The correct lever for a
+// rate-limited provider is the model choice (config triage_model/distill_model) or waiting,
+// not the liveness bound.
 const generateTimeout = 10 * time.Minute
+
+// queueWaitBudget bounds how long a request may sit UNSTARTED at the provider before witness
+// gives up on it. It is deliberately generous — several times generateTimeout — because a
+// provider that serves serially makes concurrent siblings wait by design, and killing them for
+// that is precisely the bug this exists to prevent: with mine_concurrency=4 and ~41s per
+// generation, the last sibling legitimately waits ~2 minutes before it starts.
+//
+// It is not unbounded, because a request that never starts must eventually surface rather than
+// pin a drain forever. The engine's own backoff then retries the session, and the drain's
+// adaptive narrowing reduces how many siblings compete next time.
+// A var, not a const, for the same reason openCodeRequestTimeout and healthCheckBudget are: a test
+// must be able to shrink it to prove the budget is ENFORCED. Asserting on a 30-minute bound with a
+// real clock is not a test anyone will run.
+var queueWaitBudget = 30 * time.Minute
+
+// requestLifetimeBudget is the ABSOLUTE ceiling a single Run may occupy: the queue allowance plus
+// one generation, with slack so the phase checks above (which produce actionable messages naming
+// WHICH phase failed) always fire before this blunt ctx deadline does.
+//
+// The ctx bound must cover BOTH phases. It previously used generateTimeout alone, which meant a
+// request that legitimately waited its turn at a serially-serving provider was killed by the ctx
+// at 600s no matter what the phase logic decided — the very starvation the two-phase budget
+// exists to remove. It stays finite so a wedged serve can never pin the machine-wide WorkerLock
+// indefinitely.
+//
+// WHAT THIS COSTS AT THE DRAIN LEVEL, since the number is much larger than it looks: 30m + 10m +
+// 1m = 41m is the worst case for ONE Run, and a session with N enabled lenses issues N sequential
+// Runs, so a single wholly-unserved session can hold the WorkerLock for N*41m. At 3 lenses that is
+// ~2h. Nothing bounds a drain's total wall clock; only the per-request ceiling is bounded.
+//
+// That is deliberate but it is a real ceiling worth knowing before raising queueWaitBudget:
+//   - It is only reachable when the provider accepts requests and serves NONE of them. A provider
+//     that serves anything moves the request into the generation phase, where the bound is 10m.
+//   - Backoff is what stops the repeat. A lens whose mine deadlines is backed off (MineFailed), so
+//     the pathological case does not re-run immediately on the next drain.
+//   - The lock is held, not leaked: witness stays responsive, `witness distill status` reports the
+//     worker as running, and the drain's ctx cancellation still cuts every in-flight Run.
+//
+// The alternative — a drain-wide deadline — was not added because it would abandon a legitimately
+// queued backfill partway through with no way to distinguish it from starvation, and the queue is
+// already resumable by design (the watermark makes the next drain pick up exactly where this one
+// stopped).
+func requestLifetimeBudget() time.Duration { return queueWaitBudget + generateTimeout + time.Minute }
 
 // openCodeRequestTimeout bounds ONE HTTP request to the local serve process, and
 // openCodeProbeTimeout bounds ONE `opencode` CLI probe (`--version`, `models`).
@@ -168,7 +399,7 @@ var (
 // is observed by polling the short message-list endpoint. It creates and deletes
 // an OpenCode session for this request only.
 func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, generateTimeout)
+	ctx, cancel := context.WithTimeout(ctx, requestLifetimeBudget())
 	defer cancel()
 
 	// Concurrency (issue #22): the lock guards ONLY the closed check, NOT the whole
@@ -216,15 +447,36 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	} else if ok {
 		body["model"] = map[string]string{"providerID": provider, "modelID": modelID}
 	}
+	// Log the request's SIZE and the model, before sending.
+	//
+	// A generation that never completes reports only `context deadline exceeded`, which names the
+	// deadline and describes nothing about what was asked. That blind spot cost three wrong
+	// diagnoses on a real Windows failure. The two numbers that matter are here and nowhere else:
+	// how much text this one prompt carries, and which model was asked. Note that the corpus is
+	// UNBOUNDED by default — chunking is off (ChunkMaxChars=0 renders the whole session as one
+	// transcript) — so a session with very few MESSAGES can still produce an enormous request when
+	// its turns contain tool output or file dumps.
+	promptChars := utf8.RuneCountInString(systemPrompt) + utf8.RuneCountInString(input)
+	slog.Info("opencode: prompting", "session", sessionID, "message", messageID, "model", model,
+		"corpus_chars", utf8.RuneCountInString(input), "total_chars", promptChars)
+	sent := time.Now()
 	_, err := s.doJSON(ctx, http.MethodPost, "/session/"+sessionID+"/prompt_async", body, http.StatusOK, http.StatusNoContent)
 	if err != nil {
 		return "", err
 	}
 	reply, err := s.waitForAsyncReply(ctx, sessionID, messageID)
 	if err != nil {
+		// Attribute the failure to a SIZE and a DURATION, so a stall is diagnosable from the log
+		// alone rather than by re-running with a debugger attached.
+		slog.Warn("opencode: generation did not complete", "session", sessionID, "model", model,
+			"corpus_chars", utf8.RuneCountInString(input), "total_chars", promptChars,
+			"waited", time.Since(sent).String(), "err", err.Error())
 		_ = s.abortSessionBestEffort(sessionID)
 		return "", err
 	}
+	slog.Info("opencode: generation complete", "session", sessionID, "model", model,
+		"corpus_chars", utf8.RuneCountInString(input), "reply_chars", utf8.RuneCountInString(reply),
+		"took", time.Since(sent).String())
 	if strings.TrimSpace(reply) == "" {
 		return "", fmt.Errorf("opencode message produced no text output")
 	}
@@ -232,39 +484,87 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 }
 
 func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, messageID string) (string, error) {
-	data, err := s.doJSON(ctx, http.MethodGet, "/session/"+sessionID+"/message?limit=20", nil, http.StatusOK)
+	path := fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
+	data, err := s.doJSON(ctx, http.MethodGet, path, nil, http.StatusOK)
 	if err != nil {
 		return "", err
 	}
 	return parseOpenCodeAsyncReply(data, messageID), nil
 }
 
-func (s *OpenCodeServer) fork(ctx context.Context, source string) (string, error) {
-	data, err := s.doJSON(ctx, http.MethodPost, "/session/"+source+"/fork", map[string]any{}, http.StatusOK)
-	if err != nil {
-		return "", err
+// asyncReplyWindow is how many trailing messages each poll fetches from the fork.
+//
+// It must exceed 1 (our request) + the assistant reply, and the window is a TAIL: witness
+// prompts a fork of the user's session, so the fork already contains that entire conversation
+// (see parseOpenCodeAsyncReply). If the window were the OLDEST n messages, our request would
+// never appear in it on any session longer than n and the poll would spin to the timeout with
+// no reply and no error — a permanent stall that looks exactly like a slow model. The window
+// being a tail is what makes this safe, and requestMissingStreak below is the guard for it
+// being wrong: rather than trust the assumption for the full generateTimeout, we surface it.
+const asyncReplyWindow = 50
+
+// requestMissingLimit is how many consecutive polls may come back WITHOUT our request message
+// before we stop waiting. The server echoes a prompt_async request into the message list
+// promptly, so more than a handful of polls without it means it is not coming — the window
+// does not reach it, the id was rejected, or the session was reset. Failing here yields an
+// actionable error in seconds instead of a generateTimeout-long silence.
+const requestMissingLimit = 10
+
+// lastPollNote renders the most recent poll failure for inclusion in a phase-budget error, or "" when
+// polling was healthy. Without it a request whose polls were ALL failing would be reported purely as
+// a phase timeout, hiding the transport error that actually caused it.
+func lastPollNote(lastErr error) string {
+	if lastErr == nil {
+		return ""
 	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("decode opencode fork: %w", err)
-	}
-	if strings.TrimSpace(resp.ID) == "" {
-		return "", fmt.Errorf("opencode fork response had no id")
-	}
-	return resp.ID, nil
+	return fmt.Sprintf(" (every poll also failed; last: %v)", lastErr)
 }
 
 func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, requestMessageID string) (string, error) {
 	ticker := time.NewTicker(openCodeAsyncPollInterval)
 	defer ticker.Stop()
 	var lastErr error
+	requestMissingStreak := 0
+	path := fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
+
+	// TWO-PHASE BUDGET: queue-wait and generation are bounded SEPARATELY.
+	//
+	// The caller's ctx carries generateTimeout, which used to run from the moment witness sent.
+	// That silently charged provider QUEUE TIME as generation time, and with several requests in
+	// flight against a provider that serves serially the ones at the back died having never been
+	// generated. Measured: four simultaneous prompts, all four dead at exactly 600s; one solo
+	// retry then completed in 41s. Four such generations total ~164s of real work — they fit
+	// inside a SINGLE request's budget, so the concurrency was never the problem. Charging the
+	// wait was.
+	//
+	// So the generation deadline now starts when the provider starts (generationStarted, keyed on
+	// the assistant message OpenCode creates at that moment), and queueing gets its own, much
+	// larger allowance. This keeps real concurrency — which is the point of parallel mining — and
+	// stops a queued request from being killed for waiting its turn.
+	//
+	// The ctx deadline still applies as the absolute ceiling for both phases together, so a
+	// cancelled drain (Ctrl-C, `worker stop`) still tears down promptly.
+	sent := time.Now()
+	var startedAt time.Time
 	for {
-		data, err := s.doJSON(ctx, http.MethodGet, "/session/"+sessionID+"/message?limit=20", nil, http.StatusOK)
+		data, err := s.doJSON(ctx, http.MethodGet, path, nil, http.StatusOK)
 		if err == nil {
 			if reply := parseOpenCodeAsyncReply(data, requestMessageID); strings.TrimSpace(reply) != "" {
 				return reply, nil
+			}
+			// Our own request must show up in the window; until it does, nothing here is
+			// attributable to this run (see parseOpenCodeAsyncReply). If it NEVER shows up we
+			// must not keep polling: that is the stall shape above, and it burns a full
+			// generateTimeout while holding the machine-wide WorkerLock.
+			if !hasOpenCodeRequestMessage(data, requestMessageID) {
+				requestMissingStreak++
+				if requestMissingStreak >= requestMissingLimit {
+					return "", fmt.Errorf("opencode never echoed our prompt (message %s) into the last %d "+
+						"messages of session %s after %d polls; the reply window may not reach it",
+						requestMessageID, asyncReplyWindow, sessionID, requestMissingStreak)
+				}
+			} else {
+				requestMissingStreak = 0
 			}
 			// FAIL FAST on a generation that completed with a provider error. Such a
 			// message has no text parts, so it is indistinguishable from "still
@@ -275,8 +575,47 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 			if provErr := parseOpenCodeAsyncError(data, requestMessageID); provErr != "" {
 				return "", fmt.Errorf("opencode generation failed: %s", provErr)
 			}
+			// FAIL FAST on a generation that COMPLETED without emitting any text. Same hazard as
+			// the error above and the same cost — indistinguishable from "still generating", so
+			// without this the poll burns the full generateTimeout and reports a deadline. The
+			// most likely cause is a model that reached for a tool: witness's agent denies all
+			// tools, so the turn can finish with no prose. Retrying cannot help; the model already
+			// answered, just not in words.
+			// Phase transition: note when generation actually began, so the generation
+			// deadline is measured from there rather than from when we sent.
+			if startedAt.IsZero() && generationStarted(data, requestMessageID) {
+				startedAt = time.Now()
+				slog.Debug("opencode: generation started", "session", sessionID,
+					"queued", time.Since(sent).String())
+			}
+			if completedWithoutText(data, requestMessageID) {
+				return "", fmt.Errorf("opencode generation completed without emitting any text " +
+					"(the model may have attempted a tool call, which witness's agent denies, or " +
+					"refused silently); the prompt asks for a JSON array only")
+			}
 		} else {
 			lastErr = err
+		}
+		// Enforce the two phases on EVERY iteration — including one whose poll FAILED.
+		//
+		// This deliberately sits outside the `if err == nil` branch above. When it lived inside,
+		// a poll that kept erroring was charged nothing: not the queue budget, not the generation
+		// budget, and not the request-missing streak. A serve that accepts the prompt and then
+		// fails or wedges every GET (a 500, or each GET burning openCodeRequestTimeout) would then
+		// run to the blunt requestLifetimeBudget ctx ceiling — which the two-phase change RAISED
+		// from 10m to ~41m. So the fix for one stall would have made a different stall four times
+		// worse. Charging time regardless of poll outcome is what keeps the budgets honest, and
+		// lastErr is still reported so the message names the transport failure rather than hiding
+		// it behind a phase.
+		if startedAt.IsZero() {
+			if waited := time.Since(sent); waited > queueWaitBudget {
+				return "", fmt.Errorf("opencode never began generating after %s queued (the provider "+
+					"is serving other requests; reduce mine_concurrency or wait)%s: %w",
+					waited.Truncate(time.Second), lastPollNote(lastErr), context.DeadlineExceeded)
+			}
+		} else if gen := time.Since(startedAt); gen > generateTimeout {
+			return "", fmt.Errorf("opencode generation exceeded %s after starting%s: %w",
+				generateTimeout, lastPollNote(lastErr), context.DeadlineExceeded)
 		}
 		select {
 		case <-ctx.Done():
@@ -309,7 +648,39 @@ func (s *OpenCodeServer) Close() error {
 	s.closed = true
 	cmd := s.cmd
 	waitDone := s.waitDone
+	pidFile := s.pidFile
 	s.mu.Unlock()
+
+	// Drop the pid record on EVERY exit path — the early return below and the escalation
+	// timeout included. Leaving it only on the happy path is how "cleanup on close" quietly
+	// becomes cleanup-sometimes, so this is deferred rather than inline.
+	//
+	// But remove it only if it is still OURS. The path is machine-wide (runtimeRoot is
+	// <store root>/runtime), so a concurrent process may have started its own serve and
+	// overwritten the record since we wrote it — `witness lens try` opens a runner without
+	// WorkerLock, which makes that overlap reachable. Deleting another live serve's record
+	// would leave it untracked, i.e. unreapable on Windows, where this record is the ONLY
+	// cleanup path. Compare-then-delete keeps that from happening.
+	defer func() {
+		if pidFile == "" {
+			return
+		}
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return // already gone
+		}
+		var rec serveRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			_ = os.Remove(pidFile) // unreadable: nobody can use it, clear it
+			return
+		}
+		if rec.Owner != os.Getpid() {
+			slog.Debug("leaving the opencode serve record alone: it belongs to another witness process",
+				"owner", rec.Owner)
+			return
+		}
+		_ = os.Remove(pidFile)
+	}()
 
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -566,7 +937,7 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	// blocked Open/doctor forever while holding the machine-wide WorkerLock.
 	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "opencode", "models", "--pure", provider)
+	cmd := openCodeCommand(ctx, "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
 	// Isolated env when we have a runtime root: `opencode models` opens its OPENCODE_DB
 	// read-WRITE (and applies schema migrations), so inheriting the ambient env would
@@ -632,7 +1003,7 @@ func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec
 }
 
 func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, password string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "opencode", "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
+	cmd := openCodeCommand(ctx, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
 	cmd.Dir = os.TempDir()
 	cmd.Env = replaceEnv(os.Environ(), []string{
 		"WITNESS_WORKER=1",
@@ -737,6 +1108,107 @@ func parseOpenCodeMessageResponse(data []byte) string {
 // parseOpenCodeAsyncError returns the provider error from an assistant message that
 // belongs to THIS request, or "" if none does. It mirrors parseOpenCodeAsyncReply's scan
 // exactly — only messages AFTER the request index count, so a failure recorded in the
+// generationStarted reports whether the provider has begun generating OUR reply — i.e. an
+// assistant message exists after our request.
+//
+// This is the distinction that makes concurrency safe. OpenCode creates the assistant message
+// when it actually starts the completion (verified against the real 1.18.3 capture in
+// testdata/async_provider_error.json: the user turn is created at t, the assistant turn 203ms
+// later, and completes 865ms after that). So "no assistant message yet" means our request is
+// QUEUED at the provider, not slow.
+//
+// Why that matters: the generation deadline used to start when witness SENT, so a request waiting
+// its turn burned the same budget as one being generated. With several requests in flight against
+// a provider that serves serially, the ones at the back of the queue died having never been
+// touched — measured: four simultaneous prompts, all four dead at exactly 600s, then one solo
+// retry completing in 41s. Four x 41s is 164s of real work, comfortably inside ONE request's
+// budget; the failure was purely that waiting was charged as generating.
+func generationStarted(data []byte, requestMessageID string) bool {
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		return false
+	}
+	requestIndex := -1
+	for i := range list {
+		if isOpenCodeRequestMessage(list[i], requestMessageID) {
+			requestIndex = i
+			break
+		}
+	}
+	if requestIndex < 0 {
+		return false // our request is not even echoed yet
+	}
+	for i := requestIndex + 1; i < len(list); i++ {
+		if role := openCodeMessageRole(list[i]); role == "assistant" {
+			return true
+		}
+	}
+	return false
+}
+
+// completedWithoutText reports whether an assistant message after our request has FINISHED
+// generating yet produced no text — the second way a generation ends invisibly.
+//
+// parseOpenCodeAsyncReply harvests only `type:"text"` parts, so a completed assistant message
+// whose parts are all TOOL CALLS (or empty) yields "" — identical to "still generating". The poll
+// then spins to the 10-minute generateTimeout and blames the deadline. We already fail fast on the
+// error-shaped version of this (info.error, see openCodeMessageError); this is the same hazard
+// without an error attached.
+//
+// Why it happens in practice: witness's distillation agent sets `permission: {"*": "deny"}`, so a
+// model that decides to reach for a tool has its call denied and can finish the turn having emitted
+// no prose at all. That is invisible on a trivial prompt (nothing to reach for) and likely on a
+// transcript full of file contents and tool output — which is exactly the pattern reported: a
+// hand-built "2+2=4" probe answered in 3s while every real code-reading session timed out.
+//
+// Completion is read from info.time.completed, whose shape is pinned by a VERBATIM OpenCode 1.18.3
+// capture (testdata/async_provider_error.json: an assistant message with
+// time:{created,completed} and parts:[]). Messages BEFORE our request are ignored, as everywhere
+// else in this file: they are not this run's outcome.
+func completedWithoutText(data []byte, requestMessageID string) bool {
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		return false
+	}
+	requestIndex := -1
+	for i := range list {
+		if isOpenCodeRequestMessage(list[i], requestMessageID) {
+			requestIndex = i
+			break
+		}
+	}
+	if requestIndex < 0 {
+		return false // our request is not here yet; nothing is attributable
+	}
+	for i := requestIndex + 1; i < len(list); i++ {
+		if role := openCodeMessageRole(list[i]); role != "" && role != "assistant" {
+			continue
+		}
+		if !openCodeMessageCompleted(list[i]) {
+			continue // still generating: keep waiting, which is correct
+		}
+		if strings.TrimSpace(parseOpenCodeMessageResponse(list[i])) == "" {
+			return true // finished, and said nothing we can use
+		}
+	}
+	return false
+}
+
+// openCodeMessageCompleted reports whether one message has a completion timestamp.
+func openCodeMessageCompleted(data []byte) bool {
+	var msg struct {
+		Info struct {
+			Time struct {
+				Completed *float64 `json:"completed"`
+			} `json:"time"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return false
+	}
+	return msg.Info.Time.Completed != nil
+}
+
 // forked source conversation (history witness did not create) is never mistaken for this
 // run's outcome. Requires the request to be present for the same reason.
 func parseOpenCodeAsyncError(data []byte, requestMessageID string) string {
@@ -814,6 +1286,27 @@ func isOpenCodeRequestMessage(data []byte, requestMessageID string) bool {
 		return false
 	}
 	return openCodeMessageID(data) == requestMessageID
+}
+
+// hasOpenCodeRequestMessage reports whether our own prompt_async request appears anywhere in a
+// message-list response. It is the guard for the reply window actually REACHING our request: a
+// retained scratch session can already hold an earlier attempt's turns, so a window that is not a
+// tail (or is too small) would not include our request, and the poll would spin silently to the
+// timeout.
+func hasOpenCodeRequestMessage(data []byte, requestMessageID string) bool {
+	if requestMessageID == "" {
+		return false
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(data, &list); err != nil {
+		return isOpenCodeRequestMessage(data, requestMessageID)
+	}
+	for i := range list {
+		if isOpenCodeRequestMessage(list[i], requestMessageID) {
+			return true
+		}
+	}
+	return false
 }
 
 func openCodeMessageID(data []byte) string {

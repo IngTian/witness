@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -499,8 +500,20 @@ func (r *EmergentReviewer) verify(ctx context.Context, ln *lens.Lens, c Candidat
 		return reviewedFacet{}, false, err
 	}
 	arr, perr := ParseJSONArray[reviewedFacet](reply)
+	// A TRUNCATED reply is not a rejection — it is a retryable output failure, and the two must
+	// not collapse. RunFull calls markSeen(…, false) on a rejection, which stamps this exact
+	// cluster signature as judged FOREVER: a reply cut off mid-array (an output-token cap, a
+	// killed child, a dropped stream) would permanently bury an arc the judge never actually
+	// ruled on. Returning the error instead takes the `err != nil` path in RunFull, which
+	// deliberately does NOT mark seen, so the arc is re-proposed next pass. This mirrors the mine
+	// path, where ErrTruncatedJSONArray is explicitly retryable rather than treated as drift.
+	if errors.Is(perr, ErrTruncatedJSONArray) {
+		return reviewedFacet{}, false, fmt.Errorf("verify reply truncated (retryable, arc not judged): %w", perr)
+	}
+	// Everything else — no array at all (drift/prose), or an explicit empty array — IS a
+	// rejection: the judge answered, and the answer was "not a real arc".
 	if perr != nil || len(arr) == 0 {
-		return reviewedFacet{}, false, nil // no array / empty = the judge rejected the arc
+		return reviewedFacet{}, false, nil
 	}
 	// The verify judges ONE cluster; take the first well-formed facet it returns.
 	for _, rf := range arr {

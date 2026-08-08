@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,7 +15,53 @@ import (
 // a registered RunnerProvider (a typo'd cfg.Runner / WITNESS_RUNNER, or a name with
 // no runner capability). Surfacing it beats silently falling back to a default.
 func unknownRunnerError(name string) error {
-	return fmt.Errorf("unknown distillation runner %q (want claude or opencode)", name)
+	if names := RunnerNames(); len(names) > 0 {
+		return fmt.Errorf("unknown distillation runner %q (want one of: %s)", name, strings.Join(names, ", "))
+	}
+	return fmt.Errorf("unknown distillation runner %q (no runner-capable platform is registered)", name)
+}
+
+// RunnerNames lists the registered platforms that can actually distill, sorted.
+//
+// Derived from the registry rather than hardcoded, so adding a runtime does not require
+// editing a message or a validation allowlist somewhere else. A platform that registers but
+// supplies no RunnerProvider (internal/platform/file does exactly that) is correctly absent:
+// it can own sessions without being able to run a model.
+func RunnerNames() []string {
+	var out []string
+	for name, p := range registry {
+		if _, ok := p.(RunnerProvider); ok {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidateRunnerName reports whether name is usable as the distillation runner, WITHOUT
+// minting one (no serve process, no model probe) — the check a CLI needs before writing the
+// value to config.
+//
+// It exists because `witness config set runner` validated against a hardcoded
+// {RunnerClaude, RunnerOpenCode} pair while `witness install <target>` validated nothing at
+// all: two writers of one config key, disagreeing. Both now ask the registry, so a third
+// runtime is accepted the moment it registers a RunnerProvider.
+//
+// Empty is VALID and means "unset — use the default", matching the config template and
+// RunnerForName's own contract.
+func ValidateRunnerName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	p, ok := ByName(name)
+	if !ok {
+		return unknownRunnerError(name)
+	}
+	if _, ok := p.(RunnerProvider); !ok {
+		return unknownRunnerError(name)
+	}
+	return nil
 }
 
 // Platform is one agent runtime (Claude Code, OpenCode, …) as a first-class type,

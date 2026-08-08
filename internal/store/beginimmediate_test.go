@@ -26,7 +26,10 @@ func TestBeginImmediateCarriesNoStateIntoTheTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := string(src)
+	// LF-normalize before scanning: a CRLF checkout (git's Windows default) makes the "\n}\n"
+	// delimiter below miss, and this test would then t.Fatal on every Windows run instead of
+	// asserting the property. .gitattributes pins *.go to LF as well.
+	body := strings.ReplaceAll(strings.ReplaceAll(string(src), "\r\n", "\n"), "\r", "\n")
 	start := strings.Index(body, "func beginImmediate(")
 	if start < 0 {
 		t.Fatal("beginImmediate not found")

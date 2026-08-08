@@ -37,7 +37,7 @@ func writeFakeSourceDB(t *testing.T, path string) string {
 	return path
 }
 
-func TestNativeRunUsesPrivateImportAndDistinctForks(t *testing.T) {
+func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 	root, source := t.TempDir(), filepath.Join(t.TempDir(), "opencode.db")
 	writeFakeSourceDB(t, source)
 	t.Setenv("WITNESS_OPENCODE_DB", source)
@@ -55,7 +55,9 @@ func TestNativeRunUsesPrivateImportAndDistinctForks(t *testing.T) {
 	prompted := map[string]bool{}
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/session/source/fork":
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			// A FRESH scratch session, not a fork of the user's conversation. The request
+			// path carries no source id at all — that is the property under test.
 			forks++
 			_, _ = w.Write([]byte(`{"id":"fork_` + string(rune('0'+forks)) + `"}`))
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/message"):
@@ -72,13 +74,15 @@ func TestNativeRunUsesPrivateImportAndDistinctForks(t *testing.T) {
 						}
 					}
 				}
+				// A fresh scratch session contains ONLY witness's own turns, so our request
+				// is the first message — never buried behind inherited history (which is what
+				// used to push it out of the reply window on a long session).
 				_, _ = fmt.Fprintf(w, `[
-					{"info":{"id":"old","role":"assistant"},"parts":[{"type":"text","text":"historical"}]},
 					{"info":{"id":%q,"role":"user"},"parts":[{"type":"text","text":"request"}]},
 					{"info":{"id":"reply","role":"assistant"},"parts":[{"type":"text","text":"[]"}]}
 				]`, messageID)
 			} else {
-				_, _ = w.Write([]byte(`[{"info":{"id":"old","role":"assistant"},"parts":[{"type":"text","text":"historical"}]}]`))
+				_, _ = w.Write([]byte(`[]`))
 			}
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/prompt_async"):
 			prompts++
@@ -103,11 +107,13 @@ func TestNativeRunUsesPrivateImportAndDistinctForks(t *testing.T) {
 			t.Fatal(err)
 		}
 		if forkDeletes != 0 {
-			t.Fatal("fork deleted before finalization")
+			t.Fatal("the scratch session was deleted before finalization")
 		}
 	}
+	// Three jobs, three DISTINCT scratch sessions, three prompts: no sharing of context
+	// between lenses or chunks.
 	if forks != 3 || prompts != 3 {
-		t.Fatalf("forks=%d prompts=%d", forks, prompts)
+		t.Fatalf("scratch sessions=%d prompts=%d, want 3 and 3", forks, prompts)
 	}
 	beforeCommands, beforePrompts := len(commands), prompts
 	n2 := newNativeRuntime(root, n.server)
@@ -117,8 +123,17 @@ func TestNativeRunUsesPrivateImportAndDistinctForks(t *testing.T) {
 	if len(commands) != beforeCommands || prompts != beforePrompts {
 		t.Fatalf("completed reply was not reused: commands=%d prompts=%d", len(commands), prompts)
 	}
-	if len(commands) != 6 {
-		t.Fatalf("commands=%d, want export/import per lens and chunk", len(commands))
+	// ONE subprocess per job: the export. There is no import any more — it existed only to
+	// materialize a fork parent, and the scratch session is now created empty. Asserting the
+	// exact count is what keeps a re-introduced import (or a second export per job) visible.
+	if len(commands) != 3 {
+		t.Fatalf("commands=%d, want exactly one `export` per lens+chunk job and no import", len(commands))
+	}
+	for _, c := range commands {
+		if strings.Contains(strings.Join(c, "\n"), "import --pure") {
+			t.Error("an `opencode import` ran: the snapshot is only exported for its digest now, " +
+				"never imported (that step existed solely to give fork() a parent)")
+		}
 	}
 	for _, c := range commands {
 		joined := strings.Join(c, "\n")
@@ -183,7 +198,7 @@ func TestNativeRunRejectsExportNewerThanCapturedL0(t *testing.T) {
 	}
 }
 
-func TestNativeRunsGenerateConcurrentlyAfterIsolatedForkSetup(t *testing.T) {
+func TestNativeRunsGenerateConcurrentlyAfterIsolatedScratchSetup(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("WITNESS_OPENCODE_DB", writeFakeSourceDB(t, filepath.Join(t.TempDir(), "source.db")))
 	oldCommand := nativeCommand
@@ -209,7 +224,7 @@ func TestNativeRunsGenerateConcurrentlyAfterIsolatedForkSetup(t *testing.T) {
 		switch {
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/fork"):
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
 			id := forks.Add(1)
 			_, _ = fmt.Fprintf(w, `{"id":"fork_%d"}`, id)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/prompt_async"):
@@ -636,7 +651,7 @@ func TestNativeManifestKeyCoversModelAndPrompt(t *testing.T) {
 		switch {
 		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/fork"):
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
 			_, _ = fmt.Fprintf(w, `{"id":"fork_%d"}`, prompts+1)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/prompt_async"):
 			var body struct{ MessageID string }

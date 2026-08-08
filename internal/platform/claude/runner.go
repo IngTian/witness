@@ -46,19 +46,45 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 	if platform.ExternalRunnersDisabled() {
 		return "", fmt.Errorf("claude runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	runCtx, cancel := context.WithTimeout(ctx, claudeRunTimeout)
 	defer cancel()
 
-	cmd := buildRunCmd(ctx, model, systemPrompt, input)
+	cmd := buildRunCmdFn(runCtx, model, systemPrompt, input)
 
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
+		// A TIMEOUT must be reported as context.DeadlineExceeded, and os/exec does not do that
+		// for us. When CommandContext kills the child, Run returns *exec.ExitError "signal:
+		// killed" — errors.Is(err, context.DeadlineExceeded) is FALSE (verified directly). So
+		// wrapping the raw error alone made the engine's backpressure signal permanently dead on
+		// the Claude path: distill classifies a deadline as MineTimedOut and narrows the drain
+		// window on it, and a `claude -p` that ran out of time was instead filed as a generic
+		// transport failure that only backs the lens off. Concurrency never narrowed, so the
+		// starvation this branch fixes for OpenCode would have kept recurring here.
+		//
+		// runCtx.Err() is the discriminator rather than inspecting the exit status: it says
+		// whether WE stopped the child, which "signal: killed" cannot distinguish from the user
+		// killing it or an OOM.
+		if de := runCtx.Err(); de != nil {
+			// Report the CALLER's cancellation as cancellation, not as our timeout: if the parent
+			// ctx is already done the worker is shutting down, which is not a provider signal and
+			// must not narrow the window.
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("claude -p canceled: %w (stderr: %s)", ctx.Err(), stderrExcerpt(errb.String()))
+			}
+			return "", fmt.Errorf("claude -p exceeded %s and was killed: %w (stderr: %s)",
+				claudeRunTimeout, de, stderrExcerpt(errb.String()))
+		}
 		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", err, stderrExcerpt(errb.String()))
 	}
 	return out.String(), nil
 }
+
+// claudeRunTimeout bounds one `claude -p`. It is a var only so the deadline-attribution test can
+// shrink it; nothing in production reassigns it.
+var claudeRunTimeout = 10 * time.Minute
 
 // maxStderrExcerpt bounds how much of a failed child's stderr is interpolated into the error.
 //
@@ -109,6 +135,16 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 // — a hostile repo that induces record_observation(<payload>) cannot have that
 // payload reach the reviewer as instructions. Split out from Run so the wiring is
 // unit-testable. WITNESS_WORKER=1 is the recursion guard.
+// buildRunCmdFn is the test seam for the child process. It exists so the deadline-attribution
+// test can drive the REAL Run() — including its error classification, the part that was wrong —
+// against a stand-in that hangs, instead of spawning the user's actual `claude` CLI. Nothing in
+// production reassigns it.
+//
+// The seam is here rather than in the test because a test that hand-builds its own exec.Cmd and
+// asserts on that proves nothing about Run: an earlier test in this repo did exactly that and
+// stayed green while the production path leaked unbounded children.
+var buildRunCmdFn = buildRunCmd
+
 func buildRunCmd(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
 	cmd := newClaudeCmd(ctx, model)
 	cmd.Args = append(cmd.Args, "--append-system-prompt", systemPrompt+"\n\n"+platform.CorpusNotice)

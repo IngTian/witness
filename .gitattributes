@@ -1,0 +1,48 @@
+# Line endings are NORMALIZED, not left to the platform.
+#
+# Without this, git on Windows checks files out with CRLF by default (core.autocrlf=true),
+# and that broke real tests on a real Windows machine: five source-scan tests locate a
+# function body with `strings.Index(src, "\n}\n")`, which does not match "\r\n}\r\n". Three
+# of them then sliced with the resulting -1 and PANICKED; the other two silently stopped
+# guarding anything. A test that cannot run on a platform is not protecting that platform.
+#
+# Go's own toolchain is LF-only anyway — gofmt writes LF, and `gofmt -l .` (a hard CI gate)
+# would flag a CRLF-formatted file — so LF is the only self-consistent choice for sources.
+# The lens/prompt files matter too: they are read verbatim as model prompts, and stray \r
+# would be sent to the provider.
+#
+# `* text=auto` lets git normalize to LF in the repository for anything it detects as text;
+# the explicit lines below remove the guesswork for the types we ship.
+* text=auto
+
+*.go      text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.jsonc   text eol=lf
+*.js      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.toml    text eol=lf
+*.sum     text eol=lf
+*.mod     text eol=lf
+*.txt     text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+Makefile       text eol=lf
+
+# Shell scripts and the hook shim MUST be LF: a CRLF shebang line makes the kernel look for
+# an interpreter named "bash\r", which fails with a confusing "no such file or directory".
+*.sh      text eol=lf
+
+# Windows-only scripts are the one exception — cmd.exe/PowerShell want CRLF.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# Binary assets: never touch, never diff as text.
+*.onnx      binary
+*.onnx_data binary
+*.zip       binary
+*.png       binary
+*.jpg       binary
+*.ico       binary

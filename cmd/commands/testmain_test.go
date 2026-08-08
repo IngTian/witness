@@ -26,6 +26,20 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("WITNESS_ASSETS", assets)
 	_ = os.Setenv("WITNESS_SKIP_MODEL_DOWNLOAD", "1")
 	_ = os.Setenv(platform.DisableExternalRunnersEnv, "1")
+	// LOCALAPPDATA belongs in the package-wide sandbox, not in one test.
+	//
+	// The Windows install path is DESTRUCTIVE and validates late: installBundle copies
+	// os.Executable() to <LOCALAPPDATA>\witness\witness.exe before probeSrcTree can reject a
+	// non-built source tree (install_windows.go). Under `go test` os.Executable() is the TEST
+	// binary and copyFile's os.SameFile short-circuit compares different directories, so it does
+	// not fire — running this package's suite on Windows would overwrite a user's installed
+	// witness.exe and put a build temp dir on their PATH.
+	//
+	// Redirecting it here rather than per-test is deliberate: any FUTURE test that reaches
+	// installSelf/installBundle/ensureOnUserPath inherits the containment automatically. A
+	// per-test t.Setenv only protects the test that remembers to write it, and this hazard is
+	// invisible on the platform the tests are usually run on.
+	_ = os.Setenv("LOCALAPPDATA", filepath.Join(root, "localappdata"))
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)

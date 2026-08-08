@@ -43,6 +43,31 @@ func valueOrNever(v string) string {
 	return v
 }
 
+// logLevel is the witness.log verbosity, INFO unless WITNESS_LOG_LEVEL says otherwise.
+//
+// It exists because the level was hardcoded to INFO and there was no way to raise it — so every
+// slog.Debug in the tree was unreachable, including the five this branch added to the OpenCode
+// reaper and the generation-phase transition. Those are exactly the lines someone wants when a
+// distill misbehaves on a machine they cannot attach a debugger to, and "recompile witness" is not
+// a diagnostic step a user can take.
+//
+// An env var rather than a config key on purpose: setupLogging runs before any command has parsed
+// flags, and the hook path (capture/session-start/session-end) must stay allocation-cheap and
+// argument-free. An unrecognized value falls back to INFO rather than failing — a typo in a
+// diagnostic knob must never stop witness from capturing.
+func logLevel() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WITNESS_LOG_LEVEL"))) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 // setupLogging points slog at WITNESS_HOME/witness.log (JSON lines, append) and
 // returns a closer. Each subcommand runs as its own process and configures its
 // own default logger; failures that hooks would otherwise swallow land here.
@@ -51,7 +76,7 @@ func setupLogging(st *store.Store) func() {
 	if err != nil {
 		return func() {}
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: logLevel()})))
 	return func() { _ = f.Close() }
 }
 

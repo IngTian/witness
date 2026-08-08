@@ -244,6 +244,16 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	// and execution state can expand well beyond the ~448MB asset). nil if the
 	// model isn't ready (review-only work can still proceed).
 	var miner *distill.Worker
+	// minerFailed latches a startup failure for the rest of this run.
+	//
+	// Without it, `miner` is cached only on SUCCESS, so every later getMiner() call retries the
+	// whole heavy startup — measured: a run with no embedding model re-attempted the load FOUR
+	// times and logged the same error four times, because getMiner has two callers (drainAll and
+	// the loop's ensureMiner) and the loop re-enters. That is not just log noise: the retried step
+	// is a ~448MB model parse, so on a machine where the load is SLOW rather than absent, the
+	// worker pays that cost repeatedly while appearing frozen. One attempt per run is the right
+	// policy — the next wakeup is the retry, and it gets a fresh process.
+	minerFailed := false
 	attempted := map[string]bool{}
 	// runForLens is the per-lens runner resolver threaded into the engine (issue #75
 	// slice 2): a lens declaring its own runtime mines/reviews against that runner. Only
@@ -255,19 +265,47 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		}
 		return rs.RunFor(ln)
 	}
+	// getMiner performs the worker's one-time heavy startup: opening the runner set (which for
+	// OpenCode spawns a private `opencode serve` and validates models) and loading the ~448MB
+	// embedding model through GoMLX.
+	//
+	// Every step here is TRACED, at info, with a before/after pair. That is not noise — it is the
+	// difference between a diagnosable report and a guess. Both steps are slow, unbounded and were
+	// previously SILENT on success, so a wedged one was indistinguishable from a frozen worker: the
+	// heartbeat is already stamped, the process is alive, and nothing further is ever written. A
+	// real Windows run reported exactly that ("heartbeat stamped once, never updated, no log
+	// entries after startup"), and the log could not say which of the two it was. With these lines
+	// the LAST one written names the blocker, and the elapsed time separates "slow" from "hung".
 	getMiner := func() *distill.Worker {
+		if minerFailed {
+			return nil // already tried and failed this run; the next wakeup retries in a fresh process
+		}
 		if miner == nil {
 			// Open the runner set before mining — closes the "work arrived after the pre-loop
 			// snapshot, rs still nil" gap. A failed open (fatal default) means we can't mine
 			// this run; return nil so the loop breaks and the next wakeup retries.
+			slog.Info("worker startup: opening runners", "runner", cfg.Runner, "lenses", len(lenses))
+			t0 := time.Now()
 			if !ensureRunners() {
+				minerFailed = true
 				return nil
 			}
+			slog.Info("worker startup: runners open", "runner", cfg.Runner, "took", time.Since(t0).String())
+
+			// The embedder is the single heaviest startup step: it parses a ~448MB ONNX model and
+			// initializes a GoMLX backend, with no context and no timeout. A partial download
+			// passes embed.ModelReady()'s size floor and can still stall or fail here, so the
+			// asset path and size are logged too — that is the first thing to check when this is
+			// the last line in the log.
+			slog.Info("worker startup: loading the embedding model", "assets", embed.AssetsDir())
+			t1 := time.Now()
 			emb, err := embed.New()
 			if err != nil {
-				slog.Error("embedder", "err", err) // can't mine this run; review may still run
+				slog.Error("embedder", "err", err, "assets", embed.AssetsDir()) // can't mine this run; review may still run
+				minerFailed = true
 				return nil
 			}
+			slog.Info("worker startup: embedding model ready", "took", time.Since(t1).String())
 			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens, NativeFor: rs.NativeFor}
 		}
 		return miner
@@ -281,6 +319,10 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		// EVERY opened runtime (different sessions run in parallel and may each touch any
 		// runtime), so AND across the set. rs is non-nil here (getMiner ensured it).
 		conc := distill.EffectiveConcurrency(cfg.MineConcurrency, rs.concurrentRunSafe())
+		// Trace the drain boundary for the same reason getMiner traces startup: Drain can spend
+		// minutes inside one model call, and without this line a log that stops here is
+		// ambiguous between "never started draining" and "started and is waiting on a model".
+		slog.Info("worker: draining", "pending", len(pending()), "concurrency", conc)
 		for !stopRequested() {
 			n := w.Drain(ctx, distill.DrainOpts{
 				Conc:      conc,

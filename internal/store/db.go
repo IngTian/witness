@@ -310,16 +310,33 @@ func addSessionPlatformColumn(tx *sql.Tx) error {
 	).Scan(&hasColumn); err != nil {
 		return fmt.Errorf("probe platform column: %w", err)
 	}
-	if hasColumn == 0 {
-		// Column-level DEFAULT '' so existing rows get a concrete value; the backfill
-		// then upgrades the ones we can classify.
-		if _, err := tx.Exec(`ALTER TABLE session_meta ADD COLUMN platform TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("add column: %w", err)
-		}
+	if hasColumn != 0 {
+		// The column already exists, so the one-time classification below has already happened.
+		// It must NOT run again — see the comment on the backfill.
+		return nil
 	}
-	// Backfill only rows still unclassified (''), so this is idempotent and never
-	// overwrites a value a newer binary already wrote. OpenCode sessions carry the
-	// "opencode:" id prefix; everything else is Claude.
+	// Column-level DEFAULT '' so existing rows get a concrete value; the backfill
+	// then upgrades the ones we can classify.
+	if _, err := tx.Exec(`ALTER TABLE session_meta ADD COLUMN platform TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add column: %w", err)
+	}
+	// ONE-TIME classification of pre-v4 rows, and it must stay inside the column-add branch.
+	//
+	// This ran unconditionally before, so it re-executed on EVERY later schema bump — and its rule
+	// ("unmarked and not opencode-prefixed => claude") is frozen v3-era history that predates the
+	// `file` platform (v0.5.0, which owns the "file:" prefix). Consequences, all silent:
+	//   - the '' state is reachable in the modern era: ApplyRawImport inserts the session_meta row
+	//     with no platform, and the platform is written by a SEPARATE best-effort call whose error
+	//     is discarded (cmd/commands/ingest.go), so a crash between them leaves '';
+	//   - platform.ForSession prefers the persisted column over the session-id prefix, so a wrong
+	//     value is permanent — nothing ever re-derives it;
+	//   - file and claude render transcripts identically today, so the only symptom is a wrong
+	//     owning platform in the DB, until a runtime with its own input shaper is added and those
+	//     sessions are quietly distilled through the wrong renderer.
+	//
+	// Scoping it to the column add keeps the historical result byte-identical for databases that
+	// genuinely predate v4 (AGENTS.md: the migration literal is frozen history, do not rewrite it)
+	// while making it impossible to reclassify rows created in a later era.
 	if _, err := tx.Exec(
 		`UPDATE session_meta SET platform = 'opencode'
 		  WHERE platform = '' AND session LIKE 'opencode:%'`,

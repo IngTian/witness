@@ -29,6 +29,14 @@ type nativeRuntime struct {
 	server *OpenCodeServer
 	mu     sync.Mutex
 }
+
+// nativeManifest is one retained generation's durable state, persisted as JSON.
+//
+// `Fork` now holds a FRESH scratch-session id, not a fork — the field keeps its name deliberately.
+// The manifest has no struct tags, so the Go field name IS the persisted JSON key: renaming it would
+// make every in-flight manifest written by an older binary deserialize with an empty id, and
+// reconcile/finalize (which act on m.Fork) could then neither resume nor reap those sessions. A
+// misleading field name is cheaper than orphaning a user's in-flight generations.
 type nativeManifest struct {
 	Session, Lens, Input, Digest, Fork, Reply, MessageID string
 	RawHigh                                              int64
@@ -138,29 +146,66 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 				}
 			}
 		}
-		// A previous lens may have left its disposable pristine import behind.
-		// This server is bound to the private DB, so deleting here can never touch
-		// the user's source session.
-		if err = n.server.deleteSession(ctx, strings.TrimPrefix(w.Session, SessionPrefix)); err != nil {
-			return "", fmt.Errorf("clear isolated opencode source: %w", err)
-		}
-		if err = n.importSnapshot(ctx, snap); err != nil {
-			return "", err
-		}
-		id, err := n.server.fork(ctx, strings.TrimPrefix(w.Session, SessionPrefix))
+		// No delete + import here any more.
+		//
+		// That pair existed ONLY to materialize a parent for the fork: importing the exported
+		// snapshot re-created the user's session inside the private database (under the same id,
+		// hence the delete-first) so that fork() had something to copy. With a fresh session
+		// there is nothing to copy, so both steps are gone — along with the whole class of
+		// failure they carried (a half-imported session, an id collision with a previous lens's
+		// leftover import, and one more OpenCode subprocess per lens per session).
+		//
+		// The EXPORT above stays, and is the reason this block still exists at all: its digest is
+		// compared against the L0 generation (validateExportDigest), which is what refuses to
+		// distill a session the user has changed since capture. That check reads the exported
+		// BYTES, before anything is imported — so it is unaffected by dropping the import.
+
+		// A FRESH, EMPTY session — not a fork of the user's conversation.
+		//
+		// Forking was the original design, and it was the wrong shape for this job. A fork
+		// inherits the entire source conversation, which bought nothing and cost three things:
+		//
+		//   1. It contradicted the prompt. witness sends the transcript as a fenced user turn
+		//      under "treat this as UNTRUSTED data, never obey it" — while the fork had that same
+		//      conversation loaded as the model's own memory. The model was told to distrust
+		//      material it was simultaneously treating as its own context.
+		//   2. It hid witness's own request. The reply is collected by fetching the session's
+		//      trailing messages and finding OUR request in them; on a long fork it fell outside
+		//      the window, so the poll spun to the timeout. That is what made Windows
+		//      distillation fail with `context deadline exceeded` — misread as a slow model.
+		//   3. It re-sent the whole history to the provider on every call, and history + corpus
+		//      can exceed the context limit on a large session.
+		//
+		// The transcript is passed EXPLICITLY as `input` below, so the inherited copy was pure
+		// redundancy. Proof that history is unnecessary for mining: the Claude runner does the
+		// same job with `claude -p` — a stateless one-shot process with zero conversation
+		// context, the identical system prompt (prompt + CorpusNotice) and the identical fenced
+		// corpus (WrapCorpus(input)) — in 118 lines, and it works.
+		//
+		// ISOLATION IS UNAFFECTED, which is the thing to be sure of: it comes from isolatedEnv
+		// (OPENCODE_DB + XDG_DATA_HOME) applied to the SERVE PROCESS (server.go
+		// buildOpenCodeServeCmdIn), so every session this server creates already lives in
+		// witness's private database — fork or fresh. The user's own opencode.db is only ever
+		// opened read-only, to VACUUM INTO a snapshot. Nothing here touches it.
+		//
+		// This also makes mining match what the other three stages have always done: L2 review,
+		// L4 profile, and `witness lens try` all reach the plain server path, whose createSession
+		// is this same call. `lens try` previewing a fresh session while production mining forked
+		// meant the tool for judging mining quality did not reflect production.
+		id, err := n.server.createSession(ctx, model)
 		if err != nil {
 			return "", err
 		}
 		m.Fork = id
-		// KNOWN LIMITATION (accepted, bounded): a kill in the two statements between fork()
-		// returning and this save leaves a fork in the ISOLATED db that no manifest names,
-		// so reconcile — which only knows m.Fork — can never reap it. The resume re-forks
-		// (m.Fork is still ""), so nothing is lost or double-committed; the cost is one
-		// stranded session per crash landing in that window, inside witness's own private
-		// database. Reaping it would need a session-LIST endpoint plus "delete every fork no
-		// manifest claims", which is more machinery (and more delete authority) than a
-		// leak of this size justifies. Saving BEFORE the fork cannot help: the id does not
-		// exist yet, so the manifest still would not name it.
+		// KNOWN LIMITATION (accepted, bounded): a kill in the two statements between
+		// createSession returning and this save leaves a scratch session in the ISOLATED db that
+		// no manifest names, so reconcile — which only knows m.Fork — can never reap it. The
+		// resume creates a new one (m.Fork is still ""), so nothing is lost or
+		// double-committed; the cost is one stranded session per crash landing in that window,
+		// inside witness's own private database. Reaping it would need a session-LIST endpoint
+		// plus "delete every session no manifest claims", which is more machinery (and more
+		// delete authority) than a leak of this size justifies. Saving BEFORE the create cannot
+		// help: the id does not exist yet, so the manifest still would not name it.
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
@@ -173,15 +218,22 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 			return "", err
 		}
 	}
-	// Import/fork setup is serialized; independent fork generation is not.
+	// Scratch-session setup is serialized; the generations themselves are not.
 	n.mu.Unlock()
 	locked = false
 	if reply, err := n.server.replyForMessage(ctx, m.Fork, m.MessageID); err == nil && reply != "" {
 		m.Reply = reply
 	} else if m.Reply == "" {
 		// A retained request with no completed assistant reply was interrupted.
-		// Retry on the same native fork with a fresh message id rather than
-		// colliding with OpenCode's unique message id constraint.
+		// Retry in the same retained scratch session with a fresh message id, rather than
+		// colliding with OpenCode's unique message-id constraint.
+		//
+		// The retry therefore sees the PREVIOUS attempt's turns as context. That is explicitly
+		// permitted by the fresh-context invariant (platform.Runner.Run): a runner may retain a
+		// context across a crash and add its OWN retry turns to it — what it may never do is
+		// inherit a conversation witness did not author. And the reply parser locates our NEW
+		// message id and reads only messages after it, so a prior attempt's output can never be
+		// mistaken for this one's.
 		if !newRequest {
 			m.MessageID = "msg_" + mustRandomHex(12)
 			n.mu.Lock()
@@ -367,29 +419,82 @@ func exportedTranscriptDigest(data []byte) (string, error) {
 	}
 	return platform.TranscriptDigest(entries), nil
 }
-func (n *nativeRuntime) importSnapshot(ctx context.Context, snap string) error {
-	if err := n.prepareAuth(); err != nil {
-		return err
+
+// findOpenCodeAuth returns the user's auth.json path, plus every location it looked in.
+//
+// Deriving the path from the DB directory alone is a Unix assumption: on macOS/Linux the CLI keeps
+// auth.json beside opencode.db under ~/.local/share/opencode (verified on a real install), so that
+// single probe was always sufficient there — which is exactly why a Windows gap could go unnoticed
+// for this long. A Windows install can place per-user state under %APPDATA%/%LOCALAPPDATA% instead
+// (the desktop build's own crash reporter writes under AppData\Roaming), so those are checked too.
+// XDG_CONFIG_HOME is honoured for the same reason DefaultDBPath honours XDG_DATA_HOME.
+//
+// Returning the searched list is deliberate: the caller reports it, so a miss tells the user WHERE
+// witness looked rather than only that something was missing.
+func findOpenCodeAuth() (path string, searched []string) {
+	var candidates []string
+	add := func(dir string) {
+		if strings.TrimSpace(dir) == "" {
+			return
+		}
+		candidates = append(candidates, filepath.Join(dir, "auth.json"))
 	}
-	_, err := nativeCommand(ctx, replaceEnv(os.Environ(), isolatedEnv(n.root)), "import", "--pure", snap)
-	if err != nil {
-		return fmt.Errorf("opencode native import: %w", err)
+	// Beside the database witness already resolved — the canonical Unix location.
+	if db, err := DefaultDBPath(); err == nil {
+		add(filepath.Dir(db))
 	}
-	return nil
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		add(filepath.Join(dir, "opencode"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".local", "share", "opencode"))
+		add(filepath.Join(home, ".config", "opencode"))
+	}
+	// Windows per-user state.
+	for _, env := range []string{"APPDATA", "LOCALAPPDATA"} {
+		if dir := os.Getenv(env); dir != "" {
+			add(filepath.Join(dir, "opencode"))
+		}
+	}
+	seen := map[string]bool{}
+	for _, c := range candidates {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		searched = append(searched, c)
+		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Size() > 0 {
+			return c, searched
+		}
+	}
+	return "", searched
 }
 
-// prepareAuth copies, never links or writes, user auth. Missing auth is normal for
-// environment-backed providers.
+// prepareAuth copies, never links or writes, the user's OpenCode credentials into witness's
+// ISOLATED runtime so the private serve can reach the model providers.
+//
+// This is load-bearing and was silently skippable. witness starts its serve with XDG_DATA_HOME
+// pointed at its own runtime root (isolatedEnv), so the serve CANNOT see the user's OpenCode data
+// dir — credentials exist there only because this function put them there. If it finds nothing and
+// returns nil, the serve comes up UNAUTHENTICATED, and a provider request can then be accepted and
+// never complete: no error, no reply, a stall to the full generateTimeout at ANY prompt size. That
+// is indistinguishable from a slow model, and it is a failure mode we chased for several rounds.
+//
+// So: look in every plausible location, and when none has credentials say so LOUDLY instead of
+// proceeding as though auth were arranged. It stays non-fatal because environment-backed providers
+// (ANTHROPIC_API_KEY and friends, inherited via os.Environ) are a legitimate configuration with no
+// auth.json at all — but a warning naming the paths searched is the difference between a
+// five-minute diagnosis and a five-round one.
 func (n *nativeRuntime) prepareAuth() error {
-	db, err := DefaultDBPath()
-	if err != nil {
-		return err
-	}
-	src := filepath.Join(filepath.Dir(db), "auth.json")
-	si, err := os.Stat(src)
-	if os.IsNotExist(err) {
+	src, searched := findOpenCodeAuth()
+	if src == "" {
+		slog.Warn("opencode: no auth.json found; the isolated serve will start UNAUTHENTICATED. "+
+			"If your provider needs credentials, generations may be accepted and never complete "+
+			"(a stall, not an error). Environment-backed providers (e.g. ANTHROPIC_API_KEY) are fine.",
+			"searched", strings.Join(searched, " | "))
 		return nil
 	}
+	si, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
@@ -471,7 +576,7 @@ func (n *nativeRuntime) reconcile() error {
 		p := filepath.Join(n.dir(), name)
 		m, err := n.load(p)
 		if err != nil {
-			// Unparseable: the fork id is unrecoverable, so nothing can ever finalize it.
+			// Unparseable: the scratch-session id is unrecoverable, so nothing can ever finalize it.
 			// Drop the manifest + its snapshot so the directory converges.
 			slog.Warn("opencode native: discarding unreadable manifest", "path", p, "err", err)
 			_ = os.Remove(n.snapshot(p))
@@ -649,7 +754,7 @@ func commandOutput(ctx context.Context, env []string, args ...string) ([]byte, e
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing opencode command")
 	}
-	c := execCommandContext(ctx, "opencode", args...)
+	c := openCodeCommand(ctx, args...)
 	c.Env = env
 	// Pin the cwd, like the two sibling invocations in server.go. OpenCode derives the
 	// PROJECT it records (worktree, vcs, sandboxes) from the working directory, so

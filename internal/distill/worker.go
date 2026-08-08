@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
@@ -147,6 +148,31 @@ type LensMining struct {
 	Done       int // this lens's watermark at read time (turns it had already mined)
 	Mined      []store.Observation
 	MineFailed bool // a transport error hit THIS lens — commit backs off this lens only
+	// MineTimedOut narrows MineFailed to "the request hit a deadline" (errors.Is of
+	// context.DeadlineExceeded). It is the backpressure signal: unlike a 4xx or a network
+	// error, a deadline usually means WE asked for more concurrency than the provider
+	// grants, so the drain reduces its window rather than retrying the same burst.
+	//
+	// It deliberately CONFLATES two causes, which the runner can distinguish and does not:
+	// a request that never began generating (queue starvation — narrowing is the correct
+	// response) and one that began and generated too slowly (a slow model — narrowing does
+	// nothing for it). Both set this flag.
+	//
+	// Conflating them is the right trade here, for two reasons. Narrowing is per-batch and
+	// re-derived from Conc on the next batch (see drainWindow), so a spurious narrow costs
+	// some parallelism for one batch, not a persistent throttle. And the asymmetry of being
+	// wrong is lopsided: failing to narrow under real starvation is the measured Windows
+	// failure — four requests dead at exactly 600s having never been served, repeating
+	// every drain — while narrowing on a genuinely slow model just serializes work that
+	// was going to be slow anyway.
+	//
+	// If it ever needs splitting, the runner already has the fact: OpenCode tracks
+	// generationStarted and reports the two phases in distinct messages ("never began
+	// generating after ..." vs "generation exceeded ..."). The clean shape is a typed
+	// sentinel from the platform port, not string matching here. Not done because there is
+	// no evidence yet that the slow-model case actually fires — the flag would need to be
+	// observed narrowing a healthy drain first.
+	MineTimedOut bool
 	// Drifted marks that this lens saw prose_drift (a reply with no JSON array,
 	// errNoArray) AND produced ZERO observations across ALL of its inputs (#57). It is
 	// set only in that all-inputs-drifted-nothing case: a multi-chunk session where one
@@ -250,7 +276,14 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			// anywhere AND at least one input drifted — so a long session where one chunk
 			// extracts fine is never miscounted as drift (see LensMining.Drifted).
 			producedObs, sawDrift := false, false
-			isNative := platform.ForSession(w.Store, session).Name() == platform.AgentOpenCode && w.NativeFor != nil && w.NativeFor(ln)
+			// Ask the platform whether its sessions can host a retained scratch context, rather
+			// than comparing its NAME. Both halves of this decision are now capabilities: the
+			// session owner via SupportsNativeSessionSource, and the runner via w.NativeFor
+			// (which asserts platform.NativeSessionSupport). The name compare that used to be
+			// here was the engine's only piece of hardcoded platform knowledge, and the
+			// acceptance guard that forbids exactly that could not see it.
+			isNative := platform.SupportsNativeSessionSource(platform.ForSession(w.Store, session)) &&
+				w.NativeFor != nil && w.NativeFor(ln)
 			var nativeDigest string
 			if isNative {
 				entries := make([]platform.TranscriptEntry, len(raw))
@@ -267,7 +300,26 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 					native = &platform.NativeSession{Session: session, RawHigh: rawHighID, Total: total, Lens: ln.Name, Input: fmt.Sprintf("%d:%x", chunkIndex, h[:]), Digest: nativeDigest}
 					callCtx = platform.WithNativeSession(callCtx, native)
 				}
+				// Log the SIZE of what we are about to send, and how long it took.
+				//
+				// This was a blind spot with real cost: a mine that times out reported only
+				// "context deadline exceeded", which names the deadline and says nothing about the
+				// request. Three separate wrong diagnoses on a real Windows failure (rate limits,
+				// then the reply window, then the session fork) all survived longer than they
+				// should have because nobody could see that the input was, or was not, enormous.
+				// Chunking defaults to OFF (ChunkMaxChars=0 => the whole session as ONE
+				// transcript), so a session with only a handful of MESSAGES can still carry a
+				// gigantic prompt — a few tool results that each dumped a file, for instance. Turns
+				// and characters are different units, and only one of them predicts a model stall.
+				started := time.Now()
+				slog.Info("mine: sending", "session", session, "lens", ln.Name,
+					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
+					"input_bytes", len(transcript), "records", len(raw[done:]))
 				obs, err := w.mine(callCtx, ln, session, transcript)
+				slog.Info("mine: returned", "session", session, "lens", ln.Name,
+					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
+					"took", time.Since(started).String(), "observations", len(obs),
+					"err", errText(err))
 				if native != nil {
 					lm.Native = append(lm.Native, native)
 				}
@@ -284,6 +336,17 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 					// A real transport error (rate limit, network, timeout) — back this lens off.
 					slog.Error("mine failed", "session", session, "lens", ln.Name, "err", err)
 					lm.MineFailed = true
+					// A DEADLINE is a distinct signal from any other transport failure: it means
+					// the request was accepted and never served. When several fire at once against
+					// a rate-limiting provider, the excess sit in a provider queue and every one of
+					// them burns its full budget having never been generated — measured on a real
+					// Windows run: four simultaneous prompts at 21:11:01, all four dead at exactly
+					// 21:21:01 (600s), then ONE solo retry three seconds later completing in 41s.
+					// The drain uses this to narrow its own concurrency (see DrainOpts.Conc), so
+					// witness stops asking for more parallelism than the provider will serve.
+					if errors.Is(err, context.DeadlineExceeded) {
+						lm.MineTimedOut = true
+					}
 					continue
 				}
 				if len(obs) > 0 {
@@ -634,4 +697,13 @@ func obsID(session, lens, text string) string {
 func mustJSON(v any) string {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b)
+}
+
+// errText renders an error for a structured log field without the caller needing a branch: slog
+// prints a nil error as "<nil>", which reads as a value rather than as "no failure".
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
