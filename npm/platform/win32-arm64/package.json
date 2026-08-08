@@ -1,6 +1,6 @@
 {
   "name": "@witness-ai/opencode-win32-arm64",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "witness binary for OpenCode on Windows ARM64.",
   "os": ["win32"],
   "cpu": ["arm64"],
