@@ -84,7 +84,21 @@ func ensureProfileFresh(st *store.Store) (bool, error) {
 		Run:           rs.RunFor(nil),
 		RunFor:        rs.RunFor,
 	}
-	if err := sm.Summarize(ctx); err != nil {
+	// A ~13s silent wait is indistinguishable from a hang, so animate it.
+	//
+	// Two properties make this safe to start unconditionally, rather than needing to predict
+	// whether Summarize will actually call a model:
+	//
+	//   - The first frame is one tick (90ms) away, and a fully-cached pass returns in ~20ms
+	//     (measured). So the fast path prints NOTHING — no frame, no escape codes, no flicker.
+	//     Only a pass slow enough to need feedback ever shows any.
+	//   - startSpinner returns nil unless stdout is an interactive TTY, so the MCP server (stdio
+	//     pipes) and every redirect get silence for free. The get_profile path needs no special
+	//     case: it cannot animate even by accident.
+	sp := startSpinner("distilling the profile from the latest facets…")
+	err = sm.Summarize(ctx)
+	sp.Stop() // nil-safe; blocks until the animation stops writing, so no frame interleaves
+	if err != nil {
 		return false, err
 	}
 	return true, nil
