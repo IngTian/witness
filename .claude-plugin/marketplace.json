@@ -9,7 +9,7 @@
       "name": "witness",
       "source": "./",
       "version": "0.7.7",
-      "description": "Local memory & self-improvement engine: quietly captures your coding sessions — and ingests your own records (notes, articles, any text) — then distills how your habits and knowledge evolve over time. A person-centric growth archive with provenance, served over an MCP read API + plain files. Global shareable lenses."
+      "description": "Quietly captures your Claude Code sessions and distills how your thinking, habits, and knowledge change over time — a dated growth archive with provenance, served over MCP. Also ingests any text corpus (notes, articles, market news) to track how THAT changed instead. Local, single Go binary."
     }
   ]
 }

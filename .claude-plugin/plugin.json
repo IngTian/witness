@@ -1,6 +1,6 @@
 {
   "name": "witness",
-  "description": "Local memory & self-improvement engine for Claude Code: quietly captures your coding sessions — and ingests your own records (notes, articles, any text) — then distills how your thinking, habits, and knowledge evolve over time. A person-centric growth archive with provenance. A pure capture-and-serve tool (not a coach), served over MCP + plain files, with global shareable lenses.",
+  "description": "Quietly captures your Claude Code sessions and distills how your thinking, habits, and knowledge change over time — a dated growth archive with provenance, served over MCP. Also ingests any text corpus (notes, articles, market news) to track how THAT changed instead. Local, single Go binary.",
   "version": "0.7.7",
   "author": {
     "name": "Zeying Tian",

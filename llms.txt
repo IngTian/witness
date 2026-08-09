@@ -1,11 +1,18 @@
 # witness
 
-> A local memory & self-improvement engine for Claude Code and OpenCode. It captures your
-> coding sessions and distills how your patterns, habits, and knowledge **evolve over time** —
-> a person-centric growth archive with provenance. Not project memory (what your code did) —
-> a record of who you are becoming. One pure-Go binary, served over an MCP server + plain files.
-> It also ingests your own records — feed it notes, articles, or any text stream with
-> `witness ingest`, and the same distillation engine tracks how that knowledge evolves too.
+> A local distillation engine that turns a text stream into a **dated history of how its subject
+> changed**. Point it at your Claude Code / OpenCode sessions and it tracks how *you* think and work
+> — that is the setup it ships configured. Point it at market news, research notes, a knowledge base,
+> or any document stream (`witness ingest`) and it tracks how *that* changed instead.
+> One pure-Go binary; a local SQLite archive plus plain markdown, served over MCP.
+>
+> The design point is change with provenance: when a value changes it is not overwritten — the old
+> value closes with a date and a new one opens, citing the records that drove the shift. So the
+> archive answers "how did this get here", not only "what is true now".
+>
+> Caveat worth knowing: the ENGINE is subject-agnostic, but everything witness SHIPS is
+> person-shaped (the built-in lens and the summary prompts describe a person). For another subject
+> you write a lens — three files — starting from `prompts/lens/corpus-example/`.
 
 ## What it does (the needs it serves)
 
@@ -14,6 +21,7 @@
 - **Reflect / journal / retrospective**: a re-readable record of how I thought and changed.
 - **Track how my knowledge and patterns evolve over time**, with provenance (why each change was recorded).
 - **Distill knowledge** from conversations — and from your own records (notes, articles, any text) via `witness ingest`.
+- **Build a change-history over a corpus that is not me** — market commentary, a knowledge base, research notes, incident reports — as dated state transitions rather than a pile of summaries. Start from `prompts/lens/corpus-example/`.
 
 ## How it works
 
