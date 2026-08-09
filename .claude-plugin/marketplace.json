@@ -8,7 +8,7 @@
     {
       "name": "witness",
       "source": "./",
-      "version": "0.7.7",
+      "version": "0.7.8",
       "description": "Quietly captures your Claude Code sessions and distills how your thinking, habits, and knowledge change over time — a dated growth archive with provenance, served over MCP. Also ingests any text corpus (notes, articles, market news) to track how THAT changed instead. Local, single Go binary."
     }
   ]
