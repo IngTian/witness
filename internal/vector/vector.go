@@ -1,7 +1,12 @@
 // Package vector is a brute-force cosine index over L1 observation embeddings.
-// At one-person scale (~5k vectors/yr) an ANN engine is overkill; this is ~50
-// lines and exact. The same vectors serve read-time recall (MCP) and write-time
-// dedup (the worker).
+// At one-person scale (~5k vectors/yr) an ANN engine is overkill; this is ~40
+// lines and exact.
+//
+// It serves READ-TIME RECALL only (MCP search_observations, `witness observations search`). It used
+// to also serve write-time dedup via NearestScore, which scanned the whole corpus per mined
+// observation — the O(n^2) ceiling that issue #85 is built around. Append-only L1 replaced that with
+// an exact-ID hash set in CommitMining (worker.go), so NearestScore lost its only caller and has
+// been removed; #85's headline ceiling no longer exists in the code it describes.
 package vector
 
 import (
@@ -40,20 +45,4 @@ func Search(obs []store.Observation, query []float32, lens string, k int) []Hit 
 		hits = hits[:k]
 	}
 	return hits
-}
-
-// NearestScore returns the best cosine score of candidate against any existing
-// observation in the same lens — the dedup signal the worker uses before
-// appending a mined observation (near-duplicate => skip / fold).
-func NearestScore(existing []store.Observation, candidate []float32, lens string) float64 {
-	best := 0.0
-	for _, o := range existing {
-		if o.Lens != lens || len(o.Embedding) == 0 {
-			continue
-		}
-		if s := embed.Cosine(candidate, o.Embedding); s > best {
-			best = s
-		}
-	}
-	return best
 }

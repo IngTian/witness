@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -51,9 +52,18 @@ func Run() int {
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "witness",
-		Short:         "Capture, distill, and serve a person-centric growth archive.",
-		Version:       version,
+		Use:   "witness",
+		Short: "Capture, distill, and serve a person-centric growth archive.",
+		// commit + buildTime are ldflags-injected by the Makefile on EVERY build, and were
+		// previously never displayed anywhere — staticcheck flagged both as unused, correctly. The
+		// values were being computed and thrown away.
+		//
+		// Surfaced here rather than deleted because identifying the exact binary is the first step
+		// of any bug report, and a released tag is not enough on its own: the stale-binary incident
+		// (a bin/ that predated five releases while reviews silently did nothing) was diagnosable
+		// only by build metadata. `witness --version` now answers "which build is this" without
+		// requiring the user to check file mtimes.
+		Version:       fmt.Sprintf("%s (commit %s, built %s)", version, commit, buildTime),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Long: strings.TrimSpace(`witness records raw assistant-session turns, distills them into observations and facets, and serves derived profiles through CLI and MCP.
