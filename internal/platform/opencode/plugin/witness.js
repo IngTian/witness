@@ -13,7 +13,7 @@ function spawnWitness(args, payload) {
       stdin: payload ? new Blob([JSON.stringify(payload)]) : "ignore",
       stdout: "ignore",
       stderr: "ignore",
-      env: { ...process.env, WITNESS_OPENCODE_PLUGIN: "1" },
+      env: { ...process.env },
     })
     proc.unref?.()
     return proc

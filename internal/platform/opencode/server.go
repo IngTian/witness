@@ -93,10 +93,12 @@ func servePIDPath(runtimeRoot string) string {
 //     Windows it succeeds exactly when the pid IS live — i.e. exactly in the reuse case.
 //   - The record is MACHINE-WIDE, not per-process. runtimeRoot is <store root>/runtime
 //     (store/config.go), so every witness process shares this one file. A live sibling's
-//     serve therefore matches any identity check based on process shape alone, and the
-//     OpenCode runner reports SweepsOnClose()==false, which means `witness lens try` opens a
-//     runner WITHOUT taking WorkerLock — so this can and does run concurrently with a
-//     draining worker.
+//     serve therefore matches any identity check based on process shape alone, and `witness
+//     lens try` opens a runner WITHOUT taking WorkerLock — so this can and does run
+//     concurrently with a draining worker. (That lock-free preview used to be conditional on a
+//     SweepsOnCloser capability; it is now unconditional, because the shared-DB sweep the
+//     capability reported on was deleted with the private database. The hazard below is
+//     unchanged either way — it is what makes the lock-free preview SAFE.)
 //
 // Owner is the pid of the WITNESS process that started the serve, and it is the field that
 // separates the two cases: a serve whose owner is still alive is a live sibling's, not an

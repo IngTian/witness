@@ -15,6 +15,13 @@ import (
 // `runner` field) so CLI validation and the config template share one source of truth,
 // without importing internal/platform (which would invert the store→platform layering).
 const (
+	// RunnerClaude / RunnerOpenCode have no PRODUCTION readers — every runner-name decision goes
+	// through platform.ValidateRunnerName / RunnerNames, which derive from the registry, and deriving
+	// from the registry is the point of it. They are kept because eight TESTS across three packages
+	// use them as the canonical spelling, which is a real consumer: a test that hardcodes "opencode"
+	// as a bare string is one typo away from asserting nothing. Do not "clean these up" without
+	// re-pointing those tests; the drift risk AGENTS.md warns about is real but bounded, since
+	// ValidateRunnerName would reject a value these constants disagreed with.
 	RunnerClaude   = "claude"
 	RunnerOpenCode = "opencode"
 )

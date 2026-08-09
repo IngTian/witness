@@ -175,8 +175,9 @@ func TestIsOurServePIDRejectsThisProcess(t *testing.T) {
 //
 // This is the hazard that makes the pid file dangerous rather than merely useless. The record
 // lives at a MACHINE-WIDE path (runtimeRoot is <store root>/runtime), so every witness process
-// shares one file — and `witness lens try` opens an OpenCode runner WITHOUT taking WorkerLock,
-// because the runner reports SweepsOnClose()==false. So a `lens try` can run reapPriorServe
+// shares one file — and `witness lens try` opens an OpenCode runner WITHOUT taking WorkerLock
+// (unconditionally, since the SweepsOnCloser capability that once gated it was removed along with
+// the shared-DB sweep it reported on). So a `lens try` can run reapPriorServe
 // while a worker is mid-drain. If the reap keys on "the pid looks like our serve", it kills the
 // WORKER's live serve: every remaining Run in that drain then fails against a closed port.
 //
