@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.IngTian/witness",
   "title": "witness",
-  "description": "Second brain for Claude Code & OpenCode: distills how your patterns and knowledge evolve over time.",
+  "description": "Distills a text stream into a dated history of how its subject changed — your coding sessions, or any corpus (news, notes, docs). Bi-temporal facets with provenance, served locally over MCP.",
   "websiteUrl": "https://github.com/IngTian/witness#readme",
   "version": "0.7.7",
   "repository": {

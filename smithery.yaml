@@ -1,7 +1,8 @@
 # Smithery configuration: https://smithery.ai/docs/config#smitheryyaml
 # witness runs as a LOCAL stdio MCP server. First run downloads a local embedding
 # model and uses your local Claude Code / OpenCode auth for distillation — nothing
-# leaves your machine. Prebuilt npm binaries: darwin-arm64, linux-x64.
+# leaves your machine. Prebuilt npm binaries: darwin-arm64, linux-x64, win32-x64,
+# win32-arm64.
 startCommand:
   type: stdio
   configSchema:

@@ -2,7 +2,7 @@
   "name": "@witness-ai/opencode",
   "mcpName": "io.github.IngTian/witness",
   "version": "0.7.7",
-  "description": "MCP memory / second brain for Claude Code & OpenCode — captures your coding sessions and distills how your knowledge and habits evolve over time, queryable by your agent.",
+  "description": "Distills your Claude Code / OpenCode sessions — or any text corpus you ingest — into a dated history of how its subject changed, queryable by your agent over MCP.",
   "type": "module",
   "main": "./witness.js",
   "exports": "./witness.js",
@@ -43,7 +43,13 @@
     "provenance",
     "growth",
     "llm",
-    "coding-agent"
+    "coding-agent",
+    "bitemporal",
+    "change-tracking",
+    "corpus-analysis",
+    "text-mining",
+    "distillation",
+    "agent-memory"
   ],
   "license": "MIT",
   "repository": {
