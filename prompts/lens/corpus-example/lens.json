@@ -1,0 +1,4 @@
+{
+  "name": "regime",
+  "dimensions": ["rates", "inflation", "growth", "risk_appetite", "positioning"]
+}

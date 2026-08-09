@@ -1,7 +1,7 @@
 {
   "name": "@witness-ai/opencode",
   "mcpName": "io.github.IngTian/witness",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "MCP memory / second brain for Claude Code & OpenCode — captures your coding sessions and distills how your knowledge and habits evolve over time, queryable by your agent.",
   "type": "module",
   "main": "./witness.js",
@@ -21,10 +21,10 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@witness-ai/opencode-darwin-arm64": "0.7.6",
-    "@witness-ai/opencode-linux-x64": "0.7.6",
-    "@witness-ai/opencode-win32-x64": "0.7.6",
-    "@witness-ai/opencode-win32-arm64": "0.7.6"
+    "@witness-ai/opencode-darwin-arm64": "0.7.7",
+    "@witness-ai/opencode-linux-x64": "0.7.7",
+    "@witness-ai/opencode-win32-x64": "0.7.7",
+    "@witness-ai/opencode-win32-arm64": "0.7.7"
   },
   "keywords": [
     "mcp",

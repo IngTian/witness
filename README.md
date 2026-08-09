@@ -1,4 +1,4 @@
-# witness — Let Claude Code and OpenCode witness your growth.
+# witness — a distillation engine that keeps the history of how things changed.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/@witness-ai/opencode?logo=npm&label=%40witness-ai%2Fopencode)](https://www.npmjs.com/package/@witness-ai/opencode)
@@ -6,29 +6,58 @@
 ![Single binary](https://img.shields.io/badge/single%20binary-CGO__ENABLED%3D0-informational)
 ![Runtimes](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20OpenCode-8A2BE2)
 
-**witness is a local memory & self-improvement engine for Claude Code and OpenCode.** It captures
-your coding sessions and distills how your patterns, habits, and knowledge **evolve over time** —
-a person-centric growth archive with provenance, served over an MCP server + plain files, as a
-single pure-Go binary. Think *second brain / AI memory* for how you think and grow, not project
-memory for what your code did. **It also ingests your own records** — feed it notes, articles, or
-any text stream with `witness ingest`, and the same engine distills how that knowledge evolves,
-not just your chats.
+**witness turns a stream of text into a dated record of how its subject changed.** Feed it your AI
+coding sessions and it tracks how *you* think and work. Feed it market commentary, research notes, or
+any document stream and it tracks how *that* changed instead. One pure-Go binary, a local SQLite
+archive plus plain markdown, served to your agent over MCP.
 
-> *"Aah, you were at my side, all along.*  
-> *My true mentor...*  
-> *My guiding moonlight..."*  
+The thing it is built around is **change over time, with provenance**. When an attribute's value
+changes, witness does not overwrite it — it closes the old value with a date and opens a new one, and
+records which source records drove the shift. So the archive answers *"how did this get here"*, not
+just *"what is true now"*.
+
+> *"Aah, you were at my side, all along.*
+> *My true mentor...*
+> *My guiding moonlight..."*
 > — Ludwig, the Holy Blade
 
-A Claude Code / OpenCode plugin that quietly keeps a **person-centric archive of how you grow
-and change** as you work — your thinking, workstyle, habits, the cognitive traps you fall into
-and climb out of, and how all of it shifts over time. Not a record of *what your code did*
-(other tools do project memory) — a record of **who you are becoming**.
+## Two ways people use it
 
-It is **reflection-oriented, not clone-oriented**: the point is to let Claude understand you and
-reflect you back to yourself, and to leave you a re-readable record of how you thought and grew.
-It is a **pure tool, not a coach** — it captures, structures, and serves the archive (via an MCP
-server and plain files). Building a *coach* on top of it (proactive reflections, "you've done this
-three times…") is left to other projects that read its output.
+**1. Watch your own growth as you work with AI.** Install it into Claude Code or OpenCode and it
+captures your sessions in the background — no prompting, no ritual. It distills how your thinking,
+workstyle, habits, and blind spots shift over months, with evidence for every claim. This is the
+setup witness ships configured out of the box.
+
+It is **reflection-oriented, not clone-oriented**: the point is to let your agent understand you, and
+to leave you a re-readable record of how you thought and grew. It is a **pure tool, not a coach** —
+it captures, structures, and serves. Building a coach on top ("you've done this three times…") is
+left to other projects that read its output.
+
+**2. Build a change-history over any text corpus.** Write a lens — a prompt describing what to notice
+and which dimensions to track — point `witness ingest` at NDJSON records, and the same four-stage
+engine runs. Nothing about the machinery is person-specific: raw records → observations → dated
+facets → narrative.
+
+A worked example, run end to end while writing this section. A `regime` lens over market commentary,
+in an archive with **no** person lens enabled at all: 7 news records became 22 observations and 13
+facets. Then the regime flipped hawkish→dovish, and the archive recorded it as history rather than
+replacing it:
+
+```
+inflation/core_trend
+  "Disinflation has broken rather than paused: core CPI reaccelerating…"   valid_to 2026-06-…
+  "Core is disinflating persistently rather than reaccelerating…"          (current)
+```
+
+Five facets closed and reopened that way in one review. The generated brief even flagged that its own
+earlier sequencing thesis had been **falsified** by the new data — which is the whole point of keeping
+the history instead of the latest snapshot.
+
+**Honest caveat:** the engine is general, but everything witness *ships* is person-shaped — the
+built-in `default` lens, the example lens, and the summary prompts all say "notice things about the
+person". For a non-person corpus you write your own lens (three files) and, if you want, override the
+summary prompt with one file. There is no market-lens or research-lens preset yet; the machinery is
+domain-agnostic, the batteries included are not.
 
 ## Is this you?
 
@@ -38,7 +67,8 @@ witness is the answer if you've ever wanted to:
 - Have a **second brain / AI memory** for your thinking, workstyle, and habits, queryable by your agent.
 - **Track how you grow as a developer over time** — the traps you fall into and climb out of — with provenance for every recorded change.
 - Keep a **journal / retrospective** of how you thought and changed, re-readable months later.
-- **Distill your own records** — feed notes, articles, or any text stream to `witness ingest` (NDJSON) and see how that knowledge evolves across documents, not just chats.
+- **Distill a corpus you care about** — market news, a knowledge base, research notes, meeting logs — into a dated history of how its state changed, not a pile of summaries. Feed it NDJSON with `witness ingest`.
+- Query any of the above **from your agent**, over MCP, instead of re-explaining context every session.
 
 **Contents:** [How it works](#how-it-works) · [Lenses](#lenses) · [Example](#example-one-moment-end-to-end) · [Reading the archive](#reading-the-archive) · [Commands](#commands) · [Install](#install) · [Configuration](#configuration) · [Your data](#your-data-is-yours)
 
@@ -98,9 +128,15 @@ the built-in `default` prompts — it doesn't extend them — so each must be **
 including its output JSON schema** (the tool appends the transcript / observations as the user
 message, but injects no schema for you).
 
-A **complete, copy-paste-ready** lens lives at [`prompts/lens/example/`](prompts/lens/example) —
-the fastest way to start is to copy the directory and rewrite the dimensions and prose for your
-domain:
+Two **complete, copy-paste-ready** lenses ship as starting points. Copy the directory and rewrite the
+dimensions and prose for your domain:
+
+- [`prompts/lens/example/`](prompts/lens/example) — a **person** lens (math learning), for tracking
+  someone as they work.
+- [`prompts/lens/corpus-example/`](prompts/lens/corpus-example) — a **non-person** lens (market
+  regime), for tracking a subject that is not you. Start here for research notes, a knowledge base,
+  incident reports, or any document stream; its README explains what has to change when the subject
+  stops being a person.
 
 ```sh
 cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/example" ./math   # edit the files, then:
