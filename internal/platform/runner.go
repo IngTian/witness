@@ -170,30 +170,26 @@ type RunnerProvider interface {
 	NewRunner(cfg store.Config) Runner
 }
 
-// SweepsOnCloser is the OPTIONAL capability of a Runner whose Open/Close runs a
-// PROCESS-GLOBAL cleanup sweep — one that reaches beyond this runner's own work and
-// can disturb a concurrently-running witness worker. The OpenCode runner implements
-// it. Current built-in runners do not sweep process-global state: OpenCode writes
-// only its private runtime and Claude has no persistent runtime state.
+// (SweepsOnCloser / RunnerSweepsOnClose used to live here.)
 //
-// This is a SEPARATE axis from ConcurrentRunSafe: that says "can the engine call Run
-// on THIS runner concurrently" (true for both today); SweepsOnClose says "does
-// closing this runner touch OTHER processes' state". A read-only tool that opens its
-// own runner alongside a possible background worker (e.g. `witness lens try`) must
-// hold the single-flight WorkerLock while a sweeping runner is open, but needs no
-// lock for a non-sweeping one.
-type SweepsOnCloser interface {
-	SweepsOnClose() bool
-}
-
-// RunnerSweepsOnClose reports whether r runs a process-global sweep on Open/Close —
-// nil-safe: a runner that doesn't implement SweepsOnCloser is treated as false (no
-// sweep). Centralizing the type assertion here means callers can't accidentally use
-// the wrong predicate (ConcurrentRunSafe) or mis-handle the not-implemented case.
-func RunnerSweepsOnClose(r Runner) bool {
-	s, ok := r.(SweepsOnCloser)
-	return ok && s.SweepsOnClose()
-}
+// The capability asked "does closing this runner run a PROCESS-GLOBAL sweep that could disturb a
+// concurrently-running worker?", so that a read-only tool (`witness lens try`) could take the
+// machine-wide WorkerLock only when the answer was yes. It was TRUE when added in #72: OpenCode's
+// Close ran cleanupDistillSessions, a sweep of the SHARED OpenCode database that deleted
+// witness-distill sessions created before now+1s — which would delete a live worker's in-flight
+// session.
+//
+// Both halves of that premise are gone. v0.7.0 gave distillation its own private database, so
+// cleanupDistillSessions was deleted outright (the symbol no longer exists anywhere). The sweeps that
+// remain on the OpenCode Open path — reapPriorServe and procCtl.ReapOrphans — are ORPHAN-ONLY by
+// construction: reapPriorServe's first gate requires the owning witness process to be GONE, and
+// ReapOrphans gates on ppid==1, so neither can reach a live worker's state. That is why the only
+// implementation returned false, and it was CORRECT rather than stale.
+//
+// So the interface had exactly one implementation, hardcoded to the value that makes its guarded
+// branch unreachable. Deleted rather than kept "in case a future runner sweeps": a capability whose
+// single answer is no is not a seam, it is a comment. If a sweeping runner ever appears, the lock it
+// needs is three lines at the call site — and this note records what shape the problem took.
 
 // RunnerFor resolves the default runner for a drain. It applies the store's runner
 // precedence (bound-meta > config line > WITNESS_RUNNER env > default — unchanged)

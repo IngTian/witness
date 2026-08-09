@@ -210,20 +210,21 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 
 	ctx := context.Background()
 
-	// Mint without opening so a process-global sweeping runner can acquire the
-	// worker lock before any subprocess starts.
 	runner, err := runnerForStore(st, cfg)
 	if err != nil {
 		return err
 	}
-	if platform.RunnerSweepsOnClose(runner) {
-		unlock, ok := st.WorkerLock()
-		if !ok {
-			return fmt.Errorf("`lens try` needs exclusive access on the %q runner; a witness worker is draining now — retry once it is idle", cfg.Runner)
-		}
-		// Registered before runner.Close below: LIFO closes the subprocess first.
-		defer unlock()
-	}
+	// No WorkerLock here, deliberately. This used to take it when the runner reported
+	// SweepsOnClose() — a capability that existed because OpenCode's Close once swept the SHARED
+	// OpenCode database and could delete a live worker's in-flight distill session (#72). That sweep
+	// was deleted when #119 gave distillation its own private database, and the sweeps that remain on
+	// the Open path (reapPriorServe, procCtl.ReapOrphans) are ORPHAN-ONLY: they require the owning
+	// witness process to be gone (or ppid==1), so they cannot reach a running worker. The capability's
+	// only implementation therefore answered false and this branch was unreachable.
+	//
+	// Keeping `lens try` lock-free is the better behaviour anyway: it is a read-only preview, and
+	// blocking it behind a multi-minute backfill was the reason the guard was conditional rather than
+	// unconditional in the first place.
 	if err := runner.Open(ctx); err != nil {
 		return err
 	}

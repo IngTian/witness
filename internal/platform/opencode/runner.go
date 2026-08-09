@@ -94,4 +94,6 @@ func (*runner) InvocationHint() string { return "opencode serve" }
 func (*runner) ConcurrentRunSafe() bool     { return true }
 func (*runner) SupportsNativeSession() bool { return true }
 
-func (*runner) SweepsOnClose() bool { return false }
+// (SweepsOnClose() false used to be here. The capability is gone from the port — see
+// platform.Runner — because this was its only implementation and the shared-DB sweep it reported on
+// was deleted with #119's private database. The sweeps still on the Open path are orphan-only.)
