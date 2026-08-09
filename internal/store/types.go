@@ -39,12 +39,21 @@ const (
 // RawRecord is one raw turn-half: a user prompt or an assistant reply, captured
 // verbatim from the stable hook fields (UserPromptSubmit.prompt / Stop.last_assistant_message).
 type RawRecord struct {
-	TS      string `json:"ts"`               // RFC3339 capture time
-	Session string `json:"session"`          // session_id from the hook payload
-	Seq     int    `json:"seq"`              // monotonic per-session ordinal
-	Role    string `json:"role"`             // "user" | "assistant"
-	Effort  string `json:"effort,omitempty"` // assistant effort level, if present
-	Text    string `json:"text"`             // verbatim content
+	TS      string `json:"ts"`      // RFC3339 capture time
+	Session string `json:"session"` // session_id from the hook payload
+	Seq     int    `json:"seq"`     // monotonic per-session ordinal
+	Role    string `json:"role"`    // "user" | "assistant"
+	// Effort is CAPTURED AND STORED BUT NEVER RENDERED — deliberately recorded here so the next
+	// dead-code sweep does not re-derive it. claude/capture.go reads it from the hook payload and
+	// raw.go persists and scans it, but platform.RenderTranscript — the ONE path from L0 to a model
+	// prompt — emits only role + text, so the effort level reaches SQLite and stops there. The
+	// OpenCode importer never sets it at all.
+	//
+	// KEPT rather than removed: this is L0, the append-only ground truth, so dropping a persisted
+	// column costs a migration on every live archive and buys nothing. If effort SHOULD influence
+	// distillation, the fix is to render it in RenderTranscript — not to delete the field.
+	Effort string `json:"effort,omitempty"` // assistant effort level, if present
+	Text   string `json:"text"`             // verbatim content
 }
 
 // SessionMeta records non-content facts about a session that the worker needs —
