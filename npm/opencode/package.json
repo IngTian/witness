@@ -1,7 +1,7 @@
 {
   "name": "@witness-ai/opencode",
   "mcpName": "io.github.IngTian/witness",
-  "version": "0.7.8",
+  "version": "0.7.9",
   "description": "Distills your Claude Code / OpenCode sessions — or any text corpus you ingest — into a dated history of how its subject changed, queryable by your agent over MCP.",
   "type": "module",
   "main": "./witness.js",
@@ -21,10 +21,10 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@witness-ai/opencode-darwin-arm64": "0.7.8",
-    "@witness-ai/opencode-linux-x64": "0.7.8",
-    "@witness-ai/opencode-win32-x64": "0.7.8",
-    "@witness-ai/opencode-win32-arm64": "0.7.8"
+    "@witness-ai/opencode-darwin-arm64": "0.7.9",
+    "@witness-ai/opencode-linux-x64": "0.7.9",
+    "@witness-ai/opencode-win32-x64": "0.7.9",
+    "@witness-ai/opencode-win32-arm64": "0.7.9"
   },
   "keywords": [
     "mcp",

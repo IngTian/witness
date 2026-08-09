@@ -4,7 +4,7 @@
   "title": "witness",
   "description": "Distills your sessions or any text corpus into a dated history of how its subject changed.",
   "websiteUrl": "https://github.com/IngTian/witness#readme",
-  "version": "0.7.8",
+  "version": "0.7.9",
   "repository": {
     "url": "https://github.com/IngTian/witness",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@witness-ai/opencode",
-      "version": "0.7.8",
+      "version": "0.7.9",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
