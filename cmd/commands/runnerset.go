@@ -42,9 +42,22 @@ type openedRunner struct {
 // down. It DOES return an error only if the default runner itself can't even be resolved
 // (a config typo), matching slice-1's fail-closed behavior.
 //
-// Each runner is minted with a cfg carrying the UNION of that runtime's per-lens models
-// (plus the default models for the default runtime), so an OpenCode runner prewarms/validates
-// every model its lenses will actually use — not just the two default stage models.
+// Each runner is minted with a cfg carrying the models that runtime should VALIDATE at Open: the
+// configured default stage models for the default runtime, and none for a non-default one (see
+// clearCrossRuntimeModels).
+//
+// It does NOT validate the union of that runtime's per-lens models, and the comment here used to
+// claim it did (#148). Nothing computed such a union — the parameter that was supposed to carry the
+// lenses was declared and never read, so the claim described behavior that never existed, which is
+// worse than an absent feature because it stops anyone from looking.
+//
+// NOT IMPLEMENTED DELIBERATELY, rather than left as a TODO. store.Config carries exactly two model
+// slots (TriageModel, DistillModel), so a real union needs a new Config field threaded through
+// every runner — and the only thing it buys is EARLIER failure for a mistyped per-lens model.
+// That model is already validated when it is first used: the run fails, the lens backs off, and the
+// error names the model. Trading a new config field plus its migration for moving one error message
+// earlier is not worth it. If per-lens models ever become common enough that a fail-at-Open check
+// pays for itself, StartOpenCodeServerIn already accepts variadic models — the plumbing is there.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
 	rs := &runnerSet{cfg: cfg, byName: map[string]*openedRunner{}, defaultR: strings.TrimSpace(cfg.Runner)}
 
@@ -59,7 +72,7 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 	needed[rs.defaultR] = true
 
 	for name := range needed {
-		rs.openRuntime(ctx, st, name, lenses)
+		rs.openRuntime(ctx, st, name)
 	}
 	// Fail closed if the default runner is broken — it's the one runtime the drain can't
 	// proceed without (the always-on default lens + the unified summary ride it), and this
@@ -81,12 +94,12 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 }
 
 // openRuntime mints + Opens one runtime, recording either its MineFunc or a broken marker.
-// The cfg it mints with carries this runtime's model union so the runner validates every
-// model its lenses use.
-func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name string, lenses []*lens.Lens) {
+// The cfg it mints with carries only the models this runtime should validate at Open — the
+// configured defaults for the default runtime, none for a cross-runtime one.
+func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name string) {
 	rcfg := rs.cfg
 	rcfg.Runner = name
-	applyModelUnion(&rcfg, name, rs.defaultR, lenses)
+	clearCrossRuntimeModels(&rcfg, name, rs.defaultR)
 
 	runner, err := platform.RunnerForName(name, rcfg)
 	if err != nil {
@@ -181,13 +194,20 @@ func (e *runnerDownError) Error() string {
 // need Open's prewarm to not choke on a wrong-runtime default model. The per-lens models
 // themselves are passed per-call (ModelFor), and OpenCode's server accepts any configured
 // model per-call, so prewarming the default models is sufficient for Open to succeed.
-func applyModelUnion(rcfg *store.Config, name, defaultRunner string, lenses []*lens.Lens) {
+// clearCrossRuntimeModels blanks the configured default stage models when minting a runner for a
+// NON-default runtime, because a model name is only valid on its own runtime: passing the
+// Claude-side default to an OpenCode runner would make its Open-time validation reject a name that
+// was never meant for it. The runner then falls back to its own default, and per-lens models are
+// supplied per call.
+//
+// Renamed from applyModelUnion, which took a `lenses []*lens.Lens` parameter it never referenced
+// (#148). The name and signature both advertised a union this function has never computed; nothing
+// is lost by dropping them, and a caller can no longer believe passing lenses here achieves
+// anything.
+func clearCrossRuntimeModels(rcfg *store.Config, name, defaultRunner string) {
 	if strings.TrimSpace(name) == strings.TrimSpace(defaultRunner) {
 		return // keep the configured default models; they belong to this runtime
 	}
-	// Non-default runtime: the configured default models are for the wrong runtime. Clear
-	// them so Open's prewarm/validate doesn't reject a cross-runtime model name; the
-	// runner falls back to its own default and per-lens models are supplied per call.
 	rcfg.TriageModel = ""
 	rcfg.DistillModel = ""
 }

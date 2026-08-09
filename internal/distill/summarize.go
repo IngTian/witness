@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -138,6 +139,12 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	}
 
 	var portrait strings.Builder
+	// failures collects per-lens errors so ONE bad lens cannot starve the others (#148); they are
+	// joined and returned at the end. stalePortrait records that at least one section fell back to
+	// a prior summary, which is what suppresses the signature stamp below — otherwise a portrait
+	// built partly from stale sections would be vouched for as current and never rebuilt.
+	var failures []error
+	stalePortrait := false
 	for _, l := range lenses {
 		ln := byName[l]
 		model := ModelFor(sm.Config, ln, PhaseReview)
@@ -157,17 +164,39 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		}
 
 		md, err := sm.runFor(ln)(ctx, model, sm.LensPrompt, rendered)
+		if err == nil && strings.TrimSpace(md) == "" {
+			// Never persist an empty summary (#148). The skip above tolerates an empty prior file
+			// (it regenerates), but nothing stopped this from WRITING one — replacing a good
+			// narrative with a blank and stamping a signature that vouches for it.
+			err = fmt.Errorf("the model returned an empty summary")
+		}
+		if err == nil {
+			if werr := sm.Store.WriteProfile(l, md); werr != nil {
+				err = fmt.Errorf("write profile: %w", werr)
+			}
+		}
 		if err != nil {
-			return fmt.Errorf("summarize lens %s: %w", l, err)
-		}
-		// Never persist an empty summary (#148). The skip above tolerates an empty prior file
-		// (it regenerates), but nothing stopped this from WRITING one — replacing a good
-		// narrative with a blank and stamping a signature that vouches for it.
-		if strings.TrimSpace(md) == "" {
-			return fmt.Errorf("summarize lens %s: the model returned an empty summary; keeping the prior one", l)
-		}
-		if err := sm.Store.WriteProfile(l, md); err != nil {
-			return fmt.Errorf("write profile %s: %w", l, err)
+			// FAULT-ISOLATED per lens (#148). This used to `return` on the first failure, so one
+			// lens with a typo'd model, an exhausted provider, or a broken runner starved every
+			// LATER lens and the cross-lens portrait too — none of them were attempted, and the
+			// only trace was a single swallowed Warn from the caller.
+			//
+			// Collect and continue instead. The failure is still surfaced (joined and returned at
+			// the end, so a persistently failing model stays visible) but it no longer decides
+			// whether unrelated lenses get summarized. This mirrors what reapOrphanProfiles
+			// already does with a failed enumeration: degrade, don't abort the review.
+			failures = append(failures, fmt.Errorf("summarize lens %s: %w", l, err))
+			// Fall back to the PRIOR summary for the portrait, when there is one. Omitting the
+			// lens entirely would silently produce a cross-lens portrait that does not mention
+			// it — and then STAMP that portrait as current, so the gap would persist until the
+			// facets changed again. A slightly stale section is honest; a silently missing one is
+			// not. With no prior summary the lens is simply absent from this portrait, which is
+			// the same state a brand-new lens is in.
+			if prev, ok, _ := sm.Store.ReadProfile(l); ok && prev != "" {
+				fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, prev)
+				stalePortrait = true
+			}
+			continue
 		}
 		// Stamp the signature only AFTER the summary is safely on disk, so a crash
 		// between write and stamp just regenerates next time (never skips a stale file).
@@ -219,7 +248,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	}
 	umd, err := sm.Run(ctx, unifiedModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {
-		return fmt.Errorf("summarize unified: %w", err)
+		return errors.Join(append(failures, fmt.Errorf("summarize unified: %w", err))...)
 	}
 	// Refuse to persist an EMPTY summary at all (the other half of #148). Writing it would
 	// replace a good portrait with a blank one and — with the signature stamped — vouch for the
@@ -228,14 +257,23 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// the caller reports it, so a model that keeps refusing is visible instead of looking like
 	// an archive that has nothing to say.
 	if strings.TrimSpace(umd) == "" {
-		return fmt.Errorf("summarize unified: the model returned an empty summary; keeping the prior portrait")
+		return errors.Join(append(failures,
+			fmt.Errorf("summarize unified: the model returned an empty summary; keeping the prior portrait"))...)
 	}
 	if err := sm.Store.WriteProfile(store.ProfileUnified, umd); err != nil {
-		return err
+		return errors.Join(append(failures, err)...)
 	}
-	// Stamp after the write succeeds (same crash-safety as the per-lens stamp).
-	_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), unifiedSig)
-	return nil
+	// Stamp after the write succeeds (same crash-safety as the per-lens stamp) — but ONLY when
+	// every section is current. A portrait containing a fallback section is correct to serve and
+	// wrong to vouch for: stamping it would match the signature next pass and skip the rebuild, so
+	// a transient model failure would freeze the stale section in place until the facets happened
+	// to change again. Leaving the signature unstamped costs one regeneration and self-heals.
+	if !stalePortrait {
+		_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), unifiedSig)
+	}
+	// Report the per-lens failures now that everything that COULD be summarized has been. The
+	// caller logs this; the profiles that succeeded are already durable.
+	return errors.Join(failures...)
 }
 
 // deleteProfileAndSignature removes a profile file that has stopped being applicable and
