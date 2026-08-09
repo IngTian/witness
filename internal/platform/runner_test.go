@@ -34,27 +34,10 @@ func TestRunnerFor(t *testing.T) {
 	}
 }
 
-// Neither built-in runner sweeps process-global state on Close. OpenCode now owns
-// a private runtime DB, so closing a preview runner cannot delete a worker's fork.
-func TestRunnerSweepsOnClose(t *testing.T) {
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st, err := store.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer st.Close()
-
-	cases := map[string]bool{"claude": false, "opencode": false}
-	for name, want := range cases {
-		r, err := platform.RunnerFor(st, store.Config{Runner: name})
-		if err != nil {
-			t.Fatalf("RunnerFor %q: %v", name, err)
-		}
-		if got := platform.RunnerSweepsOnClose(r); got != want {
-			t.Fatalf("RunnerSweepsOnClose(%q) = %v, want %v", name, got, want)
-		}
-	}
-}
+// (TestRunnerSweepsOnClose used to live here. It asserted that BOTH built-in runners return false —
+// i.e. it pinned the very fact that made the SweepsOnCloser capability unreachable. The capability is
+// gone from the port; see platform.Runner for why the shared-DB sweep it reported on no longer
+// exists.)
 
 // InvocationHint distinguishes the two runners for doctor/diagnostics.
 func TestRunnerInvocationHint(t *testing.T) {

@@ -17,7 +17,7 @@ import (
 )
 
 func TestBuildOpenCodeServeCmdIsolation(t *testing.T) {
-	cmd := buildOpenCodeServeCmd(context.Background(), 12345, "secret")
+	cmd := buildOpenCodeServeCmdIn(context.Background(), "", 12345, "secret")
 	for _, want := range []string{"serve", "--pure", "--hostname", "127.0.0.1", "--port", "12345"} {
 		if !slices.Contains(cmd.Args, want) {
 			t.Fatalf("missing %q in args: %v", want, cmd.Args)
@@ -140,7 +140,7 @@ func TestBuildOpenCodeServeCmdDrivesPort(t *testing.T) {
 	procCtl = fake
 	defer func() { procCtl = prev }()
 
-	cmd := buildOpenCodeServeCmd(context.Background(), 12345, "secret")
+	cmd := buildOpenCodeServeCmdIn(context.Background(), "", 12345, "secret")
 	if len(fake.Bound) != 1 || fake.Bound[0] != cmd {
 		t.Fatalf("buildOpenCodeServeCmd did not call BindToParent on the serve cmd: %+v", fake.Bound)
 	}

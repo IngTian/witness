@@ -148,10 +148,6 @@ type Queue interface {
 // replace the L2 facet profile, and stamp the review cadence.
 type ReviewStore interface {
 	ReadFacets() ([]Facet, error)
-	ReadObservationsLite(lens string) ([]Observation, error)
-	// ReadObservationsSince is the incremental fold read: obs for one lens with
-	// seq > sinceRowid, ts-ordered, embeddings stripped (issue #16).
-	ReadObservationsSince(lens string, sinceRowid int64) ([]Observation, error)
 	// ReadObservationsSinceOrdered is the WINDOWED-fold read (#123): same but SEQ-
 	// ordered and carrying each obs's seq (in Observation.Rowid), so windows are
 	// contiguous seq ranges (seq is a monotonic AUTOINCREMENT, never reused — #125).

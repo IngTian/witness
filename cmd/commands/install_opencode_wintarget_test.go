@@ -219,14 +219,8 @@ func TestWindowsResolverDoesNotReturnTheBashShim(t *testing.T) {
 	}
 }
 
-// The Unix behavior must be UNCHANGED — this issue must not alter the shim path that has
-// been shipping, or every existing Unix install would break on re-wire.
-func TestUnixOpenCodeStillBakesTheShim(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Unix-only expectation")
-	}
-	src := opencodeplugin.Source("/repo/hooks/witness.sh")
-	if !strings.Contains(src, `globalThis.WITNESS_SHIM = "/repo/hooks/witness.sh"`) {
-		t.Error("the Unix plugin must still bake the shim path verbatim")
-	}
-}
+// (TestUnixOpenCodeStillBakesTheShim used to live here. Its single assertion — that Source()
+// bakes "/repo/hooks/witness.sh" verbatim — is asserted IDENTICALLY, with additional checks, by
+// TestOpenCodePluginSourceBakesShim in install_test.go, which is NOT GOOS-gated. This copy was
+// skipped on Windows and redundant everywhere else, so it protected nothing that the ungated
+// test does not already protect.)

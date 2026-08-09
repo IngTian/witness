@@ -278,7 +278,7 @@ That's the whole thing — idempotent, safe to re-run after a `git pull`. The ta
 is required: the script builds the binary, provisions the archive, and binds the matching
 distillation runtime into `config.toml` (`runner = claude` or `runner = opencode`). It also
 offers to add a `witness` command to your PATH (for `witness profile`, `doctor`, `lens`,
-`import`, `distill`, `cleanup`, `ingest`). Equivalent `make` targets exist (`make install`,
+`import`, `status`, `cleanup`, `ingest`). Equivalent `make` targets exist (`make install`,
 `make install-opencode`, `make build`, `make doctor`, `make uninstall`,
 `make uninstall-opencode`, `make clean`). To remove the editor integration: `make uninstall`
 or `make uninstall-opencode` (strips wiring; your data is untouched).

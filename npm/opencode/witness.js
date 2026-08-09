@@ -35,7 +35,7 @@ function warnIfInert() {
 function spawnWitness(args, payload) {
   if (!WITNESS_BIN || process.env.WITNESS_WORKER === "1") return
   try {
-    const env = { ...process.env, WITNESS_OPENCODE_PLUGIN: "1" }
+    const env = { ...process.env }
     env.WITNESS_ASSETS ||= modelDir(PACKAGE_ROOT)
     // Point the binary at THIS package's bundled prompts. The binary lives in a
     // separate per-platform package, so its exe-relative probe can't find them —

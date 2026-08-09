@@ -21,7 +21,7 @@ make test         # CGO_ENABLED=0 go test ./...
 make vet          # CGO_ENABLED=0 go vet ./...
 make fmt          # gofmt -w internal cmd
 make doctor       # build + run the embedder/model/config health check
-make install claude      # (or: opencode) wire hooks/plugin + MCP + bind runner
+make install             # (or: make install-opencode) wire hooks/plugin + MCP + bind runner
 make build-all    # cross-compile darwin+linux+windows, amd64+arm64
 make package-windows     # self-contained Windows zips (exe + prompts + model)
 ```

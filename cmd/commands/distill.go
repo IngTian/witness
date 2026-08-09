@@ -75,7 +75,13 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 // below stays the authority on success either way.
 func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs bool) error {
 	if strings.TrimSpace(sinceValue) != "" || strings.TrimSpace(untilValue) != "" {
-		return fmt.Errorf("--all drains the entire backlog and cannot be combined with --since/--until")
+		// Name the flag the USER typed and the thing that actually works. This used to say
+		// "--all drains the entire backlog and cannot be combined with --since/--until", naming a
+		// `--all` flag that does not exist on `witness worker run` — so a user who typed
+		// `worker run --since 7d` (a flag this command registers and documents) got an error about
+		// a flag they had never heard of, with no hint that adding --detach makes it work.
+		return fmt.Errorf("the foreground drain covers the whole backlog and cannot be limited with " +
+			"--since/--until; add --detach to drain a time range in the background")
 	}
 	if !quiet {
 		fmt.Println("distilling the full backlog in the foreground; this may take a while — run `witness status` in another shell to watch")

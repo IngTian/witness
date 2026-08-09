@@ -96,6 +96,12 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 // openRuntime mints + Opens one runtime, recording either its MineFunc or a broken marker.
 // The cfg it mints with carries only the models this runtime should validate at Open — the
 // configured defaults for the default runtime, none for a cross-runtime one.
+// st is currently UNREAD here, and that is a deliberate keep rather than an oversight: openRuntime
+// resolves via platform.RunnerForName (name + cfg), while the sibling entry point platform.RunnerFor
+// takes a store.RunnerResolver to apply the runner-precedence ladder. Any per-runtime resolution that
+// needs the store lands here. Dropping it would touch six call sites to save one parameter, and the
+// judgement is that the symmetry with RunnerFor is worth more than the line — unlike the lenses
+// parameter removed in #148, which advertised a model UNION that was never computed.
 func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name string) {
 	rcfg := rs.cfg
 	rcfg.Runner = name

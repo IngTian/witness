@@ -10,9 +10,15 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// --all means the ENTIRE backlog; combining it with a time bound is contradictory,
-// so cmdDistillBackfill rejects it before doing any work. (A bounded backfill is
-// just `distill start --since ...`, the background path.)
+// The foreground drain covers the ENTIRE backlog, so combining it with a time bound is
+// contradictory and is rejected before any work happens.
+//
+// The assertion is on the ACTIONABLE half of the message, not on a phrase. It used to require
+// "cannot be combined", which the error carried alongside a reference to a `--all` flag that does
+// not exist on `witness worker run` — so a user who typed `worker run --since 7d` (a flag the
+// command registers and documents) got an error naming a flag they had never seen, with no hint
+// that --detach makes it work. Pinning "--detach" instead means the message must keep telling the
+// user what to do, which is the property worth guarding.
 func TestDistillBackfillRejectsTimeBounds(t *testing.T) {
 	for _, tc := range []struct{ since, until string }{
 		{"7d", ""},
@@ -23,7 +29,7 @@ func TestDistillBackfillRejectsTimeBounds(t *testing.T) {
 		if err == nil {
 			t.Fatalf("--all with since=%q until=%q should error", tc.since, tc.until)
 		}
-		if !strings.Contains(err.Error(), "cannot be combined") {
+		if !strings.Contains(err.Error(), "--detach") {
 			t.Fatalf("unexpected error for since=%q until=%q: %v", tc.since, tc.until, err)
 		}
 	}

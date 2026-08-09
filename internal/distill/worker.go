@@ -113,12 +113,25 @@ type Worker struct {
 // else the single default Run. Centralizes the fallback so mine() (and any future call
 // site) never has to special-case a nil RunFor.
 func (w *Worker) runFor(ln *lens.Lens) MineFunc {
-	if w.RunFor != nil {
-		if fn := w.RunFor(ln); fn != nil {
+	return resolveRunner(w.RunFor, ln, w.Run)
+}
+
+// resolveRunner picks the MineFunc for one lens: the per-lens resolver when it is wired AND returns
+// something, else the stage's single default.
+//
+// Shared by all three stages (mine, review, summarize) because it was written three times, byte for
+// byte, with only the receiver differing — Worker.runFor, Reviewer.runnerFor, and Summarizer.runFor.
+// The double nil check is the substance, and it is easy to get subtly wrong in one copy: the resolver
+// FUNCTION may be absent (stage wired without per-lens routing), and separately the resolver may
+// RETURN nil for a lens it does not route. Either case must fall back to the default rather than
+// invoking a nil MineFunc, which would panic inside a drain.
+func resolveRunner(perLens func(*lens.Lens) MineFunc, ln *lens.Lens, fallback MineFunc) MineFunc {
+	if perLens != nil {
+		if fn := perLens(ln); fn != nil {
 			return fn
 		}
 	}
-	return w.Run
+	return fallback
 }
 
 // SessionMining is the result of the MAP half of a distillation pass: everything

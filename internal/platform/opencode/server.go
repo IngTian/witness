@@ -93,10 +93,12 @@ func servePIDPath(runtimeRoot string) string {
 //     Windows it succeeds exactly when the pid IS live — i.e. exactly in the reuse case.
 //   - The record is MACHINE-WIDE, not per-process. runtimeRoot is <store root>/runtime
 //     (store/config.go), so every witness process shares this one file. A live sibling's
-//     serve therefore matches any identity check based on process shape alone, and the
-//     OpenCode runner reports SweepsOnClose()==false, which means `witness lens try` opens a
-//     runner WITHOUT taking WorkerLock — so this can and does run concurrently with a
-//     draining worker.
+//     serve therefore matches any identity check based on process shape alone, and `witness
+//     lens try` opens a runner WITHOUT taking WorkerLock — so this can and does run
+//     concurrently with a draining worker. (That lock-free preview used to be conditional on a
+//     SweepsOnCloser capability; it is now unconditional, because the shared-DB sweep the
+//     capability reported on was deleted with the private database. The hazard below is
+//     unchanged either way — it is what makes the lock-free preview SAFE.)
 //
 // Owner is the pid of the WITNESS process that started the serve, and it is the field that
 // separates the two cases: a serve whose owner is still alive is a live sibling's, not an
@@ -210,15 +212,13 @@ func serveAnswersOurPassword(rec serveRecord) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// StartOpenCodeServer starts a private OpenCode HTTP server for witness
-// distillation. The supplied models are validated once up front; individual Run
-// calls may then use any of those configured models without re-running
-// `opencode models`.
-func StartOpenCodeServer(ctx context.Context, models ...string) (*OpenCodeServer, error) {
-	return StartOpenCodeServerIn(ctx, "", models...)
-}
-
 // StartOpenCodeServerIn starts serve with a witness-owned OpenCode database.
+//
+// There is no runtimeRoot-less variant. A StartOpenCodeServer wrapper existed that passed "" — no
+// callers, and the empty root means "use the AMBIENT OpenCode database", i.e. opt out of the private
+// per-witness database that #119 made the isolation boundary. A shorter name that quietly runs
+// distillation against the user's own opencode.db is a trap, not a convenience, so it is gone;
+// callers pass the root explicitly.
 func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...string) (*OpenCodeServer, error) {
 	if err := ValidateOpenCodeModelsIn(ctx, runtimeRoot, models...); err != nil {
 		return nil, err
@@ -836,17 +836,16 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 	return nil, fmt.Errorf("opencode %s %s failed: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))
 }
 
-// ValidateOpenCodeModels ensures configured OpenCode model names are available
-// from `opencode models`. Empty model strings are valid and mean "use OpenCode's
-// default". Prefer ValidateOpenCodeModelsIn, which keeps the probe off the user's DB.
-func ValidateOpenCodeModels(ctx context.Context, models ...string) error {
-	return ValidateOpenCodeModelsIn(ctx, "", models...)
-}
-
-// ValidateOpenCodeModelsIn is ValidateOpenCodeModels with the witness-owned runtime
-// root, so the `opencode models` probe runs against the ISOLATED database instead of
-// the user's (it opens its OPENCODE_DB read-write). runtimeRoot "" keeps the ambient
-// env, for callers that have no runtime root yet.
+// ValidateOpenCodeModelsIn ensures configured OpenCode model names are available from
+// `opencode models`, running the probe against the witness-owned runtime root rather than the user's
+// database (the probe opens its OPENCODE_DB read-write). Empty model strings are valid and mean "use
+// OpenCode's default". runtimeRoot "" keeps the ambient env, for callers that have no runtime root
+// yet.
+//
+// Its own doc used to say "prefer ValidateOpenCodeModelsIn" — advice printed on the very wrapper it
+// was steering people away from. That wrapper (ValidateOpenCodeModels, which passed "") had no
+// callers and is removed; a doc comment recommending against itself is a sign the shape was already
+// understood to be wrong.
 func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ...string) error {
 	if err := ValidateOpenCodeCapability(ctx); err != nil {
 		return err
@@ -996,10 +995,6 @@ func modelHint(models []string) string {
 		hint += ", ..."
 	}
 	return hint
-}
-
-func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec.Cmd {
-	return buildOpenCodeServeCmdIn(ctx, "", port, password)
 }
 
 func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, password string) *exec.Cmd {

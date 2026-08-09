@@ -215,64 +215,18 @@ func (o *obsIO) DeleteObservation(obsID string) (bool, error) {
 	return true, nil
 }
 
-// ReadObservationsLite is ReadObservations without decoding embeddings — for
-// scans that never use the vectors (the reviewer, which slims them off anyway),
-// avoiding loading 384 float32s per row across the whole corpus.
-func (o *obsIO) ReadObservationsLite(lens string) ([]Observation, error) {
-	q := `SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
-	        FROM observations`
-	var args []any
-	if lens != "" {
-		q += ` WHERE lens = ?`
-		args = append(args, lens)
-	}
-	q += ` ORDER BY seq`
-	rows, err := o.db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Observation
-	for rows.Next() {
-		var ob Observation
-		if err := rows.Scan(&ob.ID, &ob.TS, &ob.Session, &ob.Lens, &ob.Dimension, &ob.Observation,
-			&ob.Evidence, &ob.Poignancy, &ob.Source); err != nil {
-			return nil, err
-		}
-		out = append(out, ob)
-	}
-	return out, rows.Err()
-}
-
-// ReadObservationsSince is the incremental-fold read (issue #16): the observations
-// for one lens with seq > sinceRowid, embeddings stripped (like ReadObservationsLite),
-// in VALID-TIME order (ts, then seq as a stable tiebreak). The seq cursor is the
-// monotonic "new since last review" frontier (advanced by StampReviewLens); the ts
-// sort is what lets the reviewer fold "the stance as it was at that moment," since
-// under the parallel commit-as-ready drain (#56 B3) seq order is NOT valid-time
-// order. The window is one small ReviewEvery batch, so the ts-sort is trivial — this
-// is what bounds the reviewer input by "what's new" instead of the whole corpus.
-func (o *obsIO) ReadObservationsSince(lens string, sinceRowid int64) ([]Observation, error) {
-	rows, err := o.db.Query(
-		`SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
-		   FROM observations
-		  WHERE lens = ? AND seq > ?
-		  ORDER BY ts, seq`, lens, sinceRowid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Observation
-	for rows.Next() {
-		var ob Observation
-		if err := rows.Scan(&ob.ID, &ob.TS, &ob.Session, &ob.Lens, &ob.Dimension, &ob.Observation,
-			&ob.Evidence, &ob.Poignancy, &ob.Source); err != nil {
-			return nil, err
-		}
-		out = append(out, ob)
-	}
-	return out, rows.Err()
-}
+// (ReadObservationsLite and ReadObservationsSince used to live here — 96 lines, both with zero
+// production callers.
+//
+// Lite skipped embedding decode for scans that never used the vectors; its caller was the reviewer,
+// which moved to the incremental delta read and no longer scans the whole corpus at all.
+// ReadObservationsSince was the #16 incremental fold read, superseded by ReadObservationsSinceOrdered
+// when the windowed fold needed SEQ order rather than ts order — advancing a watermark over a
+// ts-ordered window can skip a low-seq/high-ts observation, which is exactly the bug the Ordered
+// variant exists to prevent. Since's only remaining caller was a test that existed solely to test it.
+//
+// Both were still declared on the ReviewStore interface, so they were kept compiling by the interface
+// rather than by any user.)
 
 // ReadObservationsSinceOrdered is the WINDOWED-fold read (issue #123): obs for one lens
 // with seq > since, in SEQ order, each carrying its seq (in Observation.Rowid). Seq order

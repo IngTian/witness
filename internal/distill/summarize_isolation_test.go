@@ -63,7 +63,7 @@ func TestOneFailingLensDoesNotStarveTheOthers(t *testing.T) {
 		}
 	}
 	// And the portrait was still built.
-	if !containsStr(called, "UNIFIED") {
+	if !contains(called, "UNIFIED") {
 		t.Errorf("the cross-lens portrait was never attempted; calls=%v", called)
 	}
 	if md, ok, _ := s.ReadProfile(store.ProfileUnified); !ok || md != "PORTRAIT" {
@@ -163,11 +163,5 @@ func TestAPortraitBuiltFromAStaleSectionIsNotStamped(t *testing.T) {
 	}
 }
 
-func containsStr(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
-}
+// (containsStr used to live here — my own duplicate of `contains` in lens_parity_test.go, the same
+// eight-line scan in the same package. Removed; the call site uses the existing helper.)
