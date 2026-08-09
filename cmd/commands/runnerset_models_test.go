@@ -43,24 +43,46 @@ func TestCrossRuntimeModelsAreClearedButTheDefaultRuntimeKeepsThem(t *testing.T)
 	}
 }
 
-// The model-union claim must not come back without an implementation (#148).
+// The dead `lenses` parameter must not come back (#148).
 //
-// The old applyModelUnion took a `lenses` parameter it never referenced, while its doc comment
-// promised the runner validated "the UNION of that runtime's per-lens models". The claim described
-// behavior that never existed — which is worse than an absent feature, because a reader who trusts
-// it stops looking. This scan fails if that promise reappears in the file without the word
-// documenting that it is deliberately not implemented.
-func TestNoUnimplementedModelUnionClaim(t *testing.T) {
+// applyModelUnion took a `lenses []*lens.Lens` it never referenced, while its doc promised the runner
+// validated "the UNION of that runtime's per-lens models" — behavior that never existed. Renaming it
+// to clearCrossRuntimeModels and dropping the parameter is the fix; this guards the shape.
+//
+// IT GUARDS THE SIGNATURE, not a comment phrase. My first version searched the source for that
+// promise string and returned early when absent — and the same commit that removed the promise made
+// the search miss, so the assertion could never run. `grep -c "UNION of that runtime's per-lens
+// models" runnerset.go` returned 0 immediately after I wrote it: a test about unimplemented promises
+// that was itself a dead promise, written one hour after I documented this exact failure mode.
+//
+// A signature is the right thing to pin because it is what the defect WAS: a parameter that exists
+// only to be ignored. Prose can be reworded; `func clearCrossRuntimeModels(rcfg, name, defaultRunner)`
+// either takes lenses or it does not.
+func TestModelClearingTakesNoLensesParameter(t *testing.T) {
 	src := readSource(t, "runnerset.go")
-	i := strings.Index(src, "UNION of that runtime's per-lens models")
+
+	i := strings.Index(src, "func clearCrossRuntimeModels(")
 	if i < 0 {
-		return // the claim is gone entirely; nothing to guard
+		t.Fatal("clearCrossRuntimeModels is gone; if it was renamed, re-point this guard at the new " +
+			"name rather than deleting it — the invariant is that model clearing takes no lens list")
 	}
-	// If the phrase is present, it must be in a passage that says it is NOT implemented.
-	window := src[max0(i-800):min(len(src), i+800)]
-	if !strings.Contains(window, "does NOT") && !strings.Contains(window, "NOT IMPLEMENTED") {
-		t.Error("runnerset.go claims the runner validates the UNION of per-lens models. Either " +
-			"implement it (StartOpenCodeServerIn already takes variadic models) or keep the note " +
-			"saying it is deliberately not implemented — an unqualified claim stops anyone looking.")
+	sig := src[i : i+strings.Index(src[i:], ")")+1]
+	if strings.Contains(sig, "lens.") || strings.Contains(sig, "lenses") {
+		t.Errorf("model clearing must NOT take a lens list: %s\n"+
+			"That parameter existed for a per-lens model UNION that was never computed. Either "+
+			"implement the union (StartOpenCodeServerIn already accepts variadic models) or keep the "+
+			"parameter out — a parameter that exists only to be ignored is how the original defect "+
+			"survived review.", sig)
+	}
+
+	// openRuntime carried the same dead parameter, purely to forward it here.
+	j := strings.Index(src, "func (rs *runnerSet) openRuntime(")
+	if j < 0 {
+		t.Fatal("openRuntime not found")
+	}
+	osig := src[j : j+strings.Index(src[j:], ")")+1]
+	if strings.Contains(osig, "lenses") {
+		t.Errorf("openRuntime must not take a lens list either — it only ever forwarded it to the "+
+			"clearing function: %s", osig)
 	}
 }

@@ -995,10 +995,6 @@ func modelHint(models []string) string {
 	return hint
 }
 
-func buildOpenCodeServeCmd(ctx context.Context, port int, password string) *exec.Cmd {
-	return buildOpenCodeServeCmdIn(ctx, "", port, password)
-}
-
 func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, password string) *exec.Cmd {
 	cmd := openCodeCommand(ctx, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
 	cmd.Dir = os.TempDir()

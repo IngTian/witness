@@ -46,9 +46,5 @@ func TestStderrExcerptLeavesNormalStderrAlone(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// (A local `min` used to live here, shadowing Go's builtin — available since 1.21, and go.mod
+// declares 1.25.1. Removed; the call site resolves to the builtin.)

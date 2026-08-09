@@ -40,12 +40,7 @@ type Reviewer struct {
 // runnerFor returns the MineFunc for a lens's review: the per-lens runner via RunnerFor
 // when wired, else the single default Runner.
 func (r *Reviewer) runnerFor(ln *lens.Lens) MineFunc {
-	if r.RunnerFor != nil {
-		if fn := r.RunnerFor(ln); fn != nil {
-			return fn
-		}
-	}
-	return r.Runner
+	return resolveRunner(r.RunnerFor, ln, r.Runner)
 }
 
 // reviewedFacet is what the review prompt returns per facet it asserts.
@@ -198,7 +193,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
 			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
 		})
-	case rf.Contradicts && !sameValue(cur.Value, rf.Value):
+	case rf.Contradicts && cur.Value != rf.Value:
 		// Sustained contradiction => record a change arc: close the old, open the new.
 		// (The "sustained" judgment is the review prompt's job; code just applies it.)
 		f.Versions[len(f.Versions)-1].ValidTo = nowStr
@@ -208,7 +203,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		})
 	default:
 		// Same value reaffirmed: reinforce (raise confidence, refresh provenance).
-		cur.Confidence = clampConf(maxF(cur.Confidence, rf.Confidence))
+		cur.Confidence = clampConf(max(cur.Confidence, rf.Confidence))
 		cur.BecauseOf = mergeIDs(cur.BecauseOf, rf.BecauseOf)
 	}
 	return true
@@ -365,13 +360,10 @@ func clampConf(c float64) float64 {
 	}
 	return c
 }
-func maxF(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-func sameValue(a, b string) bool { return a == b }
+
+// maxF and sameValue used to live here. maxF predated Go 1.21's builtin `max` (go.mod is 1.25.1) and
+// sameValue was `return a == b` — each with exactly one caller, so both were indirection that made
+// the call sites harder to read rather than easier.
 func mergeIDs(a, b []string) []string {
 	seen := map[string]bool{}
 	out := []string{}

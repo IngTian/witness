@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -194,16 +195,10 @@ func TestValidateRunnerNameComesFromTheRegistry(t *testing.T) {
 	if err := platform.ValidateRunnerName("file"); err == nil {
 		t.Error("the `file` platform has no RunnerProvider, so it must not validate as a runner")
 	}
-	if slicesContains(names, "file") {
+	if slices.Contains(names, "file") {
 		t.Error("RunnerNames listed `file`, which cannot run a model")
 	}
 }
 
-func slicesContains(haystack []string, needle string) bool {
-	for _, h := range haystack {
-		if h == needle {
-			return true
-		}
-	}
-	return false
-}
+// (slicesContains used to live here — a hand-rolled membership scan with one call site, which the
+// stdlib has provided as slices.Contains since Go 1.21. Removed.)

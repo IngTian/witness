@@ -110,10 +110,6 @@ func shellInvocation(shim string) hookInvocation {
 }
 func execInvocation(exe string) hookInvocation { return hookInvocation{execForm: true, target: exe} }
 
-// mcpTarget is the executable settings.json / `claude mcp add` should invoke for
-// the MCP server: the shim on Unix, the installed exe on Windows.
-func (inv hookInvocation) mcpTarget() string { return inv.target }
-
 // shellQuote single-quotes a path for safe use in a shell-executed hook command,
 // POSIX-escaping any embedded single quote (close the quote, backslash-escape the
 // quote, reopen). Claude Code runs hook commands through a shell, so an absolute
@@ -566,7 +562,12 @@ func cmdInstallClaude() error {
 	// bounded — see claudeMCPRemoveTimeout for why: an unbounded `claude` child hung
 	// `witness wire` forever and orphaned itself to PID 1, unreapable.
 	if out, _ := claudeCLIOutput("mcp", "list"); !mcpServerRegistered(out, "witness") {
-		if err := claudeCLIRun("mcp", "add", "-s", "user", "witness", inv.mcpTarget(), "mcp"); err != nil {
+		if err := claudeCLIRun("mcp", "add", "-s", "user", "witness", // inv.target is what settings.json / `claude mcp add` should invoke for the MCP
+			// server: the shim on Unix, the installed exe on Windows. (This was an mcpTarget()
+			// method that returned exactly this field; the per-platform choice happens where the
+			// hookInvocation is CONSTRUCTED, not on read, so the accessor added a name without
+			// adding a decision.)
+			inv.target, "mcp"); err != nil {
 			fmt.Fprintf(os.Stderr, "witness: could not register MCP server (is `claude` on PATH?): %v\n", err)
 		} else {
 			fmt.Println("MCP server 'witness' registered")

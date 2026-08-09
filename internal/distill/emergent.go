@@ -517,7 +517,9 @@ func (r *EmergentReviewer) verify(ctx context.Context, ln *lens.Lens, c Candidat
 	}
 	// The verify judges ONE cluster; take the first well-formed facet it returns.
 	for _, rf := range arr {
-		if strings.TrimSpace(rf.Dimension) != "" && strings.TrimSpace(rf.Key) != "" && strings.TrimSpace(rf.Value) != "" {
+		// wellFormed (reviewer.go) is the SAME rule on the SAME type — call it rather than
+		// re-inlining, so the two paths cannot drift on what "well-formed" means.
+		if wellFormed(rf) {
 			return rf, true, nil
 		}
 	}

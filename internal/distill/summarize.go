@@ -62,12 +62,8 @@ type Summarizer struct {
 // runFor returns the SummarizeFunc for a lens: the per-lens runner via RunFor when wired,
 // else the default Run.
 func (sm *Summarizer) runFor(ln *lens.Lens) SummarizeFunc {
-	if sm.RunFor != nil {
-		if fn := sm.RunFor(ln); fn != nil {
-			return fn
-		}
-	}
-	return sm.Run
+	// SummarizeFunc IS MineFunc (a type alias), so the shared resolver applies unchanged.
+	return resolveRunner(sm.RunFor, ln, sm.Run)
 }
 
 // Summarize regenerates each per-lens summary from current facets, then the unified
