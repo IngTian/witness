@@ -1,7 +1,7 @@
 {
   "name": "witness",
   "description": "Quietly captures your Claude Code sessions and distills how your thinking, habits, and knowledge change over time — a dated growth archive with provenance, served over MCP. Also ingests any text corpus (notes, articles, market news) to track how THAT changed instead. Local, single Go binary.",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "author": {
     "name": "Zeying Tian",
     "url": "https://github.com/IngTian"

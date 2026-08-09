@@ -4,7 +4,7 @@
   "title": "witness",
   "description": "Distills a text stream into a dated history of how its subject changed — your coding sessions, or any corpus (news, notes, docs). Bi-temporal facets with provenance, served locally over MCP.",
   "websiteUrl": "https://github.com/IngTian/witness#readme",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "repository": {
     "url": "https://github.com/IngTian/witness",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@witness-ai/opencode",
-      "version": "0.7.7",
+      "version": "0.7.8",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
