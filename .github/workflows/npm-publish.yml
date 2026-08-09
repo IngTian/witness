@@ -90,6 +90,17 @@ jobs:
           check "server.json" "$(node -p "require('./server.json').version")"
           check "server.json packages[0]" "$(node -p "require('./server.json').packages[0].version")"
 
+          # The MCP Registry caps server.json's description at 100 characters and rejects a longer
+          # one with a 422 — AFTER npm has already published, so the run fails with the packages live
+          # and the registry entry missing. That happened on v0.7.8 (186 chars). Fail HERE instead,
+          # before anything is published, where the fix is one edit and a re-tag.
+          desc_len="$(node -p "require('./server.json').description.length")"
+          if [ "$desc_len" -gt 100 ]; then
+            echo "server.json description is $desc_len chars; the MCP Registry rejects >100" >&2
+            node -p "require('./server.json').description" >&2
+            exit 1
+          fi
+
       - name: Test and stage packages
         run: |
           npm --prefix npm/opencode run check
