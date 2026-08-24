@@ -90,10 +90,11 @@ func openDB(path string) (*sql.DB, error) {
 // restore, stop witness and copy it into the data dir (or point WITNESS_HOME at
 // its folder).
 //
-// Scope: this snapshots the DATABASE only — L0 raw, L1 observations, L2 facets,
-// config, and the distill queue, i.e. the source of truth. The L4 narrative
-// profile (profile/*.md) is a DERIVED cache regenerated from L2 facets, so it is
-// deliberately NOT exported; after a restore, `witness review` rebuilds it.
+// Scope: this snapshots the DATABASE only — L0 raw, L1 observations, L2 facets and
+// the distill queue. That is the bulk of the archive but NOT all of it: config.toml,
+// the lens definitions under lenses/, and the L4 profile/*.md are plain files beside
+// the database and none of them are in it. Use ExportAll (`export --all`) for a
+// complete backup; see its doc comment for why each of those three matters.
 //
 // dst must not already exist (VACUUM INTO requires a fresh path, and refusing to
 // overwrite avoids clobbering a prior backup); callers pass force to remove an
@@ -102,7 +103,12 @@ func (s *Store) Export(dst string, force bool) error {
 	if dst == "" {
 		return fmt.Errorf("export: destination path is required")
 	}
-	if _, err := os.Stat(dst); err == nil {
+	if fi, err := os.Stat(dst); err == nil {
+		// A directory destination is the --all shape. Say so instead of failing later on
+		// a remove-non-empty-directory error that explains nothing.
+		if fi.IsDir() {
+			return fmt.Errorf("export: %s is a directory; pass a file path for a database-only snapshot, or use --all to write a complete archive there", dst)
+		}
 		if !force {
 			return fmt.Errorf("export: %s already exists (use --force to overwrite)", dst)
 		}

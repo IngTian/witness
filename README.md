@@ -284,7 +284,10 @@ they exist for recovery and debugging, and everything they do also happens autom
   sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates
   (`YYYY-MM-DD`) and do not discard sessions outside the selected range.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
-- `witness export <path>` — write a consistent single-file snapshot of the archive (safe to back up / cloud-sync).
+- `witness export <path>` — write a consistent single-file snapshot of the **database** (safe to back
+  up / cloud-sync). Add `--all` and `<path>` becomes a **directory** holding the complete archive:
+  that snapshot plus `config.toml`, `lenses/` and `profile/`. Use `--all` for backups — see
+  [Your data is yours](#your-data-is-yours).
 - `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
   default data root). Creates the directory structure and database schema. Typically called once per
   machine; `install.sh` handles this for source-checkout users.
@@ -517,18 +520,31 @@ slow model from a stalled one. For more detail, set `WITNESS_LOG_LEVEL=debug` (a
 `error`; anything unrecognized falls back to the `info` default, so a typo can never stop witness
 capturing).
 
-**Backup / sync.** To back the archive up or sync it (iCloud/Dropbox/Drive), use `witness export
-<path>` — it writes a single consistent `.db` snapshot you can point a syncer at. Do **not** sync the
-live data directory directly: the database runs in WAL mode (`.db` + `-wal` + `-shm`), and a syncer
-racing those files can corrupt it. Wire it up yourself, e.g. a cron/launchd job:
+**Backup / sync.** Use `witness export --all <dir>` — it writes a **complete** archive you can point
+a syncer at. Do **not** sync the live data directory directly: the database runs in WAL mode (`.db` +
+`-wal` + `-shm`), and a syncer racing those files can corrupt it. Wire it up yourself, e.g. a
+cron/launchd job:
 
 ```sh
-witness export ~/Dropbox/witness-backup.db --force   # consistent snapshot, safe to sync
+witness export --all ~/Dropbox/witness-backup --force   # complete archive, safe to sync
 ```
 
-To restore, stop witness and copy a snapshot into your data dir as `witness.db` (or set `WITNESS_HOME`
-to its folder), then run `witness worker review` — the snapshot holds the source of truth (raw turns,
-observations, facets); the narrative profile is regenerated from it.
+`--all` matters because only one of the four things in your data directory is the database:
+
+| | in `--all` | in a plain `export` | recoverable without a backup? |
+|---|---|---|---|
+| `witness.db` — raw turns, observations, facets | yes | yes | no |
+| `config.toml` — enabled lenses, runner, models | yes | **no** | reconfigure by hand; until then distillation is silently off |
+| `lenses/` — your lens definitions | yes | **no** | **no** — prompt text is in no database. A bundled lens re-seeds; one you wrote is gone |
+| `profile/` — the narrative | yes | **no** | rebuilt by a review, *except* a hand-edited `unified.md` |
+
+Left out on purpose: `witness.log` (diagnostics), `runtime/` (OpenCode's disposable private runtime),
+and the lock files. Either form runs safely while the worker is writing — no need to stop it.
+
+**Restoring needs no separate command.** An `--all` directory has the same layout as your data
+directory, so either point witness at it in place (`WITNESS_HOME=~/Dropbox/witness-backup`) or, with
+witness stopped, copy its contents into your data dir. A plain database-only snapshot restores the
+same way as `witness.db`, and `witness worker review` rebuilds the narrative from it.
 
 ## License
 
