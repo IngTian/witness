@@ -6,6 +6,8 @@
 ![Single binary](https://img.shields.io/badge/single%20binary-CGO__ENABLED%3D0-informational)
 ![Runtimes](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20OpenCode-8A2BE2)
 
+[![witness MCP server](https://mcprush.com/badge/witness-mcp/card.svg)](https://mcprush.com/to/witness-mcp?ref=badge)
+
 **witness turns a stream of text into a dated record of how its subject changed.** Feed it your AI
 coding sessions and it tracks how *you* think and work. Feed it market commentary, research notes, or
 any document stream and it tracks how *that* changed instead. One pure-Go binary, a local SQLite
