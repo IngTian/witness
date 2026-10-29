@@ -211,7 +211,10 @@ func cmdDoctor(asJSON bool) error {
 			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; `witness config set triage_model <stronger>`, then `witness lens backfill <lens> --fresh`",
 			driftTotal, last)))
 	}
-	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
+	// `witness install` took a <claude|opencode> target before the install/wire split; it is
+	// now Args: cobra.NoArgs, so the old hint names a form that errors. Switching the runner
+	// is `config set runner` — what wire's own help points at — not a re-wire of the editor.
+	fmt.Printf("    %s witness config set runner <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
 	fmt.Printf("    %s witness config set <triage_model|distill_model> <model>  %s\n", dim("↳ set models:  "), dim("(or edit "+st.ConfigPath()+")"))
 
 	fmt.Println()
