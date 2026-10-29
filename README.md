@@ -2,7 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/@witness-ai/opencode?logo=npm&label=%40witness-ai%2Fopencode)](https://www.npmjs.com/package/@witness-ai/opencode)
-[![mcprush](https://img.shields.io/endpoint?url=https%3A%2F%2Fmcprush.com%2Fbadge%2Fwitness-mcp%2Fshields.json)](https://mcprush.com/to/witness-mcp?ref=badge)
 ![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
 ![Single binary](https://img.shields.io/badge/single%20binary-CGO__ENABLED%3D0-informational)
 ![Runtimes](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20OpenCode-8A2BE2)
@@ -308,6 +307,8 @@ DB, no cloud key. Local multilingual (English **and** Chinese) embeddings run pu
 Claude Code auth via `claude -p`; set `runner = opencode` to use a private `opencode serve` runner instead.
 
 ## Install
+
+[![witness MCP server](https://mcprush.com/badge/witness-mcp/card.svg)](https://mcprush.com/to/witness-mcp?ref=badge)
 
 ```sh
 ./install.sh claude    # Claude Code: build, fetch model (~448MB once), wire hooks + MCP
