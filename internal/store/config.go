@@ -62,6 +62,31 @@ type Config struct {
 	// re-reads them, preserving cross-window contradiction), so this is a pure latency
 	// ceiling, never a quality knob. <=0 in config clamps back to the default.
 	ReviewMaxChars int
+	// ReviewFacetClip budgets the OTHER half of the review call — the prior facets — which
+	// ReviewMaxChars never governed. That omission wedged a real archive: a 2,039-facet lens
+	// sent 2,411,507 chars of prior state against a 16,000-char observation budget (99.4% of
+	// the call), `claude -p` refused it outright, and the lens did not fold for 24 days. A
+	// 920,574-char sibling lens was accepted but exceeded the 10-minute wall and was killed.
+	//
+	// This is a per-VALUE clip, not a budget over the whole block: every facet's identity is
+	// always sent in full, because applyFacet keys on lens|dimension|key and a facet hidden
+	// from the prompt is silently minted as a duplicate. Measured over every version pair in
+	// a real archive, real changes diverge from their predecessor within 62 chars on one lens
+	// and within 240 on another (98.7%), because the prompts trained the model to lead with a
+	// changelog verdict — so a head clip keeps the change signal. The residue is covered by
+	// the blind-close re-ask in internal/distill/reviewer.go, not by luck.
+	//
+	// It is a fixed correctness parameter, deliberately NOT derived from a total budget: a
+	// residual clip shrinks as the profile grows and would silently lose change-detection
+	// exactly when there is most history to lose. <=0 restores the old unbounded behaviour.
+	ReviewFacetClip int
+	// ReviewFacetFull caps how many facets are ALSO sent with their full value, chosen as
+	// "has changed before" (len(Versions) > 1), most recently changed first. Version count
+	// beat every alternative selector on measured data: embedding top-K recalled 80.3% at
+	// K=200, recency gave ZERO facets inside 14 days on the lens that mattered, and 88% of
+	// observations sit in a 4-7 poignancy band. It is also free — ReadFacets already loads
+	// every version — and self-tunes per lens (49 of 2,039 on one, 380 of 720 on another).
+	ReviewFacetFull int
 	// EnabledLenses is the set of registered lens names that run on EVERY session
 	// (alongside the always-on "default" lens). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
@@ -82,6 +107,19 @@ const DefaultMineConcurrency = 4
 // A safety ceiling like the 10-min timeout, not a quality dial; err small (too small =
 // slower but correct; too large = reopens the stall).
 const DefaultReviewMaxChars = 16000
+
+// DefaultReviewFacetClip and DefaultReviewFacetFull budget the prior-facet half of the review
+// call. 160 is measured, not guessed: real value changes diverge from their predecessor within
+// 62 chars on the lens that wedged and within 240 on its sibling (98.7%), so 160 carries the
+// change signal with margin on the first and is backstopped by the blind-close re-ask on the
+// second. Together they take a real 2,039-facet lens from 2,411,507 chars to roughly 516,000 —
+// under the input ceiling that was refusing it, and well clear of the 920,574 that was timing
+// out. 48 full values is ~57,000 chars, which is the whole changed set on one real lens and a
+// cap on another that has 380.
+const (
+	DefaultReviewFacetClip = 160
+	DefaultReviewFacetFull = 48
+)
 
 // configFile is the user-authored config.toml concern plus the DB-backed review
 // cadence and runner-bound flag that config resolution consults. Unlike the other
@@ -117,8 +155,10 @@ func DefaultConfig() Config {
 		// 0 = never chunk (mine whole). This is the deliberate default per #57: chunking
 		// is a timeout guard, not a quality feature, and it degrades arc lenses badly.
 		// A user with giant sessions opts in by setting a positive chunk_max_chars.
-		ChunkMaxChars:  0,
-		ReviewMaxChars: DefaultReviewMaxChars,
+		ChunkMaxChars:   0,
+		ReviewMaxChars:  DefaultReviewMaxChars,
+		ReviewFacetClip: DefaultReviewFacetClip,
+		ReviewFacetFull: DefaultReviewFacetFull,
 	}
 }
 
@@ -210,6 +250,24 @@ func (c *configFile) LoadConfig() Config {
 				} else {
 					cfg.ReviewMaxChars = n
 				}
+			}
+		case "review_facet_clip":
+			// <=0 IS meaningful here (restore the old unbounded prior-facet block), so it is
+			// stored verbatim like chunk_max_chars rather than clamped like review_max_chars.
+			// Unbounded is what wedged a real archive, so it is an escape hatch, not a
+			// default — and renderPriorFacets marks everything as fully shown in that mode so
+			// the blind-close guard correctly stops firing.
+			if n, err := strconv.Atoi(v); err == nil {
+				cfg.ReviewFacetClip = n
+			}
+		case "review_facet_full":
+			// 0 is meaningful (no full-prose tier at all — identity + clipped heads only, with
+			// every contradiction routed through the re-ask). Negative is treated as 0.
+			if n, err := strconv.Atoi(v); err == nil {
+				if n < 0 {
+					n = 0
+				}
+				cfg.ReviewFacetFull = n
 			}
 		case "lens":
 			// One enabled lens per line: "lens = <name>". Global — runs on every
@@ -509,6 +567,22 @@ chunk_max_chars = 0
 # risk); smaller = more, faster calls. <=0 restores the default. Splitting the fold does
 # not degrade the profile (observations are independent facts).
 review_max_chars = 16000
+
+# The OTHER half of the review call: how much of each already-known facet is re-sent so the
+# model can tell "this evidence changes that facet" from "this is new". Each facet's
+# dimension/key is ALWAYS sent in full (hiding one makes the model mint a duplicate); this
+# clips the stored VALUE to the first N characters. 160 is measured — a real value change
+# shows up in the first ~60 characters because the prompts lead with a verdict line — and a
+# contradiction against a clipped value is re-asked with the full text before anything is
+# recorded, so clipping cannot silently rewrite history. Raise it if your lens writes long
+# prose whose meaning only diverges late. <=0 sends every value in full, which is what froze
+# a 2,039-facet profile for 24 days; it is an escape hatch, not a setting to reach for.
+review_facet_clip = 160
+
+# How many facets ALSO get their full value, on top of the clipped list above: the ones that
+# have changed before, most recently changed first. Those are the ones new evidence is most
+# likely to contradict, so they are worth the characters. 0 = clipped list only.
+review_facet_full = 48
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math

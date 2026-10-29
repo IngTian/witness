@@ -243,14 +243,118 @@ func wellFormed(rf reviewedFacet) bool {
 		strings.TrimSpace(rf.Value) != ""
 }
 
+// reviewLens folds ONE window against the current stance.
+//
+// Block order is deliberate. The prior-facet index is bulk reference material the model scans
+// for identity matching, so it sits first/middle where positional attention is weakest; the new
+// observations — the only thing this call is actually judging — sit LAST, adjacent to the task.
+// Before this was budgeted the proportions were 99.4% prior state to 0.6% new evidence.
 func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]reviewedFacet, error) {
-	input := "OBSERVATIONS (L1):\n" + mustJSON(slimObs(obs)) +
-		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name))
+	clip, topFull := r.facetBudget()
+	priorText, shownFull, indexN, fullN := renderPriorFacets(prior, ln.Name, clip, topFull)
+	obsText := mustJSON(slimObs(obs))
+	input := priorText + "\nOBSERVATIONS (L1):\n" + obsText
+
 	reply, err := r.runnerFor(ln)(ctx, ModelFor(r.Config, ln, PhaseReview), ln.Review, input)
 	if err != nil {
 		return nil, err
 	}
-	return ParseJSONArray[reviewedFacet](reply)
+	reviewed, err := ParseJSONArray[reviewedFacet](reply)
+	if err != nil {
+		return nil, err
+	}
+	// Review logged NOTHING about payload or outcome, which is why an input-size refusal and
+	// an output truncation were indistinguishable after the fact for 24 days. mine already
+	// logs input_chars; this is the review counterpart.
+	slog.Info("review: folded a window",
+		"lens", ln.Name, "obs", len(obs), "asserted", len(reviewed),
+		"facet_index", indexN, "facet_full", fullN, "clip", clip,
+		"prior_chars", len(priorText), "obs_chars", len(obsText), "reply_chars", len(reply))
+
+	return r.guardClippedVerdicts(ctx, ln, obsText, prior, reviewed, shownFull), nil
+}
+
+// facetBudget resolves the prior-facet clip and full-prose cap, clamping an unset config to the
+// measured defaults the same way foldLensWindowed clamps ReviewMaxChars. A zero-valued Config
+// (tests, older config.toml) must NOT mean "unbounded" — unbounded is precisely the wedge.
+func (r *Reviewer) facetBudget() (clip, topFull int) {
+	clip, topFull = r.Config.ReviewFacetClip, r.Config.ReviewFacetFull
+	if clip == 0 && topFull == 0 {
+		return store.DefaultReviewFacetClip, store.DefaultReviewFacetFull
+	}
+	return clip, topFull
+}
+
+// guardClippedVerdicts is the code half of the clipping contract: a version is never closed on
+// the strength of a value the model could only read truncated.
+//
+// The risk is specific and asymmetric. applyFacet's reinforcement branch touches only
+// Confidence and BecauseOf — it never writes Value — so a truncated value echoed back as a
+// REINFORCEMENT is harmless. But its change branch (`rf.Contradicts && cur.Value != rf.Value`)
+// closes the stored version and opens a new one from rf.Value, so a contradiction judged
+// against 160 characters would stamp ValidTo on good full prose and make a stub current. That
+// corrupts the change history, which is the product's entire claim.
+//
+// So: drop any value echoing the clip marker, and hold back any contradiction against a facet
+// that was not shown in full, re-asking ONCE with those facets' real text. Bounded by
+// construction — the deferred set is only what the model itself flagged.
+func (r *Reviewer) guardClippedVerdicts(ctx context.Context, ln *lens.Lens, obsText string, prior []store.Facet, reviewed []reviewedFacet, shownFull map[string]bool) []reviewedFacet {
+	byKey := indexFacets(prior)
+	out := make([]reviewedFacet, 0, len(reviewed))
+	deferredSet := map[string]bool{}
+	var deferred []reviewedFacet
+
+	for _, rf := range reviewed {
+		if truncationEchoed(rf.Value) {
+			slog.Warn("review: dropped an assertion that echoed a clipped value back as its value",
+				"lens", ln.Name, "dimension", rf.Dimension, "key", rf.Key, "contradicts_prior", rf.Contradicts)
+			continue
+		}
+		key := facetKey(rf.Dimension, rf.Key)
+		_, exists := byKey[ln.Name+"|"+rf.Dimension+"|"+rf.Key]
+		if rf.Contradicts && exists && !shownFull[key] {
+			deferredSet[key] = true
+			deferred = append(deferred, rf)
+			continue
+		}
+		out = append(out, rf)
+	}
+	if len(deferred) == 0 {
+		return out
+	}
+
+	reply, err := r.runnerFor(ln)(ctx, ModelFor(r.Config, ln, PhaseReview), ln.Review,
+		renderNamedFacets(prior, ln.Name, deferredSet)+"\nOBSERVATIONS (L1):\n"+obsText)
+	if err == nil {
+		var reJudged []reviewedFacet
+		reJudged, err = ParseJSONArray[reviewedFacet](reply)
+		if err == nil {
+			kept := 0
+			for _, rf := range reJudged {
+				// Only the facets we asked about, and never an echoed stub.
+				if deferredSet[facetKey(rf.Dimension, rf.Key)] && !truncationEchoed(rf.Value) {
+					out = append(out, rf)
+					kept++
+				}
+			}
+			slog.Info("review: re-asked clipped contradictions with full values",
+				"lens", ln.Name, "deferred", len(deferred), "applied", kept)
+			return out
+		}
+	}
+
+	// Re-ask unavailable. Degrade to REINFORCEMENT rather than dropping the evidence or
+	// closing blind: applyFacet's default branch merges because_of and raises confidence
+	// while leaving the stored value alone. The arc is not recorded this pass — the window's
+	// watermark still advances, so it will not be re-offered — but nothing is corrupted and
+	// the WARN names what was downgraded.
+	slog.Warn("review: re-ask for clipped contradictions failed; applying them as reinforcements instead (no version closed)",
+		"lens", ln.Name, "deferred", len(deferred), "err", err)
+	for _, rf := range deferred {
+		rf.Contradicts = false
+		out = append(out, rf)
+	}
+	return out
 }
 
 // PreviewFacet is one facet the REVIEW prompt asserted in a read-only preview — the
@@ -325,31 +429,12 @@ func slimObs(obs []store.Observation) []map[string]any {
 	return out
 }
 
-func slimFacets(facets []store.Facet, lensName string) []map[string]any {
-	out := []map[string]any{}
-	for _, f := range facets {
-		if f.Lens != lensName {
-			continue
-		}
-		cur := f.Current()
-		val := ""
-		conf := 0.0
-		if cur != nil {
-			val = cur.Value
-			conf = cur.Confidence
-		}
-		// current_confidence is REQUIRED, not decorative: applyFacet keeps
-		// max(current, returned) confidence on reinforcement (reviewer.go), so a
-		// reinforcement is a silent no-op unless the model can see the current value
-		// and return one above it. Exposing it is what lets repeated evidence actually
-		// raise confidence (the keep-everything reinforcement signal, issue #16).
-		out = append(out, map[string]any{
-			"dimension": f.Dimension, "key": f.Key,
-			"current_value": val, "current_confidence": conf,
-		})
-	}
-	return out
-}
+// slimFacets is GONE — replaced by renderPriorFacets in facetrender.go. It emitted every
+// current facet's full value as JSON with no budget, which is what refused a 2,039-facet lens
+// outright for 24 days. Its one genuinely load-bearing detail is preserved there: the current
+// CONFIDENCE must be visible, because applyFacet keeps max(current, returned) on
+// reinforcement, so a reinforcement is a silent no-op unless the model can see and exceed the
+// stored number (the keep-everything reinforcement signal, issue #16).
 
 func clampConf(c float64) float64 {
 	if c < 0 {
