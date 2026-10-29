@@ -17,6 +17,20 @@ if (command === "wire" || command === "unwire") {
   process.exit(1)
 }
 
+// Bare `npx -y @witness-ai/opencode` means "be the MCP server". Every MCP host's config
+// generator emits {command:"npx", args:["-y","<package>"]} with NO subcommand, because an
+// npm-distributed MCP server is conventionally the server when run bare. Without this the
+// generated command spawned the binary with zero args, which prints cobra's help and never
+// speaks JSON-RPC — so witness looked broken on every host wired from a scraped marketplace
+// listing rather than by install.sh (which passes `mcp` explicitly) or the OpenCode plugin
+// (which spawns [bin, "mcp"] itself). Neither of those paths reaches this wrapper, so this
+// changes nothing for them.
+//
+// Gated on a piped stdin because an MCP host always pipes it, whereas a human running
+// `witness` at a terminal wants the help text — not a process sitting silently on stdin.
+const args = process.argv.slice(2)
+if (args.length === 0 && !process.stdin.isTTY) args.push("mcp")
+
 const packageName = platformPackage()
 // Honor an explicit WITNESS_BIN override, just like the plugin (witness.js) does —
 // used verbatim (no existsSync gate) so it can point at a dev build or a binary the
@@ -45,7 +59,7 @@ env.WITNESS_PROMPTS ||= promptsDir(PACKAGE_ROOT)
 env.WITNESS_RUNNER ||= "opencode"
 env.WITNESS_NPM_PACKAGE = "1"
 
-const result = spawnSync(bin, process.argv.slice(2), {
+const result = spawnSync(bin, args, {
   stdio: "inherit",
   env,
 })

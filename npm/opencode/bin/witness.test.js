@@ -193,3 +193,70 @@ test("npm CLI reports the supported matrix when no platform package is available
   assert.match(result.errors[0], /unsupported platform/)
   assert.match(result.errors[0], /macOS Apple Silicon and Linux x86-64/)
 })
+
+// A bare `npx -y @witness-ai/opencode` must BE the MCP server. Every MCP host's config
+// generator emits {command:"npx", args:["-y","<package>"]} with no subcommand, so without
+// this the generated command spawned the binary with zero args, printed cobra's help and
+// never spoke JSON-RPC — witness looked broken on every host wired from a marketplace
+// listing. install.sh and the OpenCode plugin pass `mcp` themselves and never reach here.
+test("npm CLI treats a bare invocation on a piped stdin as the MCP server", async () => {
+  const spawnCalls = []
+  const harness = {
+    spawnCalls,
+    fs: { existsSync: () => true },
+    model: { modelDir: () => "/assets/e5-small", promptsDir: () => "/pkg/prompts" },
+    platform: {
+      platformPackage: () => "@witness-ai/opencode-darwin-arm64",
+      platformWitnessBin: () => "/packages/darwin-arm64/bin/witness",
+      supportedPlatforms: () => "supported",
+    },
+    childProcess: {
+      spawnSync(bin, args, options) {
+        spawnCalls.push({ bin, args, options })
+        return { status: 0 }
+      },
+    },
+  }
+  const previous = process.stdin.isTTY
+  process.stdin.isTTY = false // what an MCP host gives us
+  try {
+    const result = await runCLI([process.execPath, "witness"], harness)
+    assert.equal(result.code, 0)
+    assert.equal(spawnCalls.length, 1)
+    assert.deepEqual(spawnCalls[0].args, ["mcp"])
+  } finally {
+    process.stdin.isTTY = previous
+  }
+})
+
+// The flip side: a human typing `witness` at a terminal wants the help text, not a process
+// sitting silently on stdin waiting for JSON-RPC that is never coming.
+test("npm CLI leaves a bare invocation at a TTY alone so it still prints help", async () => {
+  const spawnCalls = []
+  const harness = {
+    spawnCalls,
+    fs: { existsSync: () => true },
+    model: { modelDir: () => "/assets/e5-small", promptsDir: () => "/pkg/prompts" },
+    platform: {
+      platformPackage: () => "@witness-ai/opencode-darwin-arm64",
+      platformWitnessBin: () => "/packages/darwin-arm64/bin/witness",
+      supportedPlatforms: () => "supported",
+    },
+    childProcess: {
+      spawnSync(bin, args, options) {
+        spawnCalls.push({ bin, args, options })
+        return { status: 0 }
+      },
+    },
+  }
+  const previous = process.stdin.isTTY
+  process.stdin.isTTY = true
+  try {
+    const result = await runCLI([process.execPath, "witness"], harness)
+    assert.equal(result.code, 0)
+    assert.equal(spawnCalls.length, 1)
+    assert.deepEqual(spawnCalls[0].args, [])
+  } finally {
+    process.stdin.isTTY = previous
+  }
+})
