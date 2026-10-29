@@ -125,7 +125,7 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 		}
 		return emitJSON(out)
 	}
-	renderObservationHits(lensName, hits)
+	renderObservationHits(lensName, hits, func() store.EmptyReason { return st.WhyEmpty(lensName) })
 	return nil
 }
 
@@ -148,9 +148,20 @@ type observationHitJSON struct {
 	Score       float64 `json:"score"`
 }
 
-func renderObservationHits(lensName string, hits []vector.Hit) {
+func renderObservationHits(lensName string, hits []vector.Hit, whyEmpty func() store.EmptyReason) {
 	if len(hits) == 0 {
+		// vector.Search is top-k with no score threshold, so zero hits never means "your
+		// query missed" — it means there is nothing embedded to search. Say which layer is
+		// actually missing instead of leaving the user to guess (#166).
 		fmt.Printf("No observations found in the %q lens.\n", lensName)
+		switch whyEmpty() {
+		case store.NoCapture:
+			fmt.Println("This archive holds no raw turns at all, so nothing is capturing — wire an editor with `witness wire claude`, or add the plugin to opencode.json for OpenCode.")
+		case store.NoObservations:
+			fmt.Printf("Capture is working, but nothing has been mined into %q yet — try `witness lens backfill %s`.\n", lensName, lensName)
+		default:
+			fmt.Printf("%q has observations, but none carry embeddings, so nothing is searchable — check `witness doctor`.\n", lensName)
+		}
 		return
 	}
 	fmt.Printf("Growth observations (%s lens), most relevant first:\n\n", lensName)

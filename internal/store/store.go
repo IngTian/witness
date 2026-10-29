@@ -189,6 +189,41 @@ func (s *Store) UnreviewedDelta(lens string) int {
 	return s.unreviewedDeltaSince(lens, s.ReviewRowid(lens))
 }
 
+// EmptyReason explains why a lens has nothing to show. The three cases have COMPLETELY
+// different remedies, and conflating them is a real defect: an archive that will never
+// fill — because no editor integration was ever wired — used to be told "the reviewer may
+// not have run yet", which implies waiting will help. It won't. Wiring only the MCP server
+// is easy to do by accident (every marketplace and host config generator produces an
+// MCP-server entry and none of them mention capture), so this is the common case, not an
+// exotic one.
+type EmptyReason int
+
+const (
+	// NoCapture: the archive holds no raw turns at all, so nothing is feeding it. The
+	// remedy is wiring an editor (`witness wire claude`, or the OpenCode plugin) — the
+	// MCP server only reads.
+	NoCapture EmptyReason = iota
+	// NoObservations: raw turns exist, so capture works, but none were mined into this
+	// lens. The remedy is time (or a drain), or enabling/backfilling the lens.
+	NoObservations
+	// NoFacets: the lens has observations but no facets, so the reviewer genuinely has
+	// not folded them yet. This is the ONLY case where "the reviewer may not have run" is
+	// the truth.
+	NoFacets
+)
+
+// WhyEmpty classifies why a lens has no data, for callers that have already found
+// nothing and need to name the actual fix. Two indexed counts, no corpus scan.
+func (s *Store) WhyEmpty(lens string) EmptyReason {
+	if s.LastRawTS() == "" {
+		return NoCapture
+	}
+	if obs, _ := s.LensDataCounts(lens); obs == 0 {
+		return NoObservations
+	}
+	return NoFacets
+}
+
 func (s *Store) ConfigPath() string { return configTomlPath(s.Root) }
 func (s *Store) LogPath() string    { return filepath.Join(s.Root, "witness.log") }
 

@@ -55,7 +55,9 @@ func cmdFacets(args []string, asJSON bool) error {
 	// (review only iterates the enabled set), so that hint must point at `lens enable`.
 	registered := slices.Contains(st.RegisteredLenses(), lensName)
 	enabled := slices.Contains(st.LoadConfig().EnabledLenses, lensName)
-	renderCurrentFacets(lensName, facets, registered, enabled)
+	// whyEmpty is a closure, not a value: it costs two indexed queries and is only needed
+	// on the empty path, which is the uncommon one.
+	renderCurrentFacets(lensName, facets, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(lensName) })
 	return nil
 }
 
@@ -64,7 +66,7 @@ type facetsJSON struct {
 	Facets []store.Facet `json:"facets"`
 }
 
-func renderCurrentFacets(lensName string, facets []store.Facet, registered, enabled bool) {
+func renderCurrentFacets(lensName string, facets []store.Facet, registered, enabled bool, whyEmpty func() store.EmptyReason) {
 	count := 0
 	for _, f := range facets {
 		if f.Lens == lensName && f.Current() != nil {
@@ -82,7 +84,20 @@ func renderCurrentFacets(lensName string, facets []store.Facet, registered, enab
 			// point at enable, not review.
 			fmt.Printf("Lens %q is registered but disabled, so it has no facets — enable it with `witness lens enable %s`, then distill.\n", lensName, lensName)
 		default:
-			fmt.Printf("No facets for lens %q yet — the reviewer runs after enough observations accumulate; force one now with `witness worker review`.\n", lensName)
+			// Registered AND enabled, so the lens itself is fine — the question is which
+			// layer is missing. "The reviewer runs after enough observations accumulate" is
+			// only true when observations EXIST; telling someone with no capture wired to
+			// wait for the reviewer describes a fix that will never arrive (#166).
+			switch whyEmpty() {
+			case store.NoCapture:
+				fmt.Printf("No facets for lens %q — and this archive holds no raw turns at all, so nothing is capturing.\n", lensName)
+				fmt.Println("Wire an editor: `witness wire claude`, or add the plugin to opencode.json for OpenCode. Waiting will not help.")
+			case store.NoObservations:
+				fmt.Printf("No facets for lens %q — capture is working, but nothing has been mined into it yet.\n", lensName)
+				fmt.Printf("Mine it over existing history with `witness lens backfill %s`.\n", lensName)
+			default:
+				fmt.Printf("No facets for lens %q yet — the reviewer runs after enough observations accumulate; force one now with `witness worker review`.\n", lensName)
+			}
 		}
 		return
 	}
