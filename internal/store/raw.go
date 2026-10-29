@@ -274,6 +274,7 @@ func (r *rawIO) RawPruneStats(cutoff string) (sessions, records int, err error) 
 // constants live at internal/platform/opencode/import.go and cmd/commands/ingest.go, and
 // prunemeta_lens_test.go pins that this list stays in sync with them.
 var PerSessionMetaNamespaces = []string{
+	"codex_import_state",   // Codex source revisions and message keys
 	"opencode_import_keys", // OpenCode import dedup state
 	"file_import_keys",     // `witness ingest` dedup state
 }

@@ -91,7 +91,7 @@ func TestPerSessionMetaNamespacesAreAllReaped(t *testing.T) {
 	// The two namespaces that exist today, pinned by name so a rename has to be deliberate.
 	// Their definitions live outside this package (internal/platform/opencode/import.go,
 	// cmd/commands/ingest.go), which the store cannot import, so this is the sync check.
-	want := map[string]bool{"opencode_import_keys": true, "file_import_keys": true}
+	want := map[string]bool{"opencode_import_keys": true, "file_import_keys": true, "codex_import_state": true}
 	for _, ns := range PerSessionMetaNamespaces {
 		delete(want, ns)
 	}

@@ -23,6 +23,7 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.Setenv("WITNESS_HOME", filepath.Join(root, "witness"))
 	_ = os.Setenv("WITNESS_OPENCODE_DB", filepath.Join(root, "opencode.db"))
+	_ = os.Setenv("WITNESS_CODEX_HOME", filepath.Join(root, "codex"))
 	_ = os.Setenv("WITNESS_ASSETS", assets)
 	_ = os.Setenv("WITNESS_SKIP_MODEL_DOWNLOAD", "1")
 	_ = os.Setenv(platform.DisableExternalRunnersEnv, "1")
