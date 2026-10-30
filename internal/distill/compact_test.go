@@ -345,6 +345,66 @@ func TestAlreadyArchivedFacetsAreNotReconsidered(t *testing.T) {
 	}
 }
 
+// Found by the first real run: one batch failing threw away every action already planned from
+// the batches that succeeded. On a 45-call lens that means any single transient model error
+// costs the whole pass, so it would essentially never complete.
+func TestAFailedBatchKeepsTheActionsAlreadyPlanned(t *testing.T) {
+	// Two dimensions, so there are two batches and the first can succeed while the second
+	// fails. 12 facets keeps the plan under the archive cap.
+	var facets []store.Facet
+	for _, k := range []string{"a", "b", "c", "d", "e", "f"} {
+		facets = append(facets, cf("thinking", k, "v"+k, 0.7, 1))
+		facets = append(facets, cf("habits", k, "v"+k, 0.7, 1))
+	}
+	st := &fakeCompactStore{facets: facets}
+	c := compactor(st, "")
+	calls := 0
+	c.Runner = func(_ context.Context, _, _, input string) (string, error) {
+		calls++
+		if strings.Contains(input, "DIMENSION: habits") {
+			return "", context.DeadlineExceeded // the auth timeout / wall the real run hit
+		}
+		return mergeReply("a", []string{"b", "c"}), nil
+	}
+
+	plans, err := c.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("both batches should be attempted, got %d calls", calls)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("the lens should still produce a plan, got %d", len(plans))
+	}
+	if len(plans[0].Actions) != 1 {
+		t.Errorf("the successful batch's action must survive, got %d", len(plans[0].Actions))
+	}
+	if plans[0].Failed != 1 {
+		t.Errorf("the failure must be reported so the plan reads as PARTIAL, got Failed=%d", plans[0].Failed)
+	}
+}
+
+// A lens where every call failed must not report "nothing to compact" — that is the one
+// wrong conclusion, because it looks exactly like an already-tight profile.
+func TestAnAllFailedLensIsReportedNotSilentlyDropped(t *testing.T) {
+	st := &fakeCompactStore{facets: []store.Facet{
+		cf("thinking", "a", "va", 0.7, 1),
+		cf("thinking", "b", "vb", 0.7, 1),
+	}}
+	c := compactor(st, "")
+	c.Runner = func(context.Context, string, string, string) (string, error) {
+		return "", context.DeadlineExceeded
+	}
+	plans, err := c.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Failed != 1 || len(plans[0].Actions) != 0 {
+		t.Fatalf("want one plan with 0 actions and 1 failure, got %+v", plans)
+	}
+}
+
 func containsStr(xs []string, want string) bool {
 	for _, x := range xs {
 		if x == want {

@@ -18,8 +18,14 @@ import (
 // DRY RUN BY DEFAULT, and that is deliberate rather than cautious boilerplate. This is the one
 // command that rewrites the shape of someone's profile, the judgment is a model's, and the
 // result is not obvious in advance — so the default prints the plan and changes nothing, and
-// --apply is a separate, explicit act. The plan shown is the exact plan applied (Plan and Apply
-// are separate phases over the same actions), so approving a dry run means something.
+// --apply is a separate, explicit act.
+//
+// Within ONE invocation the plan printed is the plan applied (Apply replays the actions Plan
+// produced and makes no fresh judgment). Across invocations it is not: --apply re-plans, so its
+// proposals can differ from a previous dry run's. That is why the dry-run footer says so rather
+// than implying a hand-off. Persisting a plan to disk would buy that hand-off, and is not worth
+// a new on-disk format until someone actually wants to approve a plan in one sitting and apply
+// it in another.
 func newCompactCmd() *cobra.Command {
 	var apply bool
 	var lensOnly string
@@ -106,7 +112,12 @@ func cmdCompact(apply bool, lensOnly string) error {
 	printCompactPlans(plans)
 	if !apply {
 		fmt.Println()
-		fmt.Println(dim("dry run — nothing written. Re-run with --apply to commit this plan."))
+		// Be precise about what --apply does: it plans AGAIN and applies that fresh plan, so
+		// the proposals can differ slightly from the ones printed above. Saying "commit this
+		// plan" would promise a hand-off between runs that does not exist (Plan and Apply are
+		// one invocation; only a single run guarantees the plan shown is the plan applied).
+		fmt.Println(dim("dry run — nothing written. --apply re-plans and commits in one run, so"))
+		fmt.Println(dim("its proposals may differ slightly from the ones above."))
 		return nil
 	}
 	if err := c.Apply(ctx, plans, time.Now()); err != nil {
@@ -140,10 +151,19 @@ func printCompactPlans(plans []distill.CompactPlan) {
 				fmt.Printf("  %s %s/%s — %s\n", yellow("retire"), a.Dimension, a.Key, dim(a.Why))
 			}
 		}
+		if len(p.Actions) == 0 {
+			fmt.Println(dim("  no merges or retirements proposed"))
+		}
 		if len(p.Skipped) > 0 {
 			// A prompt regression shows up as a pile of skips. Surfacing it beats a quietly
 			// smaller plan that looks like "the profile is already tight".
 			fmt.Printf("  %s %v\n", dim("refused (invalid proposals):"), p.Skipped)
+		}
+		if p.Failed > 0 {
+			// A partial plan must never read as a complete one. Without this, a run where
+			// most calls timed out looks identical to a profile that is already tight.
+			fmt.Printf("  %s %s failed (model error or timeout) — this plan is PARTIAL; see %s\n",
+				warnGlyph(), pluralize(p.Failed, "batch", "batches"), dim("witness.log"))
 		}
 	}
 }

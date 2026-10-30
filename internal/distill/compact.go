@@ -100,6 +100,10 @@ type CompactPlan struct {
 	// Skipped counts actions the validator refused, by reason — a prompt regression shows up
 	// here rather than silently shrinking the plan.
 	Skipped map[string]int `json:"skipped,omitempty"`
+	// Failed is how many batches errored (a model timeout, an unparseable reply). The plan is
+	// still valid for everything else, but it is PARTIAL — surfaced so "nothing more to
+	// compact" is never confused with "half the calls did not run".
+	Failed int `json:"failed,omitempty"`
 }
 
 // Compactor rebalances the active facet surface of each lens. It is the only writer of
@@ -133,7 +137,10 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 			slog.Error("compact: lens planning failed", "lens", ln.Name, "err", err)
 			continue
 		}
-		if len(plan.Actions) > 0 {
+		// Keep a plan that found nothing but FAILED somewhere: dropping it would report
+		// "nothing to compact" for a lens whose calls never ran, which is the one wrong
+		// conclusion a maintenance command must not hand back.
+		if len(plan.Actions) > 0 || plan.Failed > 0 {
 			plans = append(plans, plan)
 		}
 	}
@@ -158,7 +165,17 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 		for _, batch := range compactBatches(inDim) {
 			actions, err := c.askBatch(ctx, ln, dim, batch)
 			if err != nil {
-				return plan, fmt.Errorf("dimension %s: %w", dim, err)
+				// A failed batch must NOT discard the batches that already succeeded. This
+				// aborted the whole lens once and threw away 12 valid actions from 5 good
+				// batches because the 6th hit a transient auth timeout — a 45-call lens would
+				// never complete if any one call failing cost the entire pass. Same discipline
+				// as the review path, which keeps committed windows and resumes. A plan is
+				// just a proposal (Plan writes nothing), so a partial one is safe AND useful:
+				// apply what was found, re-run for the rest.
+				slog.Error("compact: batch failed (keeping the actions already planned)",
+					"lens", ln.Name, "dimension", dim, "facets", len(batch), "err", err)
+				plan.Failed++
+				continue
 			}
 			for _, a := range actions {
 				if reason := validate(a, dim, batch, byKey, claimed); reason != "" {
