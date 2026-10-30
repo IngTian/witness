@@ -1,74 +1,144 @@
 package distill
 
-// compactPrompt lives in Go, not in the lens registry, for the same reason the prior-facet
-// block headers do: lens prompt files are copied into an archive once at seed time and never
-// updated, so text authored there provably never reaches an existing install. Compaction is
-// also structural rather than domain-specific — it asks "are these the same trait", which does
-// not change between a coding lens and a trading lens — so there is nothing per-lens to author.
+import "strings"
+
+// The two compaction prompts, one per stage.
 //
-// ponytail: one shared prompt, no per-lens override. Add a lenses/<name>/compact.md seam the
-// first time a real lens needs different grouping judgment, not before.
-const compactPrompt = `You are consolidating a behavioural profile. You are given every facet in ONE dimension
-of ONE lens. Each facet is a claim about one person, mined from their work sessions over
-time.
+// WHY TWO. Measured on a real 105-facet dimension: one call asked to decide the grouping AND
+// write every merged value emitted ~40,000 chars and was KILLED at the runner's 10-minute wall,
+// for three different prompts including an explicitly aggressive one. The conservative prompt
+// survived only because it merged PAIRS — 9m57s, three seconds from the same cliff. Generation
+// time tracks output length, so a single call cannot merge deeply at any wording. Asking for the
+// grouping ALONE returned 8,191 chars in 3m17s with merges averaging 9.2 facets, projecting an
+// 87.6% reduction, and the groups matched an independent by-hand clustering of the same
+// dimension. Large input is cheap; large output is what costs.
+//
+// Both live in Go, not in the lens registry, for the same reason the review prompt's block
+// headers do: lens prompt files are copied into an archive once at seed time and never updated,
+// so text authored there provably never reaches an existing install. Compaction is also
+// structural rather than domain-specific — "are these the same trait" does not change between a
+// coding lens and a trading lens.
+//
+// ponytail: one shared pair of prompts, no per-lens override. Add a lenses/<name>/compact.md
+// seam the first time a real lens needs different grouping judgment, not before.
 
-The profile has a problem: it only ever grew. Nothing ever removed or combined a facet, and
-nothing ever asked whether two facets were the same thing. So it has accumulated many facets
-that restate each other in different words, plus some that were never really traits at all.
+func (c *Compactor) groupPrompt() string {
+	if strings.TrimSpace(c.Prompt) != "" {
+		return c.Prompt // experiment/override seam, used by the strategy sweep
+	}
+	return compactGroupPrompt
+}
 
-YOUR GOAL: the smallest set of facets that still says everything the current set says.
-Not a shorter profile — an equally complete one with less redundancy. If merging two facets
-would lose a real distinction, do not merge them. If a facet is the only thing carrying some
-piece of the picture, keep it, however narrow it is.
+func (c *Compactor) writePrompt() string {
+	if strings.TrimSpace(c.WritePrompt) != "" {
+		return c.WritePrompt
+	}
+	return compactWritePrompt
+}
+
+// STAGE 1 — grouping. Names only, so the reply stays small and the call stays fast.
+const compactGroupPrompt = `You are consolidating a behavioural profile. You are given every facet in ONE dimension of
+ONE lens. Each facet is a claim about one person, mined from their work sessions over time.
+
+The profile only ever grew: nothing ever removed or combined a facet, and nothing ever asked
+whether two facets were the same thing. So what you are looking at is NOT this many traits. It
+is a handful of real underlying dispositions — on the order of ten — each described many times
+from different angles, because every session wrote its own description without checking whether
+the trait was already recorded.
+
+YOUR ONLY JOB IN THIS PASS IS GROUPING. Decide which facets describe the same underlying
+disposition. Do NOT write merged values — the wording is a separate later step, and a long reply
+here will be cut off. Emit only names and a one-line reason.
+
+Expect groups of EIGHT or TWELVE facets, not pairs. Aim to end with roughly one tenth as many
+facets as you were shown, and no more than fifteen.
+
+Work in this order: first decide what the few real dispositions in this dimension ARE, then
+assign every facet to one of them. Do not start by looking for similar pairs.
+
+Judge by MECHANISM: two facets are one disposition if the same underlying thing about the person
+produces both, even in different material. A general disposition and its specific instances are
+ONE disposition. Different examples of one mechanism are ONE disposition. Only a genuinely
+different mechanism earns its own facet.
 
 Return a JSON array of actions. Only these two:
 
 {"action": "merge", "dimension": "<the dimension>", "key": "<survivor key>",
- "value": "<rewritten value>", "absorb": ["<key>", "<key>", ...],
- "confidence": <0.0-1.0>, "why": "<one line>"}
+ "absorb": ["<key>", "<key>", ...], "confidence": <0.0-1.0>, "why": "<one line>"}
 
 {"action": "retire", "dimension": "<the dimension>", "key": "<key>", "why": "<one line>"}
 
-MERGE — several facets that are ONE underlying trait.
+Your "why" is RECORDED PERMANENTLY against every facet the action touches — it is the only
+explanation anyone will ever have for why these were judged one trait. Name the shared
+mechanism, not the similarity.
 
-  Use it when the facets would be described the same way by someone who knew the person:
-  they are paraphrases, or they are specific instances of one general disposition.
+RULES
 
-  "key" is the survivor. It may be one of the absorbed keys, or a NEW snake_case key you
-  invent when the right name for the combined trait is more general than any of the originals.
-  A new key is the better choice when you are abstracting rather than deduplicating.
+  "key" is the survivor: either one of the absorbed keys, or a NEW snake_case key you invent
+  naming the disposition itself. Prefer a new general key when abstracting several facets.
 
-  "absorb" lists at least two keys to fold in. Do not include the survivor in it.
+  "absorb" lists at least TWO keys and must never contain the survivor.
 
-  "value" is the hard part. REWRITE it. It must carry every distinct thing the absorbed
-  facets contributed, in the register of the originals — specific and behavioural, not a
-  summary of a summary. Do not concatenate the old values. Do not drop a nuance because it
-  only appeared in one of them. If you cannot write a single value that keeps everything,
-  that is strong evidence these are not one trait: do not merge them.
+  Every key you name must appear in the batch, and each key may be named at most ONCE across the
+  whole array.
 
-RETIRE — a facet that should not be in a profile at all.
+  RETIRE is for facets that are not traits: a restatement another facet covers completely, one
+  incident rather than a pattern, an artifact of how the session was recorded, something true of
+  anyone, or a facet whose own text says its content moved elsewhere. Low confidence, few
+  observations and age are NOT reasons on their own.
 
-  Legitimate reasons: it restates something a single other facet already says completely
-  (and you are not merging it); it describes one incident rather than a pattern; it is an
-  artifact of how the session was recorded rather than a trait of the person; it is so
-  generic it would be true of anyone.
-
-  NOT legitimate: low confidence alone, a small number of supporting observations alone, or
-  being old. A quiet trait is still a trait. Absence of recent evidence is not evidence of
-  absence — that is why it has a confidence score rather than an expiry.
-
-JUDGMENT
-
-  Be conservative. Doing nothing to a facet is always safe; a wrong merge destroys a
-  distinction and a wrong retirement drops knowledge. Returning an empty array is a valid and
-  correct answer for a dimension that is already tight.
-
-  The signals you are given: "versions" is how many times this facet's value has changed — a
-  facet with several versions is carrying a real arc over time and is usually worth keeping
-  as its own node. "confidence" and "last_seen" tell you how well-supported and how recent it
-  is; weigh them, but see the NOT-legitimate list above.
-
-  You may only act on the keys shown in this batch. Do not reference a facet that is not
-  listed. Do not act on another dimension.
+  A facet carrying a disposition nothing else covers should simply be left out of the array.
 
 Output ONLY the JSON array. No prose, no code fence.`
+
+// STAGE 2 — writing one merged value. Prose out, not JSON: a 4,000-char value with a stray
+// quote or newline would break a JSON parse and lose the whole call for no benefit.
+const compactWritePrompt = `You are writing ONE facet of a behavioural profile. You are given several existing facets that
+have been judged to describe the SAME underlying disposition, and your job is to write the
+single facet that replaces all of them.
+
+This is a consolidation, not a summary. The facets you are given are about to be archived and
+this value becomes the only one anyone reads.
+
+WHAT MUST SURVIVE. Every distinct thing any input facet contributes:
+
+  - every concrete instance and example, with its detail intact
+  - every observation id (the obs_... references) exactly as written
+  - every quoted phrase of the person's own words
+  - every date, count and measurement
+  - every COST, limit, caveat or provenance note
+  - every falsifier — the conditions that would raise, lower or close the claim
+
+If an input says something only once, it still has to appear. Dropping a detail because it is
+mentioned by only one facet is the single way this task fails.
+
+LENGTH — AIM FOR THE UNION, NOT THE SUM.
+
+  Target: about as long as the LONGEST facet you were given, and never more than twice it. It
+  must not be SHORTER than the longest one — that would mean you dropped content, and it will be
+  rejected.
+
+  That band is achievable because these facets overlap heavily. They describe ONE mechanism, and
+  each was written by a separate session that did not know the others existed, so the same claim
+  appears four or nine times in four or nine different wordings. The union of what they say is
+  far smaller than their total length; the repetition is the bulk of it.
+
+  So: state each distinct thing ONCE. Do not restate one mechanism in four phrasings because
+  four facets did. Do not keep four separate "why this matters" passages that make the same
+  point. Do not re-explain the trait before each instance.
+
+  What you must NOT drop to hit the band: any concrete instance, any observation id, any quoted
+  phrase, any date or measurement, any cost or falsifier. Those are the irreducible content and
+  together they are a small fraction of the text. Cut repeated DESCRIPTION, never evidence.
+
+STRUCTURE. Organise a long value so it stays readable: name the disposition in the first
+sentence, then number or label the distinct faces of it, then the cost or limit, then the
+falsifiers. Keep the register of the inputs — specific and behavioural, citing evidence — not
+abstract personality description.
+
+STAY IN YOUR LANE. If you are shown other traits from the same dimension, they are being written
+by other calls. Anything belonging to one of them is theirs to cover; do not restate it here.
+Overlapping with a sibling re-creates the redundancy this process exists to remove.
+
+Write ONLY the facet value itself. No key, no JSON, no code fence, no preamble, no commentary
+about what you did.`

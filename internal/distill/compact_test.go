@@ -43,12 +43,24 @@ func (f *fakeCompactStore) WriteFacets(fs []store.Facet) error {
 	return nil
 }
 
-func compactor(st *fakeCompactStore, reply string) *Compactor {
+// mergedValue is what the stage-2 stub returns. It must be at least as long as the longest
+// input value or validateMergedValue refuses it as a summary — which is the guard working.
+const mergedValue = "one combined trait, written long enough to clear the length guard that refuses a merge shorter than its largest input"
+
+// compactor wires a fake that answers BOTH stages: stage 1 (grouping) gets the canned JSON
+// array, stage 2 (writing one value) gets prose. They are told apart by the stage-2 header,
+// because a single canned reply would feed a JSON array in as a facet value.
+func compactor(st *fakeCompactStore, groupReply string) *Compactor {
 	return &Compactor{
 		Store:  st,
 		Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW"}},
 		Config: store.Config{},
-		Runner: func(context.Context, string, string, string) (string, error) { return reply, nil },
+		Runner: func(_ context.Context, _, _, input string) (string, error) {
+			if strings.Contains(input, "THE TRAIT YOU ARE WRITING") {
+				return mergedValue, nil
+			}
+			return groupReply, nil
+		},
 	}
 }
 
@@ -131,7 +143,7 @@ func TestMergeArchivesAbsorbedAndKeepsHistory(t *testing.T) {
 		t.Error("the superseded version must be closed — a value rewrite is a change arc")
 	}
 	cur := surv.Current()
-	if cur == nil || cur.Value != "one combined trait" {
+	if cur == nil || cur.Value != mergedValue {
 		t.Fatalf("survivor's current value should be the rewritten one, got %+v", cur)
 	}
 	// Provenance is the whole claim of the archive: a merge that drops the absorbed
@@ -177,7 +189,7 @@ func TestMergeCanMintANewAbstractionKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	newF := writtenByRef(t, st, "thinking", "general_trait")
-	if !newF.Active() || newF.Current() == nil || newF.Current().Value != "the general form" {
+	if !newF.Active() || newF.Current() == nil || newF.Current().Value != mergedValue {
 		t.Fatalf("the new abstraction should be active with the merged value, got %+v", newF)
 	}
 	if !containsStr(newF.Current().BecauseOf, "obs-specific1") {
@@ -208,8 +220,6 @@ func TestValidatorRefusals(t *testing.T) {
 			compactAction{Action: "merge", Key: "unseen", Value: "v", Absorb: []string{"a", "b"}}, "survivor_unseen"},
 		{"absorbing the survivor into itself",
 			compactAction{Action: "merge", Key: "a", Value: "v", Absorb: []string{"a", "b"}}, "absorb_includes_survivor"},
-		{"a blank merged value",
-			compactAction{Action: "merge", Key: "a", Value: "   ", Absorb: []string{"b", "c"}}, "empty_merged_value"},
 		{"a merge of one facet (a rename)",
 			compactAction{Action: "merge", Key: "a", Value: "v", Absorb: []string{"b"}}, "merge_too_small"},
 		{"the same facet twice in one merge",
@@ -225,7 +235,7 @@ func TestValidatorRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := validate(tc.action, "thinking", batch, byKey, map[string]bool{}); got != tc.want {
+			if got := validateGrouping(tc.action, "thinking", batch, byKey, map[string]bool{}); got != tc.want {
 				t.Errorf("want refusal %q, got %q", tc.want, got)
 			}
 		})
@@ -258,33 +268,61 @@ func TestAFacetCanOnlyBeClaimedOnce(t *testing.T) {
 	}
 }
 
-// Without a cap, one bad batch flattens a profile in a single command. Compaction is
-// re-runnable, so refusing costs a second pass and nothing else.
-func TestRunawayPlanIsRefused(t *testing.T) {
-	// 30 active facets → the fraction cap (15) is above the floor (10), so this exercises the
-	// percentage rather than the small-profile allowance.
+// The guard that replaced the archived-FRACTION cap. The fraction was the wrong shape: it
+// limited how much is removed, while the damage case is being left with almost nothing — and
+// the intended result IS a large removal. On real data it refused a correct 29-of-33 plan.
+func TestCollapsingALargeDimensionIsRefused(t *testing.T) {
+	// 12 facets (over the guard threshold) proposed down to a single survivor.
 	var facets []store.Facet
 	var absorb []string
-	for i := 0; i < 30; i++ {
-		k := string(rune('a'+i/26)) + string(rune('a'+i%26))
+	for i := 0; i < 12; i++ {
+		k := string(rune('a' + i))
 		facets = append(facets, cf("thinking", k, "v"+k, 0.7, 1))
-		if i > 0 && len(absorb) < 16 { // 16 archived > cap of 15
+		if i > 0 {
 			absorb = append(absorb, k)
 		}
 	}
 	st := &fakeCompactStore{facets: facets}
-	c := compactor(st, mergeReply("aa", absorb))
+	c := compactor(st, mergeReply("a", absorb))
 	plans, err := c.Plan(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// planLens fails for this lens, so it contributes no plan — and critically, nothing is
-	// applied. Plan() logs and continues rather than failing the whole run.
-	if len(plans) != 0 {
-		t.Fatalf("a runaway plan must not be returned, got %d plan(s) archiving %d", len(plans), plans[0].Archived)
+	for _, p := range plans {
+		if len(p.Actions) != 0 {
+			t.Errorf("a collapse to 1 survivor must not be applied, got %d actions", len(p.Actions))
+		}
+		if p.Skipped["would_collapse_the_dimension"] == 0 {
+			t.Errorf("the refusal should be tallied, got %v", p.Skipped)
+		}
 	}
 	if st.writes != 0 {
 		t.Error("a refused plan must write nothing")
+	}
+}
+
+// The other half, and the one the old cap got wrong: a LARGE dimension reduced hard but not to
+// nothing is exactly the goal. 20 facets to 4 survivors is an 80% reduction and must pass.
+func TestADeepButNonCollapsingReductionIsAllowed(t *testing.T) {
+	var facets []store.Facet
+	for i := 0; i < 20; i++ {
+		facets = append(facets, cf("thinking", string(rune('a'+i)), "v", 0.7, 1))
+	}
+	st := &fakeCompactStore{facets: facets}
+	// Four groups of four absorbed each: 20 -> 4 survivors.
+	c := compactor(st, `[{"action":"merge","dimension":"thinking","key":"a","absorb":["b","c","d","e"],"why":"1"},
+	 {"action":"merge","dimension":"thinking","key":"f","absorb":["g","h","i","j"],"why":"2"},
+	 {"action":"merge","dimension":"thinking","key":"k","absorb":["l","m","n","o"],"why":"3"},
+	 {"action":"merge","dimension":"thinking","key":"p","absorb":["q","r","s","t"],"why":"4"}]`)
+	plans, err := c.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || len(plans[0].Actions) != 4 {
+		t.Fatalf("an 80%% reduction leaving 4 facets is the goal and must be allowed, got %+v", plans)
+	}
+	if plans[0].Archived != 16 {
+		t.Errorf("want 16 archived, got %d", plans[0].Archived)
 	}
 }
 
@@ -358,9 +396,12 @@ func TestAFailedBatchKeepsTheActionsAlreadyPlanned(t *testing.T) {
 	}
 	st := &fakeCompactStore{facets: facets}
 	c := compactor(st, "")
-	calls := 0
+	groupCalls := 0
 	c.Runner = func(_ context.Context, _, _, input string) (string, error) {
-		calls++
+		if strings.Contains(input, "THE TRAIT YOU ARE WRITING") {
+			return mergedValue, nil // stage 2 for whichever group survived
+		}
+		groupCalls++
 		if strings.Contains(input, "DIMENSION: habits") {
 			return "", context.DeadlineExceeded // the auth timeout / wall the real run hit
 		}
@@ -371,8 +412,8 @@ func TestAFailedBatchKeepsTheActionsAlreadyPlanned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Fatalf("both batches should be attempted, got %d calls", calls)
+	if groupCalls != 2 {
+		t.Fatalf("both dimensions should be grouped, got %d grouping calls", groupCalls)
 	}
 	if len(plans) != 1 {
 		t.Fatalf("the lens should still produce a plan, got %d", len(plans))

@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -134,11 +136,35 @@ func cmdCompact(apply bool, lensOnly string) error {
 	return nil
 }
 
+// humanCount groups thousands so a six-digit character count is readable at a glance.
+func humanCount(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func printCompactPlans(plans []distill.CompactPlan) {
 	for _, p := range plans {
 		fmt.Println()
 		fmt.Println(header(fmt.Sprintf("%s — %d active facets, %d would be archived",
 			p.Lens, p.Before, p.Archived)))
+		// Facet count and payload size move independently: a run once cut the count 70% while
+		// DOUBLING the text, which makes the review payload worse. Print both or the headline
+		// is misleading.
+		if p.InputChars > 0 {
+			fmt.Printf("  %s %s chars of merged facets → %s (%.2fx)\n", dim("text:"),
+				humanCount(p.InputChars), humanCount(p.OutputChars),
+				float64(p.OutputChars)/float64(p.InputChars))
+		}
 		for _, a := range p.Actions {
 			switch a.Action {
 			case "merge":

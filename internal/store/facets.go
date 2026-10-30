@@ -33,7 +33,7 @@ func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
 		where = ` WHERE f.archived_at = ''`
 	}
 	rows, err := f.db.Query(
-		`SELECT f.id, f.lens, f.dimension, f.key, f.last_seen, f.archived_at, f.merged_into,
+		`SELECT f.id, f.lens, f.dimension, f.key, f.last_seen, f.archived_at, f.merged_into, f.archive_reason,
 		        v.value, v.valid_from, v.valid_to, v.recorded_at, v.because_of, v.confidence
 		   FROM facets f
 		   LEFT JOIN facet_versions v ON v.facet_id = f.id` + where + `
@@ -49,18 +49,18 @@ func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
 		var (
 			id                                int64
 			lens, dim, key, lastSeen          string
-			archivedAt, mergedInto            string
+			archivedAt, mergedInto, reason    string
 			value, vFrom, vTo, recAt, because *string
 			confidence                        *float64
 		)
-		if err := rows.Scan(&id, &lens, &dim, &key, &lastSeen, &archivedAt, &mergedInto,
+		if err := rows.Scan(&id, &lens, &dim, &key, &lastSeen, &archivedAt, &mergedInto, &reason,
 			&value, &vFrom, &vTo, &recAt, &because, &confidence); err != nil {
 			return nil, err
 		}
 		if id != curID {
 			out = append(out, Facet{
 				Lens: lens, Dimension: dim, Key: key, LastSeen: lastSeen,
-				ArchivedAt: archivedAt, MergedInto: mergedInto,
+				ArchivedAt: archivedAt, MergedInto: mergedInto, ArchiveReason: reason,
 			})
 			curID = id
 		}
@@ -97,8 +97,8 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 		return err
 	}
 	fStmt, err := tx.Prepare(
-		`INSERT INTO facets(lens, dimension, key, last_seen, archived_at, merged_into)
-		 VALUES (?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO facets(lens, dimension, key, last_seen, archived_at, merged_into, archive_reason)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -116,7 +116,7 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 		// archived_at/merged_into ride through on every write. The reviewer reads the whole
 		// profile and writes it back each fold, so a column dropped here would be erased on
 		// the next review rather than at compaction time — a silent, delayed data loss.
-		res, err := fStmt.Exec(fc.Lens, fc.Dimension, fc.Key, fc.LastSeen, fc.ArchivedAt, fc.MergedInto)
+		res, err := fStmt.Exec(fc.Lens, fc.Dimension, fc.Key, fc.LastSeen, fc.ArchivedAt, fc.MergedInto, fc.ArchiveReason)
 		if err != nil {
 			tx.Rollback()
 			return err

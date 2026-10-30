@@ -45,8 +45,19 @@ import (
 // before this: nothing in the codebase could remove or combine one, so a profile only ever
 // grew — measured at 2,039 facets on a real archive, of which 1,216 were never the nearest
 // match to any observation. Compaction archives instead of deleting (every version is kept)
-// and the active profile becomes the derived subset where archived_at is empty.
-const schemaVersion = 9
+// and the active profile becomes the derived subset where archived_at is empty; v10 adds
+// facets.archive_reason (the model's justification for a merge or retirement, persisted so the
+// audit trail for a profile reshape does not live only in a rotating log line) through the SAME
+// per-column guarded step.
+//
+// v10 exists because archive_reason was ADDED to that step after a pre-release build had
+// already stamped user_version=9. migrate() early-returns when the stored version is >=
+// schemaVersion, so the new column's own pragma_table_info guard was never reached and the
+// archive opened with a query referencing a column that did not exist. A column can never be
+// added to a version number some binary has already written — it needs a new one, which is what
+// version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
+// them on the next open.)
+const schemaVersion = 10
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -306,9 +317,13 @@ func migrate(db *sql.DB) error {
 	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps). No backfill:
 	// the empty-string column DEFAULT is exactly right for every pre-existing facet — all of
 	// them are active, because nothing could archive one before this version.
+	// Also the v9 -> v10 step: the same function adds archive_reason. It is per-column guarded
+	// (pragma_table_info), so one call converges a DB from v8, from a pre-release v9, or from
+	// v10 — which is precisely why the columns are added here rather than assumed from the
+	// version number.
 	if err := addFacetLineageColumns(tx); err != nil {
 		tx.Rollback()
-		return fmt.Errorf("v9 add facet lineage columns: %w", err)
+		return fmt.Errorf("v9/v10 add facet lineage columns: %w", err)
 	}
 
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
@@ -581,7 +596,7 @@ func migrateObservationsSeq(tx *sql.Tx) error {
 // Idempotent: the per-column guard skips the ALTER once it exists (fresh DBs get both from
 // schemaV1; a re-run sees them too).
 func addFacetLineageColumns(tx *sql.Tx) error {
-	for _, col := range []string{"archived_at", "merged_into"} {
+	for _, col := range []string{"archived_at", "merged_into", "archive_reason"} {
 		var hasColumn int
 		if err := tx.QueryRow(
 			`SELECT COUNT(*) FROM pragma_table_info('facets') WHERE name=?`, col,
@@ -671,6 +686,7 @@ CREATE TABLE IF NOT EXISTS facets (
   last_seen   TEXT NOT NULL DEFAULT '',
   archived_at TEXT NOT NULL DEFAULT '',
   merged_into TEXT NOT NULL DEFAULT '',
+  archive_reason TEXT NOT NULL DEFAULT '',
   UNIQUE(lens, dimension, key)
 );
 -- idx_facets_active (on lens, archived_at) is NOT here, for the same reason the progress

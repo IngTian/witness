@@ -126,6 +126,12 @@ type Facet struct {
 	// every row on each review, so ids are not stable across writes but lens|dimension|key
 	// is the facet's real identity (applyFacet keys on it too).
 	MergedInto string `json:"merged_into,omitempty"`
+	// ArchiveReason is the model's one-line justification for the merge or retirement. It is
+	// persisted because compaction reshapes the profile on a model's judgment: the link alone
+	// tells you THAT nine facets became one, never why it judged them one trait. Without it
+	// the audit trail for the one destructive-looking operation in witness lives in a log line
+	// that rotates away.
+	ArchiveReason string `json:"archive_reason,omitempty"`
 }
 
 // Current returns the live version of a facet (the one with no ValidTo), or nil.
