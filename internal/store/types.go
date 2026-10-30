@@ -15,6 +15,8 @@
 // global (runs on every session); repo lenses are scoped (opt-in per repo).
 package store
 
+import "strings"
+
 // Name constants — the single source of truth for the two special names, in the data
 // layer (every store-side check and the lens loader route through them). Since #44
 // slice 1a only ProfileUnified is RESERVED; LensDefault is an ordinary lens name kept
@@ -99,12 +101,31 @@ type FacetVersion struct {
 // Facet is the evolving record of one named attribute within a lens+dimension,
 // e.g. lens="default", dimension="thinking", key="resolving_uncertainty".
 // Its Versions slice IS the change history — the whole point of the system.
+//
+// ArchivedAt/MergedInto are the STRUCTURAL half of that history. Versions record how one
+// facet's value moved; these record how the set of facets itself was reshaped — which is a
+// different kind of change and was previously not recorded at all, because nothing ever
+// removed or combined a facet. A facet is never deleted: it is archived, keeping its full
+// version history, and the active profile is the derived subset where ArchivedAt is empty.
 type Facet struct {
 	Lens      string         `json:"lens"`
 	Dimension string         `json:"dimension"`
 	Key       string         `json:"key"`       // emergent within the dimension
 	LastSeen  string         `json:"last_seen"` // most recent supporting observation
 	Versions  []FacetVersion `json:"versions"`  // append-as-it-changes; current = ValidTo==""
+
+	// ArchivedAt is when compaction took this facet out of the active profile (empty =
+	// active). Archived facets stay in the database with every version intact; they are
+	// simply no longer shown to the model or served as current state.
+	ArchivedAt string `json:"archived_at,omitempty"`
+	// MergedInto is the "dimension/key" of the facet that absorbed this one, empty when the
+	// facet was retired outright rather than folded into another. It is the LINK that makes
+	// an active facet expandable: given a survivor, the facets naming it here are its
+	// tributaries, and theirs in turn, so a compact node unfolds into the full trajectory
+	// that produced it. Stored as text, not a row id, deliberately — WriteFacets replaces
+	// every row on each review, so ids are not stable across writes but lens|dimension|key
+	// is the facet's real identity (applyFacet keys on it too).
+	MergedInto string `json:"merged_into,omitempty"`
 }
 
 // Current returns the live version of a facet (the one with no ValidTo), or nil.
@@ -115,4 +136,24 @@ func (f *Facet) Current() *FacetVersion {
 		}
 	}
 	return nil
+}
+
+// Active reports whether this facet is part of the live profile — the set that feeds the
+// model, the portrait, and MCP. Compaction archives rather than deletes, so "all facets" and
+// "the current profile" are no longer the same question.
+func (f *Facet) Active() bool { return f.ArchivedAt == "" }
+
+// FacetRef is the "dimension/key" form used by MergedInto and by the compaction prompt. The
+// lens is implicit: compaction only ever groups facets within one lens.
+func FacetRef(dimension, key string) string { return dimension + "/" + key }
+
+// ParseFacetRef splits a FacetRef back into its parts. Dimensions and keys are snake_case
+// slugs, so the first "/" is the separator; ok is false for anything that is not a well-formed
+// ref (an empty MergedInto, or a value from an older/hand-edited database).
+func ParseFacetRef(ref string) (dimension, key string, ok bool) {
+	i := strings.Index(ref, "/")
+	if i <= 0 || i == len(ref)-1 {
+		return "", "", false
+	}
+	return ref[:i], ref[i+1:], true
 }

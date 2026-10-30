@@ -39,8 +39,14 @@ import (
 // after the max-rowid row is deleted, so a delete-of-newest + re-mine could land a new
 // obs at a rowid <= a lens's review watermark and be silently skipped by the windowed
 // fold (issue #125); AUTOINCREMENT makes the fold cursor strictly monotonic so a fresh
-// obs always sorts after the watermark.
-const schemaVersion = 8
+// obs always sorts after the watermark; v9 adds facets.archived_at + facets.merged_into (the
+// structural half of facet history) via guarded ADD COLUMNs in migrate()
+// (addFacetLineageColumns) plus an idx_facets_active index in schemaV1. Facets were immortal
+// before this: nothing in the codebase could remove or combine one, so a profile only ever
+// grew — measured at 2,039 facets on a real archive, of which 1,216 were never the nearest
+// match to any observation. Compaction archives instead of deleting (every version is kept)
+// and the active profile becomes the derived subset where archived_at is empty.
+const schemaVersion = 9
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -292,6 +298,17 @@ func migrate(db *sql.DB) error {
 	if err := migrateObservationsSeq(tx); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("v8 observations seq: %w", err)
+	}
+
+	// 8. v8 -> v9: facets.archived_at + facets.merged_into — the structural half of facet
+	// history, so compaction can take a facet out of the active profile without destroying
+	// it. schemaV1's CREATE ... IF NOT EXISTS won't alter an existing facets table, so add
+	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps). No backfill:
+	// the empty-string column DEFAULT is exactly right for every pre-existing facet — all of
+	// them are active, because nothing could archive one before this version.
+	if err := addFacetLineageColumns(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v9 add facet lineage columns: %w", err)
 	}
 
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
@@ -550,6 +567,49 @@ func migrateObservationsSeq(tx *sql.Tx) error {
 	return nil
 }
 
+// addFacetLineageColumns is the v8->v9 step: add facets.archived_at and facets.merged_into if
+// the running DB's table predates them.
+//
+// Why these live ON the facet row and not in a lineage table of their own: WriteFacets
+// replaces the ENTIRE facets table on every review (DELETE + re-INSERT), so facet row ids are
+// not stable across writes — a side table keyed on facet id would be silently orphaned by the
+// next fold. Columns on the row survive because ReadFacets → WriteFacets round-trips them, and
+// the facet's real identity (lens|dimension|key, what applyFacet keys on) is text anyway.
+//
+// No backfill: the empty-string DEFAULT means "active, never merged", which is true of every
+// facet that existed before this version — nothing in the codebase could archive one.
+// Idempotent: the per-column guard skips the ALTER once it exists (fresh DBs get both from
+// schemaV1; a re-run sees them too).
+func addFacetLineageColumns(tx *sql.Tx) error {
+	for _, col := range []string{"archived_at", "merged_into"} {
+		var hasColumn int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('facets') WHERE name=?`, col,
+		).Scan(&hasColumn); err != nil {
+			return fmt.Errorf("probe %s column: %w", col, err)
+		}
+		if hasColumn != 0 {
+			continue
+		}
+		// Column name is from the fixed slice above, never user input — safe to interpolate
+		// (SQLite takes no bound parameter in an ALTER).
+		if _, err := tx.Exec(fmt.Sprintf(
+			`ALTER TABLE facets ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)); err != nil {
+			return fmt.Errorf("add column %s: %w", col, err)
+		}
+	}
+	// The active-profile index, created HERE rather than in schemaV1 because it references
+	// archived_at: on a pre-v9 database schemaV1 runs while facets still lacks the column (its
+	// CREATE TABLE IF NOT EXISTS does not alter the existing table), so an index there fails
+	// the whole migration and the archive cannot be opened at all. Same ordering constraint as
+	// addProgressIndexes. Idempotent, and it runs after the ALTERs above on every path.
+	if _, err := tx.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_facets_active ON facets(lens, archived_at)`); err != nil {
+		return fmt.Errorf("create idx_facets_active: %w", err)
+	}
+	return nil
+}
+
 // schemaV1 is the full current schema. `raw` is the append-only ground-truth
 // transcript (surrogate rowid; seq is a plain ordinal, not a uniqueness
 // constraint, matching the old JSONL append). observations carry a monotonic
@@ -604,13 +664,20 @@ CREATE INDEX IF NOT EXISTS idx_staged_session ON staged(session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_staged_unique ON staged(session, obs_id);
 
 CREATE TABLE IF NOT EXISTS facets (
-  id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  lens      TEXT NOT NULL,
-  dimension TEXT NOT NULL,
-  key       TEXT NOT NULL,
-  last_seen TEXT NOT NULL DEFAULT '',
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  lens        TEXT NOT NULL,
+  dimension   TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  last_seen   TEXT NOT NULL DEFAULT '',
+  archived_at TEXT NOT NULL DEFAULT '',
+  merged_into TEXT NOT NULL DEFAULT '',
   UNIQUE(lens, dimension, key)
 );
+-- idx_facets_active (on lens, archived_at) is NOT here, for the same reason the progress
+-- hot-path indexes are not: it references archived_at, which on a pre-v9 database does not
+-- exist yet — schemaV1 runs BEFORE addFacetLineageColumns adds it, and CREATE TABLE IF NOT
+-- EXISTS does not alter the existing table, so the index would fail and break every upgrade.
+-- It is created in addFacetLineageColumns, after the ALTERs.
 
 CREATE TABLE IF NOT EXISTS facet_versions (
   facet_id    INTEGER NOT NULL REFERENCES facets(id) ON DELETE CASCADE,

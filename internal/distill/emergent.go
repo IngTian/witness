@@ -236,6 +236,16 @@ func bestFacetCoverage(members []store.Observation, facets []store.Facet, lens s
 		if f.Lens != lens {
 			continue
 		}
+		// Only the ACTIVE profile can cover an arc. An archived facet's citations are not
+		// part of the current stance, so letting one suppress a candidate would make a
+		// retirement permanent — the arc could never be re-proposed however much evidence
+		// accumulated. A MERGED facet's citations are not lost by this: Apply unions them
+		// into the survivor's merged version, so coverage is still counted, under the
+		// consolidated key. Callers pass the whole profile (writers must), so the filter
+		// belongs here, where coverage is actually decided.
+		if !f.Active() {
+			continue
+		}
 		cited := map[string]bool{}
 		for _, v := range f.Versions {
 			for _, id := range v.BecauseOf {
