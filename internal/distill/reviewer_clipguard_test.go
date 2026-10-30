@@ -165,11 +165,14 @@ func TestReAskReplyIsFilteredToTheDeferredSet(t *testing.T) {
 	}
 }
 
-// facetBudget must never let a zero-valued Config mean "unbounded" — unbounded is exactly the
-// payload that refused a real 2,039-facet lens for 24 days.
+// facetBudget must never let a zero-valued Config mean "unbounded" for a stance that does NOT
+// fit — unbounded is exactly the payload that refused a real 2,039-facet lens for 24 days. (A
+// stance that fits is sent whole by design; that is the whole-send gate, tested separately.)
 func TestZeroConfigFallsBackToMeasuredDefaultsNotUnbounded(t *testing.T) {
 	r := &Reviewer{Config: store.Config{}}
-	clip, full := r.facetBudget()
+	oversized := []store.Facet{facet("default", "habits", "huge", 0.7, "2026-10-01T00:00:00Z",
+		strings.Repeat("x", reviewFacetWholeBudget+1))}
+	clip, full := r.facetBudget(oversized, "default")
 	if clip != store.DefaultReviewFacetClip || full != store.DefaultReviewFacetFull {
 		t.Fatalf("zero Config gave clip=%d full=%d, want the measured defaults", clip, full)
 	}

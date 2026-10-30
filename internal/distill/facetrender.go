@@ -80,6 +80,44 @@ const (
 		"is recorded. NEVER copy a truncated value (one ending \"" + clipMarker + "\") back as a value.\n"
 )
 
+// reviewFacetWholeBudget is the prior-state size, in chars of THIS lens's current values, at or
+// under which the whole stance is sent UNCLIPPED.
+//
+// Clipping is a backstop, not the mechanism. The default policy is to give the model everything
+// it can take: a healthy archive costs little (measured on a real one, mean current value is
+// 1,182 chars, so 200 facets ≈ 236k chars ≈ 59k tokens — comfortable even on a 200k-context
+// model), and clipping it would discard real signal for nothing. Without this gate the clip
+// applies to EVERY archive, which is worst for a fresh one: its facets have a single version
+// each, so the "changed before" full-prose tier selects none of them and every value arrives
+// truncated — a 47k-char stance crushed to 6k for no reason.
+//
+// The number is the size where the call stops being comfortable rather than where it fails. The
+// same archive gives both bounds: 2,411,507 chars (~600k tokens) was REFUSED outright, while
+// 920,574 chars was accepted but ran past the 10-minute wall and was killed. 500k sits below the
+// slow case with headroom and still covers 200 facets even if every one of them is long.
+//
+// ponytail: one global constant, not a per-model context probe. A lens can bind its own model
+// (#75), so the true ceiling varies 5x between a 200k and a 1M context — but the fix for an
+// archive that exceeds this is pruning the facet count, not tuning the threshold. Revisit only
+// if a real lens sits legitimately above it.
+const reviewFacetWholeBudget = 500_000
+
+// priorChars totals the current-value size of ONE lens's facets — the quantity the whole-send
+// gate is about. Filtering by lens is load-bearing: prior carries every lens's facets, so
+// totalling all of them would let a large sibling lens force this one to clip needlessly.
+func priorChars(facets []store.Facet, lensName string) int {
+	n := 0
+	for i := range facets {
+		if facets[i].Lens != lensName {
+			continue
+		}
+		if cur := facets[i].Current(); cur != nil {
+			n += len(cur.Value)
+		}
+	}
+	return n
+}
+
 // renderPriorFacets builds the prior-facet blocks for one lens and reports which facets were
 // shown in FULL, so the caller can refuse to close a version the model only saw truncated.
 //

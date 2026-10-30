@@ -569,19 +569,27 @@ chunk_max_chars = 0
 review_max_chars = 16000
 
 # The OTHER half of the review call: how much of each already-known facet is re-sent so the
-# model can tell "this evidence changes that facet" from "this is new". Each facet's
-# dimension/key is ALWAYS sent in full (hiding one makes the model mint a duplicate); this
-# clips the stored VALUE to the first N characters. 160 is measured — a real value change
-# shows up in the first ~60 characters because the prompts lead with a verdict line — and a
-# contradiction against a clipped value is re-asked with the full text before anything is
-# recorded, so clipping cannot silently rewrite history. Raise it if your lens writes long
-# prose whose meaning only diverges late. <=0 sends every value in full, which is what froze
-# a 2,039-facet profile for 24 days; it is an escape hatch, not a setting to reach for.
+# model can tell "this evidence changes that facet" from "this is new".
+#
+# NORMALLY THIS DOES NOTHING. A lens whose whole current profile fits in 500,000 characters —
+# roughly 400 average facets — is sent COMPLETE, because the default policy is to give the
+# model everything it can take. This setting is the OVERFLOW behaviour for a profile that has
+# grown past that, and the real fix for one that has is fewer facets, not a tighter clip.
+#
+# When it does engage: each facet's dimension/key is ALWAYS sent in full (hiding one makes the
+# model mint a duplicate); this clips the stored VALUE to the first N characters. 160 is
+# measured — a real value change shows up in the first ~60 characters because the prompts lead
+# with a verdict line — and a contradiction against a clipped value is re-asked with the full
+# text before anything is recorded, so clipping cannot silently rewrite history. Raise it if
+# your lens writes long prose whose meaning only diverges late. <=0 forces full values even
+# when oversized, which is what froze a 2,039-facet profile for 24 days; it is an escape
+# hatch, not a setting to reach for.
 review_facet_clip = 160
 
-# How many facets ALSO get their full value, on top of the clipped list above: the ones that
-# have changed before, most recently changed first. Those are the ones new evidence is most
-# likely to contradict, so they are worth the characters. 0 = clipped list only.
+# Also overflow-only. When a profile IS oversized, how many facets get their full value on
+# top of the clipped list above: the ones that have changed before, most recently changed
+# first. Those are the ones new evidence is most likely to contradict, so they are worth the
+# characters. 0 = clipped list only.
 review_facet_full = 48
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.

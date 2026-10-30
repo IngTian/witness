@@ -250,7 +250,7 @@ func wellFormed(rf reviewedFacet) bool {
 // observations — the only thing this call is actually judging — sit LAST, adjacent to the task.
 // Before this was budgeted the proportions were 99.4% prior state to 0.6% new evidence.
 func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]reviewedFacet, error) {
-	clip, topFull := r.facetBudget()
+	clip, topFull := r.facetBudget(prior, ln.Name)
 	priorText, shownFull, indexN, fullN := renderPriorFacets(prior, ln.Name, clip, topFull)
 	obsText := mustJSON(slimObs(obs))
 	input := priorText + "\nOBSERVATIONS (L1):\n" + obsText
@@ -274,13 +274,28 @@ func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Ob
 	return r.guardClippedVerdicts(ctx, ln, obsText, prior, reviewed, shownFull), nil
 }
 
-// facetBudget resolves the prior-facet clip and full-prose cap, clamping an unset config to the
-// measured defaults the same way foldLensWindowed clamps ReviewMaxChars. A zero-valued Config
-// (tests, older config.toml) must NOT mean "unbounded" — unbounded is precisely the wedge.
-func (r *Reviewer) facetBudget() (clip, topFull int) {
+// facetBudget resolves the prior-facet clip and full-prose cap for ONE lens's stance.
+//
+// Two decisions, in order. First the configured values, clamping an unset Config (tests, an
+// older config.toml) to the measured defaults the same way foldLensWindowed clamps
+// ReviewMaxChars — a zero-valued Config must NOT mean "unbounded", since unbounded is precisely
+// what wedged the lens for 24 days. Then the whole-send gate: if this lens's entire stance fits
+// in reviewFacetWholeBudget, clip is dropped to 0 and the model gets every value in full.
+//
+// That ordering matters. Clipping is the overflow behaviour for an archive that has already
+// over-accumulated, not the normal path — so a configured clip still governs HOW an oversized
+// stance is cut, while a stance that fits is never cut at all. It also makes the backstop
+// self-retiring: once a compaction pass holds the active facet count near 200, this gate starts
+// returning 0 on its own and clipping silently stops happening, with no code or config change.
+func (r *Reviewer) facetBudget(prior []store.Facet, lensName string) (clip, topFull int) {
 	clip, topFull = r.Config.ReviewFacetClip, r.Config.ReviewFacetFull
 	if clip == 0 && topFull == 0 {
-		return store.DefaultReviewFacetClip, store.DefaultReviewFacetFull
+		clip, topFull = store.DefaultReviewFacetClip, store.DefaultReviewFacetFull
+	}
+	if priorChars(prior, lensName) <= reviewFacetWholeBudget {
+		// 0 = unbounded: renderPriorFacets emits every value whole and marks every facet in
+		// shownFull, so the blind-close guard correctly never defers (nothing was truncated).
+		return 0, topFull
 	}
 	return clip, topFull
 }
