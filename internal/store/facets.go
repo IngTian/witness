@@ -34,7 +34,7 @@ func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
 	}
 	rows, err := f.db.Query(
 		`SELECT f.id, f.lens, f.dimension, f.key, f.last_seen, f.archived_at, f.merged_into, f.archive_reason,
-		        v.value, v.claim, v.valid_from, v.valid_to, v.recorded_at, v.because_of, v.confidence
+		        v.value, v.claim, v.confidence_seq, v.valid_from, v.valid_to, v.recorded_at, v.because_of, v.confidence
 		   FROM facets f
 		   LEFT JOIN facet_versions v ON v.facet_id = f.id` + where + `
 		  ORDER BY f.lens, f.dimension, f.key, v.pos`)
@@ -51,10 +51,11 @@ func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
 			lens, dim, key, lastSeen                 string
 			archivedAt, mergedInto, reason           string
 			value, claim, vFrom, vTo, recAt, because *string
+			confSeq                                  *int64
 			confidence                               *float64
 		)
 		if err := rows.Scan(&id, &lens, &dim, &key, &lastSeen, &archivedAt, &mergedInto, &reason,
-			&value, &claim, &vFrom, &vTo, &recAt, &because, &confidence); err != nil {
+			&value, &claim, &confSeq, &vFrom, &vTo, &recAt, &because, &confidence); err != nil {
 			return nil, err
 		}
 		if id != curID {
@@ -68,7 +69,7 @@ func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
 			continue
 		}
 		fv := FacetVersion{
-			Value: *value, Claim: deref(claim), ValidFrom: deref(vFrom), ValidTo: deref(vTo),
+			Value: *value, Claim: deref(claim), ConfidenceSeq: derefI(confSeq), ValidFrom: deref(vFrom), ValidTo: deref(vTo),
 			RecordedAt: deref(recAt), Confidence: derefF(confidence),
 		}
 		if because != nil {
@@ -105,8 +106,8 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 	}
 	defer fStmt.Close()
 	vStmt, err := tx.Prepare(
-		`INSERT INTO facet_versions(facet_id, pos, value, claim, valid_from, valid_to, recorded_at, because_of, confidence)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO facet_versions(facet_id, pos, value, claim, confidence_seq, valid_from, valid_to, recorded_at, because_of, confidence)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -127,7 +128,7 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 			if v.BecauseOf == nil {
 				because = []byte("[]")
 			}
-			if _, err := vStmt.Exec(id, pos, v.Value, v.Claim, v.ValidFrom, v.ValidTo, v.RecordedAt,
+			if _, err := vStmt.Exec(id, pos, v.Value, v.Claim, v.ConfidenceSeq, v.ValidFrom, v.ValidTo, v.RecordedAt,
 				string(because), v.Confidence); err != nil {
 				tx.Rollback()
 				return err
@@ -191,6 +192,13 @@ func (f *facetIO) LensFacetCounts(lens string) (active, archived int) {
 	_ = f.db.QueryRow(
 		`SELECT COUNT(*) FROM facets WHERE lens = ? AND archived_at != ''`, lens).Scan(&archived)
 	return active, archived
+}
+
+func derefI(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func deref(p *string) string {

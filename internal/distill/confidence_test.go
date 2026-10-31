@@ -29,7 +29,7 @@ func TestAProposedDowngradeIsApplied(t *testing.T) {
 	byKey := indexFacets([]store.Facet{confFacet(0.9)})
 	if !(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 		Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.8, BecauseOf: []string{"o2"},
-	}, applyNow) {
+	}, applyNow, 0) {
 		t.Fatal("the assertion was rejected")
 	}
 	cur := byKey["L|d|k"].Current()
@@ -52,7 +52,7 @@ func TestNoSingleFoldCanCollapseAWellSupportedFacet(t *testing.T) {
 	byKey := indexFacets([]store.Facet{confFacet(0.95)})
 	(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 		Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.0,
-	}, applyNow)
+	}, applyNow, 0)
 	got := byKey["L|d|k"].Current().Confidence
 	if got != 0.85 {
 		t.Errorf("a 0.95 facet must fall by at most one step, got %v", got)
@@ -65,7 +65,7 @@ func TestNoSingleFoldCanCatapultAWeakFacet(t *testing.T) {
 	byKey := indexFacets([]store.Facet{confFacet(0.2)})
 	(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 		Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 1.0,
-	}, applyNow)
+	}, applyNow, 0)
 	got := byKey["L|d|k"].Current().Confidence
 	if got != 0.3 {
 		t.Errorf("a 0.2 facet must rise by at most one step, got %v", got)
@@ -80,7 +80,7 @@ func TestConfidenceConvergesOverFolds(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		r.applyFacet(byKey, "L", reviewedFacet{
 			Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.4,
-		}, applyNow)
+		}, applyNow, 0)
 	}
 	if got := byKey["L|d|k"].Current().Confidence; got != 0.4 {
 		t.Errorf("five downgrading folds should reach the target, got %v", got)
@@ -88,7 +88,7 @@ func TestConfidenceConvergesOverFolds(t *testing.T) {
 	// And it lands exactly, never overshoots past the model's judgment.
 	r.applyFacet(byKey, "L", reviewedFacet{
 		Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.4,
-	}, applyNow)
+	}, applyNow, 0)
 	if got := byKey["L|d|k"].Current().Confidence; got != 0.4 {
 		t.Errorf("a further fold at the same confidence must not move it, got %v", got)
 	}
@@ -109,7 +109,7 @@ func TestAnUnmentionedFacetIsUntouched(t *testing.T) {
 
 	(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 		Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.8,
-	}, applyNow)
+	}, applyNow, 0)
 
 	if got := byKey["L|d|k"].Current().Confidence; got != 0.8 {
 		t.Errorf("the asserted facet should have moved, got %v", got)
