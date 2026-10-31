@@ -301,6 +301,13 @@ they exist for recovery and debugging, and everything they do also happens autom
   [`prompts/SCHEMA.md`](prompts/SCHEMA.md#records-in-the-ingest-contract).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
 
+### Codex capture
+
+`witness import --agent codex` imports local Codex conversations into the same
+archive and enabled lenses, with `codex:` session IDs. It supports legacy JSONL
+and paginated local history. See [Codex capture](docs/codex-capture.md) for setup,
+event-triggered capture, the read-only probe and compatibility limits.
+
 ## Single binary, no runtime
 
 The whole thing is **one self-contained Go binary** — no Python, no external services, no vector

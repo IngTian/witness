@@ -11,6 +11,7 @@ import (
 	// whose init() ran, and Default() panics if Claude is absent — so anchor both
 	// here rather than relying on some command file happening to import them.
 	_ "github.com/IngTian/witness/internal/platform/claude"
+	_ "github.com/IngTian/witness/internal/platform/codex"
 	_ "github.com/IngTian/witness/internal/platform/file"
 	_ "github.com/IngTian/witness/internal/platform/opencode"
 
