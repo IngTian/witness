@@ -85,7 +85,7 @@ func (sm *Summarizer) runFor(ln *lens.Lens) SummarizeFunc {
 // summary change?" heuristic would. So an unchanged review costs 0 calls, and a
 // one-lens change costs 2 (that lens + unified), not N+1.
 func (sm *Summarizer) Summarize(ctx context.Context) error {
-	facets, err := sm.Store.ReadFacets()
+	facets, err := sm.Store.ReadActiveFacets()
 	if err != nil {
 		return fmt.Errorf("read facets: %w", err)
 	}

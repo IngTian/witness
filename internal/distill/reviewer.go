@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -113,7 +114,11 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 		if err != nil {
 			return fmt.Errorf("read L2: %w", err)
 		}
-		reviewed, err := r.reviewLens(ctx, ln, window, prior)
+		// The clock for this fold: the highest observation seq it has read. Confidences
+		// written now are stamped here, decay is measured forward from it, and the prompt
+		// shows confidences decayed to it.
+		throughSeq := window[len(window)-1].Rowid
+		reviewed, err := r.reviewLens(ctx, ln, window, prior, throughSeq)
 		if err != nil {
 			// Surface the cause (was silently discarded pre-#123). Windows already
 			// committed stay; the watermark sits at the last good window; resume next pass.
@@ -124,7 +129,7 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 			// A malformed assertion is dropped, not merged (see wellFormed). Log it: it
 			// means this lens's review prompt is returning entries the schema forbids, and
 			// silence there is how a prompt regression goes unnoticed for weeks.
-			if !r.applyFacet(byKey, ln.Name, rf, nowStr) {
+			if !r.applyFacet(byKey, ln.Name, rf, nowStr, throughSeq) {
 				slog.Warn("review: dropped a malformed facet assertion (empty dimension, key, or value)",
 					"lens", ln.Name, "dimension", rf.Dimension, "key", rf.Key,
 					"value_empty", strings.TrimSpace(rf.Value) == "", "contradicts_prior", rf.Contradicts)
@@ -165,19 +170,26 @@ func windowEnd(obs []store.Observation, start, budget int) int {
 // applyFacet enforces the bi-temporal rule deterministically. It reports whether the
 // asserted facet was applied; a malformed one is REJECTED rather than merged (see
 // wellFormed) so the caller can log it instead of silently corrupting L2.
-func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf reviewedFacet, nowStr string) bool {
+func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf reviewedFacet, nowStr string, seq int64) bool {
 	if !wellFormed(rf) {
 		return false
 	}
 	id := lensName + "|" + rf.Dimension + "|" + rf.Key
 	f, ok := byKey[id]
+	if ok && !f.Active() {
+		// The assertion landed on a facet COMPACTION ARCHIVED. The model never saw it (the
+		// prompt shows only the active profile), so it is re-minting a name that still exists
+		// in the table — and without this branch the facet would silently come back active on
+		// its own old history, undoing the compaction on the very next fold.
+		f, id = resolveArchived(byKey, lensName, f, id)
+	}
 	if !ok {
 		// Brand-new facet: open-ended first version.
 		byKey[id] = &store.Facet{
 			Lens: lensName, Dimension: rf.Dimension, Key: rf.Key, LastSeen: nowStr,
 			Versions: []store.FacetVersion{{
 				Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
-				BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
+				BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence), ConfidenceSeq: seq,
 			}},
 		}
 		return true
@@ -191,7 +203,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		// Facet existed but had no open version (all expired) — reopen.
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
-			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
+			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence), ConfidenceSeq: seq,
 		})
 	case rf.Contradicts && cur.Value != rf.Value:
 		// Sustained contradiction => record a change arc: close the old, open the new.
@@ -199,11 +211,40 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		f.Versions[len(f.Versions)-1].ValidTo = nowStr
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
-			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
+			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence), ConfidenceSeq: seq,
 		})
 	default:
-		// Same value reaffirmed: reinforce (raise confidence, refresh provenance).
-		cur.Confidence = clampConf(max(cur.Confidence, rf.Confidence))
+		// Same value, re-judged: move confidence TOWARD what the model returned, by at most
+		// one step, and refresh provenance.
+		//
+		// This was max(current, returned), which silently discarded every downgrade the model
+		// proposed — so confidence could only ever ratchet up, and the decay both types.go and
+		// the invalidation rule above document was unreachable (issue #173). Measured: fed an
+		// observation enacting a facet's OWN stated falsifier, the model correctly declined to
+		// claim a sustained change and instead returned 0.80 against a stored 0.90. max() kept
+		// 0.90. A facet that reached 0.95 stayed there for the life of the archive whatever
+		// later evidence said, and nothing logged that a downgrade had been dropped.
+		//
+		// The naive fix — just take the returned value — is wrong, and is why max() was there:
+		// one window with a single weak observation would flatten a facet built on forty, and
+		// that would break the cross-session reinforcement signal (#16) in the other direction.
+		//
+		// So: one symmetric rule, no special cases. Neither direction may move far in a single
+		// fold, which makes confidence mean "accumulated across folds" rather than "the highest
+		// any one window ever felt". The cost is that a facet now needs several folds to climb,
+		// which is the point: the number should track repeated independent evidence, which is
+		// exactly what #16's signal is about.
+		//
+		// NOT fixed here, and still true: "decays on absence" remains unimplemented. A facet the
+		// model does not mention is left untouched, because a fold asserts ~25 facets out of
+		// thousands and decaying every unmentioned one per fold would rot the whole profile in a
+		// few passes. That needs a time-based rate, not a per-fold one — tracked on #173.
+		// Step from what the model actually SAW — the decayed value — not from the stored
+		// one. Stepping from the stored value would silently undo decay on every citation:
+		// the model would be shown 0.4, agree with 0.4, and the facet would snap back toward
+		// its pre-decay 0.9 because that is what the row still held.
+		cur.Confidence = clampConf(stepToward(cur.DecayedConfidence(seq), rf.Confidence, maxConfidenceStep))
+		cur.ConfidenceSeq = seq // confirmed now: the decay clock restarts
 		cur.BecauseOf = mergeIDs(cur.BecauseOf, rf.BecauseOf)
 	}
 	return true
@@ -243,9 +284,9 @@ func wellFormed(rf reviewedFacet) bool {
 		strings.TrimSpace(rf.Value) != ""
 }
 
-func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]reviewedFacet, error) {
+func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet, throughSeq int64) ([]reviewedFacet, error) {
 	input := "OBSERVATIONS (L1):\n" + mustJSON(slimObs(obs)) +
-		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name))
+		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name, throughSeq))
 	reply, err := r.runnerFor(ln)(ctx, ModelFor(r.Config, ln, PhaseReview), ln.Review, input)
 	if err != nil {
 		return nil, err
@@ -277,7 +318,10 @@ type PreviewFacet struct {
 // synthesize (in the tuning loop, the ones the EXTRACT preview just produced in-memory).
 func PreviewReview(ctx context.Context, run MineFunc, cfg store.Config, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]PreviewFacet, error) {
 	rv := &Reviewer{Config: cfg, Runner: run} // Store nil: reviewLens reads only Config+Runner
-	reviewed, err := rv.reviewLens(ctx, ln, obs, prior)
+	// 0 = no decay clock. A preview writes nothing and an unregistered lens has no watermark,
+	// so there is no "observations elapsed" to measure against; showing undecayed confidences
+	// is the honest rendering of a read-only trial.
+	reviewed, err := rv.reviewLens(ctx, ln, obs, prior, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +336,51 @@ func PreviewReview(ctx context.Context, run MineFunc, cfg store.Config, ln *lens
 }
 
 // --- helpers ----------------------------------------------------------------
+
+// resolveArchived decides where an assertion against an ARCHIVED facet should land, and
+// returns the facet to apply to plus its map id.
+//
+// Two cases, and they want opposite answers:
+//
+//	merged into another facet  → REDIRECT to the survivor. The trait is still represented in
+//	                             the profile, just under the consolidated name, so the evidence
+//	                             belongs there. Resurrecting instead would re-split a merge
+//	                             every time new evidence arrived, making compaction useless.
+//	retired outright           → RESURRECT. The structural judgment was "this is not a trait",
+//	                             and new evidence is exactly the thing that overturns it. The
+//	                             facet reopens on its own history, which is the honest record:
+//	                             it was here, it was dropped, it came back.
+//
+// The redirect follows a chain (A merged into B, B into C) because a later pass can merge a
+// survivor again. It is bounded: a cycle, or a survivor that is itself archived with no live
+// target, falls back to resurrecting rather than dropping the evidence on the floor.
+func resolveArchived(byKey map[string]*store.Facet, lensName string, f *store.Facet, id string) (*store.Facet, string) {
+	seen := map[string]bool{id: true}
+	cur, curID := f, id
+	for hops := 0; hops < 8; hops++ {
+		dim, key, ok := store.ParseFacetRef(cur.MergedInto)
+		if !ok {
+			break // retired outright (or an unparseable ref) → resurrect below
+		}
+		nextID := lensName + "|" + dim + "|" + key
+		if seen[nextID] {
+			break // cycle
+		}
+		seen[nextID] = true
+		next, found := byKey[nextID]
+		if !found {
+			break // survivor gone (hand-edited archive) → resurrect below
+		}
+		if next.Active() {
+			return next, nextID
+		}
+		cur, curID = next, nextID
+	}
+	// No live survivor to redirect to: bring this facet back rather than lose the assertion.
+	cur.ArchivedAt = ""
+	cur.MergedInto = ""
+	return cur, curID
+}
 
 func indexFacets(facets []store.Facet) map[string]*store.Facet {
 	m := make(map[string]*store.Facet, len(facets))
@@ -325,18 +414,42 @@ func slimObs(obs []store.Observation) []map[string]any {
 	return out
 }
 
-func slimFacets(facets []store.Facet, lensName string) []map[string]any {
+func slimFacets(facets []store.Facet, lensName string, decaySeq int64) []map[string]any {
 	out := []map[string]any{}
 	for _, f := range facets {
 		if f.Lens != lensName {
+			continue
+		}
+		// Archived facets are history, not stance. Showing one would invite the model to
+		// reinforce a facet compaction deliberately took out of the profile, undoing the
+		// compaction on the next fold. Callers still pass the WHOLE profile (WriteFacets is a
+		// replace), so the filter belongs here, at the one place the prompt view is built.
+		if !f.Active() {
 			continue
 		}
 		cur := f.Current()
 		val := ""
 		conf := 0.0
 		if cur != nil {
-			val = cur.Value
-			conf = cur.Confidence
+			// The CLAIM, when the facet has one, else the full value (Gist). This is the whole
+			// payoff of the claim/detail split and it lands here, because this function is the
+			// one place the review call's view of the profile is built.
+			//
+			// Measured on a real archive: 2,039 facets carried 2,411,507 chars of value, which
+			// was 99.4% of the review call against a 16,000-char observation budget, and the
+			// lens had not folded for 24 days. None of that bulk was evidence — zero
+			// observation ids appear inline, they are all in because_of — it was analysis:
+			// contrasts with sibling facets, diagnoses, advice, provenance notes, falsifiers.
+			// The review call needs none of it. It needs to know what each facet ASSERTS, so it
+			// can match identity and judge contradiction; the analysis is for the portrait and
+			// for humans, and re-sending it every fold is what made the call impossible.
+			val = cur.Gist()
+			// The DECAYED confidence, not the stored one. The stored value is how sure the
+			// reviewer was when the evidence last arrived; what the model needs to judge
+			// against is how sure we should be NOW, after the observations that have gone by
+			// without confirming it. Sending the stored value is what made confidence a
+			// ratchet from the model's point of view (#173).
+			conf = cur.DecayedConfidence(decaySeq)
 		}
 		// current_confidence is REQUIRED, not decorative: applyFacet keeps
 		// max(current, returned) confidence on reinforcement (reviewer.go), so a
@@ -351,6 +464,38 @@ func slimFacets(facets []store.Facet, lensName string) []map[string]any {
 	return out
 }
 
+// maxConfidenceStep bounds how far ONE fold may move a facet's confidence, in either direction.
+//
+// 0.1 is the model's own instinct rather than a guess: asked to re-judge two real facets against
+// evidence enacting their stated falsifiers, it returned 0.80 for a stored 0.90 and 0.50 for a
+// stored 0.60 — a tenth each time, in both arms of a claim-vs-value A/B. So a facet at ceiling
+// needs roughly nine consecutive downgrading folds to reach zero, and the same to climb back:
+// slow enough that no single window can rewrite a well-supported facet, fast enough that a real
+// reversal shows up within a few reviews.
+const maxConfidenceStep = 0.1
+
+// stepToward moves from toward to by at most step, and lands exactly on to when it is nearer
+// than that. Symmetric by construction, so neither a reinforcement nor a downgrade gets a
+// privileged path.
+func stepToward(from, to, step float64) float64 {
+	switch {
+	case to > from+step:
+		return from + step
+	case to < from-step:
+		return from - step
+	default:
+		return to
+	}
+}
+
+// clampConf bounds a confidence to [0,1] and rounds it to two decimals.
+//
+// The rounding is not cosmetic. Confidence now moves in steps (see stepToward), and binary
+// floating point does not represent those steps exactly: 0.2 + 0.1 is 0.30000000000000004, and
+// five folds accumulate to 0.40000000000000013. That noise would be written to the database and
+// eventually printed, since every surface renders confidence with %.2f and the prompts ask for
+// two decimals. Two decimals is also the real precision of the judgment — nothing downstream
+// distinguishes 0.67 from 0.6700000001, and a stored value should not claim more than it knows.
 func clampConf(c float64) float64 {
 	if c < 0 {
 		return 0
@@ -358,7 +503,7 @@ func clampConf(c float64) float64 {
 	if c > 1 {
 		return 1
 	}
-	return c
+	return math.Round(c*100) / 100
 }
 
 // maxF and sameValue used to live here. maxF predated Go 1.21's builtin `max` (go.mod is 1.25.1) and

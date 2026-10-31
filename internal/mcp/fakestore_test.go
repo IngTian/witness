@@ -51,7 +51,19 @@ func (f *fakeMCPStore) StageObservationCapped(o store.Observation, limit, totalL
 	return f.stagedReturn, nil
 }
 func (f *fakeMCPStore) StagedExists(session, obsID string) bool { return f.existsReturn }
-func (f *fakeMCPStore) ReadFacets() ([]store.Facet, error)      { return f.facets, nil }
+
+// The server reads the ACTIVE profile (archived facets are history, not stance). The fake
+// filters the same way a real store's WHERE clause does, so a test that plants an archived
+// facet exercises the real exclusion rather than a fake that hands back everything.
+func (f *fakeMCPStore) ReadActiveFacets() ([]store.Facet, error) {
+	var out []store.Facet
+	for _, fc := range f.facets {
+		if fc.Active() {
+			out = append(out, fc)
+		}
+	}
+	return out, nil
+}
 func (f *fakeMCPStore) ReadProfile(lens string) (string, bool, error) {
 	md, ok := f.profiles[lens]
 	return md, ok, nil
