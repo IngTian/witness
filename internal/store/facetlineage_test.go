@@ -314,6 +314,62 @@ func TestArchiveReasonSurvivesTheWriteBack(t *testing.T) {
 	}
 }
 
+// The claim has to survive the same review write-back the archive state does: the reviewer
+// reads the whole profile and rewrites it every fold, so a column dropped on write would erase
+// every claim on the next review rather than at claim time — a silent, delayed loss that would
+// quietly put the full prose back into every review call.
+//
+// Needs a REAL store: a fake that holds the slice in memory cannot catch a missing SQL column,
+// which is exactly how the first version of this passed while the column was being dropped.
+func TestClaimSurvivesTheWriteBack(t *testing.T) {
+	s := lineageStore(t)
+	f := lf("default", "thinking", "claimed", "the full analysis, which is long")
+	f.Versions[0].Claim = "He checks state before acting."
+	if err := s.WriteFacets([]Facet{f}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ { // three folds' worth of read-modify-write
+		all, err := s.ReadFacets()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.WriteFacets(all); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := s.ReadFacets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("want 1 facet, got %d", len(all))
+	}
+	cur := all[0].Current()
+	if cur.Claim != "He checks state before acting." {
+		t.Errorf("the claim was lost across the write-back, got %q", cur.Claim)
+	}
+	if cur.Value != "the full analysis, which is long" {
+		t.Errorf("the value must be preserved too, got %q", cur.Value)
+	}
+	// And Gist prefers the claim, which is what shrinks the review call.
+	if cur.Gist() != cur.Claim {
+		t.Errorf("Gist should return the claim, got %q", cur.Gist())
+	}
+}
+
+// A version with no claim must Gist to its value, or an un-claimed archive would send empty
+// current_value to the review call and the model would mint duplicates of everything.
+func TestGistFallsBackToTheValue(t *testing.T) {
+	v := FacetVersion{Value: "the full value"}
+	if v.Gist() != "the full value" {
+		t.Errorf("want the value, got %q", v.Gist())
+	}
+	v.Claim = "   "
+	if v.Gist() != "the full value" {
+		t.Errorf("a blank claim must still fall back, got %q", v.Gist())
+	}
+}
+
 func TestParseFacetRef(t *testing.T) {
 	cases := []struct {
 		in       string
