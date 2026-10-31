@@ -57,7 +57,7 @@ import (
 // added to a version number some binary has already written — it needs a new one, which is what
 // version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
 // them on the next open.)
-const schemaVersion = 11
+const schemaVersion = 12
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -317,6 +317,19 @@ func migrate(db *sql.DB) error {
 	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps). No backfill:
 	// the empty-string column DEFAULT is exactly right for every pre-existing facet — all of
 	// them are active, because nothing could archive one before this version.
+	// 10. v11 -> v12: facet_versions.confidence_seq — the observation watermark at which this
+	// version's confidence was last set, so decay-on-absence can be DERIVED on read instead of
+	// swept into the data (issue #173). Guarded ADD COLUMN, and then BACKFILLED to the current
+	// watermark rather than left at 0: a zero would read as "last confirmed at the beginning of
+	// time", so every existing facet would decay to the floor on the first read and the whole
+	// profile would re-level retroactively. Backfilling to now means decay starts from this
+	// upgrade forward, which is the only honest reading — we do not know when these facets were
+	// really last confirmed.
+	if err := addFacetConfidenceSeqColumn(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v12 add facet_versions.confidence_seq: %w", err)
+	}
+
 	// 9. v10 -> v11: facet_versions.claim — the short statement of what a facet asserts,
 	// separate from the full prose. Guarded ADD COLUMN; no backfill, because an empty claim
 	// correctly means "this version has none yet" and every consumer falls back to the value.
@@ -633,6 +646,52 @@ func addFacetLineageColumns(tx *sql.Tx) error {
 	return nil
 }
 
+// addFacetConfidenceSeqColumn is the v11->v12 step: record WHEN a confidence was set, in
+// observation-watermark units, so decay-on-absence is a pure function of (stored confidence,
+// observations elapsed since) and can be computed on read.
+//
+// WHY OBSERVATIONS AND NOT TIME OR FOLDS. Decay has to mean "evidence was possible and did not
+// arrive". Wall-clock punishes a holiday — a fortnight away would decay a profile with no new
+// evidence to justify it. Fold count is worse than it looks: folds fire at irregular intervals
+// and their size is configurable (ReviewMaxChars), so a per-fold rate silently changes meaning
+// when that setting changes. Observations elapsed is the number of chances the facet had to be
+// confirmed and wasn't, which is exactly the quantity absence should be measured in. The review
+// watermark is already a monotonic observation counter (AUTOINCREMENT seq, never reused — #125),
+// so it is the clock, free.
+//
+// WHY DERIVED AND NOT SWEPT. Storing decayed values would mean rewriting every facet on every
+// fold — thousands of rows for the couple of dozen that were actually cited — and it would be
+// destructive: the original "confidence when last confirmed" would be gone, so the rate could
+// never be retuned and a bad rate could not be undone. Derived costs one multiply per read.
+//
+// Measured on a real archive to set the default rate: a facet is cited about once every 1,486
+// observations in the `default` lens and 886 in `math` (22,501 citations across 16,353
+// observations for 2,039 facets; 2,979 across 3,634 for 720).
+func addFacetConfidenceSeqColumn(tx *sql.Tx) error {
+	var hasColumn int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('facet_versions') WHERE name='confidence_seq'`,
+	).Scan(&hasColumn); err != nil {
+		return fmt.Errorf("probe confidence_seq column: %w", err)
+	}
+	if hasColumn != 0 {
+		return nil
+	}
+	if _, err := tx.Exec(
+		`ALTER TABLE facet_versions ADD COLUMN confidence_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add column: %w", err)
+	}
+	// Backfill to the current high-water observation seq: treat every existing facet as
+	// confirmed AS OF this upgrade. Leaving 0 would date them to the beginning of time and
+	// decay the entire profile to the floor on first read.
+	if _, err := tx.Exec(
+		`UPDATE facet_versions SET confidence_seq = COALESCE((SELECT MAX(seq) FROM observations), 0)`,
+	); err != nil {
+		return fmt.Errorf("backfill confidence_seq: %w", err)
+	}
+	return nil
+}
+
 // addFacetClaimColumn is the v10->v11 step: add facet_versions.claim if the running DB's table
 // predates it.
 //
@@ -744,6 +803,7 @@ CREATE TABLE IF NOT EXISTS facet_versions (
   pos         INTEGER NOT NULL,
   value       TEXT NOT NULL DEFAULT '',
   claim       TEXT NOT NULL DEFAULT '',
+  confidence_seq INTEGER NOT NULL DEFAULT 0,
   valid_from  TEXT NOT NULL DEFAULT '',
   valid_to    TEXT NOT NULL DEFAULT '',
   recorded_at TEXT NOT NULL DEFAULT '',

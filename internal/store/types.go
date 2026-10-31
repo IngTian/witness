@@ -15,7 +15,10 @@
 // global (runs on every session); repo lenses are scoped (opt-in per repo).
 package store
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // Name constants — the single source of truth for the two special names, in the data
 // layer (every store-side check and the lens loader route through them). Since #44
@@ -101,7 +104,63 @@ type FacetVersion struct {
 	ValidTo    string   `json:"valid_to,omitempty"` // real-world: when it stopped (empty = current)
 	RecordedAt string   `json:"recorded_at"`        // system: when the reviewer learned it
 	BecauseOf  []string `json:"because_of"`         // observation IDs (provenance for re-grounding)
-	Confidence float64  `json:"confidence"`         // 0-1; decays on absence, rises on reinforcement
+	// Confidence is how sure the reviewer was WHEN THE EVIDENCE LAST ARRIVED — not how sure we
+	// should be now. Read it through DecayedConfidence, which accounts for the observations
+	// that have gone by since without confirming it.
+	Confidence float64 `json:"confidence"` // 0-1; rises on reinforcement, decays on absence
+	// ConfidenceSeq is the observation watermark at which Confidence was set: the clock decay
+	// is measured against. 0 means unknown (a facet written before this was tracked), which
+	// DecayedConfidence treats as "no decay" rather than "infinitely stale".
+	ConfidenceSeq int64 `json:"confidence_seq,omitempty"`
+}
+
+// Decay constants for DecayedConfidence. Exported so a caller can explain the numbers it shows.
+const (
+	// FacetDecayHalfLifeObs is how many observations may pass, without a facet being cited,
+	// before its confidence halves.
+	//
+	// Measured on a real archive: a facet is cited about once every 1,486 observations in the
+	// `default` lens (22,501 citations across 16,353 observations for 2,039 facets) and 886 in
+	// `math`. At this half-life a facet confirmed at 0.9 reads ~0.64 after one typical gap —
+	// visibly less certain, not alarming — and reaches the floor after roughly 10,000
+	// uncited observations, which is a facet that genuinely stopped showing up.
+	//
+	// The rate is the one real judgement call here. Too gentle and every facet pins at
+	// ceiling, which is the ratchet this fixes wearing a different hat; too aggressive and a
+	// quiet-but-real trait reads as doubtful. It is deliberately a named constant rather than
+	// a literal so the number can be argued with.
+	FacetDecayHalfLifeObs = 3000.0
+
+	// FacetConfidenceFloor is the value decay asymptotes to and never passes.
+	//
+	// It is load-bearing, not a safety rail. The invalidation rule above applyFacet is explicit
+	// that absence must NEVER invalidate a facet — only lower confidence — so a decay that
+	// could reach 0 would quietly turn "no evidence lately" into "not true", which is the one
+	// inference this archive must not make. A quiet trait stays on the books, flagged as
+	// uncertain, and one citation restores it.
+	FacetConfidenceFloor = 0.1
+)
+
+// DecayedConfidence is what a reader should see: the stored confidence decayed for the
+// observations that have passed since it was set, floored at FacetConfidenceFloor.
+//
+// currentSeq is the archive's high-water observation seq. A zero ConfidenceSeq (a facet that
+// predates the column) or a currentSeq at or below it means no elapsed evidence, so no decay —
+// never the reverse, because guessing "infinitely stale" would decay a whole archive to the
+// floor on first read.
+func (v *FacetVersion) DecayedConfidence(currentSeq int64) float64 {
+	if v.ConfidenceSeq <= 0 || currentSeq <= v.ConfidenceSeq {
+		return v.Confidence
+	}
+	if v.Confidence <= FacetConfidenceFloor {
+		return v.Confidence // already at or under the floor; decay has nothing to do
+	}
+	elapsed := float64(currentSeq - v.ConfidenceSeq)
+	decayed := v.Confidence * math.Pow(0.5, elapsed/FacetDecayHalfLifeObs)
+	if decayed < FacetConfidenceFloor {
+		return FacetConfidenceFloor
+	}
+	return math.Round(decayed*100) / 100
 }
 
 // Facet is the evolving record of one named attribute within a lens+dimension,
