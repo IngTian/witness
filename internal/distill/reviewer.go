@@ -171,6 +171,13 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 	}
 	id := lensName + "|" + rf.Dimension + "|" + rf.Key
 	f, ok := byKey[id]
+	if ok && !f.Active() {
+		// The assertion landed on a facet COMPACTION ARCHIVED. The model never saw it (the
+		// prompt shows only the active profile), so it is re-minting a name that still exists
+		// in the table — and without this branch the facet would silently come back active on
+		// its own old history, undoing the compaction on the very next fold.
+		f, id = resolveArchived(byKey, lensName, f, id)
+	}
 	if !ok {
 		// Brand-new facet: open-ended first version.
 		byKey[id] = &store.Facet{
@@ -293,6 +300,51 @@ func PreviewReview(ctx context.Context, run MineFunc, cfg store.Config, ln *lens
 
 // --- helpers ----------------------------------------------------------------
 
+// resolveArchived decides where an assertion against an ARCHIVED facet should land, and
+// returns the facet to apply to plus its map id.
+//
+// Two cases, and they want opposite answers:
+//
+//	merged into another facet  → REDIRECT to the survivor. The trait is still represented in
+//	                             the profile, just under the consolidated name, so the evidence
+//	                             belongs there. Resurrecting instead would re-split a merge
+//	                             every time new evidence arrived, making compaction useless.
+//	retired outright           → RESURRECT. The structural judgment was "this is not a trait",
+//	                             and new evidence is exactly the thing that overturns it. The
+//	                             facet reopens on its own history, which is the honest record:
+//	                             it was here, it was dropped, it came back.
+//
+// The redirect follows a chain (A merged into B, B into C) because a later pass can merge a
+// survivor again. It is bounded: a cycle, or a survivor that is itself archived with no live
+// target, falls back to resurrecting rather than dropping the evidence on the floor.
+func resolveArchived(byKey map[string]*store.Facet, lensName string, f *store.Facet, id string) (*store.Facet, string) {
+	seen := map[string]bool{id: true}
+	cur, curID := f, id
+	for hops := 0; hops < 8; hops++ {
+		dim, key, ok := store.ParseFacetRef(cur.MergedInto)
+		if !ok {
+			break // retired outright (or an unparseable ref) → resurrect below
+		}
+		nextID := lensName + "|" + dim + "|" + key
+		if seen[nextID] {
+			break // cycle
+		}
+		seen[nextID] = true
+		next, found := byKey[nextID]
+		if !found {
+			break // survivor gone (hand-edited archive) → resurrect below
+		}
+		if next.Active() {
+			return next, nextID
+		}
+		cur, curID = next, nextID
+	}
+	// No live survivor to redirect to: bring this facet back rather than lose the assertion.
+	cur.ArchivedAt = ""
+	cur.MergedInto = ""
+	return cur, curID
+}
+
 func indexFacets(facets []store.Facet) map[string]*store.Facet {
 	m := make(map[string]*store.Facet, len(facets))
 	for i := range facets {
@@ -331,11 +383,30 @@ func slimFacets(facets []store.Facet, lensName string) []map[string]any {
 		if f.Lens != lensName {
 			continue
 		}
+		// Archived facets are history, not stance. Showing one would invite the model to
+		// reinforce a facet compaction deliberately took out of the profile, undoing the
+		// compaction on the next fold. Callers still pass the WHOLE profile (WriteFacets is a
+		// replace), so the filter belongs here, at the one place the prompt view is built.
+		if !f.Active() {
+			continue
+		}
 		cur := f.Current()
 		val := ""
 		conf := 0.0
 		if cur != nil {
-			val = cur.Value
+			// The CLAIM, when the facet has one, else the full value (Gist). This is the whole
+			// payoff of the claim/detail split and it lands here, because this function is the
+			// one place the review call's view of the profile is built.
+			//
+			// Measured on a real archive: 2,039 facets carried 2,411,507 chars of value, which
+			// was 99.4% of the review call against a 16,000-char observation budget, and the
+			// lens had not folded for 24 days. None of that bulk was evidence — zero
+			// observation ids appear inline, they are all in because_of — it was analysis:
+			// contrasts with sibling facets, diagnoses, advice, provenance notes, falsifiers.
+			// The review call needs none of it. It needs to know what each facet ASSERTS, so it
+			// can match identity and judge contradiction; the analysis is for the portrait and
+			// for humans, and re-sending it every fold is what made the call impossible.
+			val = cur.Gist()
 			conf = cur.Confidence
 		}
 		// current_confidence is REQUIRED, not decorative: applyFacet keeps

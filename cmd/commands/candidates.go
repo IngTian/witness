@@ -25,7 +25,7 @@ func cmdCandidates(lens string) error {
 	if err != nil {
 		return err
 	}
-	facets, err := st.ReadFacets()
+	facets, err := st.ReadActiveFacets()
 	if err != nil {
 		return err
 	}
