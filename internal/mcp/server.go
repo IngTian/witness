@@ -287,7 +287,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		if lensName == "" {
 			lensName = store.LensDefault
 		}
-		facets, err := st.ReadFacets()
+		facets, err := st.ReadActiveFacets()
 		if err != nil {
 			return errResult(fmt.Sprintf("read facets: %v", err)), nil, nil
 		}
