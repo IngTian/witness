@@ -109,6 +109,9 @@ type MCPStore interface {
 	ReadActiveFacets() ([]Facet, error)
 	ReadProfile(lens string) (string, bool, error)
 	DeleteObservation(obsID string) (bool, error)
+	// WhyEmpty lets an empty answer name the layer that is actually missing rather than
+	// blaming the reviewer for an archive that nothing is feeding (#166).
+	WhyEmpty(lens string) EmptyReason
 }
 
 // --- distillation engine (the C1 headline: a fake-drivable worker) ------------

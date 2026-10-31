@@ -31,6 +31,10 @@ type fakeMCPStore struct {
 	// value, so tests that need a successful stage set it explicitly; the pre-existing
 	// TestServerRecordDeleteSearch sets it to true.
 	stagedReturn bool
+	// whyEmpty drives the empty-state branch (#166). The zero value is store.NoCapture,
+	// which is deliberate: an archive nothing is feeding is the case that used to be
+	// misreported as "the reviewer may not have run yet".
+	whyEmpty store.EmptyReason
 }
 
 func (f *fakeMCPStore) ReadObservations(lens string) ([]store.Observation, error) {
@@ -68,6 +72,7 @@ func (f *fakeMCPStore) DeleteObservation(obsID string) (bool, error) {
 	f.deletedIDs = append(f.deletedIDs, obsID)
 	return true, nil
 }
+func (f *fakeMCPStore) WhyEmpty(lens string) store.EmptyReason { return f.whyEmpty }
 
 // compile-time proof the fake satisfies the interface the server accepts.
 var _ store.MCPStore = (*fakeMCPStore)(nil)
