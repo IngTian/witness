@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"time"
 
@@ -209,8 +210,32 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
 		})
 	default:
-		// Same value reaffirmed: reinforce (raise confidence, refresh provenance).
-		cur.Confidence = clampConf(max(cur.Confidence, rf.Confidence))
+		// Same value, re-judged: move confidence TOWARD what the model returned, by at most
+		// one step, and refresh provenance.
+		//
+		// This was max(current, returned), which silently discarded every downgrade the model
+		// proposed — so confidence could only ever ratchet up, and the decay both types.go and
+		// the invalidation rule above document was unreachable (issue #173). Measured: fed an
+		// observation enacting a facet's OWN stated falsifier, the model correctly declined to
+		// claim a sustained change and instead returned 0.80 against a stored 0.90. max() kept
+		// 0.90. A facet that reached 0.95 stayed there for the life of the archive whatever
+		// later evidence said, and nothing logged that a downgrade had been dropped.
+		//
+		// The naive fix — just take the returned value — is wrong, and is why max() was there:
+		// one window with a single weak observation would flatten a facet built on forty, and
+		// that would break the cross-session reinforcement signal (#16) in the other direction.
+		//
+		// So: one symmetric rule, no special cases. Neither direction may move far in a single
+		// fold, which makes confidence mean "accumulated across folds" rather than "the highest
+		// any one window ever felt". The cost is that a facet now needs several folds to climb,
+		// which is the point: the number should track repeated independent evidence, which is
+		// exactly what #16's signal is about.
+		//
+		// NOT fixed here, and still true: "decays on absence" remains unimplemented. A facet the
+		// model does not mention is left untouched, because a fold asserts ~25 facets out of
+		// thousands and decaying every unmentioned one per fold would rot the whole profile in a
+		// few passes. That needs a time-based rate, not a per-fold one — tracked on #173.
+		cur.Confidence = clampConf(stepToward(cur.Confidence, rf.Confidence, maxConfidenceStep))
 		cur.BecauseOf = mergeIDs(cur.BecauseOf, rf.BecauseOf)
 	}
 	return true
@@ -422,6 +447,38 @@ func slimFacets(facets []store.Facet, lensName string) []map[string]any {
 	return out
 }
 
+// maxConfidenceStep bounds how far ONE fold may move a facet's confidence, in either direction.
+//
+// 0.1 is the model's own instinct rather than a guess: asked to re-judge two real facets against
+// evidence enacting their stated falsifiers, it returned 0.80 for a stored 0.90 and 0.50 for a
+// stored 0.60 — a tenth each time, in both arms of a claim-vs-value A/B. So a facet at ceiling
+// needs roughly nine consecutive downgrading folds to reach zero, and the same to climb back:
+// slow enough that no single window can rewrite a well-supported facet, fast enough that a real
+// reversal shows up within a few reviews.
+const maxConfidenceStep = 0.1
+
+// stepToward moves from toward to by at most step, and lands exactly on to when it is nearer
+// than that. Symmetric by construction, so neither a reinforcement nor a downgrade gets a
+// privileged path.
+func stepToward(from, to, step float64) float64 {
+	switch {
+	case to > from+step:
+		return from + step
+	case to < from-step:
+		return from - step
+	default:
+		return to
+	}
+}
+
+// clampConf bounds a confidence to [0,1] and rounds it to two decimals.
+//
+// The rounding is not cosmetic. Confidence now moves in steps (see stepToward), and binary
+// floating point does not represent those steps exactly: 0.2 + 0.1 is 0.30000000000000004, and
+// five folds accumulate to 0.40000000000000013. That noise would be written to the database and
+// eventually printed, since every surface renders confidence with %.2f and the prompts ask for
+// two decimals. Two decimals is also the real precision of the judgment — nothing downstream
+// distinguishes 0.67 from 0.6700000001, and a stored value should not claim more than it knows.
 func clampConf(c float64) float64 {
 	if c < 0 {
 		return 0
@@ -429,7 +486,7 @@ func clampConf(c float64) float64 {
 	if c > 1 {
 		return 1
 	}
-	return c
+	return math.Round(c*100) / 100
 }
 
 // maxF and sameValue used to live here. maxF predated Go 1.21's builtin `max` (go.mod is 1.25.1) and
