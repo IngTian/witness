@@ -57,7 +57,7 @@ import (
 // added to a version number some binary has already written — it needs a new one, which is what
 // version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
 // them on the next open.)
-const schemaVersion = 10
+const schemaVersion = 11
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -317,6 +317,14 @@ func migrate(db *sql.DB) error {
 	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps). No backfill:
 	// the empty-string column DEFAULT is exactly right for every pre-existing facet — all of
 	// them are active, because nothing could archive one before this version.
+	// 9. v10 -> v11: facet_versions.claim — the short statement of what a facet asserts,
+	// separate from the full prose. Guarded ADD COLUMN; no backfill, because an empty claim
+	// correctly means "this version has none yet" and every consumer falls back to the value.
+	if err := addFacetClaimColumn(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v11 add facet_versions.claim: %w", err)
+	}
+
 	// Also the v9 -> v10 step: the same function adds archive_reason. It is per-column guarded
 	// (pragma_table_info), so one call converges a DB from v8, from a pre-release v9, or from
 	// v10 — which is precisely why the columns are added here rather than assumed from the
@@ -625,6 +633,42 @@ func addFacetLineageColumns(tx *sql.Tx) error {
 	return nil
 }
 
+// addFacetClaimColumn is the v10->v11 step: add facet_versions.claim if the running DB's table
+// predates it.
+//
+// WHY A SEPARATE FIELD. A facet's value carries two different things with two different
+// audiences. The CLAIM — what this trait actually asserts — is all the review call needs to
+// match identity and judge contradiction. The rest is analysis: contrasts with sibling facets,
+// the diagnosis, actionable advice, provenance limits, falsifiers. That analysis is the
+// valuable part for a human and for the portrait, and it is also 60-70% of the text, re-sent to
+// the model on every single review.
+//
+// Measured on a real archive: 2,039 facets, 2,411,507 chars of value text, and ZERO observation
+// ids cited inline — the evidence was already separate, in 22,501 because_of references. So the
+// payload was never evidence, it was analysis. Splitting claim from analysis is what makes the
+// review call small; compaction reduces the COUNT but barely touches the text (measured: -73%
+// facets, -15% chars), so neither alone is enough and together they are.
+//
+// Per VERSION, not per facet, because a claim changes exactly when the value it summarises
+// changes — and the bi-temporal history should show how the claim moved, not just the prose.
+//
+// No backfill. An empty claim means "none written yet", and every consumer falls back to the
+// value, so an archive that has never compacted behaves exactly as before.
+func addFacetClaimColumn(tx *sql.Tx) error {
+	var hasColumn int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('facet_versions') WHERE name='claim'`,
+	).Scan(&hasColumn); err != nil {
+		return fmt.Errorf("probe claim column: %w", err)
+	}
+	if hasColumn == 0 {
+		if _, err := tx.Exec(`ALTER TABLE facet_versions ADD COLUMN claim TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add column: %w", err)
+		}
+	}
+	return nil
+}
+
 // schemaV1 is the full current schema. `raw` is the append-only ground-truth
 // transcript (surrogate rowid; seq is a plain ordinal, not a uniqueness
 // constraint, matching the old JSONL append). observations carry a monotonic
@@ -699,6 +743,7 @@ CREATE TABLE IF NOT EXISTS facet_versions (
   facet_id    INTEGER NOT NULL REFERENCES facets(id) ON DELETE CASCADE,
   pos         INTEGER NOT NULL,
   value       TEXT NOT NULL DEFAULT '',
+  claim       TEXT NOT NULL DEFAULT '',
   valid_from  TEXT NOT NULL DEFAULT '',
   valid_to    TEXT NOT NULL DEFAULT '',
   recorded_at TEXT NOT NULL DEFAULT '',

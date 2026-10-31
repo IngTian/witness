@@ -90,7 +90,13 @@ type Observation struct {
 // contradicting pattern, or recency-expiry for time-bound State. Never on mere
 // absence (that only lowers Confidence). Old versions are retained, never deleted.
 type FacetVersion struct {
-	Value      string   `json:"value"`              // the facet value at this time
+	Value string `json:"value"` // the facet value at this time
+	// Claim is the short statement of what this version ASSERTS — one or two sentences,
+	// separate from the analysis in Value. It is what the review call is sent: enough to match
+	// identity and judge contradiction, without the contrasts, advice, provenance notes and
+	// falsifiers that make up most of the prose and are re-sent on every review otherwise.
+	// Empty means none has been written yet, and every consumer falls back to Value.
+	Claim      string   `json:"claim,omitempty"`
 	ValidFrom  string   `json:"valid_from"`         // real-world: when this became true
 	ValidTo    string   `json:"valid_to,omitempty"` // real-world: when it stopped (empty = current)
 	RecordedAt string   `json:"recorded_at"`        // system: when the reviewer learned it
@@ -142,6 +148,16 @@ func (f *Facet) Current() *FacetVersion {
 		}
 	}
 	return nil
+}
+
+// Gist returns what to show a model or a listing: the short claim when one exists, else the
+// full value. The fallback is what lets an archive that has never been compacted keep working
+// unchanged — and what makes adding claims a progressive improvement rather than a migration.
+func (v *FacetVersion) Gist() string {
+	if strings.TrimSpace(v.Claim) != "" {
+		return v.Claim
+	}
+	return v.Value
 }
 
 // Active reports whether this facet is part of the live profile — the set that feeds the

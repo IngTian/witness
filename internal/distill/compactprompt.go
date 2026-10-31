@@ -140,5 +140,19 @@ STAY IN YOUR LANE. If you are shown other traits from the same dimension, they a
 by other calls. Anything belonging to one of them is theirs to cover; do not restate it here.
 Overlapping with a sibling re-creates the redundancy this process exists to remove.
 
-Write ONLY the facet value itself. No key, no JSON, no code fence, no preamble, no commentary
-about what you did.`
+OUTPUT FORMAT — two parts, separated by a line containing only three dashes:
+
+CLAIM: <one or two sentences: what this trait IS, stated plainly>
+---
+<the full value, as described above>
+
+The CLAIM is what gets sent to every future review call, so it has to stand alone: name the
+disposition and its mechanism in a way that someone could judge new evidence against. No
+instances, no observation ids, no falsifiers, no cross-references — those live in the full value
+below. Think of it as the sentence you would use to tell someone what this trait is.
+
+Everything after the dashes is the complete value: the instances, the evidence, the costs, the
+falsifiers, all of it, exactly as instructed above. Nothing is dropped because the claim exists;
+the claim is an additional short handle, not a replacement.
+
+No JSON, no code fence, no preamble, no commentary about what you did.`

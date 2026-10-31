@@ -88,6 +88,7 @@ type compactAction struct {
 	Dimension  string   `json:"dimension"`  // must be the batch's dimension
 	Key        string   `json:"key"`        // merge: the survivor; retire: the facet to archive
 	Value      string   `json:"value"`      // merge only: the rewritten value
+	Claim      string   `json:"claim"`      // merge only: the short statement of the trait
 	Absorb     []string `json:"absorb"`     // merge only: keys folded into Key
 	Why        string   `json:"why"`        // recorded in the log, and shown in a dry run
 	Confidence float64  `json:"confidence"` // merge only: confidence in the survivor
@@ -362,14 +363,14 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 				members = append(members, f)
 			}
 		}
-		value, err := c.writeOne(ctx, ln, dim, a, members, grouped)
+		claim, value, err := c.writeOne(ctx, ln, dim, a, members, grouped)
 		if err != nil {
 			slog.Error("compact: writing a merged value failed (group dropped, others kept)",
 				"lens", ln.Name, "dimension", dim, "survivor", a.Key, "absorbing", len(a.Absorb), "err", err)
 			failures++
 			continue
 		}
-		a.Value = value
+		a.Value, a.Claim = value, claim
 		if reason := validateMergedValue(a, members); reason != "" {
 			skipped[reason]++
 			continue
@@ -379,23 +380,47 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 	return out, failures
 }
 
-// writeOne runs the single call that produces one merged value.
+// writeOne runs the single call that produces one merged facet: a short CLAIM and the full
+// value.
 func (c *Compactor) writeOne(ctx context.Context, ln *lens.Lens, dim string,
-	group compactAction, members []store.Facet, siblings []compactAction) (string, error) {
+	group compactAction, members []store.Facet, siblings []compactAction) (claim, value string, err error) {
 
 	input := renderMergeInput(ln.Name, dim, group, members, siblings)
 	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), c.writePrompt(), input)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	// The reply is PROSE, not JSON: a merged value is a long free-text facet value, and
-	// wrapping it in JSON only adds an escaping failure mode (a stray newline or quote in a
-	// 4,000-char value breaks the parse and loses the whole call).
-	value := strings.TrimSpace(stripFence(reply))
-	slog.Info("compact: wrote a merged value", "lens", ln.Name, "dimension", dim,
-		"survivor", group.Key, "absorbed", len(group.Absorb),
-		"input_chars", len(input), "value_chars", len(value))
-	return value, nil
+	// The reply is PROSE, not JSON: a merged value is long free text, and wrapping it in JSON
+	// only adds an escaping failure mode (one stray newline or quote in a 4,000-char value
+	// breaks the parse and loses the whole call). So the two parts are split on a delimiter.
+	claim, value = splitClaim(stripFence(reply))
+	slog.Info("compact: wrote a merged facet", "lens", ln.Name, "dimension", dim,
+		"survivor", group.Key, "absorbed", len(group.Absorb), "input_chars", len(input),
+		"claim_chars", len(claim), "value_chars", len(value))
+	return claim, value, nil
+}
+
+// splitClaim parses the stage-2 reply into its short claim and full value.
+//
+// Degrades deliberately rather than failing: a reply with no delimiter becomes value-only with
+// an empty claim, which every consumer already handles by falling back to the value. Losing a
+// whole merge because the model forgot three dashes would be a far worse trade than carrying on
+// without the short form.
+func splitClaim(reply string) (claim, value string) {
+	lines := strings.Split(reply, "\n")
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) != "---" {
+			continue
+		}
+		head := strings.TrimSpace(strings.Join(lines[:i], "\n"))
+		head = strings.TrimSpace(strings.TrimPrefix(head, "CLAIM:"))
+		body := strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
+		if head == "" || body == "" {
+			break // a delimiter with nothing either side is not a split; treat it as prose
+		}
+		return head, body
+	}
+	return "", strings.TrimSpace(reply)
 }
 
 // stripFence removes a surrounding markdown code fence if the model added one despite being
@@ -576,7 +601,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 					byKey[id] = &store.Facet{
 						Lens: plan.Lens, Dimension: a.Dimension, Key: a.Key, LastSeen: nowStr,
 						Versions: []store.FacetVersion{{
-							Value: a.Value, ValidFrom: nowStr, RecordedAt: nowStr,
+							Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
 							BecauseOf: because, Confidence: clampConf(a.Confidence),
 						}},
 					}
@@ -591,15 +616,21 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 					if cur.Value != a.Value {
 						f.Versions[len(f.Versions)-1].ValidTo = nowStr
 						f.Versions = append(f.Versions, store.FacetVersion{
-							Value: a.Value, ValidFrom: nowStr, RecordedAt: nowStr,
+							Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
 							BecauseOf: because, Confidence: clampConf(a.Confidence),
 						})
 					} else {
 						cur.BecauseOf = because
+						// Same value, but a claim may be NEW: an existing facet whose text
+						// did not change still gains its short form on first compaction,
+						// which is how a profile acquires claims without a rewrite.
+						if strings.TrimSpace(cur.Claim) == "" {
+							cur.Claim = a.Claim
+						}
 					}
 				} else {
 					f.Versions = append(f.Versions, store.FacetVersion{
-						Value: a.Value, ValidFrom: nowStr, RecordedAt: nowStr,
+						Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
 						BecauseOf: because, Confidence: clampConf(a.Confidence),
 					})
 				}

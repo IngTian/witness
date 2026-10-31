@@ -394,7 +394,19 @@ func slimFacets(facets []store.Facet, lensName string) []map[string]any {
 		val := ""
 		conf := 0.0
 		if cur != nil {
-			val = cur.Value
+			// The CLAIM, when the facet has one, else the full value (Gist). This is the whole
+			// payoff of the claim/detail split and it lands here, because this function is the
+			// one place the review call's view of the profile is built.
+			//
+			// Measured on a real archive: 2,039 facets carried 2,411,507 chars of value, which
+			// was 99.4% of the review call against a 16,000-char observation budget, and the
+			// lens had not folded for 24 days. None of that bulk was evidence — zero
+			// observation ids appear inline, they are all in because_of — it was analysis:
+			// contrasts with sibling facets, diagnoses, advice, provenance notes, falsifiers.
+			// The review call needs none of it. It needs to know what each facet ASSERTS, so it
+			// can match identity and judge contradiction; the analysis is for the portrait and
+			// for humans, and re-sending it every fold is what made the call impossible.
+			val = cur.Gist()
 			conf = cur.Confidence
 		}
 		// current_confidence is REQUIRED, not decorative: applyFacet keeps
