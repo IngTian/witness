@@ -254,14 +254,22 @@ The visible front door, exactly as `witness --help` groups it:
 | Lenses | `lens` |
 | Configure | `config` |
 | Setup | `doctor` · `install` · `wire` · `unwire` |
-| Maintenance | `cleanup` · `export` |
+| Maintenance | `cleanup` · `export` · `compact` |
 
 Capture, the worker, and the MCP server are **internal** entry points invoked by
 Claude Code/OpenCode, not typed by hand. `witness import` and `witness worker …` are hidden:
 they exist for recovery and debugging, and everything they do also happens automatically.
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
-- `witness facets [lens]` — print current structured facets (CLI equivalent of MCP `get_facets`).
+- `witness facets [lens]` — print the active structured facets (CLI equivalent of MCP `get_facets`).
+  `--all` also lists facets archived by compaction, saying where each one went; `--expand
+  <dimension/key>` unfolds one facet into everything that was merged into it.
+- `witness compact [--lens <name>] [--apply]` — consolidate the profile: merge facets that describe
+  one trait, retire ones that were never traits, and give each surviving facet a short `claim`
+  (the summary the review call reads instead of the full prose). **Dry run unless `--apply`** —
+  it prints the plan and writes nothing. Nothing is deleted: a compacted facet is archived with its
+  full version history and a link to the facet that absorbed it, so `--expand` can always unfold
+  it. Re-runnable; each pass consolidates what it can see.
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
 - `witness observations record --session <id> --dimension <name> --observation <text>` — stage an active observation and kick the worker.
 - `witness observations delete <obs_id>` — prune a wrong observation.
