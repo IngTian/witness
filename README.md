@@ -72,120 +72,20 @@ witness is the answer if you've ever wanted to:
 - **Distill a corpus you care about** — market news, a knowledge base, research notes, meeting logs — into a dated history of how its state changed, not a pile of summaries. Feed it NDJSON with `witness ingest`.
 - Query any of the above **from your agent**, over MCP, instead of re-explaining context every session.
 
-**Contents:** [How it works](#how-it-works) · [Lenses](#lenses) · [Example](#example-one-moment-end-to-end) · [Reading the archive](#reading-the-archive) · [Commands](#commands) · [Install](#install) · [Configuration](#configuration) · [Your data](#your-data-is-yours)
+It will not tell you much on day one. witness measures *change*, so it needs weeks of material
+before there is anything to show — and it captures and tracks rather than advising or grading.
 
-## How it works
+**Contents:** [What it produces](#what-it-produces) · [Install](#install) · [Connect your tools](#connect-your-tools) · [Using it](#using-it) · [Your data](#your-data-is-yours) · [How it works](docs/how-it-works.md) · [Commands & config](docs/cli.md)
 
-Four layers — one ground-truth, three derived and **regenerable** from it:
+## What it produces
 
-| Layer | Kind | What it is |
-|-------|------|------------|
-| **raw (L0)** | ground truth | Every turn captured verbatim — from stable Claude Code hook fields (`UserPromptSubmit.prompt`, `Stop.last_assistant_message`) or OpenCode's local SQLite session DB (`message`/`part` text). Append-only, never LLM-touched. |
-| **observations (L1)** | derived | A cheap per-session worker mines atomic, evidence-anchored observations about *you*, tagged by lens. Append-only. |
-| **facets (L2)** | derived, bi-temporal | A periodic reviewer synthesizes observations into evolving *facets*, each keeping its **change history** (`valid_from`/`valid_to`) — so the archive answers "how did I change," not just "who am I now." Old values are never deleted. |
-| **profile (L4)** | derived narrative | A short, human-readable markdown summary distilled from the facets — one per lens plus a cross-lens `unified` portrait. Generated **on read**: `witness profile` (or MCP `get_profile`) rebuilds it only if the facets changed, so an unread profile costs nothing. A cached read is instant; a rebuild takes ~13s. |
-
-The archive is **collect-only / pull-only**: witness captures and distills everywhere, but never
-injects anything into a session. Nothing is pushed — you (or an agent) read the profile on demand.
-raw/observations/facets live in a single embedded SQLite database (`witness.db`); the profile is
-plain markdown under `profile/`.
-
-### Lenses
-
-Every observation/facet carries a **lens** tag:
-
-- **`default`** — global, runs on every session, cross-domain. This is the part no single-domain
-  tracker can be: it sees that "diagnoses gaps precisely" fires in math *and* coding *and* career.
-- **registered lenses** (e.g. `math`) — domain-specific lenses you **register once** and **enable
-  globally**. `witness lens register math ./math/` adds the definition (a directory) to a central
-  registry; `witness lens enable math` makes it run on every session (alongside `default`). Lenses
-  are shared, not tied to any repo, so the same `math` lens covers all your math work.
-
-#### Writing a lens
-
-A lens is a **directory** of three files:
-
-```
-math/
-  lens.json     settings: name, dimensions, optional per-lens models
-  extract.md    per-session — mines observations (the whole file is the prompt)
-  review.md     periodic — synthesizes observations into facets (the whole file is the prompt)
-```
-
-```json
-// math/lens.json
-{ "name": "math", "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
-```
-
-```markdown
-<!-- math/extract.md -->
-You are observing one session through a MATH-LEARNING lens. Notice things about the
-person as a mathematician — how they reason, get stuck, and climb out…
-Return ONLY a JSON array. Each element:
-[{ "dimension": "proof_rigor", "observation": "…", "evidence": "…", "poignancy": 6 }]
-```
-
-The one rule to remember: each prompt file is used **verbatim as the system prompt** and *replaces*
-the built-in `default` prompts — it doesn't extend them — so each must be **self-contained,
-including its output JSON schema** (the tool appends the transcript / observations as the user
-message, but injects no schema for you).
-
-Two **complete, copy-paste-ready** lenses ship as starting points. Copy the directory and rewrite the
-dimensions and prose for your domain:
-
-- [`prompts/lens/example/`](prompts/lens/example) — a **person** lens (math learning), for tracking
-  someone as they work.
-- [`prompts/lens/corpus-example/`](prompts/lens/corpus-example) — a **non-person** lens (market
-  regime), for tracking a subject that is not you. Start here for research notes, a knowledge base,
-  incident reports, or any document stream; its README explains what has to change when the subject
-  stops being a person.
-
-```sh
-cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/example" ./math   # edit the files, then:
-witness lens register math ./math      # copies the definition into your store (a snapshot)
-witness lens enable  math               # start running it on every session
-```
-
-`register` stores a **copy** — editing the original afterward has no effect until you re-register.
-`enable` is the separate switch that makes it actually run.
-
-**Per-lens models (optional).** By default every lens rides the default models (`witness config set
-triage_model / distill_model`). A rare heavy lens can pin a stronger model just for itself —
-without paying for it on every session — by adding `extract_model` / `review_model` to its
-`lens.json`:
-
-```json
-{ "name": "math", "dimensions": ["proof_rigor"], "extract_model": "claude-sonnet-5" }
-```
-
-Omit a field (or leave it empty) to ride the default. Since `register` stores a snapshot, edit the
-registered copy under `<witness-data-dir>/lenses/<name>/lens.json` — or edit the source and
-re-register. Verify what a lens resolved to with `witness lens show <name>`.
-
-The source directory may live anywhere. As a recommended canonical location, witness keeps the
-registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/` (normally
-`~/.local/share/witness/lenses/<name>/`, or `$WITNESS_HOME/lenses/<name>/`). You can edit that
-registered copy directly, but this location is a convention rather than a restriction on the
-directory passed to `lens register`.
-
-## Example: one moment, end to end
-
-Say a session contains this exchange (fictional):
+Say a session contains this exchange:
 
 > **you:** the migration keeps failing on prod but passes locally — I'll just run it by hand and move on
 >
 > **you:** …wait, what's actually *different* about prod? let me diff the two schemas before I touch anything
 
-Here's what each layer makes of it.
-
-**raw (L0)** — captured verbatim, nothing interpreted:
-
-```
-user  the migration keeps failing on prod but passes locally — I'll just run it by hand and move on
-user  wait, what's actually different about prod? let me diff the two schemas before I touch anything
-```
-
-**observations (L1)** — the worker mines one atomic, evidence-anchored noticing:
+It's captured verbatim, then mined into one evidence-anchored noticing:
 
 ```
 [thinking] Caught the urge to hand-patch around a failure and redirected to isolating the
@@ -194,8 +94,7 @@ user  wait, what's actually different about prod? let me diff the two schemas be
   poignancy: 6    lens: default
 ```
 
-**facets (L2)** — after several such moments the reviewer synthesizes an evolving attribute, and
-**keeps the history** (the whole point — it shows *change*, not just current state):
+After several such moments, an evolving attribute — **with its history kept**:
 
 ```
 default · thinking · diagnoses_before_acting                        confidence 0.82
@@ -204,370 +103,95 @@ default · thinking · diagnoses_before_acting                        confidence
   2026-02 → 2026-05   Tended to apply the first workaround that unblocked the task.   (superseded)
 ```
 
-**profile (L4)** — the narrative you actually read (`witness profile`):
+And the narrative you actually read (`witness profile`):
 
-> ## default
->
 > You've been converging on a diagnose-first way of working. A few months ago the pattern was to
 > reach for whatever unblocked the task; now you routinely catch that urge and turn to isolating the
 > mechanism before you touch anything…
 
-Nothing here is pushed into your sessions — you read it when you want it (`witness profile`), or an
-agent pulls the relevant facet on demand.
-
-### Writing your own summary prompt
-
-The shipped `unified` prompt writes a **personal growth portrait**. If your archive is something else
-— market records, research notes, a project log — drop your own prompt in and it wins:
-
-```
-<data-root>/summarize/unified.md    your prompt (overrides the built-in one)
-<data-root>/summarize/lens.md       same, for the per-lens summaries
-```
-
-`witness doctor` prints the data root. The file is the whole interface: no command to run, no
-registration step. Delete it to go back to the built-in prompt.
-
-The same facets can then produce a completely different document — a terse risk memo instead of a
-character portrait, say. Because the built-in prompt is still used when you have no override, a
-witness upgrade that ships an improved default still reaches you; once you override, your file is
-never touched by an upgrade.
-
-## Reading the archive
-
-Humans read the **narrative**; agents read the **structured** data. Over MCP:
-
-- `get_profile(lens)` — the narrative profile (prose); omit `lens` for the unified portrait.
-- `get_facets(lens)` — the current structured facets.
-- `search_observations(query, lens)` — local vector search over observations.
-- `record_observation(...)` — an in-session agent writes a decision-aware observation directly
-  (passed through verbatim), capturing context a later reviewer would miss.
-- `delete_observation(obs_id)` — prune a wrong observation.
-
-## Commands
-
-The visible front door, exactly as `witness --help` groups it:
-
-| group | commands |
-|---|---|
-| Read your archive | `status` · `profile` · `facets` · `observations` · `ingest` |
-| Lenses | `lens` |
-| Configure | `config` |
-| Setup | `doctor` · `install` · `wire` · `unwire` |
-| Maintenance | `cleanup` · `export` · `compact` |
-
-Capture, the worker, and the MCP server are **internal** entry points invoked by
-Claude Code/OpenCode, not typed by hand. `witness import` and `witness worker …` are hidden:
-they exist for recovery and debugging, and everything they do also happens automatically.
-
-- `witness profile [lens]` — print the narrative profile (default: the unified portrait).
-- `witness facets [lens]` — print the active structured facets (CLI equivalent of MCP `get_facets`).
-  `--all` also lists facets archived by compaction, saying where each one went; `--expand
-  <dimension/key>` unfolds one facet into everything that was merged into it.
-- `witness compact [--lens <name>] [--apply]` — consolidate the profile: merge facets that describe
-  one trait, retire ones that were never traits, and give each surviving facet a short `claim`
-  (the summary the review call reads instead of the full prose). **Dry run unless `--apply`** —
-  it prints the plan and writes nothing. Nothing is deleted: a compacted facet is archived with its
-  full version history and a link to the facet that absorbed it, so `--expand` can always unfold
-  it. Re-runnable; each pass consolidates what it can see.
-- `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
-- `witness observations record --session <id> --dimension <name> --observation <text>` — stage an active observation and kick the worker.
-- `witness observations delete <obs_id>` — prune a wrong observation.
-- `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
-  observations. (Hidden, like the rest of `worker`: review normally runs on its own schedule —
-  `review_every` / `review_poignancy` — so reaching for this by hand is the exception. `--full`
-  also runs the emergent long-arc pass.)
-- `witness lens register|enable|disable|list` — manage lenses.
-- `witness lens backfill <name> [--fresh]` — re-mine one lens over the whole history and refresh its
-  facets; `--fresh` first drops the lens's observations + facets (for a changed prompt).
-- `witness lens load-default` — re-seed / restore the built-in "default" person-growth lens (it is
-  auto-seeded once on first use and fully deletable, so this is how you bring it back).
-- `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
-  and kick background distillation without waiting.
-- `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
-- `witness status` — what has been captured, whether the worker is running, and how fresh the
-  distilled data is (`--json` for scripts).
-- `witness worker run` / `witness worker stop` — the operator escape hatch for the background
-  distillation worker (hidden from `--help`; normally it runs off editor hooks). `run` drains in
-  the foreground, `--detach` backgrounds it. It accepts `--since`/`--until` to select pending
-  sessions by their latest raw timestamp — for example `witness worker run --since 7d` distills
-  sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates
-  (`YYYY-MM-DD`) and do not discard sessions outside the selected range.
-- `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
-- `witness export <path>` — write a consistent single-file snapshot of the **database** (safe to back
-  up / cloud-sync). Add `--all` and `<path>` becomes a **directory** holding the complete archive:
-  that snapshot plus `config.toml`, `lenses/` and `profile/`. Use `--all` for backups — see
-  [Your data is yours](#your-data-is-yours).
-- `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
-  default data root). Creates the directory structure and database schema. Typically called once per
-  machine; `install.sh` handles this for source-checkout users.
-- `witness wire <claude|opencode>` — wire the editor integration (hooks + MCP for Claude Code;
-  plugin + MCP for OpenCode). Source-checkout command; `install.sh` calls this for you.
-- `witness unwire <claude|opencode>` — remove the editor integration wiring. Your archive is untouched.
-- `witness ingest [--file <path>]` — accept structured records (notes, logs, market data) as NDJSON
-  and distill them into the archive. Reads from stdin or a file. See the record contract in
-  [`prompts/SCHEMA.md`](prompts/SCHEMA.md#records-in-the-ingest-contract).
-- `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
-
-### Codex capture
-
-`witness import --agent codex` imports local Codex conversations into the same
-archive and enabled lenses, with `codex:` session IDs. It supports legacy JSONL
-and paginated local history. See [Codex capture](docs/codex-capture.md) for setup,
-event-triggered capture, the read-only probe and compatibility limits.
-
-**Platform status:** verified against real Codex history on **Windows** (codex-cli
-0.165/0.166-alpha), including idempotent re-import and a byte-exact match against an
-independent converter. **macOS has not been tested natively** — it cross-compiles and the
-paths are OS-agnostic (`CODEX_HOME`, else `~/.codex`), so it is expected to work, but nobody
-has run it there yet. Reports welcome.
-
-## Single binary, no runtime
-
-The whole thing is **one self-contained Go binary** — no Python, no external services, no vector
-DB, no cloud key. Local multilingual (English **and** Chinese) embeddings run pure-Go via GoMLX
-(`CGO_ENABLED=0`, verified: matches ONNX Runtime exactly). Distillation defaults to your existing
-Claude Code auth via `claude -p`; set `runner = opencode` to use a private `opencode serve` runner instead.
+Nothing is pushed into your sessions. You read it when you want it, or your agent pulls the relevant
+facet on demand.
 
 ## Install
 
 ```sh
-./install.sh claude    # Claude Code: build, fetch model (~448MB once), wire hooks + MCP
-./install.sh opencode  # OpenCode: build, fetch model, wire local plugin + MCP
+curl -fsSL https://raw.githubusercontent.com/IngTian/witness/main/install.sh | sh
 ```
 
-That's the whole thing — idempotent, safe to re-run after a `git pull`. The target
-is required: the script builds the binary, provisions the archive, and binds the matching
-distillation runtime into `config.toml` (`runner = claude` or `runner = opencode`). It also
-offers to add a `witness` command to your PATH (for `witness profile`, `doctor`, `lens`,
-`import`, `status`, `cleanup`, `ingest`). Equivalent `make` targets exist (`make install`,
-`make install-opencode`, `make build`, `make doctor`, `make uninstall`,
-`make uninstall-opencode`, `make clean`). To remove the editor integration: `make uninstall`
-or `make uninstall-opencode` (strips wiring; your data is untouched).
+Or grab a binary from [releases](https://github.com/IngTian/witness/releases). Windows users want
+the self-contained `.zip` — see [Windows install](docs/windows.md).
 
-### Windows
+OpenCode users can install from npm instead: `npm i -g @witness-ai/opencode` — see
+[OpenCode support](docs/opencode.md).
 
-Windows uses a self-contained zip instead of the shell installer (there is no
-guaranteed shell to run the hook shim). Download `witness-windows-amd64.zip`
-(Intel/AMD) or `witness-windows-arm64.zip` from the releases page — each unpacks
-to a `witness\` folder holding `witness.exe` and the embedding model. Then, from
-inside that folder in PowerShell:
+## Connect your tools
 
-```powershell
-.\witness.exe wire claude      # Claude Code
-.\witness.exe wire opencode    # OpenCode
-```
+witness captures from four sources at once, into one archive and one set of lenses. Sessions are
+namespaced per source, so none can corrupt another's data.
 
-Either command copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user
-PATH, and provisions the archive. The zip carries the prompt templates and the ~448MB
-model alongside the exe; the binary resolves both relative to itself. Running both is
-fine — the copy is idempotent, and they wire different editors.
+| source | setup |
+|---|---|
+| **Claude Code** | `witness wire claude` |
+| **OpenCode** | `witness wire opencode` |
+| **Codex** | manual for now — see [Codex capture](docs/codex-capture.md) ([#179](https://github.com/IngTian/witness/issues/179) tracks making it one command) |
+| **Files / documents** | `witness ingest --file records.ndjson` — you convert your notes, articles or logs into NDJSON records first; witness owns the record format, not your data |
 
-What each wires, and why they differ: Claude Code spawns the hook itself, so `wire
-claude` writes **exec-form hooks** (`{command: witness.exe, args: [...]}`) into
-`settings.json`. OpenCode is the other way round — its *plugin* spawns witness, so
-`wire opencode` bakes the installed `witness.exe` path into the plugin and the MCP
-entry. Neither needs a shell or Git Bash.
+`witness wire` sets up capture only and never prompts, so it is safe in CI or from a hook.
+(`witness install` is a different thing: it provisions a bare archive at a `--path`, for keeping
+an independent archive per data source. It does not wire any editor.)
 
-To remove an editor integration: `witness.exe unwire claude` / `unwire opencode`
-(strips the hooks/plugin + MCP entry). The copied files and PATH entry are left in
-place, since the other integration may still be using them.
+Then just work. Capture runs in the background — no prompting, no ritual. Check it any time with
+`witness doctor`.
 
-### OpenCode support
-
-OpenCode support has two pieces:
-
-- A plugin reconciles OpenCode's SQLite DB on startup and when a session goes idle, then asks the
-  laptop-friendly auto-start gate to distill when allowed. From-source installs write a
-  local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm plugin
-  `@witness-ai/opencode`. (That path is the same on Windows — OpenCode resolves its config as
-  `XDG_CONFIG_HOME` else `~/.config`, with no Windows-specific branch, so the plugin lands in
-  `%USERPROFILE%\.config\opencode\plugins\`.)
-- An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
-  `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
-  `delete_observation`.
-
-The npm package ships the OpenCode plugin, a `witness` CLI shim, prebuilt witness binaries, and prompts.
-The config-only path is the default: add the plugin to `~/.config/opencode/opencode.json`, and OpenCode
-installs it automatically with Bun on startup. If `mcp.witness` is absent, the plugin auto-registers it
-for you.
-
-The npm package supports OpenCode integration and general CLI usage (`witness profile`, `ingest`, etc.).
-Editor wiring (`witness wire` / `unwire`) is a source-checkout command — npm users configure the plugin
-directly in `opencode.json` and the plugin auto-registers MCP. Archive provisioning and record ingestion
-(`witness install`, `witness ingest`) work normally with the npm package.
-
-The npm distribution supports exactly these platforms:
-
-| Operating system | Architecture | npm platform package |
-| --- | --- | --- |
-| macOS | Apple Silicon (`darwin/arm64`) | `@witness-ai/opencode-darwin-arm64` |
-| Linux | x86-64 (`linux/x64`) | `@witness-ai/opencode-linux-x64` |
-
-macOS Intel, Linux ARM, and Windows are not supported by the npm distribution. Each binary is
-published as an optional platform package, so npm installs only the binary for the current machine.
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@witness-ai/opencode"]
-}
-```
-
-To test the current prerelease without replacing `latest`, pin the plugin entry:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@witness-ai/opencode@beta"]
-}
-```
-
-Optional: install it globally if you also want a `witness` command on your shell `PATH`:
+## Using it
 
 ```sh
-npm install -g @witness-ai/opencode
+witness profile              # the narrative, across everything
+witness profile math         # one lens
+witness facets               # the structured attributes behind it
+witness compact              # consolidate a grown-over profile (dry run)
+witness doctor               # health check
 ```
 
-Optional: run it ad hoc without a global install:
+Your agent reads the same archive over MCP — `get_profile`, `get_facets`, `search_observations`.
 
-```sh
-npm exec --yes --package=@witness-ai/opencode -- witness doctor
-```
-
-The main npm package contains the plugin, CLI wrapper, and prompts; the matching optional platform package
-contains one binary. The first embedding-model download is about 470MB. Installing the packages does not
-start that download: the plugin starts it when OpenCode next runs. Keep OpenCode running until the first
-download finishes. The plugin owns the downloader, stops it on shutdown, and retries later with bounded
-backoff.
-If you already have your own `mcp.witness` config, the plugin leaves it untouched. The npm wrapper does
-not support `witness wire` / `witness unwire`; those commands are for source-checkout editor wiring.
-Custom model mirrors must provide `WITNESS_MODEL_SHA256` and `WITNESS_TOKENIZER_SHA256` alongside
-`WITNESS_MODEL_BASE_URL`.
-
-After the first download, verify the model, OpenCode runner, archive, and queue:
-
-```sh
-npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
-npm exec --yes --package=@witness-ai/opencode@beta -- witness status
-```
-
-> **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is
-> `witness-distill` when distillation was interrupted. Current releases no longer create or filter
-> those sessions in OpenCode's user database. Before the first import after upgrading, remove any
-> leftover `witness-distill` sessions with OpenCode's supported session-management tools so they are
-> not captured as normal archive data.
-
-The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and prompts before publishing:
-
-```sh
-make npm-opencode-package
-npm publish ./npm/platform/darwin-arm64 --access public --tag beta
-npm publish ./npm/platform/linux-x64 --access public --tag beta
-(cd npm/opencode && npm publish --access public --ignore-scripts --tag beta)
-```
-
-Configure npm Trusted Publishing separately for the main package and both platform packages before using
-the release workflow. The npm package page renders [`npm/opencode/README.md`](npm/opencode/README.md);
-the workflow verifies after publishing that npm identifies it as the package README and that the published
-tarball contains it.
-
-For the first platform-package release only, publish both platform packages manually before creating the
-GitHub Release, then configure their Trusted Publishers on npm. npm requires a package to exist before its
-package-level Trusted Publisher can be configured. The release workflow is idempotent: it skips an already
-published package version, publishes any missing platform versions first, then publishes the main package.
-
-Manual verification path:
-
-```sh
-witness lens register math prompts/lens/example   # optional: register an extra lens
-witness lens enable math
-witness import --agent opencode    # reconciles ~/.local/share/opencode/opencode.db and returns
-witness status                    # watch non-blocking distillation progress
-witness worker review              # forces L2 facets + L4 markdown profiles (hidden cmd)
-witness profile opencode           # per-lens L4 report
-witness profile                    # unified L4 report
-```
-
-## Configuration
-
-`~/.local/share/witness/config.toml` (all optional; sensible defaults):
-
-```toml
-runner           = "claude"   # "claude" (default) or "opencode"
-triage_model     = ""         # MINING (L0 -> L1), once per session; "" = the runner's default
-distill_model    = ""         # REVIEW (L1 -> L2/L4), batched; "" falls back to triage_model
-review_every     = 5          # run the reviewer every N distilled sessions...
-review_poignancy = 30         # ...or sooner once accumulated salience crosses this (0 = off)
-auto_distill     = true       # hooks/plugins may start model work automatically
-mine_concurrency = 4          # parallel per-session miners (<= 0 restores the default)
-```
-
-Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
-`claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
-`runner = "opencode"`. Leaving both empty is the safe default and what `witness install` writes;
-note that an empty `triage_model` under the claude runner inherits your *ambient interactive*
-model, which may be heavier than you want for per-session mining, so pinning a light one is
-usually worth it.
-
-Set `auto_distill = false` for capture-only mode on battery-constrained machines, then run
-`witness worker run --detach` manually when plugged in. Automatic workers are short-lived: they load the
-embed model only while draining queued sessions, then exit.
-
-When `runner = opencode`, `triage_model` and `distill_model` should use OpenCode model names such
-as `openai/gpt-5.5`; empty values use your OpenCode defaults. Non-empty OpenCode model names are
-validated against `opencode models <provider>` before distillation, and `witness doctor` reports the
-same check as `opencode models: OK` or an explicit invalid-model error.
-
-Enabled lenses are managed for you (`witness lens enable/disable <name>`) and appear as simple
-lines, each naming a registered lens that runs on every session:
-
-```toml
-lens = math
-```
-
-There is no automatic retention knob: raw transcripts are kept until you deliberately reclaim
-them with `witness cleanup` (which never touches your observations or profile).
+Everything is per-lens: a **lens** is a prompt pair plus config that decides what gets noticed and
+how it's synthesized. The default one tracks personal growth; write your own to track anything else.
+See [How it works](docs/how-it-works.md).
 
 ## Your data is yours
 
-Everything lives under `~/.local/share/witness/` (override with `WITNESS_HOME`; installs
-predating the rename keep using `~/.local/share/claude-witness/`, adopted automatically), is `0700`
-(the DB and profile files `0600`), and never leaves your machine. The repo ships the framework,
-schema, and prompts — **never anyone's archive.**
+- **Local by default.** One SQLite file plus markdown under your data dir (`witness doctor` prints
+  the path). No telemetry, no account, no cloud key.
+- **Local embeddings.** Multilingual (English and Chinese) embeddings run pure-Go on your machine.
+- **Distillation uses your own tooling** — your existing Claude Code or OpenCode auth, whichever you
+  bound. Nothing goes anywhere you haven't already chosen.
+- **Readable and deletable.** Plain SQLite and plain markdown. `witness export --all <dir>` snapshots
+  the whole archive; delete the data dir and it's gone.
 
-**Troubleshooting.** Distillation runs in a detached worker, so failures land in
-`$WITNESS_HOME/witness.log` (JSON lines) rather than on your terminal. It records the worker's
-startup steps, each mine's input size and duration, and each model call's outcome — enough to tell a
-slow model from a stalled one. For more detail, set `WITNESS_LOG_LEVEL=debug` (also accepts `warn` /
-`error`; anything unrecognized falls back to the `info` default, so a typo can never stop witness
-capturing).
+## Where to look for things
 
-**Backup / sync.** Use `witness export --all <dir>` — it writes a **complete** archive you can point
-a syncer at. Do **not** sync the live data directory directly: the database runs in WAL mode (`.db` +
-`-wal` + `-shm`), and a syncer racing those files can corrupt it. Wire it up yourself, e.g. a
-cron/launchd job:
+| I want to… | go here |
+|---|---|
+| install it and connect my editor | [Install](#install) · [Connect your tools](#connect-your-tools) above |
+| understand the four layers and what each produces | [How it works](docs/how-it-works.md) |
+| know why a confidence number changed on its own | [Confidence, and why it moves](docs/how-it-works.md#confidence-and-why-it-moves-on-its-own) |
+| **track something other than myself** — notes, research, a market, a knowledge base | [Writing a lens](docs/writing-a-lens.md) |
+| tune what gets noticed, or test a prompt before committing to it | [Writing a lens → the loop](docs/writing-a-lens.md#the-loop) |
+| look up a command or a flag | [Commands](docs/cli.md#commands) |
+| change the model, cadence, or concurrency | [Configuration](docs/cli.md#configuration) |
+| set up Codex capture | [Codex capture](docs/codex-capture.md) |
+| set up OpenCode, or install from npm | [OpenCode support](docs/opencode.md) |
+| install on Windows | [Windows install](docs/windows.md) |
+| back up or move my archive | [`witness export --all`](docs/cli.md#commands) |
+| shrink a profile that has grown unwieldy | [`witness compact`](docs/cli.md#commands) |
+| know where my data lives and how to delete it | [Your data is yours](#your-data-is-yours) above |
+| contribute, or understand the invariants | [AGENTS.md](AGENTS.md) |
 
-```sh
-witness export --all ~/Dropbox/witness-backup --force   # complete archive, safe to sync
-```
+## Single binary, no runtime
 
-`--all` matters because only one of the four things in your data directory is the database:
-
-| | in `--all` | in a plain `export` | recoverable without a backup? |
-|---|---|---|---|
-| `witness.db` — raw turns, observations, facets | yes | yes | no |
-| `config.toml` — enabled lenses, runner, models | yes | **no** | reconfigure by hand; until then distillation is silently off |
-| `lenses/` — your lens definitions | yes | **no** | **no** — prompt text is in no database. A bundled lens re-seeds; one you wrote is gone |
-| `profile/` — the narrative | yes | **no** | rebuilt by a review, *except* a hand-edited `unified.md` |
-
-Left out on purpose: `witness.log` (diagnostics), `runtime/` (OpenCode's disposable private runtime),
-and the lock files. Either form runs safely while the worker is writing — no need to stop it.
-
-**Restoring needs no separate command.** An `--all` directory has the same layout as your data
-directory, so either point witness at it in place (`WITNESS_HOME=~/Dropbox/witness-backup`) or, with
-witness stopped, copy its contents into your data dir. A plain database-only snapshot restores the
-same way as `witness.db`, and `witness worker review` rebuilds the narrative from it.
+One self-contained Go binary — no Python, no external services, no vector DB. `CGO_ENABLED=0`, so
+it cross-compiles cleanly and has no shared-library surprises.
 
 ## License
 
