@@ -48,9 +48,11 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   data dir via `dataDirNames` (adopt-in-place, see invariants below).
 - `internal/distill/` — the worker: mines L0→L1 per lens, reviews L1→L2, and
   regenerates L4 via a headless runner (`claude -p` or `opencode serve`).
-- `internal/platform/{claude,opencode}/` — the per-runtime capture/import
-  adapters. `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
-  (`internal/platform/platform.go` holds the cross-runtime constants + types.)
+- `internal/platform/{claude,opencode,codex,file}/` — the per-source adapters.
+  `registry.go` composes identity, rendering and import with optional capture/runner
+  capabilities; `cmd/commands/root.go` imports the adapters. Installers register
+  separately through `installer.go` and have cmd-side implementations.
+  `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
 - `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding
   model) relative to the binary via `os.Executable()` when no env var points at
   them, so a copied/installed binary self-locates its assets.
@@ -59,10 +61,10 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 
 ## Runtime model (important invariants)
 
-- **Two runtimes, one store.** Claude Code and OpenCode both feed the same L0.
-  Rows are namespaced by session id (OpenCode uses an `opencode:` prefix); meta
-  keys are namespaced (`opencode_*` vs CC's `worker_*`/`review_*`). Neither can
-  corrupt the other's data.
+- **Sources share one store.** Claude Code, OpenCode, Codex and ingested files feed
+  the same L0 and enabled lenses. Sessions use each adapter's prefix (`opencode:`,
+  `codex:`, `file:`; Claude is unprefixed). Import state is source-namespaced.
+  A capture source need not provide a distillation runner.
 - **Runners are resolved from the enabled-lens set (process-wide, never
   repo-scoped).** A **default** `runner` (in `config.toml`, bound by `witness install
   <target>`) distills every session unless overridden, but a lens may declare its own
@@ -72,6 +74,11 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - **Capture must never break a session.** `capture`/`session-start`/`session-end`
   are best-effort: they log failures but always exit 0. Do not make them return
   errors on a bad hook payload.
+  The generic `import --agent <source> --hook` entry point follows the same rule:
+  consume `session_id` from stdin, log failures, exit 0 and emit only `{}` on stdout.
+  Hook errors must never block an editor session. Successful imports still reach
+  the automatic worker gate when other inputs fail. The existing worker recursion
+  short-circuit below bypasses all hook work and output.
 - **Recursion guard.** The worker runs `claude -p`, which would re-fire the
   hooks. `WITNESS_WORKER=1` short-circuits witness inside that subprocess. Both
   the Unix shim `hooks/witness.sh` and `commands.Run()` check it — and on Windows

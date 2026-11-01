@@ -47,9 +47,14 @@ def records(home, session):
                 while True:
                     offset = stream.tell()
                     line = stream.readline()
-                    if not line or not line.endswith(b"\n"):
-                        break  # incomplete live tail is retried next time
-                    row = json.loads(line)
+                    if not line:
+                        break
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        if not line.endswith(b"\n"):
+                            break  # incomplete live tail is retried next time
+                        raise
                     if row.get("type") != "response_item":
                         continue
                     item = row.get("payload", {})

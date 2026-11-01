@@ -14,5 +14,6 @@ type ImportStats struct {
 	Agent      string
 	Sessions   int
 	Records    int
+	Failed     int // source inputs skipped after recoverable errors; successful imports are retained
 	MaxUpdated int64
 }

@@ -36,12 +36,21 @@ this adapter does not try to infer authorship from the wording of a message.
 Per-session source revisions avoid rereading unchanged transcripts. Message keys
 allow a growing transcript to append only its new tail; edits to earlier messages
 rebuild that session's raw rows and reset its mining watermark. Import state and
-raw rows commit in one transaction. An incomplete final JSONL line is retried on
-the next import. Cleanup removes the corresponding importer state as well.
+raw rows commit in one transaction. A complete final JSONL record is accepted
+even without a trailing newline; an incomplete live tail is deferred until the
+file changes. Cleanup removes the corresponding importer state as well.
+
+A malformed header or terminated row is isolated to its source file. Its existing
+raw rows and watermark remain intact, and other sessions continue importing.
+The CLI reports a skipped-input count and details go to `witness.log` (including
+when `--quiet` or `--hook` suppresses human output). Destination commit failures
+and cancellation remain fatal to an explicit import; hooks still log and exit 0.
 
 These on-disk formats are version-specific, not an official stable Codex API.
-Unsupported projections fail visibly instead of reporting an empty successful
-capture. Keep the probe output when reporting a compatibility problem.
+An unsupported `thread_history_*.sqlite` filename, such as a future `_2`, produces
+a warning and increments that same skipped-input count. It is not guessed at;
+readable legacy rollouts still import. Keep the probe output when reporting a
+compatibility problem.
 
 ## Keep capture current with hooks
 
@@ -146,3 +155,17 @@ Windows suite has existing failures reproduced independently on untouched upstre
 commit `67b837add1756a3a44a1e3a6d6725683da6d4e40`. They include Unix-permission
 assumptions, Windows file-handle cleanup/rename behavior and install asset lookup
 in test binaries.
+
+After merging v0.9.0 main (`f053ac1`), review fixes were validated with Windows
+`codex-cli 0.166.0-alpha.5.1`: `CODEX_HOME` discovery imported 18 projected messages,
+then discovery through the default user home imported 0 additional records into
+the same isolated archive. A real 2,167,848-byte Windows rollout (writer version
+`0.164.0-alpha.11.1`) imported 9 messages and then 0 on repeat. Both sources matched
+the independent converter's role/text pairs exactly. At the time of probing, all
+23 available rollout files ended in a newline; unterminated complete records remain
+covered by synthetic crash-tail tests.
+
+The merged branch passed Linux/WSL full tests and vet, native Windows Codex/CLI
+regression tests, and macOS amd64/arm64 cross-compilation. A native macOS run has
+not been performed here. All real-data checks used isolated local archives with
+external runners disabled; only these aggregate results are published.

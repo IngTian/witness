@@ -98,6 +98,9 @@ func cmdImport(args []string) error {
 	}
 	if !quiet {
 		fmt.Printf("import %s: imported %d raw record(s) from %d session(s)\n", stats.Agent, stats.Records, stats.Sessions)
+		if stats.Failed > 0 {
+			fmt.Printf("skipped %d source input(s) due to errors; successful imports kept — see witness.log for details\n", stats.Failed)
+		}
 		if kicked {
 			fmt.Println("distill worker kicked in the background; run `witness status` to watch progress")
 		} else if noKick {
@@ -170,9 +173,13 @@ func cmdImportHook(agent string, input io.Reader) error {
 		slog.Warn("import hook: unknown agent", "agent", agent)
 		return nil
 	}
-	if _, err := p.Import(context.Background(), st, []string{event.SessionID}); err != nil {
+	stats, err := p.Import(context.Background(), st, []string{event.SessionID})
+	if err != nil {
 		slog.Warn("import hook failed", "agent", agent, "err", err)
 		return nil
+	}
+	if stats.Failed > 0 {
+		slog.Warn("import hook: some source inputs failed; successful imports kept", "agent", agent, "failed", stats.Failed)
 	}
 	maybeSpawnAutoWorker(st)
 	return nil

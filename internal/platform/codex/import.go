@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -37,6 +38,25 @@ type importState struct {
 type textPart struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+}
+
+// A source can be skipped, but a destination commit failure must stop the run:
+// carrying on after disk/transaction failure would obscure loss of durable data.
+type importCommitError struct{ error }
+
+func (e *importCommitError) Unwrap() error { return e.error }
+
+func skipSourceError(ctx context.Context, stats *platform.ImportStats, source string, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	var commit *importCommitError
+	if errors.As(err, &commit) {
+		return err
+	}
+	stats.Failed++
+	slog.Warn("codex import: skipped source input; other sessions will continue", "source", source, "err", err)
+	return nil
 }
 
 func codexHome() (string, error) {
@@ -86,13 +106,26 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 		wanted[strings.TrimPrefix(id, "codex:")] = true
 	}
 	seen := map[string]bool{}
-	dbPath := filepath.Join(home, "thread_history_1.sqlite")
-	if _, err := os.Stat(dbPath); err == nil {
-		if err := im.importDB(ctx, dbPath, wanted, seen, &stats); err != nil {
-			return stats, err
-		}
-	} else if !os.IsNotExist(err) {
+	entries, err := os.ReadDir(home)
+	if err != nil {
 		return stats, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "thread_history_") || !strings.HasSuffix(entry.Name(), ".sqlite") {
+			continue
+		}
+		dbPath := filepath.Join(home, entry.Name())
+		var sourceErr error
+		if filepath.Base(dbPath) != "thread_history_1.sqlite" {
+			sourceErr = fmt.Errorf("unsupported Codex history filename %q; update witness to support this version", filepath.Base(dbPath))
+		} else {
+			sourceErr = im.importDB(ctx, dbPath, wanted, seen, &stats)
+		}
+		if sourceErr != nil {
+			if err := skipSourceError(ctx, &stats, dbPath, sourceErr); err != nil {
+				return stats, err
+			}
+		}
 	}
 	for _, folder := range []string{"sessions", "archived_sessions"} {
 		dir := filepath.Join(home, folder)
@@ -101,7 +134,7 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 		}
 		err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				return err
+				return skipSourceError(ctx, &stats, path, err)
 			}
 			if err := ctx.Err(); err != nil {
 				return err
@@ -109,7 +142,10 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 			if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
 				return nil
 			}
-			return im.importFile(ctx, path, wanted, seen, &stats)
+			if err := im.importFile(ctx, path, wanted, seen, &stats); err != nil {
+				return skipSourceError(ctx, &stats, path, err)
+			}
+			return nil
 		})
 		if err != nil {
 			return stats, err
@@ -160,7 +196,7 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	}
 	state, _ := json.Marshal(importState{1, source, revision, keys})
 	if err := im.Store.ApplyRawImport(meta, tail, key, string(state), !prefix); err != nil {
-		return err
+		return &importCommitError{err}
 	}
 	im.Store.SetSessionPlatform(meta.Session, "codex")
 	if len(tail) > 0 {
@@ -294,9 +330,12 @@ func (im *Importer) importFile(ctx context.Context, path string, wanted, seen ma
 	// and an actively growing rollout cannot make the import chase EOF forever.
 	r := bufio.NewReader(io.LimitReader(f, info.Size()))
 	header, err := r.ReadBytes('\n')
-	if err != nil {
+	if errors.Is(err, io.EOF) && !json.Valid(header) {
 		return nil
-	} // metadata is still being written
+	} // metadata is still being written; even a complete header may lack a newline
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
 	var first struct {
 		Type    string `json:"type"`
 		Payload struct {
@@ -336,10 +375,11 @@ func (im *Importer) importFile(ctx context.Context, path string, wanted, seen ma
 			return err
 		}
 		line, err := r.ReadBytes('\n')
-		if errors.Is(err, io.EOF) {
+		atEOF := errors.Is(err, io.EOF)
+		if atEOF && !json.Valid(line) {
 			break
-		} // never checkpoint an incomplete live row
-		if err != nil {
+		} // accept complete JSON at EOF, retry an incomplete live tail after it grows
+		if err != nil && !atEOF {
 			return err
 		}
 		var row struct {
