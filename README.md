@@ -115,8 +115,12 @@ facet on demand.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/IngTian/witness/main/install.sh | sh
+git clone https://github.com/IngTian/witness && cd witness
+./install.sh claude      # or: ./install.sh opencode
 ```
+
+The target is required. The script builds the binary, fetches the embedding model (~448MB, once),
+provisions the archive, and wires that editor. Idempotent — safe to re-run after a `git pull`.
 
 Or grab a binary from [releases](https://github.com/IngTian/witness/releases). Windows users want
 the self-contained `.zip` — see [Windows install](docs/windows.md).
