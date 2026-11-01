@@ -99,6 +99,9 @@ type hookCmd struct {
 	CommandWindows string   `json:"commandWindows,omitempty"`
 	Args           []string `json:"args,omitempty"`
 	Async          bool     `json:"async,omitempty"`
+	// Timeout is seconds, Codex-only. Used for SessionEnd, which Codex refuses to run
+	// asynchronously and defaults to a 1-second budget. See codexHookSpecs.
+	Timeout int `json:"timeout,omitempty"`
 }
 type hookEntry struct {
 	Matcher string    `json:"matcher,omitempty"`

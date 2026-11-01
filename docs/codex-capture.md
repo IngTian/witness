@@ -78,12 +78,18 @@ definition, so until you do, Codex runs fine and witness captures nothing.
   pointless rewrite would revoke your approval and silently stop capture
 - adopts a hand-edited entry from an earlier version of this document instead of
   appending beside it, so you will not end up importing twice per turn
-- marks each handler `async`. Codex's `SessionEnd` timeout defaults to one second
-  (capped at three), and reconciling a large history takes longer than that — a
-  synchronous handler would be killed mid-import. It also keeps witness from ever
-  blocking a Codex session.
+- marks `SessionStart` and `Stop` `async`, so capture stays off your session's critical
+  path. `SessionEnd` is synchronous with a 3-second timeout — the most Codex allows for
+  that event, which defaults to one second. (Codex refuses to run `SessionEnd`
+  asynchronously: it runs it synchronously anyway and warns.) So on a large history
+  `SessionEnd` may be cut off part-way. That is harmless: `Stop` has already reconciled
+  each completed turn, import is idempotent, and anything missed is picked up by the
+  next `SessionStart` or an explicit `witness import --agent codex`.
 
-Remove it with `witness unwire codex`, which strips only witness's own entries.
+Remove it with `witness unwire codex`, which strips only witness's own entries — and
+deletes `hooks.json` outright if witness created it and nothing of yours is left in it,
+rather than leaving an empty file behind. A file holding any hook or key of your own is
+kept.
 
 Codex runs no distillation model, so wiring it does not change your `runner`; set one
 with `witness config set runner <claude|opencode>`.
@@ -108,6 +114,11 @@ doubling it:
       "type": "command",
       "commandWindows": "& 'C:\\path with spaces\\witness.exe' import --agent codex --hook",
       "async": true
+    }]}],
+    "SessionEnd": [{"hooks": [{
+      "type": "command",
+      "commandWindows": "& 'C:\\path with spaces\\witness.exe' import --agent codex --hook",
+      "timeout": 3
     }]}]
   }
 }
@@ -115,20 +126,28 @@ doubling it:
 
 The doubled backslashes are JSON string escaping, not part of the path.
 
-### What is verified, and what is not
+### What is verified
 
-Stated plainly because the failure mode here is silent. Everything on witness's side of
-the boundary is tested on every OS: the document `wire codex` writes, its idempotency,
-that it preserves foreign hooks, that it never claims one as its own, the Windows
-`commandWindows` form and its quoting, and that the installer and importer resolve the
-same Codex home. Each of those assertions was confirmed to fail when the behaviour it
-checks is removed.
+Verified against real Codex (`codex-cli 0.166.0`) on macOS, using `codex exec` into a
+throwaway archive:
 
-What is **not** verified by witness's test suite is the other side: that Codex reads
-`~/.codex/hooks.json`, fires `SessionStart`/`Stop`/`SessionEnd`, and honours `async`.
-That is taken from the official Hooks guide and needs a real Codex run to confirm. The
-import path below *has* been exercised against real Codex data on Windows. A native
-macOS run of either path has not been performed.
+- **the hook path works** — a wired `Stop`/`SessionEnd` hook fires and the conversation
+  reaches the archive with `codex:` attribution
+- **hook trust is real and enforced.** The same run with the hooks unapproved captured
+  *nothing*, silently. Approving them with `/hooks` is not boilerplate advice — it is
+  the difference between working capture and an empty archive
+- **import works on macOS**, both the paginated `thread_history_1.sqlite` projection and
+  a legacy `rollout-*.jsonl`; a repeat import writes 0 records
+- **re-wiring is inert** — the file's mtime does not move, so hook trust survives
+- **unwire leaves no trace** when witness created the file
+
+Witness's own side is additionally unit-tested on every OS — the document it writes,
+idempotency, foreign-hook preservation, the Windows `commandWindows` form and its
+quoting, and that the installer and importer resolve the same Codex home. Every one of
+those assertions was confirmed to fail when the behaviour it checks is removed.
+
+Not covered: the Windows *wiring* path (the import path there was verified separately),
+and interactive `codex` rather than `codex exec`.
 
 `--hook` always returns exit 0 and `{}` on stdout, including on malformed input,
 missing history or import failure. Errors go to the witness log. The automatic

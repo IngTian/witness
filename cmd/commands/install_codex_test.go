@@ -63,10 +63,22 @@ func TestCodexMergeWritesEveryLifecycleEvent(t *testing.T) {
 			t.Errorf("%s command = %q, want %q", event, cmds[0], want)
 		}
 	}
-	// Every handler must be async. Codex's SessionEnd timeout defaults to ONE second
-	// (capped at three), so a synchronous hook would be killed mid-import on exactly the
-	// large archives that need reconciling most — and it would also violate witness's
-	// standing rule that capture never blocks a session.
+}
+
+// SessionStart and Stop must be async; SessionEnd must NOT be, and must carry the
+// largest timeout Codex permits for it.
+//
+// This is a correction a real Codex run forced, and no amount of unit testing could
+// have produced it: Codex REFUSES to run a SessionEnd hook asynchronously. It runs it
+// synchronously anyway and prints `warning: running async SessionEnd hook
+// synchronously` into the user's session on every run — so the original wiring bought
+// nothing and cost a warning every time. The design rationale was sound and the
+// platform simply does not honour it.
+func TestCodexSessionEndIsSyncWithMaxTimeout(t *testing.T) {
+	out, err := mergeHooks([]byte(`{}`), codexHookSpecs(codexHook{program: unixShim}), isCodexEntry)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(out, &root); err != nil {
 		t.Fatal(err)
@@ -74,15 +86,30 @@ func TestCodexMergeWritesEveryLifecycleEvent(t *testing.T) {
 	hooks, _ := root["hooks"].(map[string]any)
 	for _, event := range codexHookEvents {
 		entries, _ := hooks[event].([]any)
-		for _, e := range entries {
-			m, _ := e.(map[string]any)
-			hs, _ := m["hooks"].([]any)
-			for _, h := range hs {
-				hm, _ := h.(map[string]any)
-				if async, _ := hm["async"].(bool); !async {
-					t.Errorf("%s handler is not async: %v", event, hm)
-				}
+		if len(entries) != 1 {
+			t.Fatalf("%s: want 1 entry, got %d", event, len(entries))
+		}
+		m, _ := entries[0].(map[string]any)
+		hs, _ := m["hooks"].([]any)
+		hm, _ := hs[0].(map[string]any)
+		async, _ := hm["async"].(bool)
+		timeout, hasTimeout := hm["timeout"].(float64)
+
+		if event == "SessionEnd" {
+			if async {
+				t.Error("SessionEnd must not be async: Codex ignores it and warns in the user's session on every run")
 			}
+			if !hasTimeout || int(timeout) != codexSessionEndTimeout {
+				t.Errorf("SessionEnd timeout = %v (present=%v), want %d — the max Codex allows for this event (it defaults to 1s)",
+					timeout, hasTimeout, codexSessionEndTimeout)
+			}
+			continue
+		}
+		if !async {
+			t.Errorf("%s must be async so capture stays off the session's critical path", event)
+		}
+		if hasTimeout {
+			t.Errorf("%s should not pin a timeout: Codex defaults it to 600s, and async already keeps it off the critical path", event)
 		}
 	}
 }
@@ -499,16 +526,41 @@ func TestCodexWireRoundTripOnDisk(t *testing.T) {
 	if !changed {
 		t.Error("unwire reported no change but hooks were wired")
 	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	// Nothing of the user's was ever in this file, so unwire must leave NO trace.
+	// Observed on a real machine: unwire left a two-byte `{}` husk sitting in ~/.codex.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		leftover, _ := os.ReadFile(path)
+		t.Errorf("unwire left a stub behind in a file witness created: %q", leftover)
 	}
-	if strings.Contains(string(after), codexHookArgs) {
-		t.Errorf("witness hooks survived unwire: %s", after)
+	// Unwiring again is a no-op, not an error — the file is simply gone.
+	if changed, err := unwireCodexHooks(path); err == nil || changed {
+		if !os.IsNotExist(err) {
+			t.Errorf("second unwire: changed=%v err=%v, want a not-exist error", changed, err)
+		}
 	}
-	// Unwiring twice is a no-op, not an error.
-	if changed, err := unwireCodexHooks(path); err != nil || changed {
-		t.Errorf("second unwire: changed=%v err=%v, want false/nil", changed, err)
+}
+
+// But a file holding ANYTHING of the user's must survive unwire. The delete above is
+// only safe because an emptied document proves the file held our entries and nothing
+// else; this pins the other side of that reasoning.
+func TestCodexUnwireKeepsAFileWithUserContent(t *testing.T) {
+	for name, doc := range map[string]string{
+		"a foreign hook": `{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/opt/keep-me"}]}]}}`,
+		"a sibling key":  `{"description": "mine", "hooks": {}}`,
+	} {
+		path := filepath.Join(t.TempDir(), "hooks.json")
+		if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wireCodexHooks(path, codexHook{program: unixShim}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := unwireCodexHooks(path); err != nil {
+			t.Fatalf("%s: unwire: %v", name, err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s: unwire DELETED a file holding the user's own content: %v", name, err)
+		}
 	}
 }
 

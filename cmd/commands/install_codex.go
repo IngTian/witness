@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,17 +65,30 @@ func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// codexHookSpecs is the canonical Codex wiring: one handler per lifecycle event, all
-// async.
+// codexSessionEndTimeout is the seconds budget we ask for on SessionEnd: the MAXIMUM
+// Codex allows for that event (it defaults to 1 and caps at 3, where every other event
+// defaults to 600).
+const codexSessionEndTimeout = 3
+
+// codexHookSpecs is the canonical Codex wiring: one handler per lifecycle event.
 //
-// async matters for correctness, not just speed. Codex's SessionEnd timeout defaults
-// to ONE second (capped at three) while the others default to 600 — and reconciling a
-// large history can exceed a second easily, so a synchronous SessionEnd hook would be
-// killed mid-import on exactly the archives that need it most. async also upholds
-// witness's standing invariant that capture must never block a session. We give up
-// nothing: witness injects no context, which is the only thing an async hook cannot do.
+// SessionStart and Stop are async, which keeps capture off the session's critical path
+// — witness's standing invariant. We give up nothing by it: witness injects no context,
+// and that is the only thing an async hook cannot do.
+//
+// SessionEnd is NOT async, and that is an empirical correction rather than a choice.
+// Codex REFUSES to run a SessionEnd hook asynchronously — it runs it synchronously
+// anyway and prints `warning: running async SessionEnd hook synchronously` into the
+// user's session every time. So asking for async there bought nothing and cost a
+// warning on every run. Instead we ask for the largest timeout the event permits.
+//
+// The consequence is honest and bounded: SessionEnd gets a few seconds, so on a large
+// history it may be cut off mid-import. That is survivable precisely because import is
+// idempotent and Stop has already reconciled each completed turn — SessionEnd is a
+// safety net for the final turn, not the mechanism. Anything it misses is picked up by
+// the next SessionStart or an explicit `witness import --agent codex`.
 func codexHookSpecs(h codexHook) []hookSpec {
-	cmd := hookCmd{Type: "command", Async: true}
+	cmd := hookCmd{Type: "command"}
 	if h.powerShell {
 		// The PowerShell call operator (&) is required to run a quoted path.
 		cmd.CommandWindows = "& " + psQuote(h.program) + " " + codexHookArgs
@@ -83,7 +97,13 @@ func codexHookSpecs(h codexHook) []hookSpec {
 	}
 	specs := make([]hookSpec, 0, len(codexHookEvents))
 	for _, event := range codexHookEvents {
-		specs = append(specs, hookSpec{Event: event, Entry: hookEntry{Hooks: []hookCmd{cmd}}})
+		h := cmd
+		if event == "SessionEnd" {
+			h.Timeout = codexSessionEndTimeout
+		} else {
+			h.Async = true
+		}
+		specs = append(specs, hookSpec{Event: event, Entry: hookEntry{Hooks: []hookCmd{h}}})
 	}
 	return specs
 }
@@ -232,10 +252,33 @@ func unwireCodexHooks(path string) (changed bool, err error) {
 	if bytes.Equal(data, cleaned) {
 		return false, nil
 	}
+	// If nothing is left, remove the FILE rather than leaving a `{}` stub behind. On a
+	// machine where witness created hooks.json, unwire should leave no trace — and an
+	// observed unwire left exactly that two-byte husk sitting in the user's ~/.codex.
+	//
+	// Safe by construction: removeHooks drops an emptied hooks subtree, so an empty
+	// document means the file held our entries and NOTHING else — no foreign hooks, no
+	// sibling keys like "description". Anything of the user's keeps the file alive.
+	if isEmptyJSONObject(cleaned) {
+		if err := os.Remove(path); err != nil {
+			return false, fmt.Errorf("remove %s: %w", path, err)
+		}
+		return true, nil
+	}
 	if err := writeFileAtomic(path, cleaned); err != nil {
 		return false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// isEmptyJSONObject reports whether data is a JSON object with no keys — i.e. whether
+// removing our hooks emptied the document entirely.
+func isEmptyJSONObject(data []byte) bool {
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return false
+	}
+	return len(obj) == 0
 }
 
 // cmdUninstallCodex strips our entries from hooks.json, leaving foreign hooks and the
