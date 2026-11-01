@@ -1,7 +1,5 @@
 # witness
 
-**Turns a stream of text into a dated record of how its subject changed.**
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/@witness-ai/opencode?logo=npm&label=%40witness-ai%2Fopencode)](https://www.npmjs.com/package/@witness-ai/opencode)
 ![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
@@ -10,14 +8,20 @@
 
 [![witness MCP server](https://mcprush.com/badge/witness-mcp/card.svg)](https://mcprush.com/to/witness-mcp?ref=badge)
 
-Point it at your AI coding sessions and it tracks how **you** think and work. Point it at market
-commentary, research notes, or any document stream and it tracks how **that** changed instead.
-One pure-Go binary, a local SQLite archive plus plain markdown, served to your agent over MCP.
+**witness turns a stream of text into a dated record of how its subject changed.** Feed it your AI
+coding sessions and it tracks how *you* think and work. Feed it market commentary, research notes, or
+any document stream and it tracks how *that* changed instead. One pure-Go binary, a local SQLite
+archive plus plain markdown, served to your agent over MCP.
 
-What makes it different is **change over time, with provenance**. When an attribute's value changes,
-witness doesn't overwrite it — it closes the old value with a date, opens a new one, and records
-which source records drove the shift. The archive answers *"how did this get here"*, not just
-*"what is true now"*.
+The thing it is built around is **change over time, with provenance**. When an attribute's value
+changes, witness does not overwrite it — it closes the old value with a date and opens a new one, and
+records which source records drove the shift. So the archive answers *"how did this get here"*, not
+just *"what is true now"*.
+
+> *"Aah, you were at my side, all along.*
+> *My true mentor...*
+> *My guiding moonlight..."*
+> — Ludwig, the Holy Blade
 
 ## What it produces
 
@@ -160,11 +164,6 @@ See [How it works](docs/how-it-works.md).
 
 One self-contained Go binary — no Python, no external services, no vector DB. `CGO_ENABLED=0`, so
 it cross-compiles cleanly and has no shared-library surprises.
-
-> *"Aah, you were at my side, all along.*
-> *My true mentor...*
-> *My guiding moonlight..."*
-> — Ludwig, the Holy Blade
 
 ## License
 
