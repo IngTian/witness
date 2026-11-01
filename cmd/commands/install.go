@@ -19,11 +19,15 @@ import (
 
 func newWireCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:     "wire <claude|opencode>",
+		// Built from the installer registry, not written out: a literal list went stale
+		// the moment a venue was added, and the staleness is user-facing — the help would
+		// omit a target that works, or name one that is not registered.
+		Use:     "wire <" + strings.Join(platform.InstallTargets(), "|") + ">",
 		GroupID: groupSetup,
 		Short:   "Connect an editor integration (hooks/plugin + MCP) to witness.",
 		Long: strings.TrimSpace(`
-Wire witness into your editor: Claude Code (hooks + MCP) or OpenCode (plugin + MCP).
+Wire witness into your editor: Claude Code (hooks + MCP), OpenCode (plugin + MCP)
+or Codex (hooks).
 
 This sets up CAPTURE only. It never prompts (safe in CI / as a hook), and it does
 not seed content — the built-in "default" lens is added automatically the first
@@ -31,6 +35,9 @@ time your archive is opened.
 
   runner    wire writes a sensible default (matching the editor); change it
             any time with: witness config set runner <claude|opencode>
+            Codex runs no model, so wiring it leaves the runner alone.
+  codex     Codex hooks are inert until you approve them with /hooks in Codex;
+            wiring cannot grant that trust for you.
   default   remove it with 'witness lens disable/deregister default' (it stays
             gone); restore with 'witness lens load-default'; opt a fresh archive
             out entirely with WITNESS_NO_DEFAULT_LENS=1`),
@@ -45,10 +52,10 @@ time your archive is opened.
 
 func newUnwireCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "unwire <claude|opencode>",
+		Use:     "unwire <" + strings.Join(platform.InstallTargets(), "|") + ">",
 		GroupID: groupSetup,
 		Short:   "Remove an editor integration (data/config untouched).",
-		Long:    "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
+		Long:    "Remove the Claude Code, OpenCode or Codex integration. The witness data store and config are left untouched.",
 		Hidden:  os.Getenv("WITNESS_NPM_PACKAGE") == "1",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -83,15 +90,28 @@ then feed it with 'witness ingest'. To connect an editor instead, use 'witness w
 // Args is the Claude Code exec form: when present, CC spawns Command directly with
 // these args and NO shell (used on Windows, where the bash shim can't run). When
 // Args is empty, Command is a shell-form string (Unix, via the witness.sh shim).
+// CommandWindows is the CODEX form: Codex runs `command` through a shell and takes an
+// optional Windows-only `commandWindows` override (PowerShell) instead of Claude's
+// exec-form Args. omitempty keeps it out of every document we write for Claude Code.
 type hookCmd struct {
-	Type    string   `json:"type"`
-	Command string   `json:"command"`
-	Args    []string `json:"args,omitempty"`
-	Async   bool     `json:"async,omitempty"`
+	Type           string   `json:"type"`
+	Command        string   `json:"command,omitempty"`
+	CommandWindows string   `json:"commandWindows,omitempty"`
+	Args           []string `json:"args,omitempty"`
+	Async          bool     `json:"async,omitempty"`
 }
 type hookEntry struct {
 	Matcher string    `json:"matcher,omitempty"`
 	Hooks   []hookCmd `json:"hooks"`
+}
+
+// hookSpec is one event's worth of wiring we own. Named (rather than an anonymous
+// struct) because two venues now build these: Claude Code's settings.json and Codex's
+// hooks.json use the SAME event → matcher-group → handler-list schema, so they share
+// mergeHooks/removeHooks and differ only in the specs and the ownership predicate.
+type hookSpec struct {
+	Event string
+	Entry hookEntry
 }
 
 // hookInvocation is how the installed hooks call witness — the one thing that
@@ -127,10 +147,7 @@ func shellQuote(s string) string {
 // with hooks/hooks.json (the plugin-install path uses that file). On Windows
 // (exec form) it renders {command: <exe>, args: [<token>]} so CC spawns the
 // binary directly with no shell.
-func witnessHookSpecs(inv hookInvocation) []struct {
-	Event string
-	Entry hookEntry
-} {
+func witnessHookSpecs(inv hookInvocation) []hookSpec {
 	// hook builds one command for a subcommand token, in the right form.
 	hook := func(token string, async bool) hookCmd {
 		if inv.execForm {
@@ -138,10 +155,7 @@ func witnessHookSpecs(inv hookInvocation) []struct {
 		}
 		return hookCmd{Type: "command", Command: shellQuote(inv.target) + " " + token, Async: async}
 	}
-	return []struct {
-		Event string
-		Entry hookEntry
-	}{
+	return []hookSpec{
 		{"SessionStart", hookEntry{Matcher: "startup|clear|compact|resume", Hooks: []hookCmd{hook("session-start", false)}}},
 		{"UserPromptSubmit", hookEntry{Hooks: []hookCmd{hook("capture", true)}}},
 		{"Stop", hookEntry{Hooks: []hookCmd{hook("capture", true)}}},
@@ -318,6 +332,25 @@ func appendToPathValue(current, dir string) (string, bool) {
 // any existing witness entries (idempotent, across BOTH invocation forms) and
 // preserving all other hooks and settings verbatim.
 func mergeWitnessHooks(data []byte, inv hookInvocation) ([]byte, error) {
+	return mergeHooks(data, witnessHookSpecs(inv), isWitnessEntry)
+}
+
+// removeWitnessHooks strips our hook entries, leaving foreign hooks and other
+// settings intact. Empty event arrays are dropped.
+func removeWitnessHooks(data []byte) ([]byte, error) {
+	return removeHooks(data, isWitnessEntry)
+}
+
+// mergeHooks adds specs to a hooks document, replacing any entry isOurs matches
+// (idempotent) and preserving everything else verbatim. Shared by Claude Code's
+// settings.json and Codex's hooks.json — the two formats agree on the hooks subtree,
+// so only the specs and the ownership predicate differ.
+//
+// isOurs is a PARAMETER, not a hardcoded isWitnessEntry, because the two venues are
+// recognized by different evidence: Claude's hooks carry our subcommand tokens
+// (session-start/capture/session-end), Codex's carry `import --agent codex`. Sharing
+// one predicate across both would make each venue's uninstall strip the other's hooks.
+func mergeHooks(data []byte, specs []hookSpec, isOurs func(any) bool) ([]byte, error) {
 	root := map[string]any{}
 	if len(strings.TrimSpace(string(data))) > 0 {
 		if err := json.Unmarshal(data, &root); err != nil {
@@ -328,11 +361,11 @@ func mergeWitnessHooks(data []byte, inv hookInvocation) ([]byte, error) {
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
-	for _, spec := range witnessHookSpecs(inv) {
+	for _, spec := range specs {
 		existing, _ := hooks[spec.Event].([]any)
 		kept := []any{}
 		for _, e := range existing {
-			if !isWitnessEntry(e) {
+			if !isOurs(e) {
 				kept = append(kept, e) // preserve foreign hooks
 			}
 		}
@@ -343,9 +376,10 @@ func mergeWitnessHooks(data []byte, inv hookInvocation) ([]byte, error) {
 	return json.MarshalIndent(root, "", "  ")
 }
 
-// removeWitnessHooks strips our hook entries, leaving foreign hooks and other
-// settings intact. Empty event arrays are dropped.
-func removeWitnessHooks(data []byte) ([]byte, error) {
+// removeHooks strips entries isOurs matches, leaving foreign hooks and every other
+// setting intact. Empty event arrays are dropped, and an emptied hooks subtree is
+// removed entirely.
+func removeHooks(data []byte, isOurs func(any) bool) ([]byte, error) {
 	root := map[string]any{}
 	if len(strings.TrimSpace(string(data))) > 0 {
 		if err := json.Unmarshal(data, &root); err != nil {
@@ -357,7 +391,7 @@ func removeWitnessHooks(data []byte) ([]byte, error) {
 		entries, _ := v.([]any)
 		kept := []any{}
 		for _, e := range entries {
-			if !isWitnessEntry(e) {
+			if !isOurs(e) {
 				kept = append(kept, e)
 			}
 		}
@@ -477,8 +511,24 @@ func cmdInstall(args []string) error {
 	if err := in.Install(); err != nil {
 		return err
 	}
-	if err := bindRunner(target); err != nil {
-		return err
+	// Bind the default runner only if this venue can actually RUN a model. A capture
+	// source need not provide a distillation runner (AGENTS.md), and Codex is the first
+	// that does not: writing runner=codex would put a value in config.toml that
+	// RunnerForName cannot resolve, so every later drain would fail and the archive
+	// would silently stop distilling — a worse outcome than not wiring a runner at all.
+	//
+	// The test is ValidateRunnerName, which derives from the registry, rather than a
+	// target == "codex" check: a venue that later gains a RunnerProvider starts binding
+	// with no edit here, and one that loses it stops. That is the same reasoning the
+	// function was introduced for — two writers of one config key must not disagree.
+	if platform.ValidateRunnerName(target) == nil {
+		if err := bindRunner(target); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("%s captures only; it runs no model. Distillation uses the configured runner"+
+			" (set one with: witness config set runner <%s>)\n",
+			target, strings.Join(platform.RunnerNames(), "|"))
 	}
 	// Report the resulting lens state. The first-open hook auto-seeds the built-in
 	// "default" lens on a fresh archive, and every enabled lens mines an LLM on every

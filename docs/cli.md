@@ -59,9 +59,12 @@ they exist for recovery and debugging, and everything they do also happens autom
 - `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
   default data root). Creates the directory structure and database schema. Typically called once per
   machine; `install.sh` handles this for source-checkout users.
-- `witness wire <claude|opencode>` — wire the editor integration (hooks + MCP for Claude Code;
-  plugin + MCP for OpenCode). Source-checkout command; `install.sh` calls this for you.
-- `witness unwire <claude|opencode>` — remove the editor integration wiring. Your archive is untouched.
+- `witness wire <claude|opencode|codex>` — wire the editor integration (hooks + MCP for Claude Code;
+  plugin + MCP for OpenCode; hooks for Codex). Source-checkout command; `install.sh` calls this for
+  you. Re-running it is safe: it replaces its own entries and preserves any hooks you wrote yourself.
+  Two notes specific to Codex: it runs no model, so wiring it leaves your `runner` alone, and its
+  hooks stay inert until you approve them with `/hooks` inside Codex — wiring cannot grant that trust.
+- `witness unwire <claude|opencode|codex>` — remove the editor integration wiring. Your archive is untouched.
 - `witness ingest [--file <path>]` — accept structured records (notes, logs, market data) as NDJSON
   and distill them into the archive. Reads from stdin or a file. See the record contract in
   [`prompts/SCHEMA.md`](../prompts/SCHEMA.md#records-in-the-ingest-contract).

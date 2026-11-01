@@ -221,11 +221,11 @@ func TestHomeAndReadOnlyURI(t *testing.T) {
 	a, b := t.TempDir(), t.TempDir()
 	t.Setenv("CODEX_HOME", a)
 	t.Setenv("WITNESS_CODEX_HOME", b)
-	if p, err := codexHome(); err != nil || p != b {
+	if p, err := Home(); err != nil || p != b {
 		t.Fatalf("home %q %v", p, err)
 	}
 	t.Setenv("WITNESS_CODEX_HOME", "")
-	if p, err := codexHome(); err != nil || p != a {
+	if p, err := Home(); err != nil || p != a {
 		t.Fatalf("home %q %v", p, err)
 	}
 	if uri := readOnlyURI(filepath.Join(a, "sp ace#中文.sqlite")); !strings.Contains(uri, "mode=ro") || strings.Contains(uri, "#中文") {

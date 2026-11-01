@@ -133,7 +133,7 @@ namespaced per source, so none can corrupt another's data.
 |---|---|
 | **Claude Code** | `witness wire claude` |
 | **OpenCode** | `witness wire opencode` |
-| **Codex** | manual for now — see [Codex capture](docs/codex-capture.md) ([#179](https://github.com/IngTian/witness/issues/179) tracks making it one command) |
+| **Codex** | `witness wire codex`, then approve the hooks with `/hooks` inside Codex — see [Codex capture](docs/codex-capture.md) |
 | **Files / documents** | `witness ingest --file records.ndjson` — you convert your notes, articles or logs into NDJSON records first; witness owns the record format, not your data |
 
 `witness wire` sets up capture only and never prompts, so it is safe in CI or from a hook.

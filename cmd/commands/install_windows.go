@@ -60,6 +60,22 @@ func resolveOpenCodeInstall() (string, error) {
 	return installSelf()
 }
 
+// resolveCodexInstall (Windows) self-installs and returns the installed witness.exe,
+// flagged for the PowerShell command form.
+//
+// Both halves are issue #10's lesson applied before it can recur. Windows has no
+// guaranteed shell to run the .sh shim, so pointing Codex at repoShim() would wire a
+// hook Windows cannot execute — and a Codex hook that fails is silent, so it would
+// report success and capture nothing. And hooks.json holds an ABSOLUTE path, so it must
+// point at a stable install rather than a build checkout that may be moved or deleted.
+func resolveCodexInstall() (codexHook, error) {
+	exe, err := installSelf()
+	if err != nil {
+		return codexHook{}, err
+	}
+	return codexHook{program: exe, powerShell: true}, nil
+}
+
 // installSelf copies the binary + assets into %LOCALAPPDATA%\witness and returns the
 // installed exe path, putting the install dir on the user PATH (best-effort).
 //
