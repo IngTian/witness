@@ -183,7 +183,7 @@ See [How it works](docs/how-it-works.md).
 | set up Codex capture | [Codex capture](docs/codex-capture.md) |
 | set up OpenCode, or install from npm | [OpenCode support](docs/opencode.md) |
 | install on Windows | [Windows install](docs/windows.md) |
-| back up or move my archive | [`witness export --all`](docs/cli.md#commands) |
+| back up or move my archive | [`witness export --all <dir>`](docs/cli.md#commands) |
 | shrink a profile that has grown unwieldy | [`witness compact`](docs/cli.md#commands) |
 | know where my data lives and how to delete it | [Your data is yours](#your-data-is-yours) above |
 | contribute, or understand the invariants | [AGENTS.md](AGENTS.md) |

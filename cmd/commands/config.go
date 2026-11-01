@@ -139,7 +139,7 @@ func cmdConfigSet(key, value string, lensName string) error {
 	if canonical == "runner" && lensName == "" && value != "" {
 		// Ask the platform registry, not a hardcoded pair. The old allowlist was a closed
 		// set in a system that is otherwise uniformly registry-driven, and it DISAGREED with
-		// the other writer of this same key: `witness install <target>` → bindRunner writes
+		// the other writer of this same key: `witness wire <target>` → bindRunner writes
 		// it with no validation at all. Both now go through platform.ValidateRunnerName, so a
 		// newly registered runtime is accepted without editing this file.
 		if err := platform.ValidateRunnerName(value); err != nil {

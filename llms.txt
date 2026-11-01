@@ -41,7 +41,8 @@
 
 ## Install
 
-- Claude Code / OpenCode: `witness install claude` or `witness wire opencode`; see the README "Connect your tools" section.
+- Claude Code / OpenCode: `witness wire claude` or `witness wire opencode`; see the README "Connect your tools" section.
+- `witness install` is a different thing: it provisions a bare ARCHIVE (optionally at --path), and wires no editor.
 - Codex: imports from local Codex history (`witness import --agent codex`); hook setup is currently manual, see docs/codex-capture.md.
 - Files / documents: `witness ingest <path>`.
 - Library / records-in: `witness install --path <dir>` provisions an archive, then `witness ingest` feeds it records.

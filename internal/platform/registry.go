@@ -43,7 +43,7 @@ func RunnerNames() []string {
 // value to config.
 //
 // It exists because `witness config set runner` validated against a hardcoded
-// {RunnerClaude, RunnerOpenCode} pair while `witness install <target>` validated nothing at
+// {RunnerClaude, RunnerOpenCode} pair while `witness wire <target>` validated nothing at
 // all: two writers of one config key, disagreeing. Both now ask the registry, so a third
 // runtime is accepted the moment it registers a RunnerProvider.
 //
