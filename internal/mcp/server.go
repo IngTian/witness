@@ -213,7 +213,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 			return errResult(fmt.Sprintf("embed query: %v", err)), nil, nil
 		}
 		hits := vector.Search(obs, qv, lens, k)
-		return textResult(renderHits(lens, hits)), nil, nil
+		return textResult(renderHits(lens, hits, func() string { return emptySearchHint(st, lens) })), nil, nil
 	})
 
 	// record_observation: active in-session write. Stages to the session buffer;
@@ -287,11 +287,11 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		if lensName == "" {
 			lensName = store.LensDefault
 		}
-		facets, err := st.ReadFacets()
+		facets, err := st.ReadActiveFacets()
 		if err != nil {
 			return errResult(fmt.Sprintf("read facets: %v", err)), nil, nil
 		}
-		return textResult(renderFacets(lensName, facets)), nil, nil
+		return textResult(renderFacets(lensName, facets, func() string { return emptyFacetsHint(st, lensName) })), nil, nil
 	})
 
 	// get_profile: read the L4 narrative summary (prose) for a lens — the human-
@@ -329,7 +329,8 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 			return errResult(fmt.Sprintf("read profile: %v", err)), nil, nil
 		}
 		if !ok {
-			return textResult(fmt.Sprintf("No narrative profile for '%s' yet — nothing has been distilled for it. Use get_facets for the current structured attributes.", lensName)), nil, nil
+			return textResult(fmt.Sprintf("No narrative profile for '%s' yet. %s Use get_facets for the current structured attributes.",
+				lensName, emptyFacetsHint(st, lensName))), nil, nil
 		}
 		return textResult(md + stale), nil, nil
 	})
@@ -368,9 +369,44 @@ func errResult(s string) *mcpsdk.CallToolResult {
 	return &mcpsdk.CallToolResult{IsError: true, Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: s}}}
 }
 
-func renderHits(lens string, hits []vector.Hit) string {
+// emptyFacetsHint names the remedy that actually applies when a lens has no facets.
+// Deliberately NOT a blanket "the reviewer may not have run yet": that is true only in
+// the last case, and telling someone whose archive has no capture wired that waiting will
+// help is how a never-filling install looks like a working one.
+func emptyFacetsHint(st store.MCPStore, lens string) string {
+	switch st.WhyEmpty(lens) {
+	case store.NoCapture:
+		return "This archive holds no raw turns at all, so nothing is capturing — the MCP server only READS. " +
+			"Wire an editor: `witness wire claude`, or add the plugin to opencode.json for OpenCode. Waiting will not help."
+	case store.NoObservations:
+		return fmt.Sprintf("Capture is working, but nothing has been mined into '%s' yet. "+
+			"Check the lens is enabled (`witness lens list`); `witness lens backfill %s` mines it over existing history.", lens, lens)
+	default:
+		return fmt.Sprintf("'%s' has observations but no facets yet — the reviewer folds them once enough accumulate; "+
+			"force one with `witness worker review`.", lens)
+	}
+}
+
+// emptySearchHint is emptyFacetsHint for the search surface. It differs in the last case:
+// Search is top-k with no score threshold, so zero hits never means "your query missed" —
+// it means the lens has no observations carrying embeddings.
+func emptySearchHint(st store.MCPStore, lens string) string {
+	switch st.WhyEmpty(lens) {
+	case store.NoCapture:
+		return "This archive holds no raw turns at all, so nothing is capturing — the MCP server only READS. " +
+			"Wire an editor: `witness wire claude`, or add the plugin to opencode.json for OpenCode. Waiting will not help."
+	case store.NoObservations:
+		return fmt.Sprintf("Capture is working, but nothing has been mined into '%s' yet. "+
+			"Check the lens is enabled (`witness lens list`); `witness lens backfill %s` mines it over existing history.", lens, lens)
+	default:
+		return fmt.Sprintf("'%s' has observations, but none of them carry embeddings, so nothing is searchable. "+
+			"Check `witness doctor` for the embedder's status.", lens)
+	}
+}
+
+func renderHits(lens string, hits []vector.Hit, hint func() string) string {
 	if len(hits) == 0 {
-		return fmt.Sprintf("No observations found in the '%s' lens.", lens)
+		return fmt.Sprintf("No observations found in the '%s' lens. %s", lens, hint())
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Growth observations (%s lens), most relevant first:\n\n", lens)
@@ -385,7 +421,7 @@ func renderHits(lens string, hits []vector.Hit) string {
 	return b.String()
 }
 
-func renderFacets(lensName string, facets []store.Facet) string {
+func renderFacets(lensName string, facets []store.Facet, hint func() string) string {
 	var b strings.Builder
 	count := 0
 	for _, f := range facets {
@@ -400,7 +436,7 @@ func renderFacets(lensName string, facets []store.Facet) string {
 		count++
 	}
 	if count == 0 {
-		return fmt.Sprintf("No facets found for lens '%s'. The reviewer may not have run yet.", lensName)
+		return fmt.Sprintf("No facets found for lens '%s'. %s", lensName, hint())
 	}
 	header := fmt.Sprintf("Growth facets (%s lens) — %d:\n\n", lensName, count)
 	return header + b.String()

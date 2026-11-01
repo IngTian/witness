@@ -39,8 +39,25 @@ import (
 // after the max-rowid row is deleted, so a delete-of-newest + re-mine could land a new
 // obs at a rowid <= a lens's review watermark and be silently skipped by the windowed
 // fold (issue #125); AUTOINCREMENT makes the fold cursor strictly monotonic so a fresh
-// obs always sorts after the watermark.
-const schemaVersion = 8
+// obs always sorts after the watermark; v9 adds facets.archived_at + facets.merged_into (the
+// structural half of facet history) via guarded ADD COLUMNs in migrate()
+// (addFacetLineageColumns) plus an idx_facets_active index in schemaV1. Facets were immortal
+// before this: nothing in the codebase could remove or combine one, so a profile only ever
+// grew — measured at 2,039 facets on a real archive, of which 1,216 were never the nearest
+// match to any observation. Compaction archives instead of deleting (every version is kept)
+// and the active profile becomes the derived subset where archived_at is empty; v10 adds
+// facets.archive_reason (the model's justification for a merge or retirement, persisted so the
+// audit trail for a profile reshape does not live only in a rotating log line) through the SAME
+// per-column guarded step.
+//
+// v10 exists because archive_reason was ADDED to that step after a pre-release build had
+// already stamped user_version=9. migrate() early-returns when the stored version is >=
+// schemaVersion, so the new column's own pragma_table_info guard was never reached and the
+// archive opened with a query referencing a column that did not exist. A column can never be
+// added to a version number some binary has already written — it needs a new one, which is what
+// version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
+// them on the next open.)
+const schemaVersion = 12
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -292,6 +309,42 @@ func migrate(db *sql.DB) error {
 	if err := migrateObservationsSeq(tx); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("v8 observations seq: %w", err)
+	}
+
+	// 8. v8 -> v9: facets.archived_at + facets.merged_into — the structural half of facet
+	// history, so compaction can take a facet out of the active profile without destroying
+	// it. schemaV1's CREATE ... IF NOT EXISTS won't alter an existing facets table, so add
+	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps). No backfill:
+	// the empty-string column DEFAULT is exactly right for every pre-existing facet — all of
+	// them are active, because nothing could archive one before this version.
+	// 10. v11 -> v12: facet_versions.confidence_seq — the observation watermark at which this
+	// version's confidence was last set, so decay-on-absence can be DERIVED on read instead of
+	// swept into the data (issue #173). Guarded ADD COLUMN, and then BACKFILLED to the current
+	// watermark rather than left at 0: a zero would read as "last confirmed at the beginning of
+	// time", so every existing facet would decay to the floor on the first read and the whole
+	// profile would re-level retroactively. Backfilling to now means decay starts from this
+	// upgrade forward, which is the only honest reading — we do not know when these facets were
+	// really last confirmed.
+	if err := addFacetConfidenceSeqColumn(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v12 add facet_versions.confidence_seq: %w", err)
+	}
+
+	// 9. v10 -> v11: facet_versions.claim — the short statement of what a facet asserts,
+	// separate from the full prose. Guarded ADD COLUMN; no backfill, because an empty claim
+	// correctly means "this version has none yet" and every consumer falls back to the value.
+	if err := addFacetClaimColumn(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v11 add facet_versions.claim: %w", err)
+	}
+
+	// Also the v9 -> v10 step: the same function adds archive_reason. It is per-column guarded
+	// (pragma_table_info), so one call converges a DB from v8, from a pre-release v9, or from
+	// v10 — which is precisely why the columns are added here rather than assumed from the
+	// version number.
+	if err := addFacetLineageColumns(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v9/v10 add facet lineage columns: %w", err)
 	}
 
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
@@ -550,6 +603,131 @@ func migrateObservationsSeq(tx *sql.Tx) error {
 	return nil
 }
 
+// addFacetLineageColumns is the v8->v9 step: add facets.archived_at and facets.merged_into if
+// the running DB's table predates them.
+//
+// Why these live ON the facet row and not in a lineage table of their own: WriteFacets
+// replaces the ENTIRE facets table on every review (DELETE + re-INSERT), so facet row ids are
+// not stable across writes — a side table keyed on facet id would be silently orphaned by the
+// next fold. Columns on the row survive because ReadFacets → WriteFacets round-trips them, and
+// the facet's real identity (lens|dimension|key, what applyFacet keys on) is text anyway.
+//
+// No backfill: the empty-string DEFAULT means "active, never merged", which is true of every
+// facet that existed before this version — nothing in the codebase could archive one.
+// Idempotent: the per-column guard skips the ALTER once it exists (fresh DBs get both from
+// schemaV1; a re-run sees them too).
+func addFacetLineageColumns(tx *sql.Tx) error {
+	for _, col := range []string{"archived_at", "merged_into", "archive_reason"} {
+		var hasColumn int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('facets') WHERE name=?`, col,
+		).Scan(&hasColumn); err != nil {
+			return fmt.Errorf("probe %s column: %w", col, err)
+		}
+		if hasColumn != 0 {
+			continue
+		}
+		// Column name is from the fixed slice above, never user input — safe to interpolate
+		// (SQLite takes no bound parameter in an ALTER).
+		if _, err := tx.Exec(fmt.Sprintf(
+			`ALTER TABLE facets ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)); err != nil {
+			return fmt.Errorf("add column %s: %w", col, err)
+		}
+	}
+	// The active-profile index, created HERE rather than in schemaV1 because it references
+	// archived_at: on a pre-v9 database schemaV1 runs while facets still lacks the column (its
+	// CREATE TABLE IF NOT EXISTS does not alter the existing table), so an index there fails
+	// the whole migration and the archive cannot be opened at all. Same ordering constraint as
+	// addProgressIndexes. Idempotent, and it runs after the ALTERs above on every path.
+	if _, err := tx.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_facets_active ON facets(lens, archived_at)`); err != nil {
+		return fmt.Errorf("create idx_facets_active: %w", err)
+	}
+	return nil
+}
+
+// addFacetConfidenceSeqColumn is the v11->v12 step: record WHEN a confidence was set, in
+// observation-watermark units, so decay-on-absence is a pure function of (stored confidence,
+// observations elapsed since) and can be computed on read.
+//
+// WHY OBSERVATIONS AND NOT TIME OR FOLDS. Decay has to mean "evidence was possible and did not
+// arrive". Wall-clock punishes a holiday — a fortnight away would decay a profile with no new
+// evidence to justify it. Fold count is worse than it looks: folds fire at irregular intervals
+// and their size is configurable (ReviewMaxChars), so a per-fold rate silently changes meaning
+// when that setting changes. Observations elapsed is the number of chances the facet had to be
+// confirmed and wasn't, which is exactly the quantity absence should be measured in. The review
+// watermark is already a monotonic observation counter (AUTOINCREMENT seq, never reused — #125),
+// so it is the clock, free.
+//
+// WHY DERIVED AND NOT SWEPT. Storing decayed values would mean rewriting every facet on every
+// fold — thousands of rows for the couple of dozen that were actually cited — and it would be
+// destructive: the original "confidence when last confirmed" would be gone, so the rate could
+// never be retuned and a bad rate could not be undone. Derived costs one multiply per read.
+//
+// Measured on a real archive to set the default rate: a facet is cited about once every 1,486
+// observations in the `default` lens and 886 in `math` (22,501 citations across 16,353
+// observations for 2,039 facets; 2,979 across 3,634 for 720).
+func addFacetConfidenceSeqColumn(tx *sql.Tx) error {
+	var hasColumn int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('facet_versions') WHERE name='confidence_seq'`,
+	).Scan(&hasColumn); err != nil {
+		return fmt.Errorf("probe confidence_seq column: %w", err)
+	}
+	if hasColumn != 0 {
+		return nil
+	}
+	if _, err := tx.Exec(
+		`ALTER TABLE facet_versions ADD COLUMN confidence_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add column: %w", err)
+	}
+	// Backfill to the current high-water observation seq: treat every existing facet as
+	// confirmed AS OF this upgrade. Leaving 0 would date them to the beginning of time and
+	// decay the entire profile to the floor on first read.
+	if _, err := tx.Exec(
+		`UPDATE facet_versions SET confidence_seq = COALESCE((SELECT MAX(seq) FROM observations), 0)`,
+	); err != nil {
+		return fmt.Errorf("backfill confidence_seq: %w", err)
+	}
+	return nil
+}
+
+// addFacetClaimColumn is the v10->v11 step: add facet_versions.claim if the running DB's table
+// predates it.
+//
+// WHY A SEPARATE FIELD. A facet's value carries two different things with two different
+// audiences. The CLAIM — what this trait actually asserts — is all the review call needs to
+// match identity and judge contradiction. The rest is analysis: contrasts with sibling facets,
+// the diagnosis, actionable advice, provenance limits, falsifiers. That analysis is the
+// valuable part for a human and for the portrait, and it is also 60-70% of the text, re-sent to
+// the model on every single review.
+//
+// Measured on a real archive: 2,039 facets, 2,411,507 chars of value text, and ZERO observation
+// ids cited inline — the evidence was already separate, in 22,501 because_of references. So the
+// payload was never evidence, it was analysis. Splitting claim from analysis is what makes the
+// review call small; compaction reduces the COUNT but barely touches the text (measured: -73%
+// facets, -15% chars), so neither alone is enough and together they are.
+//
+// Per VERSION, not per facet, because a claim changes exactly when the value it summarises
+// changes — and the bi-temporal history should show how the claim moved, not just the prose.
+//
+// No backfill. An empty claim means "none written yet", and every consumer falls back to the
+// value, so an archive that has never compacted behaves exactly as before.
+func addFacetClaimColumn(tx *sql.Tx) error {
+	var hasColumn int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('facet_versions') WHERE name='claim'`,
+	).Scan(&hasColumn); err != nil {
+		return fmt.Errorf("probe claim column: %w", err)
+	}
+	if hasColumn == 0 {
+		if _, err := tx.Exec(`ALTER TABLE facet_versions ADD COLUMN claim TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add column: %w", err)
+		}
+	}
+	return nil
+}
+
 // schemaV1 is the full current schema. `raw` is the append-only ground-truth
 // transcript (surrogate rowid; seq is a plain ordinal, not a uniqueness
 // constraint, matching the old JSONL append). observations carry a monotonic
@@ -604,18 +782,28 @@ CREATE INDEX IF NOT EXISTS idx_staged_session ON staged(session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_staged_unique ON staged(session, obs_id);
 
 CREATE TABLE IF NOT EXISTS facets (
-  id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  lens      TEXT NOT NULL,
-  dimension TEXT NOT NULL,
-  key       TEXT NOT NULL,
-  last_seen TEXT NOT NULL DEFAULT '',
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  lens        TEXT NOT NULL,
+  dimension   TEXT NOT NULL,
+  key         TEXT NOT NULL,
+  last_seen   TEXT NOT NULL DEFAULT '',
+  archived_at TEXT NOT NULL DEFAULT '',
+  merged_into TEXT NOT NULL DEFAULT '',
+  archive_reason TEXT NOT NULL DEFAULT '',
   UNIQUE(lens, dimension, key)
 );
+-- idx_facets_active (on lens, archived_at) is NOT here, for the same reason the progress
+-- hot-path indexes are not: it references archived_at, which on a pre-v9 database does not
+-- exist yet — schemaV1 runs BEFORE addFacetLineageColumns adds it, and CREATE TABLE IF NOT
+-- EXISTS does not alter the existing table, so the index would fail and break every upgrade.
+-- It is created in addFacetLineageColumns, after the ALTERs.
 
 CREATE TABLE IF NOT EXISTS facet_versions (
   facet_id    INTEGER NOT NULL REFERENCES facets(id) ON DELETE CASCADE,
   pos         INTEGER NOT NULL,
   value       TEXT NOT NULL DEFAULT '',
+  claim       TEXT NOT NULL DEFAULT '',
+  confidence_seq INTEGER NOT NULL DEFAULT 0,
   valid_from  TEXT NOT NULL DEFAULT '',
   valid_to    TEXT NOT NULL DEFAULT '',
   recorded_at TEXT NOT NULL DEFAULT '',

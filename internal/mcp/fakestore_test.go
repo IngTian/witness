@@ -31,6 +31,10 @@ type fakeMCPStore struct {
 	// value, so tests that need a successful stage set it explicitly; the pre-existing
 	// TestServerRecordDeleteSearch sets it to true.
 	stagedReturn bool
+	// whyEmpty drives the empty-state branch (#166). The zero value is store.NoCapture,
+	// which is deliberate: an archive nothing is feeding is the case that used to be
+	// misreported as "the reviewer may not have run yet".
+	whyEmpty store.EmptyReason
 }
 
 func (f *fakeMCPStore) ReadObservations(lens string) ([]store.Observation, error) {
@@ -47,7 +51,19 @@ func (f *fakeMCPStore) StageObservationCapped(o store.Observation, limit, totalL
 	return f.stagedReturn, nil
 }
 func (f *fakeMCPStore) StagedExists(session, obsID string) bool { return f.existsReturn }
-func (f *fakeMCPStore) ReadFacets() ([]store.Facet, error)      { return f.facets, nil }
+
+// The server reads the ACTIVE profile (archived facets are history, not stance). The fake
+// filters the same way a real store's WHERE clause does, so a test that plants an archived
+// facet exercises the real exclusion rather than a fake that hands back everything.
+func (f *fakeMCPStore) ReadActiveFacets() ([]store.Facet, error) {
+	var out []store.Facet
+	for _, fc := range f.facets {
+		if fc.Active() {
+			out = append(out, fc)
+		}
+	}
+	return out, nil
+}
 func (f *fakeMCPStore) ReadProfile(lens string) (string, bool, error) {
 	md, ok := f.profiles[lens]
 	return md, ok, nil
@@ -56,6 +72,7 @@ func (f *fakeMCPStore) DeleteObservation(obsID string) (bool, error) {
 	f.deletedIDs = append(f.deletedIDs, obsID)
 	return true, nil
 }
+func (f *fakeMCPStore) WhyEmpty(lens string) store.EmptyReason { return f.whyEmpty }
 
 // compile-time proof the fake satisfies the interface the server accepts.
 var _ store.MCPStore = (*fakeMCPStore)(nil)

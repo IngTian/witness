@@ -103,9 +103,15 @@ type ActiveObservationSink interface {
 type MCPStore interface {
 	ObservationReader
 	ActiveObservationSink
-	ReadFacets() ([]Facet, error)
+	// ReadActiveFacets, not ReadFacets: an agent asking for the profile wants the live
+	// compact set, not every facet ever recorded. Trajectory expansion is a separate,
+	// explicit request (store.FacetTrajectory), not something a plain read should return.
+	ReadActiveFacets() ([]Facet, error)
 	ReadProfile(lens string) (string, bool, error)
 	DeleteObservation(obsID string) (bool, error)
+	// WhyEmpty lets an empty answer name the layer that is actually missing rather than
+	// blaming the reviewer for an archive that nothing is feeding (#166).
+	WhyEmpty(lens string) EmptyReason
 }
 
 // --- distillation engine (the C1 headline: a fake-drivable worker) ------------
@@ -175,11 +181,23 @@ type EmergentStore interface {
 	WriteFacets(facets []Facet) error
 }
 
+// CompactStore is the surface the Compactor drives: read the WHOLE profile (archived facets
+// included — WriteFacets is a replace, so a writer that reads only the active set would delete
+// the history) and write it back. Deliberately the same two methods the Reviewer uses for L2:
+// compaction is a different judgment over the same data, not a new storage concern.
+type CompactStore interface {
+	ReadFacets() ([]Facet, error)
+	WriteFacets(facets []Facet) error
+}
+
 // SummaryStore is the surface the Summarizer drives: read facets, read/write the L4
 // narrative profile files, and its own meta watermark for change tracking.
 type SummaryStore interface {
 	MetaKV
-	ReadFacets() ([]Facet, error)
+	// ReadActiveFacets, not ReadFacets: the portrait describes who the person IS, so it must
+	// not narrate facets compaction took out of the profile. The summarizer never writes
+	// facets, so it has no reason to see the archived ones.
+	ReadActiveFacets() ([]Facet, error)
 	ReadProfile(lens string) (string, bool, error)
 	WriteProfile(lens, markdown string) error
 	DeleteProfile(lens string) error
@@ -194,6 +212,7 @@ type SummaryStore interface {
 // method signature drifts, THIS breaks — a clear store-package failure — rather than
 // a distant consumer or fake.
 var (
+	_ CompactStore          = (*Store)(nil)
 	_ CaptureStore          = (*Store)(nil)
 	_ ImportStore           = (*Store)(nil)
 	_ MCPStore              = (*Store)(nil)
