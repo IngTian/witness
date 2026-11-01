@@ -131,10 +131,14 @@ namespaced per source, so none can corrupt another's data.
 
 | source | setup |
 |---|---|
-| **Claude Code** | `witness install claude` |
+| **Claude Code** | `witness wire claude` |
 | **OpenCode** | `witness wire opencode` |
 | **Codex** | manual for now — see [Codex capture](docs/codex-capture.md) ([#179](https://github.com/IngTian/witness/issues/179) tracks making it one command) |
-| **Files / documents** | `witness ingest <path>` |
+| **Files / documents** | `witness ingest --file records.ndjson` — you convert your notes, articles or logs into NDJSON records first; witness owns the record format, not your data |
+
+`witness wire` sets up capture only and never prompts, so it is safe in CI or from a hook.
+(`witness install` is a different thing: it provisions a bare archive at a `--path`, for keeping
+an independent archive per data source. It does not wire any editor.)
 
 Then just work. Capture runs in the background — no prompting, no ritual. Check it any time with
 `witness doctor`.

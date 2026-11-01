@@ -18,6 +18,31 @@ injects anything into a session. Nothing is pushed — you (or an agent) read th
 raw/observations/facets live in a single embedded SQLite database (`witness.db`); the profile is
 plain markdown under `profile/`.
 
+### Confidence, and why it moves on its own
+
+Every facet carries a confidence between 0 and 1. It is not a score of you — it is how sure the
+archive is that the claim currently holds.
+
+It **rises** when new evidence reaffirms a facet and **falls** when the reviewer, having looked,
+is less sure. Either way a single review moves it by at most 0.1, so confidence means "accumulated
+across reviews" rather than "whatever the last window felt". A facet needs several reviews to climb
+to a high number, which is the point: the number should track repeated independent evidence.
+
+It also **decays when nothing cites the facet.** The clock is observations elapsed, not wall-clock
+time — decay has to mean "evidence was possible and did not arrive", so a fortnight away from the
+keyboard costs you nothing. The half-life is 3,000 observations: a facet last confirmed at 0.9
+reads around 0.64 after a typical gap between citations, and approaches the floor after roughly
+10,000 uncited observations.
+
+**The floor is 0.1, and it never goes below.** Absence of evidence is not evidence of absence: a
+quiet trait is still a trait, so decay marks a facet uncertain and never retires it. One citation
+restores it.
+
+So a confidence you saw last month may read lower today with no new sessions. That is working
+correctly. If you want to know why a facet is where it is, `witness facets <lens>` shows the
+current value and `witness facets <lens> --expand <dimension/key>` unfolds everything that was
+merged into it.
+
 ### Lenses
 
 Every observation/facet carries a **lens** tag:

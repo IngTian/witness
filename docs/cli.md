@@ -79,6 +79,10 @@ review_every     = 5          # run the reviewer every N distilled sessions...
 review_poignancy = 30         # ...or sooner once accumulated salience crosses this (0 = off)
 auto_distill     = true       # hooks/plugins may start model work automatically
 mine_concurrency = 4          # parallel per-session miners (<= 0 restores the default)
+chunk_max_chars  = 0          # 0 = mine each session WHOLE (best quality); set a positive
+                              #     value only if a giant session times out
+review_max_chars = 16000      # safety ceiling: max observation chars folded in ONE review
+                              #     call, so a big backlog cannot ride the runner timeout
 ```
 
 Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
@@ -87,6 +91,12 @@ Model ids are passed through to whichever runner is bound, so use that runtime's
 note that an empty `triage_model` under the claude runner inherits your *ambient interactive*
 model, which may be heavier than you want for per-session mining, so pinning a light one is
 usually worth it.
+
+`chunk_max_chars` and `review_max_chars` are **safety ceilings, not quality dials.** Mining a
+session whole is the best-quality path — splitting it loses insight that spans the session, like a
+decision made early and confirmed late — so raise `chunk_max_chars` off 0 only if a giant session
+actually times out. `review_max_chars` exists so a large review backlog is folded in windows
+rather than one call that rides the 10-minute runner timeout and freezes the profile.
 
 Set `auto_distill = false` for capture-only mode on battery-constrained machines, then run
 `witness worker run --detach` manually when plugged in. Automatic workers are short-lived: they load the
