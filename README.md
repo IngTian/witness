@@ -169,16 +169,24 @@ See [How it works](docs/how-it-works.md).
 - **Readable and deletable.** Plain SQLite and plain markdown. `witness export --all <dir>` snapshots
   the whole archive; delete the data dir and it's gone.
 
-## Documentation
+## Where to look for things
 
-| | |
+| I want to… | go here |
 |---|---|
-| [How it works](docs/how-it-works.md) | the four layers, lenses, writing your own prompts |
-| [Commands and configuration](docs/cli.md) | every command, every config key |
-| [OpenCode support](docs/opencode.md) | setup, the isolated-runtime model, npm install |
-| [Codex capture](docs/codex-capture.md) | setup, the read-only probe, compatibility limits |
-| [Windows install](docs/windows.md) | why Windows differs, and what it copies where |
-| [AGENTS.md](AGENTS.md) | architecture and invariants, for contributors |
+| install it and connect my editor | [Install](#install) · [Connect your tools](#connect-your-tools) above |
+| understand the four layers and what each produces | [How it works](docs/how-it-works.md) |
+| know why a confidence number changed on its own | [Confidence, and why it moves](docs/how-it-works.md#confidence-and-why-it-moves-on-its-own) |
+| **track something other than myself** — notes, research, a market, a knowledge base | [Writing a lens](docs/writing-a-lens.md) |
+| tune what gets noticed, or test a prompt before committing to it | [Writing a lens → the loop](docs/writing-a-lens.md#the-loop) |
+| look up a command or a flag | [Commands](docs/cli.md#commands) |
+| change the model, cadence, or concurrency | [Configuration](docs/cli.md#configuration) |
+| set up Codex capture | [Codex capture](docs/codex-capture.md) |
+| set up OpenCode, or install from npm | [OpenCode support](docs/opencode.md) |
+| install on Windows | [Windows install](docs/windows.md) |
+| back up or move my archive | [`witness export --all`](docs/cli.md#commands) |
+| shrink a profile that has grown unwieldy | [`witness compact`](docs/cli.md#commands) |
+| know where my data lives and how to delete it | [Your data is yours](#your-data-is-yours) above |
+| contribute, or understand the invariants | [AGENTS.md](AGENTS.md) |
 
 ## Single binary, no runtime
 

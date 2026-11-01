@@ -55,7 +55,7 @@ they exist for recovery and debugging, and everything they do also happens autom
 - `witness export <path>` — write a consistent single-file snapshot of the **database** (safe to back
   up / cloud-sync). Add `--all` and `<path>` becomes a **directory** holding the complete archive:
   that snapshot plus `config.toml`, `lenses/` and `profile/`. Use `--all` for backups — see
-  [Your data is yours](#your-data-is-yours).
+  [Your data is yours](../README.md#your-data-is-yours).
 - `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
   default data root). Creates the directory structure and database schema. Typically called once per
   machine; `install.sh` handles this for source-checkout users.

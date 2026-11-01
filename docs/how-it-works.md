@@ -54,90 +54,12 @@ Every observation/facet carries a **lens** tag:
   registry; `witness lens enable math` makes it run on every session (alongside `default`). Lenses
   are shared, not tied to any repo, so the same `math` lens covers all your math work.
 
-#### Writing a lens
+### Writing your own lens
 
-A lens is a **directory** of three files:
-
-```
-math/
-  lens.json     settings: name, dimensions, optional per-lens models
-  extract.md    per-session — mines observations (the whole file is the prompt)
-  review.md     periodic — synthesizes observations into facets (the whole file is the prompt)
-```
-
-```json
-// math/lens.json
-{ "name": "math", "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
-```
-
-```markdown
-<!-- math/extract.md -->
-You are observing one session through a MATH-LEARNING lens. Notice things about the
-person as a mathematician — how they reason, get stuck, and climb out…
-Return ONLY a JSON array. Each element:
-[{ "dimension": "proof_rigor", "observation": "…", "evidence": "…", "poignancy": 6 }]
-```
-
-The one rule to remember: each prompt file is used **verbatim as the system prompt** and *replaces*
-the built-in `default` prompts — it doesn't extend them — so each must be **self-contained,
-including its output JSON schema** (the tool appends the transcript / observations as the user
-message, but injects no schema for you).
-
-Two **complete, copy-paste-ready** lenses ship as starting points. Copy the directory and rewrite the
-dimensions and prose for your domain:
-
-- [`prompts/lens/example/`](../prompts/lens/example) — a **person** lens (math learning), for tracking
-  someone as they work.
-- [`prompts/lens/corpus-example/`](../prompts/lens/corpus-example) — a **non-person** lens (market
-  regime), for tracking a subject that is not you. Start here for research notes, a knowledge base,
-  incident reports, or any document stream; its README explains what has to change when the subject
-  stops being a person.
-
-```sh
-cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/example" ./math   # edit the files, then:
-witness lens register math ./math      # copies the definition into your store (a snapshot)
-witness lens enable  math               # start running it on every session
-```
-
-`register` stores a **copy** — editing the original afterward has no effect until you re-register.
-`enable` is the separate switch that makes it actually run.
-
-**Per-lens models (optional).** By default every lens rides the default models (`witness config set
-triage_model / distill_model`). A rare heavy lens can pin a stronger model just for itself —
-without paying for it on every session — by adding `extract_model` / `review_model` to its
-`lens.json`:
-
-```json
-{ "name": "math", "dimensions": ["proof_rigor"], "extract_model": "claude-sonnet-5" }
-```
-
-Omit a field (or leave it empty) to ride the default. Since `register` stores a snapshot, edit the
-registered copy under `<witness-data-dir>/lenses/<name>/lens.json` — or edit the source and
-re-register. Verify what a lens resolved to with `witness lens show <name>`.
-
-The source directory may live anywhere. As a recommended canonical location, witness keeps the
-registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/` (normally
-`~/.local/share/witness/lenses/<name>/`, or `$WITNESS_HOME/lenses/<name>/`). You can edit that
-registered copy directly, but this location is a convention rather than a restriction on the
-directory passed to `lens register`.
-
-### Writing your own summary prompt
-
-The shipped `unified` prompt writes a **personal growth portrait**. If your archive is something else
-— market records, research notes, a project log — drop your own prompt in and it wins:
-
-```
-<data-root>/summarize/unified.md    your prompt (overrides the built-in one)
-<data-root>/summarize/lens.md       same, for the per-lens summaries
-```
-
-`witness doctor` prints the data root. The file is the whole interface: no command to run, no
-registration step. Delete it to go back to the built-in prompt.
-
-The same facets can then produce a completely different document — a terse risk memo instead of a
-character portrait, say. Because the built-in prompt is still used when you have no override, a
-witness upgrade that ships an improved default still reaches you; once you override, your file is
-never touched by an upgrade.
+A lens is a directory of three files — settings plus an extract prompt and a review prompt — and
+writing one is how witness gets used for anything other than the shipped person lens. That has its
+own guide, including the no-write iteration loop (`witness lens try`) and a worked non-person
+example: **[Writing a lens](writing-a-lens.md)**.
 
 ## Reading the archive
 
