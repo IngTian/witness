@@ -28,3 +28,16 @@ func resolveClaudeInstall() (hookInvocation, error) {
 func resolveOpenCodeInstall() (string, error) {
 	return repoShim()
 }
+
+// resolveCodexInstall (Unix) points the Codex hooks at the in-repo witness.sh shim,
+// matching the other two venues. Codex runs the hook command through a shell, so the
+// shim is directly usable — and using it rather than the bare binary is what gives the
+// Codex hooks the shim's WITNESS_WORKER recursion guard, its CLAUDE_PLUGIN_ROOT export
+// for asset self-location, and its `go run` dev fallback for a fresh checkout.
+func resolveCodexInstall() (codexHook, error) {
+	shim, err := repoShim()
+	if err != nil {
+		return codexHook{}, err
+	}
+	return codexHook{program: shim}, nil
+}

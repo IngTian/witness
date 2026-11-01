@@ -12,6 +12,7 @@ import "github.com/IngTian/witness/internal/platform"
 func init() {
 	platform.RegisterInstaller("claude", claudeInstaller{})
 	platform.RegisterInstaller("opencode", openCodeInstaller{})
+	platform.RegisterInstaller("codex", codexInstaller{})
 }
 
 type claudeInstaller struct{}
@@ -23,3 +24,10 @@ type openCodeInstaller struct{}
 
 func (openCodeInstaller) Install() error   { return cmdInstallOpenCode() }
 func (openCodeInstaller) Uninstall() error { return cmdUninstallOpenCode() }
+
+// codexInstaller wires only hooks: Codex captures but supplies no RunnerProvider, and
+// its MCP registration lives in a config.toml witness does not own. See install_codex.go.
+type codexInstaller struct{}
+
+func (codexInstaller) Install() error   { return cmdInstallCodex() }
+func (codexInstaller) Uninstall() error { return cmdUninstallCodex() }

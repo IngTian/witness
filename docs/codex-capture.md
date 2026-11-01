@@ -54,40 +54,100 @@ compatibility problem.
 
 ## Keep capture current with hooks
 
-Current Codex supports lifecycle hooks; see the official
-[Hooks guide](https://learn.chatgpt.com/docs/hooks). Hooks receive `session_id`,
-which witness uses to reconcile the selected conversation from local storage.
-This avoids treating `notify` as a complete transcript feed or depending on the
-hook's optional `transcript_path`.
+Import is a snapshot; hooks keep it current. Run:
 
-Merge the following entries into your user-level `~/.codex/hooks.json` (preserve
-existing hooks), substituting the actual absolute executable path:
+```sh
+witness wire codex
+```
+
+Then **approve the hooks** with `/hooks` inside Codex. This step is not optional and
+cannot be automated: Codex keeps non-managed hooks inert until you approve the exact
+definition, so until you do, Codex runs fine and witness captures nothing.
+
+`witness wire codex` writes three handlers into `~/.codex/hooks.json`
+(`SessionStart`, `Stop`, `SessionEnd`), each invoking
+`witness import --agent codex --hook`, and:
+
+- resolves your Codex home the same way import does — `WITNESS_CODEX_HOME`, then
+  `CODEX_HOME`, then `~/.codex` — so the two can never disagree about which archive is
+  in play
+- **merges**, preserving any hooks you wrote yourself, including other handlers on the
+  same events
+- is idempotent, and byte-stable: re-running it on an already-wired file writes nothing
+  at all. That matters because Codex records hook trust against the hook's *hash*, so a
+  pointless rewrite would revoke your approval and silently stop capture
+- adopts a hand-edited entry from an earlier version of this document instead of
+  appending beside it, so you will not end up importing twice per turn
+- marks `SessionStart` and `Stop` `async`, so capture stays off your session's critical
+  path. `SessionEnd` is synchronous with a 3-second timeout — the most Codex allows for
+  that event, which defaults to one second. (Codex refuses to run `SessionEnd`
+  asynchronously: it runs it synchronously anyway and warns.) So on a large history
+  `SessionEnd` may be cut off part-way. That is harmless: `Stop` has already reconciled
+  each completed turn, import is idempotent, and anything missed is picked up by the
+  next `SessionStart` or an explicit `witness import --agent codex`.
+
+Remove it with `witness unwire codex`, which strips only witness's own entries — and
+deletes `hooks.json` outright if witness created it and nothing of yours is left in it,
+rather than leaving an empty file behind. A file holding any hook or key of your own is
+kept.
+
+Codex runs no distillation model, so wiring it does not change your `runner`; set one
+with `witness config set runner <claude|opencode>`.
+
+Hooks receive `session_id`, which witness uses to reconcile that conversation from local
+storage — rather than treating `notify` as a complete transcript feed or depending on the
+hook's optional `transcript_path`. Event names, the `commandWindows` override and the
+trust model are documented in the official
+[Hooks guide](https://learn.chatgpt.com/docs/hooks).
+
+### Doing it by hand
+
+You do not need to, but the file is yours. On Windows the handler field is
+`commandWindows` and the value is a PowerShell invocation — note the `&` call operator,
+which a quoted path will not run without, and that an apostrophe in a path is escaped by
+doubling it:
 
 ```json
 {
   "hooks": {
-    "SessionStart": [{"hooks": [{
-      "type": "command",
-      "command": "/absolute/path/to/witness import --agent codex --hook"
-    }]}],
     "Stop": [{"hooks": [{
       "type": "command",
-      "command": "/absolute/path/to/witness import --agent codex --hook"
+      "commandWindows": "& 'C:\\path with spaces\\witness.exe' import --agent codex --hook",
+      "async": true
     }]}],
     "SessionEnd": [{"hooks": [{
       "type": "command",
-      "command": "/absolute/path/to/witness import --agent codex --hook"
+      "commandWindows": "& 'C:\\path with spaces\\witness.exe' import --agent codex --hook",
+      "timeout": 3
     }]}]
   }
 }
 ```
 
-For Windows, set each handler's `commandWindows` to a PowerShell-compatible
-invocation, e.g. `& 'C:\\path with spaces\\witness.exe' import --agent codex --hook`.
-The example is a JSON string value, so the doubled backslashes are intentional.
-Review and trust the exact hook definitions using `/hooks` in Codex; installation
-alone does not grant hook trust. No command here edits Codex configuration or
-changes trust settings automatically.
+The doubled backslashes are JSON string escaping, not part of the path.
+
+### What is verified
+
+Verified against real Codex (`codex-cli 0.166.0`) on macOS, using `codex exec` into a
+throwaway archive:
+
+- **the hook path works** — a wired `Stop`/`SessionEnd` hook fires and the conversation
+  reaches the archive with `codex:` attribution
+- **hook trust is real and enforced.** The same run with the hooks unapproved captured
+  *nothing*, silently. Approving them with `/hooks` is not boilerplate advice — it is
+  the difference between working capture and an empty archive
+- **import works on macOS**, both the paginated `thread_history_1.sqlite` projection and
+  a legacy `rollout-*.jsonl`; a repeat import writes 0 records
+- **re-wiring is inert** — the file's mtime does not move, so hook trust survives
+- **unwire leaves no trace** when witness created the file
+
+Witness's own side is additionally unit-tested on every OS — the document it writes,
+idempotency, foreign-hook preservation, the Windows `commandWindows` form and its
+quoting, and that the installer and importer resolve the same Codex home. Every one of
+those assertions was confirmed to fail when the behaviour it checks is removed.
+
+Not covered: the Windows *wiring* path (the import path there was verified separately),
+and interactive `codex` rather than `codex exec`.
 
 `--hook` always returns exit 0 and `{}` on stdout, including on malformed input,
 missing history or import failure. Errors go to the witness log. The automatic

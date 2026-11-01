@@ -60,13 +60,19 @@ var dispatchPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`case\s+(platform\.Agent|store\.Runner)`),
 	// A `case` arm naming any registered platform, not just the two hardcoded ones. "file" was
 	// invisible to the old pattern even though it is a real registered platform.
-	regexp.MustCompile(`case\s+"(claude|opencode|file)"`),
+	//
+	// "codex" is here for the same reason, found the same way: it registered as a platform in
+	// v0.9.1 and NOTHING in this guard mentioned it, so for two releases the engine could have
+	// switched on it, type-asserted its adapter, or imported the package outright and this test
+	// would have reported clean. A guard whose coverage is a hand-maintained list of names
+	// silently stops covering whatever was added last.
+	regexp.MustCompile(`case\s+"(claude|opencode|file|codex)"`),
 	// A TYPE switch or assertion on a concrete adapter reaches around the capability
 	// interfaces entirely — the engine must never name an adapter type.
-	regexp.MustCompile(`\.\((\*)?(claude|opencode|file)\.`),
+	regexp.MustCompile(`\.\((\*)?(claude|opencode|file|codex)\.`),
 	// Importing an adapter package from the engine at all. The compiler would allow it and
 	// every pattern above would still pass.
-	regexp.MustCompile(`witness/internal/platform/(claude|opencode|file)"`),
+	regexp.MustCompile(`witness/internal/platform/(claude|opencode|file|codex)"`),
 }
 
 // engineDirs are the trees that MUST stay platform-agnostic. Notably absent:
@@ -96,7 +102,20 @@ func TestEngineHasNoPlatformDispatch(t *testing.T) {
 			// installers.go legitimately NAMES the platforms when registering their
 			// cmd-side installers (RegisterInstaller("claude", ...)) — that's the
 			// composition root wiring, not dispatch. Allow it.
-			if filepath.Base(path) == "installers.go" || filepath.Base(path) == "root.go" {
+			//
+			// install_codex.go is the same category one level down: AGENTS.md puts
+			// installer IMPLEMENTATIONS in cmd/commands because wiring is CLI/OS-coupled,
+			// so a per-venue installer file is that venue's adapter and naming it is the
+			// file's entire job. It imports internal/platform/codex for ONE thing —
+			// codex.Home() — because the alternative is re-deriving the Codex home
+			// directory here, and two copies of that precedence is exactly how witness
+			// would end up wiring hooks into one Codex home while importing from another.
+			//
+			// The exemption is one FILE, not a tree, and it is narrower than the hole it
+			// replaces: before this commit "codex" appeared in no pattern at all, so every
+			// file in the fenced trees was unguarded against it.
+			switch filepath.Base(path) {
+			case "installers.go", "root.go", "install_codex.go":
 				return nil
 			}
 			src, err := os.ReadFile(path)

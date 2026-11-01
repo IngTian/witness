@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/IngTian/witness/internal/platform"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 )
 
@@ -662,11 +663,22 @@ func TestMCPServerRegisteredExactName(t *testing.T) {
 }
 
 func TestWireUnwireInstallShapes(t *testing.T) {
-	if newWireCmd().Use != "wire <claude|opencode>" {
-		t.Errorf("wire Use = %q", newWireCmd().Use)
+	// Derived from the registry, not a hardcoded "wire <claude|opencode>". The literal
+	// made this test an edit-the-expectation chore on every new venue, which proves
+	// nothing — and it checked the WRONG thing: what matters is that the help names
+	// every target wire can actually dispatch to, so a user is never told to type a
+	// venue that is not registered (or left unaware of one that is).
+	targets := platform.InstallTargets()
+	if len(targets) < 2 {
+		t.Fatalf("expected at least two install targets, got %v", targets)
 	}
-	if newUnwireCmd().Use != "unwire <claude|opencode>" {
-		t.Errorf("unwire Use = %q", newUnwireCmd().Use)
+	for _, name := range targets {
+		if !strings.Contains(newWireCmd().Use, name) {
+			t.Errorf("wire Use = %q omits registered target %q", newWireCmd().Use, name)
+		}
+		if !strings.Contains(newUnwireCmd().Use, name) {
+			t.Errorf("unwire Use = %q omits registered target %q", newUnwireCmd().Use, name)
+		}
 	}
 	inst := newInstallCmd()
 	if !strings.HasPrefix(inst.Use, "install") {

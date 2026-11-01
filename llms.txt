@@ -43,7 +43,7 @@
 
 - Claude Code / OpenCode: `witness wire claude` or `witness wire opencode`; see the README "Connect your tools" section.
 - `witness install` is a different thing: it provisions a bare ARCHIVE (optionally at --path), and wires no editor.
-- Codex: imports from local Codex history (`witness import --agent codex`); hook setup is currently manual, see docs/codex-capture.md.
+- Codex: `witness wire codex` installs the lifecycle hooks, then the user must approve them with `/hooks` inside Codex (hooks are inert until trusted). History also imports directly with `witness import --agent codex`. See docs/codex-capture.md.
 - Files / documents: `witness ingest <path>`.
 - Library / records-in: `witness install --path <dir>` provisions an archive, then `witness ingest` feeds it records.
 - npm (OpenCode): `@witness-ai/opencode`.

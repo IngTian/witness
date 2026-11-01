@@ -59,7 +59,12 @@ func skipSourceError(ctx context.Context, stats *platform.ImportStats, source st
 	return nil
 }
 
-func codexHome() (string, error) {
+// Home is the Codex home directory: WITNESS_CODEX_HOME, then CODEX_HOME, then
+// ~/.codex. Exported because the hook INSTALLER (cmd/commands/install_codex.go)
+// must resolve it identically — if the two ever disagreed, witness would wire
+// hooks into one Codex home and import from another, and the only symptom would
+// be an archive that silently stays empty.
+func Home() (string, error) {
 	for _, key := range []string{"WITNESS_CODEX_HOME", "CODEX_HOME"} {
 		if p := strings.TrimSpace(os.Getenv(key)); p != "" {
 			return filepath.Abs(p)
@@ -93,7 +98,7 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 	home := im.Home
 	if home == "" {
 		var err error
-		home, err = codexHome()
+		home, err = Home()
 		if err != nil {
 			return stats, err
 		}

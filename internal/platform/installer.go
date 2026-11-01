@@ -1,5 +1,7 @@
 package platform
 
+import "sort"
+
 // Installer wires witness INTO a target runtime (hooks/plugin + MCP registration)
 // and removes it again. Unlike the other capabilities, its concrete impls live in
 // cmd/commands, NOT in the platform subpackages: installation is inherently
@@ -52,10 +54,15 @@ func InstallerFor(name string) (Installer, bool) {
 
 // InstallTargets returns the registered target names (for usage/help text), so the
 // command's error message stays in sync with what's actually installable.
+//
+// SORTED, because the wire/unwire Use strings are built from this: ranging a map
+// gives Go's randomized order, so unsorted output would reshuffle `witness --help`
+// between runs and make any test that reads it flaky.
 func InstallTargets() []string {
 	out := make([]string, 0, len(installers))
 	for name := range installers {
 		out = append(out, name)
 	}
+	sort.Strings(out)
 	return out
 }
