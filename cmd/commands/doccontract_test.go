@@ -3,6 +3,7 @@ package commands
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -153,13 +154,44 @@ func TestDocumentedInstallScriptInvocations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read install.sh: %v", err)
 	}
-	// Accepted targets, from the script's own guard: "$TARGET" != "claude" && ...
+	// Accepted targets come from the guard's case arm: `claude|opencode|codex) ;;`.
 	accepted := map[string]bool{}
-	for _, m := range regexp.MustCompile(`"\$TARGET"\s*!=\s*"([a-z]+)"`).FindAllStringSubmatch(string(script), -1) {
-		accepted[m[1]] = true
-	}
-	if len(accepted) == 0 {
+	guard := regexp.MustCompile(`(?m)^\s*([a-z|]+)\)\s*;;\s*$`).FindStringSubmatch(string(script))
+	if guard == nil {
 		t.Fatal("could not read install.sh's accepted targets — the guard changed shape, so this test proves nothing")
+	}
+	for _, name := range strings.Split(guard[1], "|") {
+		accepted[name] = true
+	}
+
+	// The USAGE message must list exactly those targets. These are two separate literals
+	// in the script, and a usage line that drifts from the guard sends users to a target
+	// the script then rejects — the same class of defect as a doc naming a command that
+	// does not exist, just one file over.
+	usage := regexp.MustCompile(`usage: \./install\.sh <([a-z|]+)>`).FindStringSubmatch(string(script))
+	if usage == nil {
+		t.Fatal("install.sh has no recognizable usage message to cross-check the guard against")
+	}
+	advertised := map[string]bool{}
+	for _, name := range strings.Split(usage[1], "|") {
+		advertised[name] = true
+	}
+	if !reflect.DeepEqual(accepted, advertised) {
+		t.Errorf("install.sh's guard accepts %v but its usage message advertises %v",
+			keysOf(accepted), keysOf(advertised))
+	}
+
+	// Adding a venue means one arm in the guard and one in EACH of the two switches that
+	// follow (the step-4 label, and the closing "what to do next" message). Forgetting
+	// the label arm dies loudly under `set -u`; forgetting the closing one just prints
+	// nothing, so a Codex user would never be told to approve the hooks — and unapproved
+	// Codex hooks capture nothing, silently. Each target must own an arm in both.
+	for name := range accepted {
+		arms := regexp.MustCompile(`(?m)^\s*`+regexp.QuoteMeta(name)+`\)`).FindAllString(string(script), -1)
+		if len(arms) < 2 {
+			t.Errorf("install.sh accepts %q but gives it %d case arm(s) after the guard; "+
+				"it needs one for the step-4 label and one for the closing instructions", name, len(arms))
+		}
 	}
 
 	invocation := regexp.MustCompile(`(?:\./)?install\.sh([^\n` + "`" + `]*)`)
