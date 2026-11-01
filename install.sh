@@ -6,10 +6,14 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 TARGET="${1:-}"
-if [[ "$TARGET" != "claude" && "$TARGET" != "opencode" ]]; then
-  echo "usage: ./install.sh <claude|opencode>" >&2
-  exit 1
-fi
+# A case, not a chain of !=, so adding a venue is one arm here and one arm in each of
+# the two switches below. The usage string must list exactly these targets — a doc test
+# (cmd/commands/doccontract_test.go) asserts the two agree, because a usage message that
+# drifts from the guard sends users to a target the script rejects.
+case "$TARGET" in
+  claude|opencode|codex) ;;
+  *) echo "usage: ./install.sh <claude|opencode|codex>" >&2; exit 1 ;;
+esac
 
 # --- pretty output (decorative only; degrades to plain text when not a TTY) ----
 if [ -t 1 ]; then
@@ -48,9 +52,12 @@ info "~448MB, fetched once; skipped if already present and intact"
 ok "model ready"
 
 # --- [4/4] wire into the selected agent runtime --------------------------------
+# Codex gets hooks only: its MCP servers live in ~/.codex/config.toml, which also holds
+# account configuration, and witness does not rewrite a foreign TOML file it does not own.
 case "$TARGET" in
   claude)   LABEL="Claude Code hooks + MCP server" ;;
   opencode) LABEL="OpenCode plugin + MCP server" ;;
+  codex)    LABEL="Codex lifecycle hooks" ;;
 esac
 step 4 "Wiring $LABEL"
 "$BIN" wire "$TARGET"
@@ -94,4 +101,12 @@ printf '  %switness doctor%s   %s# verify (or: GOMLX_BACKEND=go %s doctor)%s\n' 
 case "$TARGET" in
   claude)   printf '  %sthen restart Claude Code (or open /hooks) so the hooks load%s\n\n' "$D" "$X" ;;
   opencode) printf '  %sthen restart OpenCode so the plugin and MCP server load%s\n\n' "$D" "$X" ;;
+  codex)
+    # Restated here deliberately, the way the claude/opencode arms restate "restart your
+    # editor": four steps of build output scroll past, and this is where people look. Both
+    # of these fail SILENTLY — unapproved Codex hooks never run, and an unset runner means
+    # capture works while nothing is ever distilled.
+    printf '  %sREQUIRED: approve the hooks with%s %s/hooks%s %sin Codex — inert until you do%s\n' "$Y" "$X" "$B" "$X" "$Y" "$X"
+    printf '  %sCodex runs no model — pick a runner:%s %switness config set runner <claude|opencode>%s\n\n' "$D" "$X" "$B" "$X"
+    ;;
 esac
