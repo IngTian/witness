@@ -8,8 +8,14 @@ package platform
 // So the interface lives here (for a single registry-driven dispatch + the proof
 // test), but cmd registers the concrete installers at startup.
 //
-// This is the install-TARGET axis (a user typing `witness install claude`), which
+// This is the WIRE-TARGET axis (a user typing `witness wire claude`), which
 // is distinct from and never touches the engine's runner/session axes.
+//
+// NOTE ON NAMING, because it has misled readers: wiring an editor is `witness wire`
+// / `unwire`. `witness install` is a SEPARATE command that provisions an archive
+// (its database + config, optionally at --path) and wires no editor at all. The
+// pre-v0.5.0 spelling WAS `witness install <target>`, so older comments naming that
+// describe a CLI that no longer exists.
 type Installer interface {
 	// Install wires witness into the target runtime, idempotently.
 	Install() error

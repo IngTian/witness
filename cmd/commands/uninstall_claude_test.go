@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// `witness uninstall claude` must not claim success when the hooks are still wired.
+// `witness unwire claude` must not claim success when the hooks are still wired.
 //
 // It used to `_ =` away BOTH removeWitnessHooks's parse error and writeFileAtomic's error,
 // print "hooks removed from ...", and return nil. So on an unparseable settings.json — or a

@@ -324,7 +324,7 @@ func TestResolveRunnerEnvFallbackWhenUnbound(t *testing.T) {
 	}
 }
 
-// A user who explicitly ran `witness install claude` (SetRunner stamps
+// A user who explicitly ran `witness wire claude` (SetRunner stamps
 // runner_bound) must NOT be hijacked by a stray WITNESS_RUNNER — the persisted
 // choice wins. This is the dual CC+OpenCode safety property.
 func TestResolveRunnerBoundBeatsEnv(t *testing.T) {
