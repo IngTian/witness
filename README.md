@@ -316,6 +316,12 @@ archive and enabled lenses, with `codex:` session IDs. It supports legacy JSONL
 and paginated local history. See [Codex capture](docs/codex-capture.md) for setup,
 event-triggered capture, the read-only probe and compatibility limits.
 
+**Platform status:** verified against real Codex history on **Windows** (codex-cli
+0.165/0.166-alpha), including idempotent re-import and a byte-exact match against an
+independent converter. **macOS has not been tested natively** — it cross-compiles and the
+paths are OS-agnostic (`CODEX_HOME`, else `~/.codex`), so it is expected to work, but nobody
+has run it there yet. Reports welcome.
+
 ## Single binary, no runtime
 
 The whole thing is **one self-contained Go binary** — no Python, no external services, no vector
