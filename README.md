@@ -1,10 +1,10 @@
-# witness
+# witness — a distillation engine that keeps the history of how things changed.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/npm/v/@witness-ai/opencode?logo=npm&label=%40witness-ai%2Fopencode)](https://www.npmjs.com/package/@witness-ai/opencode)
 ![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
 ![Single binary](https://img.shields.io/badge/single%20binary-CGO__ENABLED%3D0-informational)
-![Sources](https://img.shields.io/badge/sources-Claude%20Code%20%C2%B7%20OpenCode%20%C2%B7%20Codex%20%C2%B7%20files-8A2BE2)
+![Runtimes](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20OpenCode-8A2BE2)
 
 [![witness MCP server](https://mcprush.com/badge/witness-mcp/card.svg)](https://mcprush.com/to/witness-mcp?ref=badge)
 
@@ -22,6 +22,60 @@ just *"what is true now"*.
 > *My true mentor...*
 > *My guiding moonlight..."*
 > — Ludwig, the Holy Blade
+
+## Two ways people use it
+
+**1. Watch your own growth as you work with AI.** Install it into Claude Code or OpenCode and it
+captures your sessions in the background — no prompting, no ritual. It distills how your thinking,
+workstyle, habits, and blind spots shift over months, with evidence for every claim. This is the
+setup witness ships configured out of the box.
+
+It is **reflection-oriented, not clone-oriented**: the point is to let your agent understand you, and
+to leave you a re-readable record of how you thought and grew. It is a **pure tool, not a coach** —
+it captures, structures, and serves. Building a coach on top ("you've done this three times…") is
+left to other projects that read its output.
+
+**2. Build a change-history over any text corpus.** Write a lens — a prompt describing what to notice
+and which dimensions to track — point `witness ingest` at NDJSON records, and the same four-stage
+engine runs. Nothing about the machinery is person-specific: raw records → observations → dated
+facets → narrative.
+
+A worked example, run end to end while writing this section. A `regime` lens over market commentary,
+in an archive with **no** person lens enabled at all: 7 news records became 22 observations and 13
+facets. Then the regime flipped hawkish→dovish, and the archive recorded it as history rather than
+replacing it:
+
+```
+inflation/core_trend
+  "Disinflation has broken rather than paused: core CPI reaccelerating…"   valid_to 2026-06-…
+  "Core is disinflating persistently rather than reaccelerating…"          (current)
+```
+
+Five facets closed and reopened that way in one review. The generated brief even flagged that its own
+earlier sequencing thesis had been **falsified** by the new data — which is the whole point of keeping
+the history instead of the latest snapshot.
+
+**Honest caveat:** the engine is general, but everything witness *ships* is person-shaped — the
+built-in `default` lens, the example lens, and the summary prompts all say "notice things about the
+person". For a non-person corpus you write your own lens (three files) and, if you want, override the
+summary prompt with one file. There is no market-lens or research-lens preset yet; the machinery is
+domain-agnostic, the batteries included are not.
+
+## Is this you?
+
+witness is the answer if you've ever wanted to:
+
+- **Remember what you learned across your AI coding sessions** — Claude Code, OpenCode — instead of losing it when the context window resets.
+- Have a **second brain / AI memory** for your thinking, workstyle, and habits, queryable by your agent.
+- **Track how you grow as a developer over time** — the traps you fall into and climb out of — with provenance for every recorded change.
+- Keep a **journal / retrospective** of how you thought and changed, re-readable months later.
+- **Distill a corpus you care about** — market news, a knowledge base, research notes, meeting logs — into a dated history of how its state changed, not a pile of summaries. Feed it NDJSON with `witness ingest`.
+- Query any of the above **from your agent**, over MCP, instead of re-explaining context every session.
+
+It will not tell you much on day one. witness measures *change*, so it needs weeks of material
+before there is anything to show — and it captures and tracks rather than advising or grading.
+
+**Contents:** [What it produces](#what-it-produces) · [Install](#install) · [Connect your tools](#connect-your-tools) · [Using it](#using-it) · [Your data](#your-data-is-yours) · [How it works](docs/how-it-works.md) · [Commands & config](docs/cli.md)
 
 ## What it produces
 
@@ -84,44 +138,6 @@ namespaced per source, so none can corrupt another's data.
 
 Then just work. Capture runs in the background — no prompting, no ritual. Check it any time with
 `witness doctor`.
-
-## Is this for you?
-
-Probably, if you have ever wanted to:
-
-- ask *"am I actually getting better at this, or just busier?"* and get an answer with evidence
-- know **when** a habit changed, not just that it did
-- hand an agent real context about how you work, instead of re-explaining yourself
-- track how a **corpus** evolved — a market thesis, a research area, a body of notes
-
-**Probably not, if** you want a coach, a dashboard, or a productivity score. witness captures and
-tracks; it doesn't advise, grade, or nag. It also won't tell you much on day one — it needs weeks of
-material before change is visible, because change is the thing it measures.
-
-## Beyond your own sessions
-
-Nothing in the engine is person-specific. Write a lens — a prompt describing what to notice and
-which dimensions to track — point `witness ingest` at your records, and the same four stages run.
-
-A worked example: a `regime` lens over market commentary, in an archive with **no** person lens
-enabled. 7 news records became 22 observations and 13 facets. Then the regime flipped hawkish →
-dovish, and the archive recorded it as history rather than replacing it:
-
-```
-inflation/core_trend
-  "Disinflation has broken rather than paused: core CPI reaccelerating…"   valid_to 2026-06-…
-  "Core is disinflating persistently rather than reaccelerating…"          (current)
-```
-
-Five facets closed and reopened that way in a single review, and the generated brief flagged that
-its own earlier thesis had been **falsified** by the new data — which is the point of keeping the
-history instead of the latest snapshot.
-
-**The honest caveat:** the engine is general, but everything witness *ships* is person-shaped — the
-built-in lens, the example lens, and the summary prompts all say "notice things about the person".
-For another domain you write your own lens (three files) and optionally override one summary prompt.
-There's no market-lens or research-lens preset yet. The machinery is domain-agnostic; the batteries
-included are not.
 
 ## Using it
 
