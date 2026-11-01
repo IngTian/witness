@@ -1,7 +1,7 @@
 # witness
 
 > A local distillation engine that turns a text stream into a **dated history of how its subject
-> changed**. Point it at your Claude Code / OpenCode sessions and it tracks how *you* think and work
+> changed**. Point it at your Claude Code, OpenCode or Codex sessions and it tracks how *you* think and work
 > — that is the setup it ships configured. Point it at market news, research notes, a knowledge base,
 > or any document stream (`witness ingest`) and it tracks how *that* changed instead.
 > One pure-Go binary; a local SQLite archive plus plain markdown, served over MCP.
@@ -16,7 +16,7 @@
 
 ## What it does (the needs it serves)
 
-- **Remember how I grow as a developer** across all my AI coding sessions (Claude Code, OpenCode).
+- **Remember how I grow as a developer** across all my AI coding sessions (Claude Code, OpenCode, Codex).
 - **Second brain / AI memory** for my thinking, workstyle, and habits — queryable by my agent.
 - **Reflect / journal / retrospective**: a re-readable record of how I thought and changed.
 - **Track how my knowledge and patterns evolve over time**, with provenance (why each change was recorded).
@@ -25,7 +25,8 @@
 
 ## How it works
 
-- Captures raw turns (L0) via Claude Code hooks / an OpenCode plugin, or reconciles from OpenCode's store.
+- Captures raw turns (L0) via Claude Code hooks or an OpenCode plugin, and reconciles from OpenCode's
+  store, Codex's local history, or ingested files. Four sources, one archive, namespaced per source.
 - Distills L0 → observations (L1) → bi-temporal facets (L2) → a narrative profile (L4) using configurable, global, shareable **lenses**.
 - Bi-temporal facet history (valid_from/valid_to + provenance) is what captures *evolution*, not just a snapshot.
 - A background worker mines sessions in parallel; nothing leaves your machine (local embeddings, local model).
@@ -40,7 +41,9 @@
 
 ## Install
 
-- Claude Code / OpenCode: wire the editor with `witness wire claude` (or `witness wire opencode`); see the README "Install" section.
+- Claude Code / OpenCode: `witness install claude` or `witness wire opencode`; see the README "Connect your tools" section.
+- Codex: imports from local Codex history (`witness import --agent codex`); hook setup is currently manual, see docs/codex-capture.md.
+- Files / documents: `witness ingest <path>`.
 - Library / records-in: `witness install --path <dir>` provisions an archive, then `witness ingest` feeds it records.
 - npm (OpenCode): `@witness-ai/opencode`.
 
