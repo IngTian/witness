@@ -1,0 +1,290 @@
+package commands
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/IngTian/witness/internal/store"
+	"github.com/spf13/cobra"
+)
+
+func newMergeCmd() *cobra.Command {
+	var apply bool
+	c := &cobra.Command{
+		Use:     "merge <export-dir | file.db>",
+		GroupID: groupAdmin,
+		Short:   "Merge another witness archive into this one (dry run unless --apply).",
+		Long: strings.TrimSpace(`
+Merge another witness archive into this one — for a machine that already has its
+own archive, where copying a backup in would REPLACE it. Point it at a directory
+made by 'witness export --all', or at a single .db file (a plain 'witness export',
+or a backup from before v0.8).
+
+Nothing is replaced and the model is never called. Sessions, observations and
+facets are unioned with their full histories, so both archives keep their real
+dates; a session both machines already mined is not imported twice. Where both
+archives minted the SAME facet key with different histories, the copy with newer
+evidence keeps the key and the other is kept, archived, beside it. Duplicates the
+two wrote under DIFFERENT keys are left for 'witness compact', which merges them
+by meaning.
+
+It is a one-time consolidation, not a sync: two machines merged back and forth
+every week would grow an archived copy of every facet both changed, every round.
+
+Without --apply this is a dry run: it reports exactly what would change and
+writes nothing. --apply first backs this archive up with 'witness export --all',
+because a merged archive cannot be split apart again.
+
+Lens definitions found in the export are registered here but NOT enabled
+(enabling one would mine every session you have). Your config.toml, your portrait
+prompts (summarize/) and your profile are never replaced. Facet text from the
+other archive is served to your agents through the MCP tools like your own.`),
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cmdMerge(args[0], apply)
+		},
+	}
+	c.Flags().BoolVar(&apply, "apply", false, "perform the merge, after backing this archive up")
+	return c
+}
+
+// resolveMergeSource accepts an `export --all` directory or a single database file. It never
+// suggests a command that reuses the source path: an earlier draft's "create one with: witness
+// export --all <dir>" exported THIS archive over the user's backup, and with --force deleted it.
+func resolveMergeSource(target string) (dbPath, dir string, err error) {
+	target = strings.TrimSpace(target)
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", "", err
+	}
+	if !info.IsDir() {
+		return target, "", nil
+	}
+	db := filepath.Join(target, "witness.db")
+	if _, err := os.Stat(db); err == nil {
+		return db, target, nil
+	}
+	cands, _ := filepath.Glob(filepath.Join(target, "*.db"))
+	if len(cands) > 0 {
+		return "", "", fmt.Errorf("%s has no witness.db; did you mean one of these? %s",
+			target, "witness merge "+strings.Join(cands, "  ·  witness merge "))
+	}
+	return "", "", fmt.Errorf("%s holds no witness database (expected witness.db, as `witness export --all` writes)", target)
+}
+
+func cmdMerge(target string, apply bool) error {
+	dbPath, dir, err := resolveMergeSource(target)
+	if err != nil {
+		return err
+	}
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	defer setupLogging(st)()
+
+	// The worker rewrites the whole facet table on every review; a merge interleaved with it would
+	// have its facets deleted by the worker's next write. Unlike compact this is an ERROR, not exit 0:
+	// `witness merge x --apply && rm -rf x` must not delete the only copy after merging nothing.
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		return fmt.Errorf("a distillation worker is running and holds this archive; nothing was merged — " +
+			"wait for it to finish, or stop it with `witness worker stop`, then retry")
+	}
+	defer unlock()
+
+	ctx := context.Background()
+	now := time.Now()
+	// Always plan first (a rolled-back transaction): it costs seconds, and it is what lets --apply
+	// skip the backup when there is nothing to merge — a re-run must not leave a backup behind.
+	rep, err := st.Merge(ctx, dbPath, false, now)
+	if err != nil {
+		return err
+	}
+	files := planMergeFiles(st, dir)
+	if rep.Empty() && !files.changes() {
+		fmt.Printf("nothing to merge — everything in %s is already here\n", target)
+		return nil
+	}
+
+	backup := ""
+	if apply {
+		backup = st.Root + ".premerge-" + now.UTC().Format("20060102-150405")
+		if _, err := st.ExportAll(backup, false); err != nil {
+			return fmt.Errorf("could not back this archive up before merging (%w); nothing was merged", err)
+		}
+		if rep, err = st.Merge(ctx, dbPath, true, now); err != nil {
+			return fmt.Errorf("%w (nothing was merged; this archive is unchanged)", err)
+		}
+		files.apply(st)
+	}
+	printMergeReport(target, st.Root, rep, files, apply, backup)
+	return nil
+}
+
+// mergeFiles is the file half of a merge: lens definitions, portrait prompts, profile.
+type mergeFiles struct {
+	register  []mergeLens // incoming-only lenses: registered, not enabled
+	differ    []mergeLens // same name, different definition: ours kept
+	refused   []string    // incoming lens dirs with names registration would refuse
+	summarize []string    // portrait prompts that differ from ours: NEVER copied, reported
+	srcDir    string
+	profile   bool
+	results   []string // what --apply actually did
+}
+
+type mergeLens struct{ name, path string }
+
+func (f *mergeFiles) changes() bool { return len(f.register) > 0 }
+
+func planMergeFiles(st *store.Store, dir string) *mergeFiles {
+	f := &mergeFiles{srcDir: dir}
+	if dir == "" {
+		return f
+	}
+	registered := st.RegisteredLenses()
+	entries, _ := os.ReadDir(filepath.Join(dir, "lenses"))
+	for _, e := range entries {
+		// Staging residue (.tmp/.bak) and stray files are not lenses.
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.HasSuffix(e.Name(), ".tmp") || strings.HasSuffix(e.Name(), ".bak") {
+			continue
+		}
+		l := mergeLens{name: e.Name(), path: filepath.Join(dir, "lenses", e.Name())}
+		switch {
+		case store.ValidLensName(l.name) != nil:
+			f.refused = append(f.refused, l.name)
+		case slices.Contains(registered, l.name):
+			if !sameLensDef(l.path, filepath.Join(st.LensesDir(), l.name)) {
+				f.differ = append(f.differ, l)
+			}
+		default:
+			f.register = append(f.register, l)
+		}
+	}
+	// Portrait prompts are reported, never copied. One replaces the instruction the summarizer
+	// writes the portrait with — an archive of market records would reframe a personal portrait as
+	// a market report — and witness enables no foreign prompt without the user asking.
+	sums, _ := filepath.Glob(filepath.Join(dir, "summarize", "*.md"))
+	for _, src := range sums {
+		ours, err := os.ReadFile(filepath.Join(st.Root, "summarize", filepath.Base(src)))
+		theirs, err2 := os.ReadFile(src)
+		if err2 == nil && (err != nil || !bytes.Equal(ours, theirs)) {
+			f.summarize = append(f.summarize, src)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "profile")); err == nil {
+		f.profile = true
+	}
+	return f
+}
+
+// sameLensDef compares the files a lens definition consists of.
+func sameLensDef(a, b string) bool {
+	for _, name := range []string{"lens.json", "extract.md", "review.md", "emerge.md"} {
+		x, errA := os.ReadFile(filepath.Join(a, name))
+		y, errB := os.ReadFile(filepath.Join(b, name))
+		if (errA == nil) != (errB == nil) || !bytes.Equal(x, y) {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *mergeFiles) apply(st *store.Store) {
+	for _, l := range f.register {
+		if err := st.RegisterLens(l.name, l.path); err != nil {
+			f.results = append(f.results, fmt.Sprintf("%s: not registered (%v)", l.name, err))
+			continue
+		}
+		f.results = append(f.results, l.name+": registered, NOT enabled")
+	}
+}
+
+func printMergeReport(src, root string, r *store.MergeReport, f *mergeFiles, applied bool, backup string) {
+	fmt.Println(header(fmt.Sprintf("merge %s → %s", src, root)))
+	span := "no transcripts"
+	if r.FirstTS != "" {
+		span = r.FirstTS[:min(10, len(r.FirstTS))] + " → " + r.LastTS[:min(10, len(r.LastTS))]
+	}
+	fmt.Printf("  incoming      %s · schema v%d", span, r.IncomingSchema)
+	if len(r.Cwds) > 0 {
+		fmt.Printf(" · mostly in %s", strings.Join(r.Cwds, ", "))
+	}
+	fmt.Println()
+
+	s := r.Sessions
+	fmt.Printf("  sessions      %d new · %d already here · %d longer there (%s appended) · %d longer here\n",
+		s.New, s.Equal, s.LongerThere, pluralize(s.Appended, "turn", "turns"), s.LongerHere)
+	for _, d := range s.Diverged {
+		fmt.Printf("                %s %s differs from yours — yours keeps the id, theirs arrives as %s\n", warnGlyph(), d.From, d.To)
+	}
+	o := r.Observations
+	fmt.Printf("  observations  %d reviewed there · %d to review · %d already here", o.Reviewed, o.Unreviewed, o.AlreadyHere)
+	if o.SharedMined > 0 {
+		fmt.Printf(" · %d skipped (sessions you already mined)", o.SharedMined)
+	}
+	fmt.Println()
+	if r.Staged > 0 {
+		fmt.Printf("  staged        %d recorded in-session, not yet distilled\n", r.Staged)
+	}
+	fc := r.Facets
+	fmt.Printf("  facets        %d incoming: %d new · %d already here · %d with later history adopted\n",
+		fc.Incoming, fc.New, fc.Shared, fc.FastForwarded)
+	if len(fc.SameKey) > 0 {
+		fmt.Printf("                %s %s with yours — the copy with newer evidence keeps the key,\n"+
+			"                  the other is kept beside it, archived into it:\n",
+			warnGlyph(), pluralize(len(fc.SameKey), "shares a key", "share a key"))
+		for i, k := range fc.SameKey {
+			if i == 5 {
+				fmt.Printf("                  … and %d more\n", len(fc.SameKey)-5)
+				break
+			}
+			kept := "yours"
+			if k.IncomingWon {
+				kept = "theirs"
+			}
+			fmt.Printf("                  %s  %s/%s  (kept %s; other copy %s)\n", k.Lens, k.Dimension, k.Key, kept, k.LoserKey)
+		}
+	}
+
+	for _, l := range f.register {
+		if !applied {
+			fmt.Printf("  lens          %s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
+		}
+	}
+	for _, line := range f.results {
+		fmt.Printf("  lens          %s\n", line)
+	}
+	for _, l := range f.differ {
+		fmt.Printf("  lens          %s %s: their definition differs — yours is kept (theirs: witness lens register %s %s)\n",
+			warnGlyph(), l.name, l.name, l.path)
+	}
+	for _, n := range f.refused {
+		fmt.Printf("  lens          %s %s: not a valid lens name here, skipped\n", warnGlyph(), n)
+	}
+	for _, src := range f.summarize {
+		fmt.Printf("  summarize     %s not copied — it changes how your portrait is written. To use it:\n"+
+			"                  cp %s %s\n", filepath.Base(src), src, filepath.Join(root, "summarize", filepath.Base(src)))
+	}
+	if f.profile {
+		fmt.Printf("  profile       not merged — rebuilt from the merged facets; theirs stays in %s\n", filepath.Join(f.srcDir, "profile"))
+	}
+	fmt.Println("  config.toml   yours is kept")
+	fmt.Println()
+	fmt.Println(dim("nothing here called a model. Next, optionally:"))
+	fmt.Println(dim("  witness compact --apply   merges duplicates the two archives wrote under different keys (calls the model)"))
+	fmt.Println()
+	if !applied {
+		fmt.Println("dry run — nothing written. Run again with --apply to merge (it backs this archive up first).")
+		return
+	}
+	fmt.Printf("%s merged. This archive as it was before: %s\n", okGlyph(), backup)
+	fmt.Printf("  to undo: stop witness, then replace %s with that directory\n", root)
+}

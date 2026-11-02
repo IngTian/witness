@@ -12,7 +12,7 @@ The visible front door, exactly as `witness --help` groups it:
 | Lenses | `lens` |
 | Configure | `config` |
 | Setup | `doctor` · `install` · `wire` · `unwire` |
-| Maintenance | `cleanup` · `export` · `compact` |
+| Maintenance | `cleanup` · `export` · `merge` · `compact` |
 
 Capture, the worker, and the MCP server are **internal** entry points invoked by
 Claude Code/OpenCode, not typed by hand. `witness import` and `witness worker …` are hidden:
@@ -57,6 +57,15 @@ they exist for recovery and debugging, and everything they do also happens autom
   that snapshot plus `config.toml`, `lenses/`, `summarize/` (your own portrait prompts, if any)
   and `profile/`. Use `--all` for backups — see
   [Your data is yours](../README.md#your-data-is-yours).
+- `witness merge <dir>` — merge another archive into this one, for a machine that already has its own
+  (copying a backup in would replace it). `<dir>` is an `export --all` directory, or a single `.db`
+  from a plain `export`. A dry run by default; `witness merge <dir> --apply` performs it after backing
+  this archive up. Nothing is replaced and the model is never called: sessions, observations and facets
+  are unioned with their full histories, and a session both machines mined is not imported twice. Where
+  both archives minted the same facet key, the copy with newer evidence keeps it and the other is
+  archived beside it; duplicates under different keys are left for `witness compact`. A one-time
+  consolidation, not a sync — merged back and forth, two machines grow an archived copy of every facet
+  both changed, every round.
 - `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
   default data root). Creates the directory structure and database schema. Typically called once per
   machine; `install.sh` handles this for source-checkout users.

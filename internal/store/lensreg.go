@@ -91,16 +91,13 @@ const (
 // memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
 // file. And it stages into a sibling .tmp dir then atomically renames into place, so a
 // concurrent worker read never sees a half-built lens directory.
-func (r *lensReg) RegisterLens(name, srcDir string) error {
-	// Serialize registry mutations (this + SetLensModel) so two concurrent
-	// `witness lens register <same-name>` can't interleave through the shared staging
-	// path and silently destroy the lens. Non-blocking: contention returns a retryable
-	// error rather than corrupting — acceptable for a rare interactive admin op.
-	unlock, ok := r.lensRegistryLock()
-	if !ok {
-		return errLensBusy
-	}
-	defer unlock()
+// ValidLensName is the lens-NAME rule, shared by RegisterLens and by `witness merge`, which
+// brings lens names in from another archive's data and must refuse the same names registration
+// would. A lens name ends up as a profile file name and a meta-key suffix, so an unchecked one
+// is not cosmetic: "unified" collides with the cross-lens portrait's signature key, and a name
+// with a "/" fails WriteProfile after the model call — so no signature is stamped and every
+// profile read pays for a regeneration, forever.
+func ValidLensName(name string) error {
 	if ReservedLensName(name) {
 		return fmt.Errorf("lens name %q is reserved (the cross-lens 'unified' summary); choose another name", name)
 	}
@@ -112,6 +109,22 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 	// handle, closing that gap at the single source instead of sanitizing at every gate.
 	if sanitize(name) != name {
 		return fmt.Errorf("lens name %q must be a slug — letters, digits, '-', '_' only (no spaces or special characters)", name)
+	}
+	return nil
+}
+
+func (r *lensReg) RegisterLens(name, srcDir string) error {
+	// Serialize registry mutations (this + SetLensModel) so two concurrent
+	// `witness lens register <same-name>` can't interleave through the shared staging
+	// path and silently destroy the lens. Non-blocking: contention returns a retryable
+	// error rather than corrupting — acceptable for a rare interactive admin op.
+	unlock, ok := r.lensRegistryLock()
+	if !ok {
+		return errLensBusy
+	}
+	defer unlock()
+	if err := ValidLensName(name); err != nil {
+		return err
 	}
 	// Reject a name that case-insensitively collides with an ALREADY-registered lens
 	// under a different casing. The registry dir is sanitize(name) with case PRESERVED,

@@ -93,15 +93,25 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM facets`); err != nil {
+	if err := writeFacetsTx(tx, facets); err != nil {
 		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// writeFacetsTx is WriteFacets inside a caller's transaction: the same whole-table REPLACE, so the
+// same rule holds — the slice must be the complete profile. It exists for the merge, which must
+// write L2 in the same transaction as the L0/L1 rows the facets cite, or a crash between the two
+// leaves facets citing observations that never arrived.
+func writeFacetsTx(tx *sql.Tx, facets []Facet) error {
+	if _, err := tx.Exec(`DELETE FROM facets`); err != nil {
 		return err
 	}
 	fStmt, err := tx.Prepare(
 		`INSERT INTO facets(lens, dimension, key, last_seen, archived_at, merged_into, archive_reason)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	defer fStmt.Close()
@@ -109,7 +119,6 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 		`INSERT INTO facet_versions(facet_id, pos, value, claim, confidence_seq, valid_from, valid_to, recorded_at, because_of, confidence)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	defer vStmt.Close()
@@ -119,7 +128,6 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 		// the next review rather than at compaction time — a silent, delayed data loss.
 		res, err := fStmt.Exec(fc.Lens, fc.Dimension, fc.Key, fc.LastSeen, fc.ArchivedAt, fc.MergedInto, fc.ArchiveReason)
 		if err != nil {
-			tx.Rollback()
 			return err
 		}
 		id, _ := res.LastInsertId()
@@ -130,12 +138,11 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 			}
 			if _, err := vStmt.Exec(id, pos, v.Value, v.Claim, v.ConfidenceSeq, v.ValidFrom, v.ValidTo, v.RecordedAt,
 				string(because), v.Confidence); err != nil {
-				tx.Rollback()
 				return err
 			}
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // FacetTrajectory expands ONE active facet into the full history behind it: the facets that
