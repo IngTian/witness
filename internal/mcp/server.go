@@ -291,7 +291,11 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		if err != nil {
 			return errResult(fmt.Sprintf("read facets: %v", err)), nil, nil
 		}
-		return textResult(renderFacets(lensName, facets, func() string { return emptyFacetsHint(st, lensName) })), nil, nil
+		hw, err := st.ObservationHighWater()
+		if err != nil {
+			return errResult(fmt.Sprintf("read observation high-water: %v", err)), nil, nil
+		}
+		return textResult(renderFacets(lensName, facets, hw, func() string { return emptyFacetsHint(st, lensName) })), nil, nil
 	})
 
 	// get_profile: read the L4 narrative summary (prose) for a lens — the human-
@@ -421,7 +425,11 @@ func renderHits(lens string, hits []vector.Hit, hint func() string) string {
 	return b.String()
 }
 
-func renderFacets(lensName string, facets []store.Facet, hint func() string) string {
+// renderFacets reports each facet's CURRENT confidence — decayed to the observation high-water
+// mark — not the value stored at its last confirmation. The stored number only falls when a
+// review cites the facet, so an agent shown it would read a trait nothing has evidenced in
+// thousands of observations as a certainty.
+func renderFacets(lensName string, facets []store.Facet, decaySeq int64, hint func() string) string {
 	var b strings.Builder
 	count := 0
 	for _, f := range facets {
@@ -432,7 +440,7 @@ func renderFacets(lensName string, facets []store.Facet, hint func() string) str
 		if cur == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "- **%s/%s** (confidence %.2f): %s\n", f.Dimension, f.Key, cur.Confidence, cur.Value)
+		fmt.Fprintf(&b, "- **%s/%s** (confidence %.2f): %s\n", f.Dimension, f.Key, cur.DecayedConfidence(decaySeq), cur.Value)
 		count++
 	}
 	if count == 0 {

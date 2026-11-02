@@ -31,12 +31,14 @@ func cf(dim, key, value string, conf float64, versions int) store.Facet {
 }
 
 type fakeCompactStore struct {
-	facets  []store.Facet
-	writes  int
-	written []store.Facet
+	facets    []store.Facet
+	writes    int
+	written   []store.Facet
+	highWater int64 // the decay clock's "now"; 0 leaves every confidence as stored
 }
 
-func (f *fakeCompactStore) ReadFacets() ([]store.Facet, error) { return f.facets, nil }
+func (f *fakeCompactStore) ReadFacets() ([]store.Facet, error)   { return f.facets, nil }
+func (f *fakeCompactStore) ObservationHighWater() (int64, error) { return f.highWater, nil }
 func (f *fakeCompactStore) WriteFacets(fs []store.Facet) error {
 	f.writes++
 	f.written = fs

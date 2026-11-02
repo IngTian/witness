@@ -12,6 +12,17 @@ import (
 // themselves.
 type obsIO struct{ db *sql.DB }
 
+// ObservationHighWater is the highest observation seq in the archive — the "now" of the
+// decay clock (#173). Confidence decays on READ, by the observations elapsed since a facet was
+// last confirmed, so every surface that shows a confidence to a person or a model needs this to
+// show the CURRENT one: FacetVersion.DecayedConfidence(ObservationHighWater()). The stored
+// Confidence is the value as of the last confirmation, which is a record, not a reading.
+func (o *obsIO) ObservationHighWater() (int64, error) {
+	var hw int64
+	err := o.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM observations`).Scan(&hw)
+	return hw, err
+}
+
 // --- active observation staging (in-session via MCP) ------------------------
 
 // StageObservation records an active (in-session) observation with no quantity

@@ -71,9 +71,16 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	// (review only iterates the enabled set), so that hint must point at `lens enable`.
 	registered := slices.Contains(st.RegisteredLenses(), lensName)
 	enabled := slices.Contains(st.LoadConfig().EnabledLenses, lensName)
+	// The listing shows CURRENT confidence (decayed to now); --json above stays the stored
+	// record. docs/how-it-works.md promises this view moves on its own as evidence fails to
+	// arrive, and before this it never did.
+	hw, err := st.ObservationHighWater()
+	if err != nil {
+		return err
+	}
 	// whyEmpty is a closure, not a value: it costs two indexed queries and is only needed
 	// on the empty path, which is the uncommon one.
-	renderCurrentFacets(lensName, facets, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(lensName) })
+	renderCurrentFacets(lensName, facets, hw, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(lensName) })
 	return nil
 }
 
@@ -165,7 +172,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	return nil
 }
 
-func renderCurrentFacets(lensName string, facets []store.Facet, registered, enabled bool, whyEmpty func() store.EmptyReason) {
+func renderCurrentFacets(lensName string, facets []store.Facet, decaySeq int64, registered, enabled bool, whyEmpty func() store.EmptyReason) {
 	count := 0
 	for _, f := range facets {
 		if f.Lens == lensName && f.Current() != nil {
@@ -209,7 +216,7 @@ func renderCurrentFacets(lensName string, facets []store.Facet, registered, enab
 		if cur == nil {
 			continue
 		}
-		fmt.Printf("- %s/%s (confidence %.2f)\n", f.Dimension, f.Key, cur.Confidence)
+		fmt.Printf("- %s/%s (confidence %.2f)\n", f.Dimension, f.Key, cur.DecayedConfidence(decaySeq))
 		// Only reachable under --all. An archived facet listed without saying so would read as
 		// a live claim about the person, which is exactly what compaction decided it is not.
 		if !f.Active() {

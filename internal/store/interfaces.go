@@ -109,6 +109,10 @@ type MCPStore interface {
 	ReadActiveFacets() ([]Facet, error)
 	ReadProfile(lens string) (string, bool, error)
 	DeleteObservation(obsID string) (bool, error)
+	// ObservationHighWater: get_facets reports the CURRENT (decayed) confidence, not the value
+	// stored at the last confirmation — an agent reading the profile should see what the
+	// archive believes now.
+	ObservationHighWater() (int64, error)
 	// WhyEmpty lets an empty answer name the layer that is actually missing rather than
 	// blaming the reviewer for an archive that nothing is feeding (#166).
 	WhyEmpty(lens string) EmptyReason
@@ -188,6 +192,10 @@ type EmergentStore interface {
 type CompactStore interface {
 	ReadFacets() ([]Facet, error)
 	WriteFacets(facets []Facet) error
+	// ObservationHighWater lets the model be shown DECAYED confidence. Shown the stored value,
+	// it would merge a stale-but-high facet with a fresh one into a survivor that is both
+	// confident and fresh — a free refresh of exactly the kind decay exists to prevent.
+	ObservationHighWater() (int64, error)
 }
 
 // SummaryStore is the surface the Summarizer drives: read facets, read/write the L4
@@ -201,6 +209,9 @@ type SummaryStore interface {
 	ReadProfile(lens string) (string, bool, error)
 	WriteProfile(lens, markdown string) error
 	DeleteProfile(lens string) error
+	// ObservationHighWater: the portrait is written from CURRENT (decayed) confidence, so a
+	// facet nothing has cited in thousands of observations is not narrated as a certainty.
+	ObservationHighWater() (int64, error)
 	// ListProfiles enumerates the summaries ON DISK (including the unified portrait), so
 	// the summarizer can reap one whose lens no longer has facets. Without it the
 	// summarizer only ever visits lenses that HAVE facets, so a dropped lens's stale

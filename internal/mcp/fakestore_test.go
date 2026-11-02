@@ -35,7 +35,11 @@ type fakeMCPStore struct {
 	// which is deliberate: an archive nothing is feeding is the case that used to be
 	// misreported as "the reviewer may not have run yet".
 	whyEmpty store.EmptyReason
+	// highWater is the decay clock's "now" for get_facets; 0 renders every confidence as stored.
+	highWater int64
 }
+
+func (f *fakeMCPStore) ObservationHighWater() (int64, error) { return f.highWater, nil }
 
 func (f *fakeMCPStore) ReadObservations(lens string) ([]store.Observation, error) {
 	f.readCalls++

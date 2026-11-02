@@ -138,6 +138,14 @@ type Compactor struct {
 	WritePrompt  string // "" → compactWritePrompt (stage 2)
 	BatchChars   int    // 0 → compactBatchChars
 	MinSurvivors int    // 0 → compactMinSurvivors
+
+	// decaySeq is the observation high-water mark, read once by Plan, so every confidence the
+	// model is shown is the CURRENT (decayed) one. Both stages used to render the stored value:
+	// a facet stored at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh
+	// 0.59 duplicate looking like the stronger claim, the model returned ~0.90 for the survivor,
+	// and Apply gave that survivor the fresher member's clock — so a stale confidence came out
+	// fresh. The review already sends decayed values (slimFacets); compaction now agrees with it.
+	decaySeq int64
 }
 
 func (c *Compactor) batchChars() int {
@@ -165,6 +173,9 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 	all, err := c.Store.ReadFacets()
 	if err != nil {
 		return nil, fmt.Errorf("read L2: %w", err)
+	}
+	if c.decaySeq, err = c.Store.ObservationHighWater(); err != nil {
+		return nil, fmt.Errorf("read observation high-water: %w", err)
 	}
 	var plans []CompactPlan
 	for _, ln := range c.Lenses {
@@ -324,7 +335,7 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 // any prompt. Grouping alone returned 8,191 chars in 3m17s and proposed merges averaging 9.2
 // facets, projecting an 87.6% reduction. Large INPUT is cheap; large OUTPUT is what costs.
 func (c *Compactor) groupBatch(ctx context.Context, ln *lens.Lens, dim string, batch []store.Facet) ([]compactAction, error) {
-	input := renderCompactBatch(ln.Name, dim, batch)
+	input := renderCompactBatch(ln.Name, dim, batch, c.decaySeq)
 	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), c.groupPrompt(), input)
 	if err != nil {
 		return nil, err
@@ -385,7 +396,7 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 func (c *Compactor) writeOne(ctx context.Context, ln *lens.Lens, dim string,
 	group compactAction, members []store.Facet, siblings []compactAction) (claim, value string, err error) {
 
-	input := renderMergeInput(ln.Name, dim, group, members, siblings)
+	input := renderMergeInput(ln.Name, dim, group, members, siblings, c.decaySeq)
 	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), c.writePrompt(), input)
 	if err != nil {
 		return "", "", err
@@ -732,7 +743,7 @@ func compactBatches(facets []store.Facet, budget int) [][]store.Facet {
 // their territory and the dimension ends up with coarse-grained overlap — the same redundancy
 // compaction removed, re-created one level up. Names and one-line reasons are enough to fence
 // each call; their full values are not needed and would blow the payload back up.
-func renderMergeInput(lensName, dim string, group compactAction, members []store.Facet, siblings []compactAction) string {
+func renderMergeInput(lensName, dim string, group compactAction, members []store.Facet, siblings []compactAction, decaySeq int64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "LENS: %s\nDIMENSION: %s\n\n", lensName, dim)
 	fmt.Fprintf(&b, "THE TRAIT YOU ARE WRITING: %s\nWHY THESE WERE GROUPED: %s\n\n", group.Key, group.Why)
@@ -744,7 +755,7 @@ func renderMergeInput(lensName, dim string, group compactAction, members []store
 			continue
 		}
 		fmt.Fprintf(&b, "--- %s (confidence %.2f, %d version(s), last_seen %s)\n%s\n\n",
-			m.Key, cur.Confidence, len(m.Versions), m.LastSeen, cur.Value)
+			m.Key, cur.DecayedConfidence(decaySeq), len(m.Versions), m.LastSeen, cur.Value)
 	}
 
 	var others []compactAction
@@ -768,13 +779,13 @@ func renderMergeInput(lensName, dim string, group compactAction, members []store
 // confidence are included because they are the cheap signals for "is this load-bearing": a
 // facet that has never changed and sits at low confidence after many sessions is a retirement
 // candidate, while one with a real change history is carrying an arc worth keeping.
-func renderCompactBatch(lensName, dim string, batch []store.Facet) string {
+func renderCompactBatch(lensName, dim string, batch []store.Facet, decaySeq int64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "LENS: %s\nDIMENSION: %s\nFACETS: %d\n\n", lensName, dim, len(batch))
 	for _, f := range batch {
 		cur := f.Current()
 		fmt.Fprintf(&b, "key: %s\nconfidence: %.2f\nversions: %d\nlast_seen: %s\nvalue: %s\n\n",
-			f.Key, cur.Confidence, len(f.Versions), f.LastSeen, cur.Value)
+			f.Key, cur.DecayedConfidence(decaySeq), len(f.Versions), f.LastSeen, cur.Value)
 	}
 	return b.String()
 }
