@@ -23,7 +23,12 @@ func TestProgressLineOnATerminal(t *testing.T) {
 	var buf bytes.Buffer
 	p := &progressLine{w: &buf, tty: true, start: time.Now().Add(-10 * time.Minute)}
 
-	p.update(compactSnap("default/biases", 5, 45, 0, 0))
+	p.update(compactSnap("default/biases", 0, 45, 0, 0)) // the pass begins: nothing done, no estimate yet
+	if strings.Contains(buf.String(), "left") {
+		t.Errorf("no work done yet, so no estimate: %q", buf.String())
+	}
+	buf.Reset()
+	p.update(compactSnap("default/biases", 5, 45, 0, 0)) // 5 calls in 10 minutes: 2m each, 40 to go
 	first := buf.String()
 	for _, want := range []string{"\r", "default/biases", "grouping 5/45", "≥1h20m left"} {
 		if !strings.Contains(first, want) {
@@ -93,6 +98,62 @@ func TestProgressLineWithoutWhere(t *testing.T) {
 	p.update(compactSnap("", 0, 4, 0, 0))
 	if out := buf.String(); !strings.HasPrefix(out, "  grouping 0/4") {
 		t.Errorf("no Where, no separator: %q", out)
+	}
+}
+
+// The estimate. Plain elapsed/done made it RISE between completions (it read as slowing down),
+// counted setup and a resumed pass's head start as instant work, and printed "≥0s left".
+func TestProgressEstimate(t *testing.T) {
+	ten := time.Now().Add(-10 * time.Minute)
+
+	// A resumed pass that starts at 30/40 has done no work in THIS run: no estimate, not "~0s".
+	p := &progressLine{w: &bytes.Buffer{}, start: ten}
+	p.update(compactSnap("lens", 30, 40, 0, 0))
+	if out := p.render(); strings.Contains(out, "left") {
+		t.Errorf("a head start is not a measured rate: %q", out)
+	}
+	// Then one call in this run took the whole 10 minutes: 9 left is ~1h30m — not 9 × 10m/31.
+	p.update(compactSnap("lens", 31, 40, 0, 0))
+	if out := p.render(); !strings.Contains(out, "1h30m left") {
+		t.Errorf("the rate must come from this run's work only: %q", out)
+	}
+
+	// 4 calls done in 10 minutes (2m30s each), 36 left: ~1h30m — counted DOWN through the call in
+	// flight, never below the 35 calls certainly left after it.
+	p = &progressLine{w: &bytes.Buffer{}, start: ten}
+	p.update(compactSnap("lens", 0, 40, 0, 0))
+	p.update(compactSnap("lens", 4, 40, 0, 0))
+	if out := p.render(); !strings.Contains(out, "1h30m left") {
+		t.Errorf("right after a completion: %q", out)
+	}
+	ago := func(d time.Duration) { p.start, p.lastDoneAt = p.start.Add(-d), p.lastDoneAt.Add(-d) }
+	ago(time.Minute) // a minute into the next call
+	if out := p.render(); !strings.Contains(out, "1h29m left") {
+		t.Errorf("the estimate must count down between completions: %q", out)
+	}
+	ago(time.Hour) // a call far slower than the rest
+	if out := p.render(); !strings.Contains(out, "1h27m left") {
+		t.Errorf("never below the calls certainly left (35 × 2m30s): %q", out)
+	}
+
+	// Under a second left says nothing.
+	p = &progressLine{w: &bytes.Buffer{}, start: time.Now().Add(-time.Second)}
+	p.update(compactSnap("lens", 0, 3, 0, 0))
+	p.update(compactSnap("lens", 2, 3, 0, 0)) // 0.5s per call, one left
+	if out := p.render(); strings.Contains(out, "left") {
+		t.Errorf("no sub-second estimate: %q", out)
+	}
+}
+
+// A pass with tens of thousands of inputs must not mean tens of thousands of terminal writes.
+func TestProgressLineThrottlesRedraws(t *testing.T) {
+	var buf bytes.Buffer
+	p := &progressLine{w: &buf, tty: true, start: time.Now(), minRedraw: time.Hour}
+	for i := 0; i < 1000; i++ {
+		p.update(compactSnap("lens", i, 1000, 0, 0))
+	}
+	if n := strings.Count(buf.String(), "\r"); n != 1 {
+		t.Errorf("1,000 updates inside one redraw interval drew %d times; want 1 (the ticker catches up)", n)
 	}
 }
 

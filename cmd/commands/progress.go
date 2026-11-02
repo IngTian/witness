@@ -37,6 +37,16 @@ type progressLine struct {
 	last  string // non-terminal: the Where last printed
 	stop  chan struct{}
 	done  chan struct{}
+
+	// The estimate's inputs. The rate is measured at the LAST COMPLETION, from work done in this
+	// run only (base is what was already done at the first update — a resumed pass must not count
+	// its head start as instant), and the time since that completion is then counted down. Plain
+	// elapsed/done instead made the estimate RISE between completions — it read as slowing down.
+	base       int
+	lastDone   int
+	lastDoneAt time.Time
+	lastDraw   time.Time
+	minRedraw  time.Duration // 0 in tests; a 20k-input pass must not mean 20k terminal writes
 }
 
 const progressRedraw = time.Second
@@ -44,7 +54,9 @@ const progressRedraw = time.Second
 // startProgress begins a progress line on stderr. Pass its update method as a distill.ProgressFunc
 // and call finish when the pass ends. Never nil.
 func startProgress() *progressLine {
-	p := &progressLine{w: os.Stderr, tty: isatty.IsTerminal(os.Stderr.Fd()), start: time.Now()}
+	// The clock starts at the first update, not here: setup (opening the store, a migration, listing
+	// the work) is not the pass, and counting it once made a 5 s import open on "~3m18s left".
+	p := &progressLine{w: os.Stderr, tty: isatty.IsTerminal(os.Stderr.Fd()), minRedraw: 100 * time.Millisecond}
 	if p.tty {
 		p.stop, p.done = make(chan struct{}), make(chan struct{})
 		go p.tick()
@@ -77,8 +89,24 @@ func (p *progressLine) update(pr distill.Progress) {
 	defer p.mu.Unlock()
 	first := !p.seen
 	p.cur, p.seen = pr, true
+	now := time.Now()
+	done := 0
+	for _, st := range pr.Stages {
+		done += st.Done
+	}
+	if first {
+		if p.start.IsZero() {
+			p.start = now
+		}
+		p.base = done
+		p.lastDone, p.lastDoneAt = done, p.start
+	} else if done != p.lastDone {
+		p.lastDone, p.lastDoneAt = done, now
+	}
 	if p.tty {
-		p.draw()
+		if p.minRedraw == 0 || now.Sub(p.lastDraw) >= p.minRedraw {
+			p.draw()
+		}
 		return
 	}
 	if first || pr.Where != p.last {
@@ -93,6 +121,7 @@ func (p *progressLine) draw() {
 	n := utf8.RuneCountInString(line)
 	fmt.Fprintf(p.w, "\r%s%s", line, spaces(max(0, p.width-n)))
 	p.width = n
+	p.lastDraw = time.Now()
 }
 
 // render is the line without the spinner frame. Caller holds mu.
@@ -113,13 +142,18 @@ func (p *progressLine) render() string {
 	}
 	elapsed := time.Since(p.start)
 	parts = append(parts, shortDuration(elapsed))
-	if done > 0 && total > done {
-		left := elapsed / time.Duration(done) * time.Duration(total-done)
-		bound := "~"
-		if open { // work not yet discovered can only add to it
-			bound = "≥"
+	if worked := p.lastDone - p.base; worked > 0 && total > done {
+		rate := p.lastDoneAt.Sub(p.start) / time.Duration(worked)
+		remaining := time.Duration(total - done)
+		// Count down through the call in flight, but never below the calls certainly left after it.
+		left := max(rate*remaining-time.Since(p.lastDoneAt), rate*(remaining-1))
+		if left >= time.Second { // "≥0s left" says nothing
+			bound := "~"
+			if open { // work not yet discovered can only add to it
+				bound = "≥"
+			}
+			parts = append(parts, bound+shortDuration(left)+" left")
 		}
-		parts = append(parts, bound+shortDuration(left)+" left")
 	}
 	return "  " + strings.Join(parts, " · ")
 }

@@ -362,11 +362,25 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 				return
 			}
 			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runForLens}
-			if err := r.Run(ctx, time.Now()); err != nil {
+			// A foreground drain (lens backfill, worker run) reviews after it mines: the same
+			// fold line and profile spinner as `witness worker review`, or that stretch is minutes
+			// of silence after the mining line clears. A detached worker stays silent.
+			fold := &phaseProgress{start: startProgress}
+			if progressWhere != "" {
+				r.Progress = fold.update
+			}
+			err := r.Run(ctx, time.Now())
+			fold.finish()
+			if err != nil {
 				slog.Error("review", "err", err)
 			} else {
 				slog.Info("review complete")
+				var sp *spinner
+				if progressWhere != "" {
+					sp = startSpinner("distilling the profile from the latest facets…")
+				}
 				regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens)
+				sp.Stop()
 			}
 		},
 		ensureMiner:    func() bool { return getMiner() != nil },
