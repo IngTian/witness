@@ -109,6 +109,78 @@ func TestMigrationBackfillsTheDecayClock(t *testing.T) {
 	}
 }
 
+// The v12->v13 repair: facet versions that compaction wrote with no decay clock (confidence_seq
+// 0, which reads as "never decays") get one, and versions the reviewer stamped are left alone.
+// Driven through migrate() itself from a database stamped v12, because the repair is version-
+// gated and a test calling the function directly would not prove the gate is wired.
+func TestMigrationRestartsClocksCompactionFroze(t *testing.T) {
+	s := lineageStore(t)
+	if err := s.AppendObservations([]Observation{
+		{ID: "o1", Lens: "default", Observation: "first"},
+		{ID: "o2", Lens: "default", Observation: "second"},
+		{ID: "o3", Lens: "default", Observation: "third"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	frozen := lf("default", "thinking", "compacted", "a value compaction wrote")
+	frozen.Versions[0].Confidence = 0.9
+	frozen.Versions[0].ConfidenceSeq = 0 // what v0.9.0's compaction wrote
+	reviewed := lf("default", "thinking", "reviewed", "a value the reviewer stamped")
+	reviewed.Versions[0].Confidence = 0.9
+	reviewed.Versions[0].ConfidenceSeq = 2
+	if err := s.WriteFacets([]Facet{frozen, reviewed}); err != nil {
+		t.Fatal(err)
+	}
+	var watermark int64
+	if err := s.db.QueryRow(`SELECT MAX(seq) FROM observations`).Scan(&watermark); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version=12`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("migrate from v12: %v", err)
+	}
+
+	got := map[string]int64{}
+	all, _ := s.ReadFacets()
+	for i := range all {
+		got[all[i].Key] = all[i].Current().ConfidenceSeq
+	}
+	if got["compacted"] != watermark {
+		t.Errorf("a compaction-frozen clock must restart at the watermark %d, got %d — the facet "+
+			"would never decay", watermark, got["compacted"])
+	}
+	if got["reviewed"] != 2 {
+		t.Errorf("a clock the reviewer stamped must be left alone, got %d (want 2) — the repair "+
+			"would be handing out free confidence refreshes", got["reviewed"])
+	}
+
+	// Once out of v12 the repair must never run again: on a later upgrade a 0 would no longer mean
+	// "frozen by v0.9.0", and re-stamping it would silently reset a clock.
+	tx, err := beginImmediate(s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE facet_versions SET confidence_seq = 0`); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := repairCompactionDecayClock(tx, 13); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	var stillZero int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM facet_versions WHERE confidence_seq = 0`).Scan(&stillZero); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	tx.Rollback()
+	if stillZero == 0 {
+		t.Error("the repair ran on a database already at v13; it must be gated to the v12 upgrade")
+	}
+}
+
 func TestDecayHalvesOverTheHalfLife(t *testing.T) {
 	v := cv(0.8, 1000)
 	at := 1000 + int64(FacetDecayHalfLifeObs)
