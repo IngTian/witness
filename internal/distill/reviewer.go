@@ -36,6 +36,9 @@ type Reviewer struct {
 	// RunnerFor, when set, picks the MineFunc for a specific lens — the per-lens RUNNER
 	// seam (issue #75 slice 2), mirroring Worker.RunFor. nil → every lens reviews on Runner.
 	RunnerFor func(ln *lens.Lens) MineFunc
+	// Progress, when set, is called as each lens's fold windows complete; Where is the lens.
+	// nil is silent — the background drain leaves it nil.
+	Progress ProgressFunc
 }
 
 // runnerFor returns the MineFunc for a lens's review: the per-lens runner via RunnerFor
@@ -105,8 +108,23 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 	if err != nil {
 		return fmt.Errorf("read L1 delta: %w", err)
 	}
+	// The whole window plan is fixed before the first call: windowEnd is a pure function of the
+	// delta read once above and the budget. Planning it up front is what makes the progress total
+	// exact — measured on a real archive, one lens's 3,253 unreviewed observations are 109
+	// windows, each a model call.
+	var ends []int // ends[i] is window i's exclusive end; each is a size-bounded, ≥1-obs window
 	for start := 0; start < len(obs); {
-		end := windowEnd(obs, start, budget) // [start,end): a size-bounded, ≥1-obs window
+		start = windowEnd(obs, start, budget)
+		ends = append(ends, start)
+	}
+	tick := func(done int) {
+		if r.Progress != nil && len(ends) > 0 { // a lens with nothing to fold says nothing
+			r.Progress(Progress{Where: ln.Name, Stages: []Stage{{Name: "folding windows", Done: done, Total: len(ends)}}})
+		}
+	}
+	tick(0)
+	start := 0
+	for i, end := range ends {
 		window := obs[start:end]
 
 		// Fold against the CURRENT stance (includes prior windows' writes this Run).
@@ -119,6 +137,7 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 		// shows confidences decayed to it.
 		throughSeq := window[len(window)-1].Rowid
 		reviewed, err := r.reviewLens(ctx, ln, window, prior, throughSeq)
+		tick(i + 1) // a failed call is still a call done
 		if err != nil {
 			// Surface the cause (was silently discarded pre-#123). Windows already
 			// committed stay; the watermark sits at the last good window; resume next pass.

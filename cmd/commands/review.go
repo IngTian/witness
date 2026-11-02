@@ -80,8 +80,14 @@ func forceReviewOpts(st *store.Store, full bool) (bool, error) {
 	}
 	defer rs.Close()
 	runFn := rs.RunFor(nil) // the default runner (unified summary + default fallback)
-	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor}
-	if err := r.Run(ctx, time.Now()); err != nil {
+	// Progress on stderr: a fold is one model call per window, and a real archive's default
+	// lens had 109 windows waiting. This is the foreground path only — the drain (worker.go)
+	// builds its own Reviewer and leaves Progress nil.
+	fold := &phaseProgress{start: startProgress}
+	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor, Progress: fold.update}
+	err = r.Run(ctx, time.Now())
+	fold.finish()
+	if err != nil {
 		return false, err
 	}
 	// S3 emergent long-arc pass (issue #16): after the ordinary fold, cluster L1 and
@@ -90,11 +96,46 @@ func forceReviewOpts(st *store.Store, full bool) (bool, error) {
 	// watermark. Runs in the SAME locked runner session so it can't race a background
 	// worker. Best-effort: a failure here must not undo the review that already landed.
 	if full {
-		er := &distill.EmergentReviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor}
-		if err := er.RunFull(ctx, time.Now()); err != nil {
+		arcs := &phaseProgress{start: startProgress}
+		er := &distill.EmergentReviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor, Progress: arcs.update}
+		err := er.RunFull(ctx, time.Now())
+		arcs.finish()
+		if err != nil {
 			slog.Error("emergent long-arc pass failed (ordinary review still applied)", "err", err)
 		}
 	}
+	// The same spinner, and message, as the read-time regeneration (profilepull.go).
+	sp := startSpinner("distilling the profile from the latest facets…")
 	regenerateProfile(ctx, st, cfg, lenses, runFn, rs.RunFor)
+	sp.Stop()
 	return true, nil
+}
+
+// phaseProgress draws each phase of a pass — a new Where, or a new set of stages — on a fresh
+// progress line. A line estimates time left from its own start, so one line carried across lenses
+// would divide the first lens's hours by the second lens's count, and one carried from clustering
+// (minutes of CPU per step) into verifying (one model call per step) would price every call at a
+// clustering step. Not safe for concurrent use: both review passes are sequential.
+type phaseProgress struct {
+	start func() *progressLine // startProgress; a test supplies its own
+	cur   *progressLine
+	key   string
+}
+
+func (p *phaseProgress) update(pr distill.Progress) {
+	key := pr.Where
+	for _, s := range pr.Stages {
+		key += "\x00" + s.Name
+	}
+	if p.cur == nil || key != p.key {
+		p.finish()
+		p.cur, p.key = p.start(), key
+	}
+	p.cur.update(pr)
+}
+
+func (p *phaseProgress) finish() {
+	if p.cur != nil {
+		p.cur.finish()
+	}
 }
