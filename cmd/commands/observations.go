@@ -187,7 +187,7 @@ func renderObservationHits(lensName, query string, hits []vector.Hit, registered
 		}
 		return
 	}
-	fmt.Println(title("observations", lensName, fmt.Sprintf("%s for %q", countNoun(len(hits), "hit", "hits"), query)))
+	fmt.Println(title("observations", lensName, fmt.Sprintf("%s for %q", countOf(len(hits), "hit", "hits"), query)))
 	for _, h := range hits {
 		o := h.Obs
 		// 2 indent + 5 score + 2 gap = the 9-column hanging indent every line of a hit shares.

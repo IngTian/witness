@@ -475,7 +475,7 @@ func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, name s
 	if candidate {
 		name += " (candidate — the lens's own name is reserved)"
 	}
-	fmt.Println(title("lens try", name, countNoun(len(sessions), "session", "sessions")+" · read-only, nothing is written"))
+	fmt.Println(title("lens try", name, countOf(len(sessions), "session", "sessions")+" · read-only, nothing is written"))
 	fmt.Println()
 	fmt.Println("  " + kvRow("mine_model", settingValue(setting{value: distill.ModelFor(cfg, ln, distill.PhaseExtract)}), ""))
 	fmt.Println()
@@ -486,7 +486,7 @@ func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, name s
 		turns := st.RawCount(sess)
 		chars := st.RawChars(sess)
 		fmt.Printf("%s %s  %s\n", cyan(glyph("── session", "-- session")), sess,
-			dim(fmt.Sprintf("(%s · %s chars)", countNoun(turns, "turn", "turns"), humanSize(chars))))
+			dim(fmt.Sprintf("(%s · %s chars)", countOf(turns, "turn", "turns"), humanSize(chars))))
 
 		if r.err != nil {
 			// A transport error (or panic) on one session doesn't sink the others — report
@@ -518,12 +518,12 @@ func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, name s
 		fmt.Printf("   %s\n\n", dim(fmt.Sprintf("%d obs in %.1fs", len(r.obs), r.elapsed.Seconds())))
 	}
 
-	summary := countNoun(total, "observation", "observations")
+	summary := countOf(total, "observation", "observations")
 	switch {
 	case failed > 0:
-		summary += fmt.Sprintf(" · %d of %s failed", failed, countNoun(len(sessions), "session", "sessions"))
+		summary += fmt.Sprintf(" · %d of %s failed", failed, countOf(len(sessions), "session", "sessions"))
 	default:
-		summary += " across " + countNoun(len(sessions), "session", "sessions")
+		summary += " across " + countOf(len(sessions), "session", "sessions")
 	}
 	if driftedAny {
 		summary += " · some drifted (see above)"
@@ -561,7 +561,7 @@ func allFailed(results []tryResult) error {
 func lensTryRenderReviewHuman(review *reviewPreview) {
 	fmt.Println()
 	fmt.Println(cyan(glyph("── review", "-- review")) + "  " +
-		dim("synthesizing "+countNoun(review.obsFed, "mined observation", "mined observations")))
+		dim("synthesizing "+countOf(review.obsFed, "mined observation", "mined observations")))
 	fmt.Println("  " + kvRow("review_model", review.model, ""))
 	fmt.Printf("   %s\n", dim("(over the sampled sessions only — register + backfill for full-history change detection)"))
 	if review.drifted {
@@ -607,7 +607,7 @@ func lensTryRenderReviewHuman(review *reviewPreview) {
 		}
 	}
 	if malformed > 0 {
-		fmt.Printf("   %s %s\n", warnGlyph(), yellow(countNoun(malformed, "facet", "facets")+" had no dimension/key/value"))
+		fmt.Printf("   %s %s\n", warnGlyph(), yellow(countOf(malformed, "facet", "facets")+" had no dimension/key/value"))
 		fmt.Printf("     %s\n", dim(wrapHanging("the REVIEW prompt likely doesn't specify the facet output schema "+
 			"(each element needs dimension, key, value, confidence, because_of)", 5)))
 	}

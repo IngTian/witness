@@ -192,6 +192,8 @@ func (p *progressLine) render() string {
 // before it loses the bar altogether.
 var progressBarCells = []int{22, 14, 8}
 
+var asciiSpinner = []string{"|", "/", "-", "\\"}
+
 // segment is one styled run of the terminal line; plain is what it occupies on screen.
 type segment struct{ plain, code string }
 
@@ -202,15 +204,19 @@ type segment struct{ plain, code string }
 // cells is the bar width; 0 drops it. Caller holds mu.
 func (p *progressLine) terminalSegments(cells int) []segment {
 	v := p.view()
-	segs := []segment{{spinnerFrames[p.frame%len(spinnerFrames)], ansiCyan}, {" ", ""}}
+	spin, fill, empty := spinnerFrames[p.frame%len(spinnerFrames)], "━", "─"
+	if !p.color { // style.go's rule: no color, ASCII decoration (a non-UTF-8 terminal reads it too)
+		spin, fill, empty = asciiSpinner[p.frame%len(asciiSpinner)], "#", "-"
+	}
+	segs := []segment{{spin, ansiCyan}, {" ", ""}}
 	if v.where != "" {
 		segs = append(segs, segment{v.where, ansiBold}, segment{"  ", ""})
 	}
 	if cells > 0 && v.total > 0 {
 		filled := v.done * cells / v.total
 		segs = append(segs,
-			segment{strings.Repeat("━", filled), ansiCyan},
-			segment{strings.Repeat("─", cells-filled), ansiDim},
+			segment{strings.Repeat(fill, filled), ansiCyan},
+			segment{strings.Repeat(empty, cells-filled), ansiDim},
 			segment{fmt.Sprintf(" %3d%%", v.done*100/v.total), ansiBold},
 			segment{"  ", ""})
 	}

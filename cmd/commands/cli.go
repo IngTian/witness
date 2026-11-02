@@ -47,6 +47,8 @@ func askYesNo(prompt string) bool {
 	answer := strings.TrimSpace(line)
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		fmt.Println(answer) // a terminal echoes what was typed; piped input would leave the line open
+	} else if err != nil {
+		fmt.Println() // Ctrl-D echoes no newline: without this the note below lands on the prompt line
 	}
 	switch strings.ToLower(answer) {
 	case "y", "yes":
@@ -215,7 +217,7 @@ func reportError(err error) {
 
 func jsonOutputMode() bool {
 	for _, a := range os.Args[1:] {
-		if a == "--json" || strings.HasPrefix(a, "--json=") {
+		if a == "--json" || a == "-j" || strings.HasPrefix(a, "--json=") { // -j: every command's shorthand
 			return true
 		}
 	}

@@ -359,7 +359,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 			// it accepts y/yes like every other confirmation and says so when nobody can answer.
 			fmt.Println()
 			fmt.Printf("%s %s\n", warnGlyph(), yellow(fmt.Sprintf("--fresh deletes %s + %s from lens %s, then re-mines it",
-				countNoun(obsAll, "observation", "observations"), countNoun(facetsN, "facet", "facets"), name)))
+				countOf(obsAll, "observation", "observations"), countOf(facetsN, "facet", "facets"), name)))
 			if active > 0 {
 				fmt.Printf("  %s %s recorded in-session, not mined — no re-mine can re-create them\n", warnGlyph(), humanCount(active))
 			}
@@ -380,7 +380,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		if err != nil {
 			return fmt.Errorf("drop lens %q data: %w", name, err)
 		}
-		fmt.Println(dim(fmt.Sprintf("dropped %s + %s", countNoun(obs, "observation", "observations"), countNoun(facets, "facet", "facets"))))
+		fmt.Println(dim(fmt.Sprintf("dropped %s + %s", countOf(obs, "observation", "observations"), countOf(facets, "facet", "facets"))))
 	}
 	if _, err := st.ResetLensWatermark(minedName); err != nil {
 		return fmt.Errorf("reset lens %q watermark: %w", name, err)
@@ -463,7 +463,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// observations — report it so a below-floor mine model is visible now.
 	if drifted := st2.DriftTotal() - driftBefore; drifted > 0 {
 		fmt.Println(result(warnGlyph(), "backfilled lens "+name,
-			countNoun(drifted, "session", "sessions")+" drifted: the model returned no observations"))
+			countOf(drifted, "session", "sessions")+" drifted: the model returned no observations"))
 		fmt.Println(hint("raise it", "witness config set mine_model <stronger> --lens "+name))
 		fmt.Println(hint("then re-mine", "witness lens backfill "+name+" --fresh"))
 		return nil
@@ -602,9 +602,9 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 			running++
 		}
 	}
-	summary := fmt.Sprintf("%s · %d enabled", countNoun(len(reg), "lens", "lenses"), running)
+	summary := fmt.Sprintf("%s · %d enabled", countOf(len(reg), "lens", "lenses"), running)
 	if len(orphans) > 0 {
-		summary += " · " + countNoun(len(orphans), "orphan", "orphans")
+		summary += " · " + countOf(len(orphans), "orphan", "orphans")
 	}
 	fmt.Println(title("lens list", "", summary))
 	fmt.Println()
@@ -635,7 +635,7 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 		case err != nil:
 			fmt.Printf("  %s %s\n", enabledGlyph(false), row(name, status, "definition does not load"))
 		default:
-			note := countNoun(len(l.Dimensions), "dim", "dims")
+			note := countOf(len(l.Dimensions), "dim", "dims")
 			if l.Name != name {
 				note += fmt.Sprintf(" · mines as %q", l.Name)
 			}

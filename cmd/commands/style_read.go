@@ -5,8 +5,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-
-	"golang.org/x/text/width"
 )
 
 // Helpers the read surfaces (facets, observations, profile, doctor, config, lens) share on top of
@@ -89,21 +87,6 @@ func fits(n int) bool {
 	return !useColor || w <= 0 || n < w
 }
 
-// cols is the width s takes on a terminal: a CJK character fills two columns, which a rune count
-// misses — and this archive's text is often Chinese. (fitLine in style.go still counts runes.)
-func cols(s string) int {
-	n := 0
-	for _, r := range s {
-		switch width.LookupRune(r).Kind() {
-		case width.EastAsianWide, width.EastAsianFullwidth:
-			n += 2
-		default:
-			n++
-		}
-	}
-	return n
-}
-
 var mdBold = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
 
 // markdownLine renders one line of an LLM-authored profile for a terminal: a "#"-heading prints
@@ -130,14 +113,6 @@ func confidence(c float64) string {
 		return dim(s)
 	}
 	return s
-}
-
-// countNoun is pluralize with thousands grouped: "1 facet", "2,844 facets".
-func countNoun(n int, singular, plural string) string {
-	if n == 1 {
-		return "1 " + singular
-	}
-	return humanCount(n) + " " + plural
 }
 
 // humanSize renders a character count the way a person reads it: 950, 12.3k, 2.8M.

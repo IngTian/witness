@@ -214,7 +214,7 @@ func cmdDoctor(asJSON bool) error {
 	} else if modelStatus != "OK" || strings.TrimSpace(cfg.TriageModel) != "" || strings.TrimSpace(cfg.DistillModel) != "" {
 		row("models", okGlyph()+" "+modelStatus, "")
 	}
-	cadence := countNoun(cfg.ReviewEvery, "session", "sessions")
+	cadence := countOf(cfg.ReviewEvery, "session", "sessions")
 	if cfg.ReviewPoignancy > 0 {
 		cadence += fmt.Sprintf(", or at poignancy %d", cfg.ReviewPoignancy)
 	}
@@ -230,7 +230,7 @@ func cmdDoctor(asJSON bool) error {
 	// uneventful. The remedy is a stronger mine model then a re-mine (#57) — of the lens it
 	// happened on, by its registered name, never a <lens> placeholder.
 	if driftTotal > 0 {
-		headline := "prose drift: " + countNoun(driftTotal, "event", "events")
+		headline := "prose drift: " + countOf(driftTotal, "event", "events")
 		if driftLastTS != "" {
 			headline += ", last " + shortTime(driftLastTS)
 		}
@@ -254,8 +254,8 @@ func cmdDoctor(asJSON bool) error {
 	fmt.Println()
 	fmt.Println("  " + bold("Archive"))
 	row("layers", fmt.Sprintf("%s · %s raw messages · %s · %s",
-		countNoun(stat.Sessions, "session", "sessions"), humanCount(stat.RawRecords),
-		countNoun(stat.Observations, "observation", "observations"), countNoun(stat.Facets, "facet", "facets")), "")
+		countOf(stat.Sessions, "session", "sessions"), humanCount(stat.RawRecords),
+		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")), "")
 	if stat.Sessions == 0 {
 		warn("nothing captured yet — no editor is feeding this archive")
 		fix("wire editor", wireCommand())
@@ -273,7 +273,7 @@ func cmdDoctor(asJSON bool) error {
 	}
 	row("queue", queueLine, "last review "+shortTime(lastReview))
 	if stat.BackedOff > 0 {
-		warn(countNoun(stat.BackedOff, "session", "sessions") + " backing off — mining is failing")
+		warn(countOf(stat.BackedOff, "session", "sessions") + " backing off — mining is failing")
 		// The cause, on the screen: the backoff itself is logged without it, so this is the most
 		// recent error the worker did log.
 		if cause := lastLoggedError(st.LogPath()); cause != "" {
@@ -290,7 +290,7 @@ func cmdDoctor(asJSON bool) error {
 	// witness.log for a per-lens review error.
 	for _, ln := range activeLensNames(st) {
 		if d := st.UnreviewedDelta(ln); d > 0 {
-			line := fmt.Sprintf("%s: %s not yet folded into facets", shown(ln), countNoun(d, "observation", "observations"))
+			line := fmt.Sprintf("%s: %s not yet folded into facets", shown(ln), countOf(d, "observation", "observations"))
 			if d > cfg.ReviewMaxChars/200 { // ~more than one window's worth of obs pending — nudge
 				warn(line)
 				because("review is behind; it folds in windows")

@@ -179,14 +179,6 @@ func shellArg(p string) string {
 	return shellQuote(p)
 }
 
-// countOf is pluralize with humanCount's thousands separators: "2,039 facets", "1 lens".
-func countOf(n int, singular, plural string) string {
-	if n == 1 {
-		return "1 " + singular
-	}
-	return humanCount(n) + " " + plural
-}
-
 // humanBytes renders a size the way a person reads it: 87.4 MB, 512 KB, 900 B.
 func humanBytes(n int64) string {
 	const unit = 1000

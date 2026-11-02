@@ -83,7 +83,7 @@ func cmdProfile(args []string, asJSON bool) error {
 	fmt.Println("  " + kvRow("distilled", shortTime(fresh.DistilledThrough), ""))
 	fmt.Println("  " + kvRow("raw", shortTime(fresh.RawThrough), ""))
 	if fresh.Pending > 0 {
-		fmt.Println("  " + kvRow("pending", yellow(countNoun(fresh.Pending, "session", "sessions")), "not in this profile yet"))
+		fmt.Println("  " + kvRow("pending", yellow(countOf(fresh.Pending, "session", "sessions")), "not in this profile yet"))
 	} else {
 		fmt.Println("  " + kvRow("pending", "0 sessions", ""))
 	}

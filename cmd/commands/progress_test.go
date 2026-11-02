@@ -166,8 +166,8 @@ func TestProgressBarOnATerminal(t *testing.T) {
 	p := &progressLine{w: &buf, tty: true, start: time.Now()}
 	p.update(compactSnap("default/biases", 11, 44, 0, 0)) // 25%
 	out := buf.String()
-	if !strings.Contains(out, strings.Repeat("━", 5)+strings.Repeat("─", 17)) || !strings.Contains(out, " 25%") {
-		t.Errorf("want a 22-cell bar a quarter full and 25%%: %q", out)
+	if !strings.Contains(out, strings.Repeat("#", 5)+strings.Repeat("-", 17)) || !strings.Contains(out, " 25%") {
+		t.Errorf("want a 22-cell ASCII bar (no color: style.go plain rule) a quarter full and 25%%: %q", out)
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Errorf("no color unless color is on: %q", out)
@@ -175,7 +175,7 @@ func TestProgressBarOnATerminal(t *testing.T) {
 	for _, tc := range []struct{ done, filled int }{{22, 11}, {44, 22}} {
 		buf.Reset()
 		p.update(compactSnap("default/biases", tc.done, 44, 0, 0))
-		if got := strings.Count(buf.String(), "━"); got != tc.filled {
+		if got := strings.Count(buf.String(), "#"); got != tc.filled {
 			t.Errorf("%d/44: %d cells filled, want %d: %q", tc.done, got, tc.filled, buf.String())
 		}
 	}
@@ -184,6 +184,9 @@ func TestProgressBarOnATerminal(t *testing.T) {
 	p.color = true
 	p.update(compactSnap("default/biases", 12, 44, 0, 0))
 	styled := buf.String()
+	if !strings.Contains(styled, "━") || strings.Contains(styled, "#") {
+		t.Errorf("color on: the box-drawing bar, not ASCII: %q", styled)
+	}
 	for _, code := range []string{ansiCyan, ansiBold, ansiDim} {
 		if !strings.Contains(styled, code) {
 			t.Errorf("color on: missing %q in %q", code, styled)
@@ -208,7 +211,7 @@ func TestProgressLineFitsTheTerminal(t *testing.T) {
 		t.Errorf("cols=20: %d runes drawn, %q", pt.width, tiny.String())
 	}
 
-	bar := func(out string) int { return strings.Count(out, "━") + strings.Count(out, "─") }
+	bar := func(out string) int { return strings.Count(out, "#") + strings.Count(out, "-") }
 	for _, tc := range []struct {
 		cols    int
 		barWant int // cells

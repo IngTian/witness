@@ -115,6 +115,36 @@ func TestStyleHelpersPlainForms(t *testing.T) {
 	}
 }
 
+// fitTo cuts by terminal COLUMNS: a CJK character fills two, and this archive's text is often
+// Chinese — a rune count let such lines overflow the terminal by several columns.
+func TestFitToCountsColumnsNotRunes(t *testing.T) {
+	if got := fitTo("abcdefghij", 0, 8); got != "abcdef…" {
+		t.Errorf("ASCII: %q", got)
+	}
+	got := fitTo("中文中文中文中文", 0, 9) // 8 columns of room: 3 characters (6) + the ellipsis
+	if got != "中文中…" || cols(got) > 8 {
+		t.Errorf("CJK must be cut by columns: %q (%d columns)", got, cols(got))
+	}
+	if got := fitTo("short", 0, 80); got != "short" {
+		t.Errorf("a line that fits is untouched: %q", got)
+	}
+	if got := fitTo(strings.Repeat("x", 500), 0, 0); len(got) != 500 {
+		t.Error("unknown width keeps the text whole")
+	}
+}
+
+// -j is every command's --json shorthand, so an error under -j must be JSON too.
+func TestJSONModeSeesTheShorthand(t *testing.T) {
+	old := os.Args
+	defer func() { os.Args = old }()
+	for args, want := range map[string]bool{"facets -j": true, "status --json": true, "doctor --json=true": true, "facets": false, "lens list": false} {
+		os.Args = append([]string{"witness"}, strings.Fields(args)...)
+		if got := jsonOutputMode(); got != want {
+			t.Errorf("jsonOutputMode(%q) = %v, want %v", args, got, want)
+		}
+	}
+}
+
 func TestShortTime(t *testing.T) {
 	now := time.Date(2026, 11, 2, 15, 0, 0, 0, time.Local)
 	at := func(d time.Duration) string { return now.Add(d).UTC().Format(time.RFC3339) }

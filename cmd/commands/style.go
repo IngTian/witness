@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-isatty"
+	"golang.org/x/text/width"
 )
 
 // Terminal styling for human-facing command output. Purely decorative: colors
@@ -194,16 +195,52 @@ func fitLine(s string, used int) string {
 	if !useColor {
 		return s
 	}
-	width := termWidth(os.Stdout)
+	return fitTo(s, used, termWidth(os.Stdout))
+}
+
+// fitTo is fitLine for a known terminal width (0: unknown, keep s whole).
+func fitTo(s string, used, width int) string {
 	if width <= 0 {
 		return s
 	}
 	room := width - used - 1
-	r := []rune(s)
-	if room <= 1 || len(r) <= room {
+	if room <= 1 || cols(s) <= room {
 		return s
 	}
-	return string(r[:room-1]) + "…"
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		w := cols(string(r))
+		if n+w > room-1 { // leave a column for the ellipsis
+			break
+		}
+		b.WriteRune(r)
+		n += w
+	}
+	return b.String() + "…"
+}
+
+// cols is the width s takes on a terminal: a CJK character fills two columns, which a rune count
+// misses — and this archive's text is often Chinese. fitLine measures with it.
+func cols(s string) int {
+	n := 0
+	for _, r := range s {
+		switch width.LookupRune(r).Kind() {
+		case width.EastAsianWide, width.EastAsianFullwidth:
+			n += 2
+		default:
+			n++
+		}
+	}
+	return n
+}
+
+// countOf is pluralize with humanCount's thousands separators: "2,039 facets", "1 lens".
+func countOf(n int, singular, plural string) string {
+	if n == 1 {
+		return "1 " + singular
+	}
+	return humanCount(n) + " " + plural
 }
 
 // shortTime renders an RFC3339 stamp the way a person reads it: "today 05:29", "yesterday 23:10",
@@ -254,13 +291,4 @@ func pluralize(n int, singular, plural string) string {
 		return "1 " + singular
 	}
 	return fmt.Sprintf("%d %s", n, plural)
-}
-
-// modelOrDefaultLabel renders a per-lens runner/model field: the value, or a dim
-// "(default)" when unset (meaning the lens rides the default-scope runner/model).
-func modelOrDefaultLabel(m string) string {
-	if strings.TrimSpace(m) == "" {
-		return dim("(default)")
-	}
-	return m
 }

@@ -152,7 +152,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	if !target.Active() {
 		state = "archived " + shortTime(target.ArchivedAt)
 	}
-	summary := state + " · " + countNoun(len(target.Versions), "version", "versions")
+	summary := state + " · " + countOf(len(target.Versions), "version", "versions")
 	if len(tributaries) > 0 {
 		summary += fmt.Sprintf(" · %d merged in", len(tributaries))
 	}
@@ -196,7 +196,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	for _, f := range tributaries {
 		fmt.Println()
 		ref := store.FacetRef(f.Dimension, f.Key)
-		meta := fmt.Sprintf("archived %s · %s", shortTime(f.ArchivedAt), countNoun(len(f.Versions), "version", "versions"))
+		meta := fmt.Sprintf("archived %s · %s", shortTime(f.ArchivedAt), countOf(len(f.Versions), "version", "versions"))
 		if fits(4 + cols(ref) + 2 + cols(meta)) {
 			fmt.Printf("  %s %s  %s\n", dim(glyph("←", "<-")), ref, dim(meta))
 		} else { // a long key keeps its whole name (it is what --expand takes); the meta drops a line
@@ -265,7 +265,7 @@ func renderCurrentFacets(name, dataName string, facets []store.Facet, decaySeq i
 	}
 	// The title says what is listed: under --all active and archived are counted apart, so the
 	// number is never a silent mix of the two.
-	summary := humanCount(count) + " active · " + countNoun(len(perDim), "dimension", "dimensions")
+	summary := humanCount(count) + " active · " + countOf(len(perDim), "dimension", "dimensions")
 	if archived > 0 {
 		summary = fmt.Sprintf("%s facets · %s active · %s archived", humanCount(count), humanCount(count-archived), humanCount(archived))
 	}
