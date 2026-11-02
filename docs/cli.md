@@ -22,10 +22,11 @@ they exist for recovery and debugging, and everything they do also happens autom
 - `witness facets [lens]` — print the active structured facets (CLI equivalent of MCP `get_facets`).
   `--all` also lists facets archived by compaction, saying where each one went; `--expand
   <dimension/key>` unfolds one facet into everything that was merged into it.
-- `witness compact [--lens <name>] [--apply]` — consolidate the profile: merge facets that describe
+- `witness compact [--lens <name>] [--yes]` — consolidate the profile: merge facets that describe
   one trait, retire ones that were never traits, and give each surviving facet a short `claim`
-  (the summary the review call reads instead of the full prose). **Dry run unless `--apply`** —
-  it prints the plan and writes nothing. Nothing is deleted: a compacted facet is archived with its
+  (the summary the review call reads instead of the full prose). **It prints the plan, then asks
+  `[y/N]`**; only `y` applies it, and the plan applied is exactly the one shown. `--yes` skips the
+  question for scripts (`--apply`, its old name, still works). Nothing is deleted: a compacted facet is archived with its
   full version history and a link to the facet that absorbed it, so `--expand` can always unfold
   it. Re-runnable; each pass consolidates what it can see.
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
