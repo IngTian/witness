@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,15 +13,16 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/store"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
 func newMergeCmd() *cobra.Command {
-	var apply bool
+	var yes bool
 	c := &cobra.Command{
 		Use:     "merge <export-dir | file.db>",
 		GroupID: groupAdmin,
-		Short:   "Merge another witness archive into this one (dry run unless --apply).",
+		Short:   "Merge another witness archive into this one (shows what would arrive, then asks).",
 		Long: strings.TrimSpace(`
 Merge another witness archive into this one — for a machine that already has its
 own archive, where copying a backup in would REPLACE it. Point it at a directory
@@ -37,9 +40,11 @@ by meaning.
 It is a one-time consolidation, not a sync: two machines merged back and forth
 every week would grow an archived copy of every facet both changed, every round.
 
-Without --apply this is a dry run: it reports exactly what would change and
-writes nothing. --apply first backs this archive up with 'witness export --all',
-because a merged archive cannot be split apart again.
+It first shows exactly what would arrive and changes nothing; then it asks. Only
+on 'y' does it back this archive up with 'witness export --all' — a merged archive
+cannot be split apart again — merge, and print how to undo. Anything else leaves
+the archive untouched and exits non-zero. --yes merges without asking, for scripts;
+it still backs up first.
 
 Lens definitions found in the export are registered here but NOT enabled
 (enabling one would mine every session you have). Your config.toml, your portrait
@@ -47,11 +52,37 @@ prompts (summarize/) and your profile are never replaced. Facet text from the
 other archive is served to your agents through the MCP tools like your own.`),
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cmdMerge(args[0], apply)
+			return cmdMerge(args[0], yes, askYesNo)
 		},
 	}
-	c.Flags().BoolVar(&apply, "apply", false, "perform the merge, after backing this archive up")
+	c.Flags().BoolVar(&yes, "yes", false, "merge without asking, for scripts (it still backs this archive up first)")
 	return c
+}
+
+// errMergeDeclined is returned when the user does not confirm. It is an ERROR, unlike the
+// abort in cleanup and backfill: those leave nothing for a following command to misread, but
+// `witness merge x && rm -rf x` would delete the only copy of an archive that was never merged.
+// A script with no one to answer reads EOF, which is a "no" — so it fails loudly, and says --yes.
+var errMergeDeclined = errors.New("not merged — nothing was written")
+
+// askYesNo is the production prompt. Anything but y/yes is a no, including EOF from a pipe.
+func askYesNo(prompt string) bool {
+	fmt.Print(prompt)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	answer := strings.TrimSpace(line)
+	if !isatty.IsTerminal(os.Stdin.Fd()) {
+		fmt.Println(answer) // a terminal echoes what was typed; piped input would leave the line open
+	}
+	switch strings.ToLower(answer) {
+	case "y", "yes":
+		return true
+	}
+	// Only when NOBODY answered — /dev/null or a closed pipe. Keyed on EOF, not on "is a terminal":
+	// /dev/null is a character device, and someone who typed "n" doesn't need told about --yes.
+	if err != nil && answer == "" {
+		fmt.Println("(no answer — pass --yes to merge without asking)")
+	}
+	return false
 }
 
 // resolveMergeSource accepts an `export --all` directory or a single database file. It never
@@ -78,7 +109,7 @@ func resolveMergeSource(target string) (dbPath, dir string, err error) {
 	return "", "", fmt.Errorf("%s holds no witness database (expected witness.db, as `witness export --all` writes)", target)
 }
 
-// premergeBackupPath is the sibling directory --apply backs the archive up to. Root is cleaned at
+// premergeBackupPath is the sibling directory a merge backs the archive up to. Root is cleaned at
 // resolution; the inside-root check is the backstop for the failure it once had: a trailing slash
 // put the backup INSIDE the archive, and following the undo instructions deleted it.
 func premergeBackupPath(root string, now time.Time) (string, error) {
@@ -90,7 +121,9 @@ func premergeBackupPath(root string, now time.Time) (string, error) {
 	return p, nil
 }
 
-func cmdMerge(target string, apply bool) error {
+// cmdMerge shows the plan, asks, and only then backs up and merges. ask is injected so tests can
+// answer; yes skips it.
+func cmdMerge(target string, yes bool, ask func(prompt string) bool) error {
 	dbPath, dir, err := resolveMergeSource(target)
 	if err != nil {
 		return err
@@ -104,7 +137,7 @@ func cmdMerge(target string, apply bool) error {
 
 	// The worker rewrites the whole facet table on every review; a merge interleaved with it would
 	// have its facets deleted by the worker's next write. Unlike compact this is an ERROR, not exit 0:
-	// `witness merge x --apply && rm -rf x` must not delete the only copy after merging nothing.
+	// `witness merge x --yes && rm -rf x` must not delete the only copy after merging nothing.
 	unlock, ok := st.WorkerLock()
 	if !ok {
 		return fmt.Errorf("a distillation worker is running and holds this archive; nothing was merged — " +
@@ -114,8 +147,8 @@ func cmdMerge(target string, apply bool) error {
 
 	ctx := context.Background()
 	now := time.Now()
-	// Always plan first (a rolled-back transaction): it is what lets --apply skip the backup when
-	// there is nothing to merge — a re-run must not leave a backup behind.
+	// Plan first (a rolled-back transaction): the user approves what they were shown, and a re-run
+	// with nothing new exits here without taking a backup.
 	rep, err := st.Merge(ctx, dbPath, false, now)
 	if err != nil {
 		return err
@@ -126,30 +159,37 @@ func cmdMerge(target string, apply bool) error {
 			// Never "everything is already here" when the export holds a definition that differs
 			// from ours: prompt text is in no database, and that claim invites discarding the export.
 			fmt.Printf("no data to merge from %s, but it holds definitions that differ from yours:\n", target)
-			printMergeFiles(st.Root, files, false)
+			printMergeFiles(st.Root, files)
 			return nil
 		}
 		fmt.Printf("nothing to merge — everything in %s is already here\n", target)
 		return nil
 	}
 
-	backup := ""
-	if apply {
-		if backup, err = premergeBackupPath(st.Root, now); err != nil {
-			return err
-		}
-		if _, err := st.ExportAll(backup, false); err != nil {
-			return fmt.Errorf("could not back this archive up before merging (%w); nothing was merged", err)
-		}
-		if rep, err = st.Merge(ctx, dbPath, true, now); err != nil {
-			return fmt.Errorf("%w (nothing was merged; this archive is unchanged — the backup at %s is a copy of it and can be deleted)", err, backup)
-		}
-		files.apply(st)
+	printMergePlan(target, st.Root, rep, files)
+	// The plan's transaction is closed before asking: held across a human pause it would block every
+	// capture hook until the user answered. The worker lock stays held, so no review rewrites the
+	// facets meanwhile; the apply recomputes the same deterministic merge, and can differ from what
+	// was shown only by turns captured while the prompt was open.
+	if !yes && !ask("Merge it? This archive is backed up first. [y/N]: ") {
+		return errMergeDeclined
 	}
-	printMergeReport(target, st.Root, rep, files, apply, backup)
+
+	backup, err := premergeBackupPath(st.Root, now)
+	if err != nil {
+		return err
+	}
+	if _, err := st.ExportAll(backup, false); err != nil {
+		return fmt.Errorf("could not back this archive up before merging (%w); nothing was merged", err)
+	}
+	if rep, err = st.Merge(ctx, dbPath, true, now); err != nil {
+		return fmt.Errorf("%w (nothing was merged; this archive is unchanged — the backup at %s is a copy of it and can be deleted)", err, backup)
+	}
+	files.apply(st)
+	printMergeDone(st.Root, rep, files, backup)
 	if n := len(files.failed); n > 0 {
 		// The data is merged, but a lens prompt that failed to register exists ONLY in the export.
-		// Exit non-zero so `merge x --apply && rm -rf x` cannot delete it.
+		// Exit non-zero so `merge x --yes && rm -rf x` cannot delete it.
 		return fmt.Errorf("merged, but %d lens %s NOT registered (see above) — keep %s and retry", n,
 			map[bool]string{true: "definition was", false: "definitions were"}[n == 1], target)
 	}
@@ -166,8 +206,8 @@ type mergeFiles struct {
 	disabled  []string    // lenses with data here whose definition is registered but not enabled
 	srcDir    string
 	profile   bool
-	results   []string // what --apply actually did
-	failed    []string // lenses --apply could not register
+	results   []string // what the merge actually did
+	failed    []string // lenses the merge could not register
 }
 
 type mergeLens struct{ name, path string }
@@ -258,7 +298,7 @@ func (f *mergeFiles) apply(st *store.Store) {
 	}
 }
 
-func printMergeReport(src, root string, r *store.MergeReport, f *mergeFiles, applied bool, backup string) {
+func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
 	fmt.Println(header(fmt.Sprintf("merge %s → %s", src, root)))
 	span := "no transcripts"
 	if r.FirstTS != "" {
@@ -310,32 +350,31 @@ func printMergeReport(src, root string, r *store.MergeReport, f *mergeFiles, app
 			fmt.Printf("                  %s  %s/%s  (kept %s; other copy %s)\n", k.Lens, k.Dimension, k.Key, kept, k.LoserKey)
 		}
 	}
-	printMergeFiles(root, f, applied)
+	printMergeFiles(root, f)
 	fmt.Println("  config.toml   yours is kept")
 	fmt.Println()
-	fmt.Println(dim("nothing here called a model. Next, optionally:"))
-	fmt.Println(dim("  witness compact --apply   merges duplicates the two archives wrote under different keys (calls the model)"))
-	fmt.Println()
-	if !applied {
-		fmt.Println("dry run — nothing written. Run again with --apply to merge (it backs this archive up first).")
-		return
+}
+
+// printMergeDone reports the applied merge and how to undo it.
+func printMergeDone(root string, r *store.MergeReport, f *mergeFiles, backup string) {
+	for _, line := range f.results {
+		fmt.Printf("  lens          %s\n", line)
 	}
 	glyph := okGlyph()
 	if len(f.failed) > 0 {
 		glyph = warnGlyph()
 	}
-	fmt.Printf("%s merged. This archive as it was before: %s\n", glyph, backup)
+	fmt.Printf("%s merged: %d sessions, %d observations, %d facets new here.\n", glyph,
+		r.Sessions.New, r.Observations.Reviewed+r.Observations.Unreviewed, r.Facets.New)
+	fmt.Printf("  this archive as it was before: %s\n", backup)
 	fmt.Printf("  to undo: stop witness, then replace %s with that directory\n", root)
+	fmt.Println(dim("  nothing here called a model. Optionally, `witness compact` merges duplicates the two"))
+	fmt.Println(dim("  archives wrote under different keys (that one does call the model)."))
 }
 
-func printMergeFiles(root string, f *mergeFiles, applied bool) {
-	if !applied {
-		for _, l := range f.register {
-			fmt.Printf("  lens          %s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
-		}
-	}
-	for _, line := range f.results {
-		fmt.Printf("  lens          %s\n", line)
+func printMergeFiles(root string, f *mergeFiles) {
+	for _, l := range f.register {
+		fmt.Printf("  lens          %s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
 	}
 	for _, l := range f.differ {
 		fmt.Printf("  lens          %s %s: their definition differs — yours is kept (theirs: witness lens register %s %q)\n",

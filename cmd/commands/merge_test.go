@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -60,10 +61,21 @@ func premergeBackups(t *testing.T, root string) []string {
 	return m
 }
 
+// answer is a scripted reply to the merge prompt; *asked records whether the prompt was shown.
+func answer(reply bool, asked *bool) func(string) bool {
+	return func(string) bool {
+		if asked != nil {
+			*asked = true
+		}
+		return reply
+	}
+}
+
 // A lens that exists only in the export is registered but NOT enabled: enabling it would mine
 // every session here, and a lens is a prompt someone else wrote. A portrait prompt is never
-// copied — it would replace how this archive's portrait is written. --apply backs up first; a
-// dry run writes nothing at all, files included.
+// copied — it would replace how this archive's portrait is written. The plan is shown before the
+// question; declining writes nothing at all, files included, and FAILS — so `merge x && rm -rf x`
+// cannot delete an archive that was never merged. Saying yes backs up first, then shows the undo.
 func TestMergeCommandFilesAndBackup(t *testing.T) {
 	export := mergeFixture(t, func(st *store.Store) {
 		if err := st.RegisterLens("math", writeLensDir(t, "math", "mine math", "fold math")); err != nil {
@@ -78,21 +90,25 @@ func TestMergeCommandFilesAndBackup(t *testing.T) {
 	})
 	root := openBase(t).Root
 
-	out := captureStdout(t, func() {
-		if err := cmdMerge(export, false); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if !strings.Contains(out, "dry run") || !strings.Contains(out, "math: will be registered, NOT enabled") {
-		t.Errorf("dry-run output missing the plan:\n%s", out)
+	var asked bool
+	var err error
+	out := captureStdout(t, func() { err = cmdMerge(export, false, answer(false, &asked)) })
+	if !errors.Is(err, errMergeDeclined) {
+		t.Errorf("declining must fail the command, got %v", err)
+	}
+	if !asked || !strings.Contains(out, "math: will be registered, NOT enabled") {
+		t.Errorf("the plan must be shown and then asked about (asked=%v):\n%s", asked, out)
 	}
 	st := openBase(t)
 	if slices.Contains(st.RegisteredLenses(), "math") || len(premergeBackups(t, root)) != 0 {
-		t.Fatal("a dry run registered a lens or wrote a backup")
+		t.Fatal("a declined merge registered a lens or wrote a backup")
+	}
+	if recs, _ := st.ReadRaw("theirs"); len(recs) != 0 {
+		t.Fatal("a declined merge wrote data")
 	}
 
 	out = captureStdout(t, func() {
-		if err := cmdMerge(export, true); err != nil {
+		if err := cmdMerge(export, false, answer(true, nil)); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -119,24 +135,70 @@ func TestMergeCommandFilesAndBackup(t *testing.T) {
 	if recs, _ := st.ReadRaw("theirs"); len(recs) != 1 {
 		t.Errorf("the incoming session did not arrive")
 	}
+	if !strings.Contains(out, backups[0]) || !strings.Contains(out, "to undo") {
+		t.Errorf("a merge must end by naming its backup and how to undo:\n%s", out)
+	}
 
-	// A second run has no data to merge and must not leave another backup behind. The export still
-	// holds a portrait prompt that differs from ours, so it must say THAT — not "everything is
-	// already here": prompt text is in no database, and that claim invites discarding the export.
+	// A second run has no data to merge: it must not ask, and must not leave another backup behind.
+	// The export still holds a portrait prompt that differs from ours, so it must say THAT — not
+	// "everything is already here": prompt text is in no database, and that claim invites
+	// discarding the export. --yes is passed with a declining prompt: had it asked, nothing merges.
+	asked = false
 	out = captureStdout(t, func() {
-		if err := cmdMerge(export, true); err != nil {
+		if err := cmdMerge(export, true, answer(false, &asked)); err != nil {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "no data to merge") || !strings.Contains(out, "unified.md") ||
+	if asked || !strings.Contains(out, "no data to merge") || !strings.Contains(out, "unified.md") ||
 		strings.Contains(out, "already here") || len(premergeBackups(t, root)) != 1 {
-		t.Errorf("a no-op re-run must report the differing prompt and write no backup; got %d backups:\n%s",
-			len(premergeBackups(t, root)), out)
+		t.Errorf("a no-op re-run must not ask (asked=%v), must report the differing prompt and write no backup; got %d backups:\n%s",
+			asked, len(premergeBackups(t, root)), out)
+	}
+}
+
+// --yes merges without asking; the prompt is never shown.
+func TestMergeCommandYesSkipsThePrompt(t *testing.T) {
+	export := mergeFixture(t, nil)
+	var asked bool
+	_ = captureStdout(t, func() {
+		if err := cmdMerge(export, true, answer(false, &asked)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	st := openBase(t)
+	if recs, _ := st.ReadRaw("theirs"); asked || len(recs) != 1 {
+		t.Errorf("--yes must merge without asking (asked=%v, rows=%d)", asked, len(recs))
+	}
+}
+
+// The production prompt: only y/yes merges. Anything else — including EOF, which is what a script
+// with nobody to answer reads — is a no. The --yes hint is for EOF alone: the first version keyed
+// it on "not a terminal", so `</dev/null` (a character device) got no hint and a piped "n" did.
+func TestMergeAskYesNo(t *testing.T) {
+	for in, want := range map[string]bool{"y\n": true, "YES\n": true, " y \n": true, "n\n": false, "\n": false, "": false, "yep\n": false} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.WriteString(in)
+		w.Close()
+		old := os.Stdin
+		os.Stdin = r
+		var got bool
+		out := captureStdout(t, func() { got = askYesNo("? ") })
+		os.Stdin = old
+		r.Close()
+		if got != want {
+			t.Errorf("askYesNo(%q) = %v, want %v", in, got, want)
+		}
+		if hinted := strings.Contains(out, "--yes"); hinted != (in == "") {
+			t.Errorf("askYesNo(%q): --yes hint shown=%v; want it exactly when nobody answered:\n%s", in, hinted, out)
+		}
 	}
 }
 
 // While a worker holds the archive, merge refuses with an ERROR — not exit 0 as compact does — so
-// `witness merge x --apply && rm -rf x` cannot delete the only copy after merging nothing.
+// `witness merge x --yes && rm -rf x` cannot delete the only copy after merging nothing.
 func TestMergeCommandRefusesWhileTheWorkerRuns(t *testing.T) {
 	export := mergeFixture(t, nil)
 	st := openBase(t)
@@ -145,7 +207,7 @@ func TestMergeCommandRefusesWhileTheWorkerRuns(t *testing.T) {
 		t.Fatal("could not take the worker lock for the test")
 	}
 	defer unlock()
-	if err := cmdMerge(export, true); err == nil || !strings.Contains(err.Error(), "nothing was merged") {
+	if err := cmdMerge(export, true, answer(false, nil)); err == nil || !strings.Contains(err.Error(), "nothing was merged") {
 		t.Errorf("want a non-nil error saying nothing was merged, got %v", err)
 	}
 	if recs, _ := st.ReadRaw("theirs"); len(recs) != 0 {

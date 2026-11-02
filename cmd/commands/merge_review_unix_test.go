@@ -13,7 +13,7 @@ import (
 )
 
 // A lens that fails to register AFTER the data committed must make the command fail. It used to
-// exit 0 with "[ok] merged", so `witness merge x --apply && rm -rf x` deleted the only copy of a
+// exit 0 with "[ok] merged", so `witness merge x --yes && rm -rf x` deleted the only copy of a
 // prompt that exists in no database. Unix-only because it holds the registry's flock directly.
 func TestReviewFailedLensRegistrationExitsNonZero(t *testing.T) {
 	export := mergeFixture(t, func(st *store.Store) {
@@ -33,7 +33,7 @@ func TestReviewFailedLensRegistrationExitsNonZero(t *testing.T) {
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 
 	var mergeErr error
-	out := captureStdout(t, func() { mergeErr = cmdMerge(export, true) })
+	out := captureStdout(t, func() { mergeErr = cmdMerge(export, true, nil) })
 	if mergeErr == nil || !strings.Contains(mergeErr.Error(), "NOT registered") {
 		t.Errorf("a lens that failed to register must fail the command, got %v", mergeErr)
 	}

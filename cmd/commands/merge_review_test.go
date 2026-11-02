@@ -13,8 +13,8 @@ import (
 // Command-layer regressions from the adversarial review of `witness merge`. Each failed on the
 // first implementation.
 
-// The dry run must not promise a registration the apply then refuses. That disagreement kept a
-// re-run from ever converging: every --apply took another full-archive backup.
+// The plan must not promise a registration the merge then refuses. That disagreement kept a
+// re-run from ever converging: every merge took another full-archive backup.
 func TestReviewRefusedLensIsReportedAndDoesNotRetakeBackups(t *testing.T) {
 	export := mergeFixture(t, func(st *store.Store) {
 		if err := st.RegisterLens("math", writeLensDir(t, "math", "mine math", "fold math")); err != nil {
@@ -27,12 +27,12 @@ func TestReviewRefusedLensIsReportedAndDoesNotRetakeBackups(t *testing.T) {
 	}
 	root := openBase(t).Root
 
-	out := captureStdout(t, func() { _ = cmdMerge(export, false) })
+	out := captureStdout(t, func() { _ = cmdMerge(export, false, answer(false, nil)) })
 	if strings.Contains(out, "math: will be registered") || !strings.Contains(out, "would be refused") {
-		t.Errorf("the dry run promised a registration the apply will refuse:\n%s", out)
+		t.Errorf("the plan promised a registration the merge will refuse:\n%s", out)
 	}
-	_ = captureStdout(t, func() { _ = cmdMerge(export, true) })
-	_ = captureStdout(t, func() { _ = cmdMerge(export, true) })
+	_ = captureStdout(t, func() { _ = cmdMerge(export, true, nil) })
+	_ = captureStdout(t, func() { _ = cmdMerge(export, true, nil) })
 	if n := len(premergeBackups(t, root)); n != 1 {
 		t.Errorf("re-running a merge with nothing new took %d backups; want 1", n)
 	}
@@ -45,7 +45,7 @@ func TestReviewBackupIsASiblingEvenWithATrailingSlash(t *testing.T) {
 	root := openBase(t).Root
 	t.Setenv("WITNESS_HOME", root+string(os.PathSeparator))
 	_ = captureStdout(t, func() {
-		if err := cmdMerge(export, true); err != nil {
+		if err := cmdMerge(export, true, nil); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -81,7 +81,7 @@ func TestReviewDataForAnUndefinedLensIsReported(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	openBase(t)
 
-	out := captureStdout(t, func() { _ = cmdMerge(db, false) })
+	out := captureStdout(t, func() { _ = cmdMerge(db, false, answer(false, nil)) })
 	if !strings.Contains(out, "math: its data arrives, but there is no definition for it here") {
 		t.Errorf("data for an undefined lens must be reported:\n%s", out)
 	}
@@ -99,7 +99,7 @@ func TestReviewPortraitPromptCommandCreatesTheDirectory(t *testing.T) {
 		}
 	})
 	openBase(t)
-	out := captureStdout(t, func() { _ = cmdMerge(export, false) })
+	out := captureStdout(t, func() { _ = cmdMerge(export, false, answer(false, nil)) })
 	if !strings.Contains(out, "mkdir -p ") || !strings.Contains(out, `cp "`) {
 		t.Errorf("the printed command must create the directory and quote its paths:\n%s", out)
 	}
