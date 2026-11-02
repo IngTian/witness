@@ -81,6 +81,13 @@ type lensTryOpts struct {
 
 var runnerForStore = platform.RunnerFor
 
+// tryProgress starts the preview's progress line on stderr. A seam so a test can read every
+// snapshot, which the line itself only prints once per Where when stderr is not a terminal.
+var tryProgress = func() (distill.ProgressFunc, func()) {
+	pl := startProgress()
+	return pl.update, pl.finish
+}
+
 // --- JSON output shape (stable, for diffing v1-vs-v2 prompt runs) -------------
 
 type lensTryObsJSON struct {
@@ -238,7 +245,25 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	if conc > len(sessions) {
 		conc = len(sessions)
 	}
+	// Progress on stderr, so stdout (and --json) is untouched: each preview is a model call per
+	// chunk and can run for minutes, and nothing prints until all of them are back.
+	update, finish := tryProgress()
+	var mu sync.Mutex
+	previewed := 0
+	show := func(more ...distill.Stage) {
+		update(distill.Progress{Where: ln.Name, Stages: append(
+			[]distill.Stage{{Name: "previewing sessions", Done: previewed, Total: len(sessions)}}, more...)})
+	}
+	show()
 	results := runPreviews(conc, sessions, func(sess string) tryResult {
+		// Deferred so a preview that PANICS still counts as finished: defers run while the panic
+		// unwinds, before runPreviews' recover turns it into this session's error.
+		defer func() {
+			mu.Lock()
+			previewed++
+			show()
+			mu.Unlock()
+		}()
 		start := time.Now()
 		obs, chunks, drifted, err := distill.PreviewMine(ctx, runFn, cfg, st, sess, ln)
 		return tryResult{obs: obs, chunks: chunks, drifted: drifted, err: err, elapsed: time.Since(start)}
@@ -250,8 +275,11 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// inherently weak (no accumulated `prior` facets to contradict) — documented in help.
 	var review *reviewPreview
 	if opts.review {
-		review = runReviewPreview(ctx, runFn, cfg, ln, results)
+		// The review stage appears only when its one call is actually made (nothing mined → no
+		// call), so the total never counts a call that will not happen.
+		review = runReviewPreview(ctx, runFn, cfg, ln, results, func() { show(distill.Stage{Name: "reviewing", Total: 1}) })
 	}
+	finish() // clear the line before the results print over it
 
 	if opts.asJSON {
 		return lensTryEmitJSON(st, cfg, ln, candidate, sessions, results, review)
@@ -276,7 +304,9 @@ type reviewPreview struct {
 // A panic in the review call is caught and turned into rp.err (mirroring the extract
 // fan-out's recover barrier): a review failure must degrade to a reported error, never
 // crash the command and discard the already-computed extract output.
-func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Config, ln *lens.Lens, results []tryResult) (rp *reviewPreview) {
+//
+// calling, if set, is told just before the review call is made (for progress).
+func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Config, ln *lens.Lens, results []tryResult, calling func()) (rp *reviewPreview) {
 	var obs []store.Observation
 	for _, r := range results {
 		obs = append(obs, r.obs...)
@@ -290,6 +320,9 @@ func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Con
 			rp.err = fmt.Errorf("panic during review: %v", r)
 		}
 	}()
+	if calling != nil {
+		calling()
+	}
 	facets, err := distill.PreviewReview(ctx, runFn, cfg, ln, obs, nil /* no prior facets for a candidate */)
 	rp.facets = facets
 	// Classify a no-array reply as DRIFT (a too-weak review model conversed instead of

@@ -79,6 +79,14 @@ func EffectiveConcurrency(want int, concurrentRunSafe bool) int {
 // in-flight char budget across concurrent miners; <=0 → maxInFlightChars. Both are
 // injectable so the gate is unit-testable without a real 200K-token corpus; production
 // worker.go leaves them zero-valued and gets the defaults.
+//
+// Progress, when set, is told each time a session finishes — whatever the outcome: a failed,
+// backed-off or quiet session is finished work. The unit is SESSIONS, not model calls: a
+// session's chunk count is only known once its transcript is read, so a call total could not be
+// known up front, and "312 sessions" is what a backfill means to the person waiting on it. The
+// total is the sessions each scan committed to attempt (a Max cap included); a re-scan that finds
+// sessions captured mid-drain adds them, so the stage is Open. Called only from the Drain
+// goroutine (never from a miner), with Where left empty for the caller to name. nil is silent.
 type DrainOpts struct {
 	Conc      int
 	Pending   func() []string
@@ -88,6 +96,7 @@ type DrainOpts struct {
 	Attempted map[string]bool
 	Sized     func(session string) int
 	MaxChars  int
+	Progress  ProgressFunc
 }
 
 // attemptKey identifies a (session, raw-turn-count) attempt — the question it
@@ -186,6 +195,12 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		attempted = map[string]bool{}
 	}
 	processed := 0
+	queued := 0 // sessions the scans so far committed to attempt: Progress's total
+	tick := func(done int) {
+		if opts.Progress != nil {
+			opts.Progress(Progress{Stages: []Stage{{Name: "mining sessions", Done: done, Total: queued, Open: true}}})
+		}
+	}
 
 	for {
 		// Build the next batch of not-yet-attempted pending sessions. Re-scanning
@@ -201,6 +216,12 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		if len(batch) == 0 {
 			return processed
 		}
+		if opts.Max > 0 {
+			queued += max(0, min(len(batch), opts.Max-processed)) // a capped run must not stall short
+		} else {
+			queued += len(batch)
+		}
+		tick(processed)
 
 		if conc == 1 {
 			// Serial fast path: no goroutines/channels for the common laptop case
@@ -213,6 +234,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 				m, err := w.mineSessionSafe(ctx, s)
 				w.commitResult(m, err, &existing, opts.OnCommit)
 				processed++
+				tick(processed)
 			}
 			continue
 		}
@@ -223,7 +245,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		// #22 review #3). Commits happen as each map finishes (commit-as-ready, issue
 		// #56 B3) — no slow head stalls finished followers. Only the single Drain
 		// goroutine commits, so the store stays single-writer and `existing` race-free.
-		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, &existing, attempted, stop, reached, processed, opts.OnCommit)
+		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, &existing, attempted, stop, reached, processed, opts.OnCommit, tick)
 
 		if stop() || reached(processed) {
 			return processed
@@ -243,7 +265,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 // The char accounting is mutated only by this single dispatcher goroutine (add at
 // dispatch, subtract on reap), so it stays lock-free and race-free like the rest of
 // the reducer.
-func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, existing *[]store.Observation, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string)) int {
+func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, existing *[]store.Observation, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string), tick func(done int)) int {
 	type minedResult struct {
 		idx int // submission index, for char-budget accounting
 		m   *SessionMining
@@ -321,6 +343,7 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 		}
 		w.commitResult(r.m, r.err, existing, onCommit)
 		committed++
+		tick(processedBase + committed) // reap runs on the Drain goroutine only, so tick does too
 	}
 
 	dispatched := 0
