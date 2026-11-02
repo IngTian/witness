@@ -26,10 +26,11 @@ var dataDirNames = []string{"witness", "claude-witness"}
 //
 // The data layers (raw turns, observations, bi-temporal facets) plus the
 // distillation queue live in a single SQLite database (witness.db). The derived
-// profile summaries (profile/*.md), user-authored config (config.toml), and lens
-// definitions (lenses/<name>/ — a lens.json plus extract.md/review.md, issue #75)
-// stay as plain files, since they are meant to be read (and, for config/lenses,
-// edited) directly.
+// profile summaries (profile/*.md), user-authored config (config.toml), lens
+// definitions (lenses/<name>/ — a lens.json plus extract.md/review.md, issue #75), and
+// the archive's own summarizer prompts (summarize/*.md, overriding the bundled ones)
+// stay as plain files, since they are meant to be read (and, for config, lenses and
+// summarize, edited) directly. export.go's exportInclude must list every one of them.
 //
 // Internally Store is a thin facade over a set of focused, independently-testable
 // concern types (issue #73-C1) — metaKV, and the others added alongside it — each

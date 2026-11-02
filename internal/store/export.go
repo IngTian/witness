@@ -23,16 +23,25 @@ import (
 //     Prompt text appears NOWHERE in the database, so a lens the user AUTHORED is
 //     simply gone. A bundled lens can be re-seeded from prompts/; a hand-written one
 //     cannot, and for a non-person corpus it is the most valuable thing in the install.
-//   - profile/ — the L4 narrative. Mostly derived from L2 facets and rebuilt by a
-//     review, EXCEPT a hand-edited unified.md: editing that file directly is the
-//     supported way to shape the cross-lens portrait (#100), and no other copy exists.
+//   - profile/ — the L4 narrative. Derived from L2 facets and rebuilt whenever they
+//     change, so it is included only so a restored archive has a readable portrait
+//     before its next rebuild. A hand edit to profile/unified.md does NOT survive that
+//     rebuild (the summarizer rewrites the file when its signature changes) — the
+//     durable way to shape the portrait is summarize/, below.
+//   - summarize/ — the archive's OWN summarizer prompts (lens.md, unified.md), which
+//     override the bundled ones (internal/lens SummarizeOverrideDir; #100). Like a lens
+//     prompt, this text is in no database. It was missing from this list for as long as
+//     the list has existed — so an archive that customised its portrait (a market corpus
+//     whose portrait is about the market, not a person) lost that customisation from
+//     every backup taken exactly as instructed. The census test could not catch it,
+//     because no test ever created the directory.
 //
 // exportInclude is an INCLUDE list, deliberately not an exclude list. A new entry
 // added to the data root must be classified on purpose — here, or in exportSkip with
 // a reason — rather than silently dropping out of every backup, which is precisely
 // the bug this function exists to fix. TestExportAllClassifiesEveryRootEntry fails on
 // an unclassified entry so the decision can't be skipped.
-var exportInclude = []string{"config.toml", "lenses", "profile"}
+var exportInclude = []string{"config.toml", "lenses", "profile", "summarize"}
 
 // exportSkip records what is deliberately left OUT of a complete export, with the
 // reason, so "is this missing on purpose?" is answerable from the source:
