@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderPrimitivesPlainWhenNoColor(t *testing.T) {
@@ -107,5 +108,25 @@ func TestStyleHelpersPlainForms(t *testing.T) {
 	}
 	if got := tildePath(home + "other"); got != home+"other" {
 		t.Errorf("a sibling of home is not under it: %q", got)
+	}
+	long := strings.Repeat("x", 9000)
+	if got := fitLine(long, 8); got != long {
+		t.Errorf("piped output keeps the full text (got %d runes)", len(got))
+	}
+}
+
+func TestShortTime(t *testing.T) {
+	now := time.Date(2026, 11, 2, 15, 0, 0, 0, time.Local)
+	at := func(d time.Duration) string { return now.Add(d).UTC().Format(time.RFC3339) }
+	for ts, want := range map[string]string{
+		at(-2 * time.Hour):       "today 13:00",
+		at(-20 * time.Hour):      "yesterday 19:00",
+		at(-30 * 24 * time.Hour): now.Add(-30 * 24 * time.Hour).Format("2006-01-02"),
+		"not a time":             "not a time",
+		"":                       "",
+	} {
+		if got := shortTimeAt(ts, now); got != want {
+			t.Errorf("shortTimeAt(%q) = %q, want %q", ts, got, want)
+		}
 	}
 }

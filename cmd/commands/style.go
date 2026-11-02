@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
 )
@@ -183,6 +184,48 @@ func tildePath(p string) string {
 		return "~" + string(os.PathSeparator) + rest
 	}
 	return p
+}
+
+// fitLine cuts s to the terminal width with an ellipsis, leaving room for `used` columns already
+// on the line — on a terminal only, where an 8,000-character facet value would otherwise soft-wrap
+// back to column 0 and lose its indent. Piped output keeps the full text, so `> file` and `| grep`
+// still see everything.
+func fitLine(s string, used int) string {
+	if !useColor {
+		return s
+	}
+	width := termWidth(os.Stdout)
+	if width <= 0 {
+		return s
+	}
+	room := width - used - 1
+	r := []rune(s)
+	if room <= 1 || len(r) <= room {
+		return s
+	}
+	return string(r[:room-1]) + "…"
+}
+
+// shortTime renders an RFC3339 stamp the way a person reads it: "today 05:29", "yesterday 23:10",
+// or "2026-10-05". Anything unparseable is returned as given.
+func shortTime(ts string) string { return shortTimeAt(ts, time.Now()) }
+
+func shortTimeAt(ts string, now time.Time) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	t, now = t.Local(), now.Local()
+	y, m, d := now.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	switch {
+	case !t.Before(today):
+		return "today " + t.Format("15:04")
+	case !t.Before(today.AddDate(0, 0, -1)):
+		return "yesterday " + t.Format("15:04")
+	default:
+		return t.Format("2006-01-02")
+	}
 }
 
 // humanCount groups thousands so a six-digit count is readable at a glance.
