@@ -12,12 +12,7 @@ import (
 // nothing here is ever reached by a --json path.
 
 // glyph picks the fancy form on a terminal and its ASCII stand-in in a pipe or under NO_COLOR.
-func glyph(fancy, plain string) string {
-	if useColor {
-		return fancy
-	}
-	return plain
-}
+func glyph(fancy, plain string) string { return outPen().pick(fancy, plain) }
 
 // rule is a dim horizontal rule, n wide but never wider than the terminal ("-" when plain).
 func rule(n int) string {
@@ -41,10 +36,7 @@ func result(g, msg, note string) string {
 // color rule (useColorErr), so `witness profile > file` keeps the file clean and the terminal
 // still gets the glyph.
 func errLine(fancy, plain, color, msg string) string {
-	if useColorErr {
-		return styledErr(color, fancy) + " " + msg
-	}
-	return plain + " " + msg
+	return errPen().mark(color, fancy, plain) + " " + msg
 }
 
 // wrapHanging word-wraps s to the terminal width, starting at column `used` and continuing every
@@ -60,13 +52,15 @@ func wrapHanging(s string, used int) string {
 	var b strings.Builder
 	for li, line := range strings.Split(s, "\n") {
 		if li > 0 {
-			b.WriteString("\n" + pad)
+			b.WriteString("\n")
+			b.WriteString(pad)
 		}
 		col := used
 		for i, w := range strings.Fields(line) {
 			if i > 0 {
 				if col+1+cols(w) >= width {
-					b.WriteString("\n" + pad)
+					b.WriteString("\n")
+					b.WriteString(pad)
 					col = used
 				} else {
 					b.WriteByte(' ')

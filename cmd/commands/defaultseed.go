@@ -114,11 +114,7 @@ func seedDefaultLensOnOpen(st *store.Store) {
 	// to the editor, so this needs a terminal on both.
 	if seedNoticeWanted() {
 		fmt.Fprintln(os.Stderr, errLine("✓", "[ok]", ansiGreen, `added the built-in "default" lens — it runs on every session`))
-		arrow := "->"
-		if useColorErr {
-			arrow = "↳"
-		}
-		fmt.Fprintln(os.Stderr, "  "+styledErr(ansiDim, arrow+" turn it off  ")+" witness lens disable default")
+		fmt.Fprintln(os.Stderr, errPen().hint(2, "turn it off", "witness lens disable default"))
 	}
 }
 

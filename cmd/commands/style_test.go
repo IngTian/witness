@@ -115,6 +115,38 @@ func TestStyleHelpersPlainForms(t *testing.T) {
 	}
 }
 
+// The pen is the one place a stream's decoration rule lives: on, color AND fancy glyphs; off, plain
+// text AND their ASCII stand-ins. Every glyph and hint helper is built on it.
+func TestPenDecidesColorAndGlyphsTogether(t *testing.T) {
+	on, off := pen{on: true}, pen{on: false}
+	if got := on.mark(ansiGreen, "✓", "[ok]"); got != ansiGreen+"✓"+ansiReset {
+		t.Errorf("on: %q", got)
+	}
+	if got := off.mark(ansiGreen, "✓", "[ok]"); got != "[ok]" {
+		t.Errorf("off: %q", got)
+	}
+	if got := on.paint(ansiDim, ""); got != "" {
+		t.Errorf("painting nothing must emit no escape codes: %q", got)
+	}
+	if got := off.hint(16, "define it", "witness lens register x <dir>"); got != strings.Repeat(" ", 16)+"-> define it     witness lens register x <dir>" {
+		t.Errorf("off hint: %q", got)
+	}
+	if got := on.hint(2, "diagnose", "witness doctor"); got != "  "+ansiDim+"↳ diagnose     "+ansiReset+" witness doctor" {
+		t.Errorf("on hint: %q", got)
+	}
+	// Under --json, stderr's pen is off even on a terminal: the error is data.
+	old, oldArgs := useColorErr, os.Args
+	defer func() { useColorErr, os.Args = old, oldArgs }()
+	useColorErr, os.Args = true, []string{"witness", "facets", "--json"}
+	if errPen().on {
+		t.Error("errPen must be off under --json")
+	}
+	os.Args = []string{"witness", "facets"}
+	if !errPen().on {
+		t.Error("errPen must follow useColorErr otherwise")
+	}
+}
+
 // fitTo cuts by terminal COLUMNS: a CJK character fills two, and this archive's text is often
 // Chinese — a rune count let such lines overflow the terminal by several columns.
 func TestFitToCountsColumnsNotRunes(t *testing.T) {

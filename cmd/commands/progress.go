@@ -205,7 +205,7 @@ type segment struct{ plain, code string }
 func (p *progressLine) terminalSegments(cells int) []segment {
 	v := p.view()
 	spin, fill, empty := spinnerFrames[p.frame%len(spinnerFrames)], "━", "─"
-	if !p.color { // style.go's rule: no color, ASCII decoration (a non-UTF-8 terminal reads it too)
+	if pn := (pen{on: p.color}); !pn.on { // style.go's rule: no color, ASCII decoration too
 		spin, fill, empty = asciiSpinner[p.frame%len(asciiSpinner)], "#", "-"
 	}
 	segs := []segment{{spin, ansiCyan}, {" ", ""}}
@@ -268,9 +268,7 @@ func (p *progressLine) draw() {
 			text = string([]rune(text)[:max(0, limit-n)])
 		}
 		n += utf8.RuneCountInString(text)
-		if p.color && s.code != "" && text != "" {
-			text = s.code + text + ansiReset
-		}
+		text = pen{on: p.color}.paint(s.code, text)
 		b.WriteString(text)
 	}
 	fmt.Fprintf(p.w, "\r%s%s", b.String(), spaces(max(0, p.width-n)))

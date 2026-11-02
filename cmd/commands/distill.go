@@ -408,10 +408,7 @@ func cmdDistillStatus(asJSON bool) error {
 	case "running":
 		workerText = enabledGlyph(true) + " " + green(status)
 	case "stopping":
-		workerText = "* " + status
-		if useColor {
-			workerText = yellow("● " + status)
-		}
+		workerText = yellow(glyph("●", "*") + " " + status)
 	}
 	var about []string
 	if pid != "" {

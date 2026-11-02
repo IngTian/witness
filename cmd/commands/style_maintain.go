@@ -26,41 +26,19 @@ func resultRow(glyph, name, value, note string) string {
 
 // padGlyph pads an ASCII glyph ([ok], [!], +) to one width when color is off, so whatever follows
 // it lines up from row to row; on a terminal every glyph is already one column.
-func padGlyph(glyph string) string {
-	if useColor {
-		return glyph
-	}
-	return fmt.Sprintf("%-4s", glyph)
-}
+func padGlyph(glyph string) string { return outPen().pick(glyph, fmt.Sprintf("%-4s", glyph)) }
 
 // subHint is a next step that belongs to the row above it, indented under that row's value column
 // rather than the screen's ("                ↳ enable  witness lens enable math").
-func subHint(label, command string) string {
-	arrow := "->"
-	if useColor {
-		arrow = "↳"
-	}
-	return strings.Repeat(" ", 16) + dim(arrow+" "+label) + "  " + command
-}
+func subHint(label, command string) string { return outPen().hint(16, label, command) }
 
 // errText styles text that will be part of an ERROR message, which reportError prints whole to
 // stderr after its ✗. Plain when stderr is not a terminal, and always plain under --json, where the
 // message is data inside {"error": …}.
-func errText(code, s string) string {
-	if jsonOutputMode() {
-		return s
-	}
-	return styledErr(code, s)
-}
+func errText(code, s string) string { return errPen().paint(code, s) }
 
 // errHint is hint() for a line inside an error message: "  ↳ label  command" on stderr.
-func errHint(label, command string) string {
-	arrow := "->"
-	if useColorErr && !jsonOutputMode() {
-		arrow = "↳"
-	}
-	return "  " + errText(ansiDim, fmt.Sprintf("%s %-13s", arrow, label)) + " " + command
-}
+func errHint(label, command string) string { return errPen().hint(2, label, command) }
 
 // errRow is an aligned "  label  text" line inside an error message — the cause of a failure,
 // shown under its headline instead of only in witness.log.

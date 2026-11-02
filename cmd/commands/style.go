@@ -32,20 +32,48 @@ const (
 	ansiCyan   = "\x1b[36m"
 )
 
-func styled(code, s string) string {
-	if !useColor {
+// pen is the decoration rule for ONE output stream. Color and the fancy glyphs (✓ ↳ ━) travel
+// together: both only when that stream is a terminal and NO_COLOR is unset; otherwise the ASCII
+// stand-ins, so a pipe, a log, or a non-UTF-8 terminal reads cleanly. There are two pens because the
+// streams can differ — `witness facets > file` on a terminal has a plain stdout and a styled stderr —
+// and every helper below asks one of them instead of re-deciding the rule itself.
+type pen struct{ on bool }
+
+// outPen is stdout's pen.
+func outPen() pen { return pen{on: useColor} }
+
+// errPen is stderr's pen — plain under --json as well, where an error is data inside {"error": …}.
+func errPen() pen { return pen{on: useColorErr && !jsonOutputMode()} }
+
+// paint wraps s in an ANSI style when the pen is on.
+func (p pen) paint(code, s string) string {
+	if !p.on || code == "" || s == "" {
 		return s
 	}
 	return code + s + ansiReset
 }
 
-// styledErr is styled for text bound for stderr.
-func styledErr(code, s string) string {
-	if !useColorErr {
-		return s
+// pick chooses the fancy form or its ASCII stand-in.
+func (p pen) pick(fancy, plain string) string {
+	if p.on {
+		return fancy
 	}
-	return code + s + ansiReset
+	return plain
 }
+
+// mark is a colored glyph with its ASCII stand-in.
+func (p pen) mark(code, fancy, plain string) string { return p.paint(code, p.pick(fancy, plain)) }
+
+// hint is a next step, `indent` columns in: "↳ label  command" — the label dim and padded so the
+// commands line up and can be copied whole.
+func (p pen) hint(indent int, label, command string) string {
+	return strings.Repeat(" ", indent) + p.paint(ansiDim, fmt.Sprintf("%s %-13s", p.pick("↳", "->"), label)) + " " + command
+}
+
+func styled(code, s string) string { return outPen().paint(code, s) }
+
+// styledErr is styled for text bound for stderr.
+func styledErr(code, s string) string { return errPen().paint(code, s) }
 
 func bold(s string) string   { return styled(ansiBold, s) }
 func dim(s string) string    { return styled(ansiDim, s) }
@@ -57,38 +85,9 @@ func cyan(s string) string   { return styled(ansiCyan, s) }
 // okGlyph / warnGlyph / badGlyph are the status marks used down the left margin
 // of doctor's report. They degrade to ASCII when color is off so a non-UTF8 or
 // piped terminal still reads cleanly.
-func okGlyph() string {
-	if useColor {
-		return green("✓")
-	}
-	return "[ok]"
-}
-
-func warnGlyph() string {
-	if useColor {
-		return yellow("!")
-	}
-	return "[!]"
-}
-
-func badGlyph() string {
-	if useColor {
-		return red("✗")
-	}
-	return "[x]"
-}
-
-// label renders a fixed-width, dimmed field label so aligned rows line up. The
-// padding is applied to the plain text BEFORE coloring, so ANSI escape bytes
-// don't throw the column width off.
-func label(name string) string {
-	const width = 10
-	padded := name + ":"
-	for len(padded) < width {
-		padded += " "
-	}
-	return dim(padded)
-}
+func okGlyph() string   { return outPen().mark(ansiGreen, "✓", "[ok]") }
+func warnGlyph() string { return outPen().mark(ansiYellow, "!", "[!]") }
+func badGlyph() string  { return outPen().mark(ansiRed, "✗", "[x]") }
 
 // header renders a section title (bold on a TTY, plain otherwise). Callers add
 // their own surrounding blank lines for rhythm.
@@ -97,16 +96,10 @@ func header(title string) string { return bold(title) }
 // enabledGlyph is the on/off mark for lists (lens list, status). Green ● when on,
 // dim ○ when off; ASCII * / - when color is disabled so piped/non-UTF8 stays clean.
 func enabledGlyph(on bool) string {
-	if !useColor {
-		if on {
-			return "*"
-		}
-		return "-"
-	}
 	if on {
-		return green("●")
+		return outPen().mark(ansiGreen, "●", "*")
 	}
-	return dim("○")
+	return outPen().mark(ansiDim, "○", "-")
 }
 
 // kvRow renders an aligned "name  value (note)" row. The name is padded to a fixed
@@ -134,30 +127,14 @@ func footer(summary string) string { return dim(summary) }
 // steps on hint lines below it, never inside a sentence.
 
 // skipGlyph marks a no-op result: dim ○, or [-] without color.
-func skipGlyph() string {
-	if useColor {
-		return dim("○")
-	}
-	return "[-]"
-}
+func skipGlyph() string { return outPen().mark(ansiDim, "○", "[-]") }
 
 // bgGlyph marks work handed to the background: green ●, or [>] without color.
-func bgGlyph() string {
-	if useColor {
-		return green("●")
-	}
-	return "[>]"
-}
+func bgGlyph() string { return outPen().mark(ansiGreen, "●", "[>]") }
 
 // hint renders a next step as "  ↳ label  command": the label dim and padded so the commands line
 // up and can be copied whole. "->" without color.
-func hint(label, command string) string {
-	arrow := "->"
-	if useColor {
-		arrow = "↳"
-	}
-	return "  " + dim(fmt.Sprintf("%s %-13s", arrow, label)) + " " + command
-}
+func hint(label, command string) string { return outPen().hint(2, label, command) }
 
 // title is a read command's first line: bold "witness <cmd>", then a dim " · <scope>" and a dim
 // summary, each omitted when empty.
