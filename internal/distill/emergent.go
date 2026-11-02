@@ -78,16 +78,13 @@ func kBand(n int) []int {
 }
 
 // Candidates builds ranked emergent-arc candidates for one lens. Pure over its inputs.
-func Candidates(obs []store.Observation, facets []store.Facet, lens string) []CandidateArc {
-	return candidates(obs, facets, lens, nil)
-}
-
-// candidates is Candidates with onK, when non-nil, called after each k of the band: the band is
-// where the time goes. Every k is a full O(n²) mutual-kNN, so the step count is known up front
-// and each costs about the same — measured on a real 17,413-observation lens, 14 k values at
-// 2m33s–2m50s each, 38 minutes of CPU before the first verify call. Everything after the band
-// (re-expansion, coverage, the sort) took 5s there, so it is not counted as a step.
-func candidates(obs []store.Observation, facets []store.Facet, lens string, onK func(done, total int)) []CandidateArc {
+//
+// onK, when non-nil, is called after each k of the band: the band is where the time goes. Every k
+// is a full O(n²) mutual-kNN, so the step count is known up front and each costs about the same —
+// measured on a real 17,413-observation lens, 14 k values at 2m33s–2m50s each, 38 minutes of CPU
+// before the first verify call. Everything after the band (re-expansion, coverage, the sort) took
+// 5s there, so it is not counted as a step.
+func Candidates(obs []store.Observation, facets []store.Facet, lens string, onK func(done, total int)) []CandidateArc {
 	band := kBand(len(obs))
 
 	// Persistence at the PAIR level (base-invariant, and robust to a cluster gaining or
@@ -483,7 +480,7 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 		// the first call. Same calls as skipping them inside it: a lens's candidates are deduped
 		// by member set, so no verify below can change whether a later candidate was seen.
 		var todo []pendingMark
-		for _, c := range candidates(obs, facets, ln.Name, cluster) {
+		for _, c := range Candidates(obs, facets, ln.Name, cluster) {
 			if sig := arcSignature(ln.Name, c.Members); !r.seenUnchanged(ln.Name, sig, c) {
 				todo = append(todo, pendingMark{ln.Name, sig, c}) // unseen (idempotency skip)
 			}

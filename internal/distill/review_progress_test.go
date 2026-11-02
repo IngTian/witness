@@ -70,8 +70,11 @@ func TestReviewProgressCountsEveryWindow(t *testing.T) {
 // and then its verify calls, each with a total known before the first step.
 func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 	s := newStore(t)
+	// Three arcs, so a budget of 1 leaves arcs unverified: a total that grew on a SUCCESS (not only
+	// on a failure) would end short of it, at 2/3.
 	seedArc(t, s, "a", 6, []float32{1, 0, 0})
 	seedArc(t, s, "b", 6, []float32{0, 1, 0})
+	seedArc(t, s, "c", 6, []float32{0, 0, 1})
 	obs, _ := s.ReadObservations("math")
 	band := len(kBand(len(obs)))
 
@@ -83,10 +86,17 @@ func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 			}
 			return `[]`, nil // a rejection: marks the arc seen
 		})
+		// A lens with no observations has nothing to cluster and must say nothing.
+		r.Lenses = append(r.Lenses, &lens.Lens{Name: "quiet", Emerge: "EMERGE", Review: "REVIEW"})
 		r.MaxVerify = maxVerify
 		r.Progress = func(p Progress) { evs = append(evs, p) }
 		if err := r.RunFull(context.Background(), time.Now()); err != nil {
 			t.Fatal(err)
+		}
+		for _, e := range evs {
+			if e.Where != "math" {
+				t.Fatalf("every event must name the lens it is about, and only a lens with work: %+v", e)
+			}
 		}
 		return evs, calls
 	}
@@ -124,12 +134,12 @@ func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 		t.Errorf("verify progress ended at %d/%d after %d calls", l.Done, l.Total, calls)
 	}
 
-	// The other arc is still unseen (the failed one was not marked): an unbudgeted run verifies
-	// exactly what is left, with that total fixed from the first event.
+	// Two arcs are still unseen (the failed one was not marked, the third was past the budget): an
+	// unbudgeted run verifies exactly those, with that total fixed from the first event.
 	evs, calls = run(0, 0)
 	_, vf = split(evs)
-	if calls == 0 || len(vf) == 0 {
-		t.Fatalf("want the remaining arcs verified, got %d calls", calls)
+	if calls != 2 || len(vf) == 0 {
+		t.Fatalf("want the 2 remaining arcs verified, got %d calls", calls)
 	}
 	for _, e := range vf {
 		if v := stage(t, e, "verifying arcs"); v.Total != calls || v.Open || e.Where != "math" {

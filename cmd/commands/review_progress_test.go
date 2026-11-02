@@ -42,3 +42,32 @@ func TestPhaseProgressStartsALinePerPhase(t *testing.T) {
 		}
 	}
 }
+
+// On a terminal the line being replaced must be finished first: it is cleared, and its once-a-second
+// redraw stops, or two lines would take turns overwriting the same row.
+func TestPhaseProgressFinishesTheLineItReplaces(t *testing.T) {
+	var lines []*progressLine
+	var bufs []*bytes.Buffer
+	p := &phaseProgress{start: func() *progressLine {
+		b := &bytes.Buffer{}
+		l := &progressLine{w: b, tty: true, start: time.Now(), stop: make(chan struct{}), done: make(chan struct{})}
+		go l.tick()
+		lines, bufs = append(lines, l), append(bufs, b)
+		return l
+	}}
+	p.update(distill.Progress{Where: "default", Stages: []distill.Stage{{Name: "folding windows", Total: 2}}})
+	p.update(distill.Progress{Where: "career", Stages: []distill.Stage{{Name: "folding windows", Total: 2}}})
+	l := lines[0]
+	l.mu.Lock()
+	cleared := strings.HasSuffix(bufs[0].String(), "\r") && l.width == 0
+	l.mu.Unlock()
+	select {
+	case <-l.done:
+	default:
+		t.Error("the replaced line's redraw is still running")
+	}
+	if !cleared {
+		t.Errorf("the replaced line was not cleared before the next one drew: %q", bufs[0].String())
+	}
+	p.finish()
+}
