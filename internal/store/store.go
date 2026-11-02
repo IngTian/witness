@@ -148,7 +148,10 @@ var SeedDefaultLens func(*Store)
 // fresh install. This is why the rename can never orphan data.
 func resolveRoot() (string, error) {
 	if home := os.Getenv("WITNESS_HOME"); home != "" {
-		return home, nil
+		// Cleaned, because Root is concatenated into SIBLING paths: with "~/snap/" (a shell
+		// tab-completes the slash) the merge backup `Root + ".premerge-…"` landed INSIDE the
+		// archive, and replacing the root as the undo instructions say deleted the backup with it.
+		return filepath.Clean(home), nil
 	}
 	base := os.Getenv("XDG_DATA_HOME")
 	if base == "" {

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 )
@@ -28,15 +29,28 @@ func (f *facetIO) ReadFacets() ([]Facet, error) { return f.readFacets(false) }
 func (f *facetIO) ReadActiveFacets() ([]Facet, error) { return f.readFacets(true) }
 
 func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
+	return readFacetsFrom(context.Background(), f.db, activeOnly)
+}
+
+// rowQuerier is what reading needs from either a *sql.DB or a *sql.Tx. The merge reads this
+// archive's facets INSIDE its transaction, so a facet change that lands while it runs either
+// precedes the read or waits for the commit — read outside, a concurrent write (a
+// delete_observation resetting a review cursor) would be silently overwritten by the merge.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func readFacetsFrom(ctx context.Context, q rowQuerier, activeOnly bool) ([]Facet, error) {
 	where := ""
 	if activeOnly {
 		where = ` WHERE f.archived_at = ''`
 	}
-	rows, err := f.db.Query(
+	rows, err := q.QueryContext(ctx,
 		`SELECT f.id, f.lens, f.dimension, f.key, f.last_seen, f.archived_at, f.merged_into, f.archive_reason,
 		        v.value, v.claim, v.confidence_seq, v.valid_from, v.valid_to, v.recorded_at, v.because_of, v.confidence
 		   FROM facets f
-		   LEFT JOIN facet_versions v ON v.facet_id = f.id` + where + `
+		   LEFT JOIN facet_versions v ON v.facet_id = f.id`+where+`
 		  ORDER BY f.lens, f.dimension, f.key, v.pos`)
 	if err != nil {
 		return nil, err
@@ -93,15 +107,25 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM facets`); err != nil {
+	if err := writeFacetsTx(tx, facets); err != nil {
 		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// writeFacetsTx is WriteFacets inside a caller's transaction: the same whole-table REPLACE, so the
+// same rule holds — the slice must be the complete profile. It exists for the merge, which must
+// write L2 in the same transaction as the L0/L1 rows the facets cite, or a crash between the two
+// leaves facets citing observations that never arrived.
+func writeFacetsTx(tx *sql.Tx, facets []Facet) error {
+	if _, err := tx.Exec(`DELETE FROM facets`); err != nil {
 		return err
 	}
 	fStmt, err := tx.Prepare(
 		`INSERT INTO facets(lens, dimension, key, last_seen, archived_at, merged_into, archive_reason)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	defer fStmt.Close()
@@ -109,7 +133,6 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 		`INSERT INTO facet_versions(facet_id, pos, value, claim, confidence_seq, valid_from, valid_to, recorded_at, because_of, confidence)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	defer vStmt.Close()
@@ -119,7 +142,6 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 		// the next review rather than at compaction time — a silent, delayed data loss.
 		res, err := fStmt.Exec(fc.Lens, fc.Dimension, fc.Key, fc.LastSeen, fc.ArchivedAt, fc.MergedInto, fc.ArchiveReason)
 		if err != nil {
-			tx.Rollback()
 			return err
 		}
 		id, _ := res.LastInsertId()
@@ -130,12 +152,11 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 			}
 			if _, err := vStmt.Exec(id, pos, v.Value, v.Claim, v.ConfidenceSeq, v.ValidFrom, v.ValidTo, v.RecordedAt,
 				string(because), v.Confidence); err != nil {
-				tx.Rollback()
 				return err
 			}
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // FacetTrajectory expands ONE active facet into the full history behind it: the facets that
