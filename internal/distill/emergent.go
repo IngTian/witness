@@ -473,10 +473,15 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 			// rejected assertion can't trigger a no-op L2 rewrite.
 			// 0 = no decay clock, deliberately. EmergentStore has no ReviewRowid — the long-arc
 			// pass must never touch the review watermark (§5c) — and ReadObservations does not
-			// populate Observation.Rowid, so there is no honest seq to stamp here. An
+			// populate Observation.Rowid, so there is no honest seq to stamp here. A NEW
 			// arc facet therefore does not decay until an ordinary review re-asserts it and
 			// stamps a real clock. Conservative: it keeps a facet readable rather than
 			// inventing a clock that would decay it by a number we made up.
+			//
+			// An arc landing on an EXISTING facet keeps that facet's clock: applyFacet treats 0
+			// as "unknown", and unknown never erases known (knownClock in reviewer.go). Before
+			// that rule, this call overwrote an established facet's real clock with 0 and
+			// froze it.
 			if !rv.applyFacet(byKey, ln.Name, rf, nowStr, 0) {
 				slog.Warn("emergent: dropped a malformed arc facet", "lens", ln.Name,
 					"dimension", rf.Dimension, "key", rf.Key)
