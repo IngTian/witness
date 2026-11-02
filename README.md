@@ -173,8 +173,11 @@ See [How it works](docs/how-it-works.md).
 - **Local embeddings.** Multilingual (English and Chinese) embeddings run pure-Go on your machine.
 - **Distillation uses your own tooling** — your existing Claude Code or OpenCode auth, whichever you
   bound. Nothing goes anywhere you haven't already chosen.
-- **Readable and deletable.** Plain SQLite and plain markdown. `witness export --all <dir>` snapshots
-  the whole archive; delete the data dir and it's gone.
+- **Readable and deletable.** Plain SQLite and plain markdown; delete the data dir and it's gone.
+- **Portable.** `witness export --all <dir>` snapshots the whole archive — the database, your config
+  and your lenses. On a fresh machine, point `WITNESS_HOME` at that directory. On one that already
+  has its own archive, `witness merge <dir>` brings yours in without replacing anything: it shows
+  what would arrive, asks, backs the archive up first, and prints how to undo.
 
 ## Where to look for things
 
