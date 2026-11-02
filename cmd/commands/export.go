@@ -31,9 +31,9 @@ func newExportCmd() *cobra.Command {
 			"for backups.\n\n" +
 			"Either form runs safely while the background worker is writing; no need to stop " +
 			"it. Restoring needs no separate command: a --all directory has the same layout as " +
-			"the data directory, so point WITNESS_HOME at it, or copy its contents into your " +
-			"data directory with witness stopped. A database-only snapshot restores the same " +
-			"way as witness.db.",
+			"the data directory, so point WITNESS_HOME at it, or copy its contents into an " +
+			"EMPTY data directory with witness stopped. If the machine already has an archive, " +
+			"copying replaces it — use `witness merge <dir>` instead, which keeps both.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdExport(args[0], force, all, asJSON)
@@ -84,7 +84,8 @@ func cmdExport(path string, force, all, asJSON bool) error {
 			fmt.Printf("  %s\n", name)
 		}
 		fmt.Println("safe to sync this directory (cloud/backup); do NOT sync the live data dir (WAL corruption).")
-		fmt.Println("to restore: set WITNESS_HOME to this directory, or copy its contents into your data dir with witness stopped.")
+		fmt.Println("to restore: set WITNESS_HOME to this directory, or copy its contents into an EMPTY data dir with witness stopped.")
+		fmt.Println("onto a machine that already has an archive: `witness merge <this dir>` — copying would replace that archive.")
 		return nil
 	}
 	if err := st.Export(path, force); err != nil {

@@ -91,16 +91,13 @@ const (
 // memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
 // file. And it stages into a sibling .tmp dir then atomically renames into place, so a
 // concurrent worker read never sees a half-built lens directory.
-func (r *lensReg) RegisterLens(name, srcDir string) error {
-	// Serialize registry mutations (this + SetLensModel) so two concurrent
-	// `witness lens register <same-name>` can't interleave through the shared staging
-	// path and silently destroy the lens. Non-blocking: contention returns a retryable
-	// error rather than corrupting — acceptable for a rare interactive admin op.
-	unlock, ok := r.lensRegistryLock()
-	if !ok {
-		return errLensBusy
-	}
-	defer unlock()
+// ValidLensName is the lens-NAME rule, shared by RegisterLens and by `witness merge`, which
+// brings lens names in from another archive's data and must refuse the same names registration
+// would. A lens name ends up as a profile file name and a meta-key suffix, so an unchecked one
+// is not cosmetic: "unified" collides with the cross-lens portrait's signature key, and a name
+// with a "/" fails WriteProfile after the model call — so no signature is stamped and every
+// profile read pays for a regeneration, forever.
+func ValidLensName(name string) error {
 	if ReservedLensName(name) {
 		return fmt.Errorf("lens name %q is reserved (the cross-lens 'unified' summary); choose another name", name)
 	}
@@ -112,6 +109,18 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 	// handle, closing that gap at the single source instead of sanitizing at every gate.
 	if sanitize(name) != name {
 		return fmt.Errorf("lens name %q must be a slug — letters, digits, '-', '_' only (no spaces or special characters)", name)
+	}
+	return nil
+}
+
+// CheckLensRegistration runs every check RegisterLens makes BEFORE it touches the registry, and
+// changes nothing. `witness merge` uses it so its dry run tells the truth: a lens it says "will
+// be registered" must not then be refused by the apply — that disagreement is what kept a re-run
+// from ever converging, re-taking a full-archive backup each time. Not under the registry lock: it
+// is advisory, and RegisterLens re-checks under the lock before writing.
+func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
+	if err := ValidLensName(name); err != nil {
+		return err
 	}
 	// Reject a name that case-insensitively collides with an ALREADY-registered lens
 	// under a different casing. The registry dir is sanitize(name) with case PRESERVED,
@@ -179,14 +188,34 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("lens source %q must be a directory holding %s + %s (+ optional %s); the single-file lens format was replaced (issue #75)", srcDir, lensExtractFile, lensReviewFile, lensConfigFile)
 	}
-	// Read EVERY source file into memory up front — before any destination mutation — so
-	// a self-register (srcDir == dest) can't lose review.md/lens.json to the wipe below.
 	extract, err := os.ReadFile(filepath.Join(srcDir, lensExtractFile))
 	if err != nil {
 		return fmt.Errorf("lens source is missing %s (the mining prompt): %w", lensExtractFile, err)
 	}
 	if strings.TrimSpace(string(extract)) == "" {
 		return fmt.Errorf("lens source %s is empty (the mining prompt is required)", lensExtractFile)
+	}
+	return nil
+}
+
+func (r *lensReg) RegisterLens(name, srcDir string) error {
+	// Serialize registry mutations (this + SetLensModel) so two concurrent
+	// `witness lens register <same-name>` can't interleave through the shared staging
+	// path and silently destroy the lens. Non-blocking: contention returns a retryable
+	// error rather than corrupting — acceptable for a rare interactive admin op.
+	unlock, ok := r.lensRegistryLock()
+	if !ok {
+		return errLensBusy
+	}
+	defer unlock()
+	if err := r.CheckLensRegistration(name, srcDir); err != nil {
+		return err
+	}
+	// Read EVERY source file into memory up front — before any destination mutation — so
+	// a self-register (srcDir == dest) can't lose review.md/lens.json to the wipe below.
+	extract, err := os.ReadFile(filepath.Join(srcDir, lensExtractFile))
+	if err != nil {
+		return fmt.Errorf("lens source is missing %s (the mining prompt): %w", lensExtractFile, err)
 	}
 	files := map[string][]byte{lensExtractFile: extract}
 	for _, fn := range []string{lensReviewFile, lensConfigFile, lensEmergeFile} { // all optional

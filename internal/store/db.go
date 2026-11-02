@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
@@ -189,7 +190,19 @@ func (s *Store) Export(dst string, force bool) error {
 // database no witness table exists yet. Contention on that write IS retryable via
 // busy_timeout, which is the whole point of taking the lock up front.
 func beginImmediate(db *sql.DB) (*sql.Tx, error) {
-	tx, err := db.Begin()
+	return beginImmediateOn(context.Background(), db)
+}
+
+// txBeginner is what beginImmediateOn needs: *sql.DB, or a pinned *sql.Conn. The merge pins one
+// connection — ATTACH is per-connection, and with MaxOpenConns(1) any statement not sent through
+// that connection would wait on it forever.
+type txBeginner interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
+// beginImmediateOn is beginImmediate on any txBeginner.
+func beginImmediateOn(ctx context.Context, b txBeginner) (*sql.Tx, error) {
+	tx, err := b.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -84,7 +84,9 @@ type ExportItem struct {
 // The snapshot directory has the SAME LAYOUT as the live data root, which is the
 // whole trick: the result is itself a working archive, so restoring needs no import
 // command and no undocumented reassembly. Either point witness at it in place
-// (WITNESS_HOME=<dir>) or copy its contents over a stopped install's data dir.
+// (WITNESS_HOME=<dir>) or copy its contents into an EMPTY data dir with witness stopped.
+// Copying over an existing archive REPLACES it; Merge (merge.go) is the way to bring a
+// snapshot into a machine that already has one.
 // TestExportAllSnapshotIsARunnableDataDir pins that property.
 //
 // Safe against losing the PREVIOUS snapshot: everything is staged into a sibling
