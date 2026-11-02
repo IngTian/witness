@@ -55,11 +55,16 @@ Five facets closed and reopened that way in one review. The generated brief even
 earlier sequencing thesis had been **falsified** by the new data — which is the whole point of keeping
 the history instead of the latest snapshot.
 
-**Honest caveat:** the engine is general, but everything witness *ships* is person-shaped — the
-built-in `default` lens, the example lens, and the summary prompts all say "notice things about the
-person". For a non-person corpus you write your own lens (three files) and, if you want, override the
-summary prompt with one file. There is no market-lens or research-lens preset yet; the machinery is
-domain-agnostic, the batteries included are not.
+At full size, [`examples/carney-market`](examples/carney-market) reads Canada's Prime Minister as a
+market variable: 188 hand-curated articles → 392 observations → 52 facets, with the lens, the
+unedited output, and the list of sources ([`examples/trump-market`](examples/trump-market) is its
+pair, 200 → 558 → 83).
+
+**Honest caveat:** the engine is general, but what witness runs *by default* is person-shaped — the
+built-in `default` lens and the summary prompts say "notice things about the person". For a
+non-person corpus you write your own lens (three files; start from
+[`prompts/lens/corpus-example`](prompts/lens/corpus-example) or one of the examples) and, if you want,
+override the summary prompt with one file.
 
 ## Is this you?
 
@@ -187,6 +192,7 @@ See [How it works](docs/how-it-works.md).
 | understand the four layers and what each produces | [How it works](docs/how-it-works.md) |
 | know why a confidence number changed on its own | [Confidence, and why it moves](docs/how-it-works.md#confidence-and-why-it-moves-on-its-own) |
 | **track something other than myself** — notes, research, a market, a knowledge base | [Writing a lens](docs/writing-a-lens.md) |
+| see a full-size run on a non-person corpus | [`examples/carney-market`](examples/carney-market) · [`examples/trump-market`](examples/trump-market) |
 | tune what gets noticed, or test a prompt before committing to it | [Writing a lens → the loop](docs/writing-a-lens.md#the-loop) |
 | look up a command or a flag | [Commands](docs/cli.md#commands) |
 | change the model, cadence, or concurrency | [Configuration](docs/cli.md#configuration) |

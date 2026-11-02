@@ -1,0 +1,4 @@
+{
+  "name": "carney-market",
+  "dimensions": ["objective_function", "us_trade", "domestic_policy", "monetary_conditions", "market_reaction"]
+}

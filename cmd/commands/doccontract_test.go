@@ -98,7 +98,7 @@ func TestDocumentedCommandsResolve(t *testing.T) {
 			}
 			name := strings.TrimLeft(strings.SplitN(tk, "=", 2)[0], "-")
 			f := cmd.Flags().Lookup(name)
-			if f == nil {
+			if f == nil && len(name) == 1 { // pflag PANICS on a multi-letter shorthand lookup
 				f = cmd.Flags().ShorthandLookup(name)
 			}
 			if f == nil {
@@ -241,7 +241,9 @@ func keysOf(m map[string]bool) []string {
 	return out
 }
 
-// docFiles is the README plus every docs/*.md, relative to this package (cmd/commands).
+// docFiles is the README, every docs/*.md, and the READMEs that walk someone through running
+// something — each example's and each shipped lens's — relative to this package (cmd/commands).
+// Those are where people copy commands from, so they are held to the same contract.
 func docFiles(t *testing.T) []string {
 	t.Helper()
 	root := filepath.Join("..", "..")
@@ -254,6 +256,13 @@ func docFiles(t *testing.T) []string {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
 			out = append(out, filepath.Join(root, "docs", e.Name()))
 		}
+	}
+	for _, pattern := range []string{"examples/*/README.md", "prompts/lens/*/README.md"} {
+		m, err := filepath.Glob(filepath.Join(root, pattern))
+		if err != nil {
+			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		out = append(out, m...)
 	}
 	sort.Strings(out)
 	return out

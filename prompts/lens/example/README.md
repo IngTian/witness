@@ -20,4 +20,4 @@ schema for you.
 A lens is runner-agnostic: by default it rides the default model. To pin a stronger
 model just for this lens (without paying for it on every session), add an optional
 `"extract_model"` / `"review_model"` to `lens.json`, or run
-`witness lens set math --extract-model <model>` (empty value clears it).
+`witness config set mine_model <model> --lens math` (`""` clears it).

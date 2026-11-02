@@ -171,6 +171,23 @@ witness profile regime                     # the narrative brief
 See [`prompts/lens/corpus-example/README.md`](../prompts/lens/corpus-example/README.md) for what
 changes when the subject stops being a person.
 
+### At full size
+
+[`examples/carney-market`](../examples/carney-market) and
+[`examples/trump-market`](../examples/trump-market) are two real runs over hand-curated news corpora
+— 188 articles → 392 observations → 52 facets, and 200 → 558 → 83 — each with its lens, the
+unedited output, and the list of sources. Two lessons from building them apply to any corpus lens:
+
+- **The corpus decides the output.** The same subject gathered by querying a person's *name*
+  returned political coverage, and the profile read like a newspaper column. Gathered by querying
+  *market topics* — rate decisions, tariff schedules, bond yields — it produced a profile with
+  falsifiable thresholds. witness does not fetch anything for you, by design: assemble the corpus on
+  purpose.
+- **Demand a channel; ask for mechanism.** Their extract prompts require every observation to name
+  what it moves — a rate, a price, a sector, a dollar amount — or return `[]`. That one rule is what
+  keeps commentary out. Their review prompts ask for the position, its numbers, and what would change
+  it; asking a model for "the tension in the story" reliably promotes conflict to the headline.
+
 ## Inspecting what you registered
 
 ```sh

@@ -1,0 +1,15 @@
+> Synthesized by witness for lens `carney-market` from 392 observations. Verbatim output, unedited.
+
+## Economic Policy Under Asymmetric Constraint
+
+Carney's economic framework is defined by a single, irreversible fact: Canada sends 76% of its goods exports to the U.S. while receiving only 17% of U.S. exports; energy dependency is steeper—the U.S. imports more crude oil from Canada than all other nations combined. This asymmetry eliminates policy optionality. Trade policy is not ideological but defensive; growth strategy focuses on managing cash flows through tariff cycles.
+
+Their revealed ranking is clear. Campaign framing promised "rupture" from U.S. integration and reorientation toward import substitution and diversification. Actual strategy: accept deeper North American integration—"including options for Fortress North America" with tighter rules of origin—to preserve Canadian preferential access. When facing 25% U.S. tariffs on all imports with no oil exemption (Q2 2025: 1.6% GDP contraction, 15.7% export collapse), they prioritized CUSMA preservation over autonomy. They eliminated consumer carbon tax immediately, shifted to two-tier deficits (capex unconstrained, operational spending disciplined), and prioritized energy export capex without regulatory restraint. Climate ranks as one of five project-approval criteria, not a veto gate.
+
+Retaliation is instrumental, not principled. They rejected reciprocal dollar-for-dollar tariff matching on grounds of relative economy size; deployed $30B immediate countertariffs but held most additional capacity in reserve. Removed retaliatory tariffs when pass-through inflation emerged, prioritizing consumer prices over negotiating leverage. Stated: "We are not going to take an action that we think is not ultimately going to influence the United States, and certainly not one that is harmful to Canada."
+
+Household support ranks above sectoral industrial policy. Would allocate spending for "a million-plus heat pumps for people who need them most" rather than "subsidize one more battery plant." Income tax relief concentrated 49% of $840 annual savings in the lowest income bracket; front-loaded payroll withholding into H2 2025 to accelerate demand during recession risk.
+
+Diagnosis: regulatory burden, not capital scarcity, is the binding constraint. Response is regulatory acceleration—two-year permitting windows, single-window approvals, removal of multi-agency review. Stated: "The days of asking why a project should be built are gone." Government unblocks permitting; private capital is available but frozen by uncertainty.
+
+Vulnerability remains unresolved. CUSMA renewal failed at July 2025 review; agreement now operates on annual renegotiation cycles through 2036 auto-expiry. October 2025 tariff-reduction negotiations failed. Current posture: "prefer status quo over bad deal"—tolerating 25–50% sectoral tariffs rather than conceding structural demands on content, dairy, or digital streaming. This uncertainty persists until tariff relief is secured, CUSMA is renegotiated, or the agreement expires.
