@@ -89,6 +89,10 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read facets: %w", err)
 	}
+	hw, err := sm.Store.ObservationHighWater()
+	if err != nil {
+		return fmt.Errorf("read observation high-water: %w", err)
+	}
 	byLens := map[string][]store.Facet{}
 	for _, f := range facets {
 		if f.Current() == nil {
@@ -144,8 +148,13 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	for _, l := range lenses {
 		ln := byName[l]
 		model := ModelFor(sm.Config, ln, PhaseReview)
-		rendered := renderFacetsForSummary(l, byLens[l])
-		sig := summarySignature(model, sm.LensPrompt, rendered)
+		// The model is shown CURRENT (decayed) confidence, but the change signature is taken over
+		// the STORED rendering. Decayed values drift by a hundredth every few dozen observations,
+		// so hashing them would regenerate every portrait — a model call per lens — after almost
+		// every session. The portrait is rebuilt when the facets really change, and on that
+		// rebuild it reads what the archive believes now.
+		rendered := renderFacetsForSummary(l, byLens[l], hw)
+		sig := summarySignature(model, sm.LensPrompt, renderFacetsForSummary(l, byLens[l], storedConfidence))
 
 		// Skip the LLM call when this lens's inputs are unchanged AND its prior summary
 		// is still on disk — reuse that summary for the portrait. A missing/failed prior
@@ -320,9 +329,15 @@ func (sm *Summarizer) reapOrphanProfiles(withFacets map[string][]store.Facet) {
 	}
 }
 
+// storedConfidence, passed as renderFacetsForSummary's decaySeq, renders each facet's confidence
+// as stored rather than decayed: DecayedConfidence returns the stored value for any seq at or
+// below the version's own clock, and 0 is below every clock. Named so the signature call site
+// says what it means instead of passing a bare 0.
+const storedConfidence int64 = 0
+
 // renderFacetsForSummary formats one lens's active facets as readable input for
-// the summarizer prompt.
-func renderFacetsForSummary(lens string, facets []store.Facet) string {
+// the summarizer prompt, with each confidence decayed to decaySeq.
+func renderFacetsForSummary(lens string, facets []store.Facet, decaySeq int64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "LENS: %s\n\nFACETS (dimension/key, confidence, value):\n", lens)
 	for _, f := range facets {
@@ -330,7 +345,7 @@ func renderFacetsForSummary(lens string, facets []store.Facet) string {
 		if cur == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "- %s/%s (%.2f): %s\n", f.Dimension, f.Key, cur.Confidence, cur.Value)
+		fmt.Fprintf(&b, "- %s/%s (%.2f): %s\n", f.Dimension, f.Key, cur.DecayedConfidence(decaySeq), cur.Value)
 	}
 	return b.String()
 }

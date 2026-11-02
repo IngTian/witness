@@ -203,7 +203,8 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		// Facet existed but had no open version (all expired) — reopen.
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
-			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence), ConfidenceSeq: seq,
+			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
+			ConfidenceSeq: knownClock(seq, f.Versions[len(f.Versions)-1].ConfidenceSeq),
 		})
 	case rf.Contradicts && cur.Value != rf.Value:
 		// Sustained contradiction => record a change arc: close the old, open the new.
@@ -211,7 +212,8 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		f.Versions[len(f.Versions)-1].ValidTo = nowStr
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
-			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence), ConfidenceSeq: seq,
+			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
+			ConfidenceSeq: knownClock(seq, cur.ConfidenceSeq),
 		})
 	default:
 		// Same value, re-judged: move confidence TOWARD what the model returned, by at most
@@ -244,10 +246,26 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		// the model would be shown 0.4, agree with 0.4, and the facet would snap back toward
 		// its pre-decay 0.9 because that is what the row still held.
 		cur.Confidence = clampConf(stepToward(cur.DecayedConfidence(seq), rf.Confidence, maxConfidenceStep))
-		cur.ConfidenceSeq = seq // confirmed now: the decay clock restarts
+		cur.ConfidenceSeq = knownClock(seq, cur.ConfidenceSeq) // confirmed now: the decay clock restarts
 		cur.BecauseOf = mergeIDs(cur.BecauseOf, rf.BecauseOf)
 	}
 	return true
+}
+
+// knownClock is the decay clock a version should carry after an assertion at seq, given the
+// clock it (or the version it supersedes) already had.
+//
+// seq 0 means the CALLER has no clock information — the emergent long-arc pass, which has no
+// honest observation seq to stamp (see emergent.go). That is a reason not to START a clock,
+// never a reason to ERASE one: every branch of applyFacet used to write `ConfidenceSeq: seq`
+// unconditionally, so an arc landing on an established facet overwrote its real clock with 0,
+// which DecayedConfidence reads as "never decays". A new facet asserted with seq 0 still starts
+// at 0, exactly as the emergent comment documents; only an existing clock is protected.
+func knownClock(seq, prior int64) int64 {
+	if seq > 0 {
+		return seq
+	}
+	return prior
 }
 
 // wellFormed rejects a facet assertion that cannot identify or state anything.

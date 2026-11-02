@@ -38,10 +38,12 @@ reads around 0.64 after a typical gap between citations, and approaches the floo
 quiet trait is still a trait, so decay marks a facet uncertain and never retires it. One citation
 restores it.
 
-So a confidence you saw last month may read lower today with no new sessions. That is working
-correctly. If you want to know why a facet is where it is, `witness facets <lens>` shows the
-current value and `witness facets <lens> --expand <dimension/key>` unfolds everything that was
-merged into it.
+So a confidence you saw last month may read lower today even though nothing about that facet
+changed — the sessions in between were chances to confirm it, and none did. That is working
+correctly. Every place that shows a confidence shows this current value: `witness facets
+<lens>`, the agent-facing `get_facets` tool, and the portrait. Only `--json` reports the stored
+value as of the facet's last confirmation, because that is the record the decay is computed from.
+`witness facets <lens> --expand <dimension/key>` unfolds everything that was merged into a facet.
 
 ### Lenses
 

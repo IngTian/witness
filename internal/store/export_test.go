@@ -145,6 +145,17 @@ func seedFullArchive(t *testing.T, st *Store) (extract string) {
 	if err := st.WriteProfile(ProfileUnified, "# hand-edited portrait\n"); err != nil {
 		t.Fatalf("WriteProfile unified: %v", err)
 	}
+	// The archive's own summarizer prompt (<root>/summarize/, internal/lens SummarizeOverrideDir).
+	// Literal directory name because store cannot import lens. Like a lens prompt, this text is
+	// in no database: an archive that customised its portrait (a market corpus, say) cannot get
+	// it back from anywhere else.
+	if err := os.MkdirAll(filepath.Join(st.Root, "summarize"), 0o700); err != nil {
+		t.Fatalf("mkdir summarize: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(st.Root, "summarize", "unified.md"),
+		[]byte("PORTRAIT: describe the market regime, not a person\n"), 0o600); err != nil {
+		t.Fatalf("write summarize override: %v", err)
+	}
 	// Deliberately-excluded residents of the same directory.
 	if err := os.WriteFile(st.LogPath(), []byte(`{"msg":"noise"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write log: %v", err)
@@ -194,6 +205,15 @@ func TestExportAllCapturesEverythingBesideTheDatabase(t *testing.T) {
 	}
 	if string(got) != extract {
 		t.Errorf("exported mining prompt = %q, want %q", got, extract)
+	}
+	// The summarizer override, byte-for-byte: it is in no database, and it was missing from
+	// every complete export before this.
+	gotSum, err := os.ReadFile(filepath.Join(dst, "summarize", "unified.md"))
+	if err != nil {
+		t.Fatalf("snapshot is missing the archive's own portrait prompt (summarize/unified.md): %v", err)
+	}
+	if want := "PORTRAIT: describe the market regime, not a person\n"; string(gotSum) != want {
+		t.Errorf("exported portrait prompt = %q, want %q", gotSum, want)
 	}
 
 	// Deliberately absent: WAL sidecars (folded in by VACUUM INTO), diagnostics, the

@@ -23,10 +23,11 @@ func newExportCmd() *cobra.Command {
 			"(iCloud/Dropbox/Drive) at it — unlike the live data directory, whose WAL a syncer " +
 			"can corrupt.\n\n" +
 			"With --all, <path> is a DIRECTORY and receives a complete backup: that same " +
-			"database snapshot plus the three things that are NOT in the database — " +
-			"config.toml (enabled lenses, runner, models), lenses/ (your lens definitions; " +
-			"prompt text lives nowhere else, so an authored lens is otherwise unrecoverable), " +
-			"and profile/ (the narrative, including a hand-edited unified.md). Prefer --all " +
+			"database snapshot plus what is NOT in the database — config.toml (enabled " +
+			"lenses, runner, models), lenses/ (your lens definitions; prompt text lives " +
+			"nowhere else, so an authored lens is otherwise unrecoverable), summarize/ (your " +
+			"own portrait prompts, if you wrote any — the same holds), and profile/ (the " +
+			"narrative, which is rebuilt from your facets whenever they change). Prefer --all " +
 			"for backups.\n\n" +
 			"Either form runs safely while the background worker is writing; no need to stop " +
 			"it. Restoring needs no separate command: a --all directory has the same layout as " +
@@ -39,7 +40,7 @@ func newExportCmd() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVarP(&force, "force", "f", false, "overwrite <path> if it already exists")
-	c.Flags().BoolVarP(&all, "all", "a", false, "export the COMPLETE archive into <path> as a directory (db + config.toml + lenses/ + profile/)")
+	c.Flags().BoolVarP(&all, "all", "a", false, "export the COMPLETE archive into <path> as a directory (db + config.toml + lenses/ + summarize/ + profile/)")
 	c.Flags().BoolVarP(&asJSON, "json", "j", false, "output as JSON")
 	return c
 }
@@ -94,6 +95,6 @@ func cmdExport(path string, force, all, asJSON bool) error {
 	}
 	fmt.Printf("exported archive snapshot to %s\n", path)
 	fmt.Println("safe to sync this file (cloud/backup); do NOT sync the live data dir (WAL corruption).")
-	fmt.Println("note: the database only — use --all to include config.toml, lenses/ and profile/.")
+	fmt.Println("note: the database only — use --all to include config.toml, lenses/, summarize/ and profile/.")
 	return nil
 }
