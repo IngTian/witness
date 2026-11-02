@@ -206,6 +206,10 @@ func reportError(err error) {
 		fmt.Fprintln(os.Stderr, string(b))
 		return
 	}
+	if useColorErr { // a terminal: the house failure glyph; a pipe or log keeps the plain form exactly
+		fmt.Fprintln(os.Stderr, styledErr(ansiRed, "✗")+" "+err.Error())
+		return
+	}
 	fmt.Fprintln(os.Stderr, "witness:", err)
 }
 

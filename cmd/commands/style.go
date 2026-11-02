@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/mattn/go-isatty"
@@ -14,6 +15,10 @@ import (
 // behavior — it only affects how the same information is rendered.
 
 var useColor = isatty.IsTerminal(os.Stdout.Fd()) && os.Getenv("NO_COLOR") == ""
+
+// useColorErr is the same rule for STDERR, where errors and progress go. Kept separate so a
+// redirected stdout does not strip color from a terminal's stderr, or the reverse.
+var useColorErr = isatty.IsTerminal(os.Stderr.Fd()) && os.Getenv("NO_COLOR") == ""
 
 const (
 	ansiReset  = "\x1b[0m"
@@ -27,6 +32,14 @@ const (
 
 func styled(code, s string) string {
 	if !useColor {
+		return s
+	}
+	return code + s + ansiReset
+}
+
+// styledErr is styled for text bound for stderr.
+func styledErr(code, s string) string {
+	if !useColorErr {
 		return s
 	}
 	return code + s + ansiReset
@@ -99,7 +112,7 @@ func enabledGlyph(on bool) string {
 // note is omitted when empty.
 func kvRow(name, value, note string) string {
 	const width = 14
-	padded := name
+	padded := name + "  " // always a gap: a 14-character name ran straight into its value
 	for len(padded) < width {
 		padded += " "
 	}
@@ -112,6 +125,84 @@ func kvRow(name, value, note string) string {
 
 // footer renders a dim one-line summary under a list/section.
 func footer(summary string) string { return dim(summary) }
+
+// The shared vocabulary of a witness screen. Every command that changes something ends with ONE
+// result line led by its glyph — okGlyph ✓ done · warnGlyph ! done with a warning · badGlyph ✗
+// failed · skipGlyph ○ nothing to do · bgGlyph ● started in the background — and puts any next
+// steps on hint lines below it, never inside a sentence.
+
+// skipGlyph marks a no-op result: dim ○, or [-] without color.
+func skipGlyph() string {
+	if useColor {
+		return dim("○")
+	}
+	return "[-]"
+}
+
+// bgGlyph marks work handed to the background: green ●, or [>] without color.
+func bgGlyph() string {
+	if useColor {
+		return green("●")
+	}
+	return "[>]"
+}
+
+// hint renders a next step as "  ↳ label  command": the label dim and padded so the commands line
+// up and can be copied whole. "->" without color.
+func hint(label, command string) string {
+	arrow := "->"
+	if useColor {
+		arrow = "↳"
+	}
+	return "  " + dim(fmt.Sprintf("%s %-13s", arrow, label)) + " " + command
+}
+
+// title is a read command's first line: bold "witness <cmd>", then a dim " · <scope>" and a dim
+// summary, each omitted when empty.
+func title(cmd, scope, summary string) string {
+	t := bold("witness " + cmd)
+	if scope != "" {
+		t += dim(" · " + scope)
+	}
+	if summary != "" {
+		t += "  " + dim(summary)
+	}
+	return t
+}
+
+// tildePath shows a path under the home directory as ~/… on human surfaces; --json keeps it whole.
+func tildePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(p, home+string(os.PathSeparator)); ok {
+		return "~" + string(os.PathSeparator) + rest
+	}
+	return p
+}
+
+// humanCount groups thousands so a six-digit count is readable at a glance.
+func humanCount(n int) string {
+	s := strconv.Itoa(n)
+	if n < 0 {
+		return "-" + humanCount(-n)
+	}
+	if len(s) <= 3 {
+		return s
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // pluralize renders "<n> <singular|plural>" picking the form by count, so summary lines
 // read "1 lens" / "2 lenses" instead of the ungrammatical "1 lenses".

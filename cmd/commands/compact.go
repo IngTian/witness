@@ -3,8 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -163,22 +161,6 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	fmt.Println()
 	fmt.Println(dim("the profile narrative is regenerated on the next review (`witness worker review`)"))
 	return nil
-}
-
-// humanCount groups thousands so a six-digit character count is readable at a glance.
-func humanCount(n int) string {
-	s := strconv.Itoa(n)
-	if len(s) <= 3 {
-		return s
-	}
-	var b strings.Builder
-	for i, r := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
 }
 
 func printCompactPlans(plans []distill.CompactPlan) {
