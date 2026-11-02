@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -102,8 +103,12 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 	if err != nil {
 		return stats, err
 	}
-	for _, s := range sessions {
+	// The whole session list is read before the first import, so the total is exact.
+	progress := platform.ImportProgressFrom(ctx)
+	progress(0, len(sessions), false)
+	for i, s := range sessions {
 		n, err := im.importSession(ctx, db, s)
+		progress(i+1, len(sessions), false)
 		if err != nil {
 			return stats, err
 		}

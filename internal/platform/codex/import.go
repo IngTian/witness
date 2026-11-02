@@ -46,6 +46,16 @@ type importCommitError struct{ error }
 
 func (e *importCommitError) Unwrap() error { return e.error }
 
+// progress counts source inputs for platform.ImportProgress: every rollout file, listed up front,
+// and every history thread, counted as its database is opened.
+type progress struct {
+	report      platform.ImportProgress
+	done, total int
+	unopened    int // history databases whose threads are not in total yet
+}
+
+func (p *progress) tick() { p.report(p.done, p.total, p.unopened > 0) }
+
 func skipSourceError(ctx context.Context, stats *platform.ImportStats, source string, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -115,23 +125,17 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 	if err != nil {
 		return stats, err
 	}
+	var dbs []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "thread_history_") || !strings.HasSuffix(entry.Name(), ".sqlite") {
 			continue
 		}
-		dbPath := filepath.Join(home, entry.Name())
-		var sourceErr error
-		if filepath.Base(dbPath) != "thread_history_1.sqlite" {
-			sourceErr = fmt.Errorf("unsupported Codex history filename %q; update witness to support this version", filepath.Base(dbPath))
-		} else {
-			sourceErr = im.importDB(ctx, dbPath, wanted, seen, &stats)
-		}
-		if sourceErr != nil {
-			if err := skipSourceError(ctx, &stats, dbPath, sourceErr); err != nil {
-				return stats, err
-			}
-		}
+		dbs = append(dbs, filepath.Join(home, entry.Name()))
 	}
+	// Every rollout is listed before anything is imported, so the progress total is exact from the
+	// start; only a history database's threads are learned later, as it is opened. Databases are
+	// still imported first: a session in both is taken from the database.
+	var files []string
 	for _, folder := range []string{"sessions", "archived_sessions"} {
 		dir := filepath.Join(home, folder)
 		if _, err := os.Stat(dir); os.IsNotExist(err) {
@@ -144,16 +148,47 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
-				return nil
-			}
-			if err := im.importFile(ctx, path, wanted, seen, &stats); err != nil {
-				return skipSourceError(ctx, &stats, path, err)
+			if !d.IsDir() && strings.HasSuffix(d.Name(), ".jsonl") {
+				files = append(files, path)
 			}
 			return nil
 		})
 		if err != nil {
 			return stats, err
+		}
+	}
+	prog := &progress{report: platform.ImportProgressFrom(ctx), total: len(files), unopened: len(dbs)}
+	prog.tick()
+	for _, dbPath := range dbs {
+		mark := *prog
+		var sourceErr error
+		if filepath.Base(dbPath) != "thread_history_1.sqlite" {
+			sourceErr = fmt.Errorf("unsupported Codex history filename %q; update witness to support this version", filepath.Base(dbPath))
+		} else {
+			sourceErr = im.importDB(ctx, dbPath, wanted, seen, &stats, prog)
+		}
+		// However it ended, this database is counted and finished: one that failed partway is
+		// skipped whole, so its unreached threads are done too and the bar cannot stall short.
+		prog.unopened = mark.unopened - 1
+		prog.done = mark.done + prog.total - mark.total
+		prog.tick()
+		if sourceErr != nil {
+			if err := skipSourceError(ctx, &stats, dbPath, sourceErr); err != nil {
+				return stats, err
+			}
+		}
+	}
+	for _, path := range files {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		err := im.importFile(ctx, path, wanted, seen, &stats)
+		prog.done++
+		prog.tick()
+		if err != nil {
+			if err := skipSourceError(ctx, &stats, path, err); err != nil {
+				return stats, err
+			}
 		}
 	}
 	for id := range wanted {
@@ -211,7 +246,7 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	return nil
 }
 
-func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[string]bool, stats *platform.ImportStats) error {
+func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[string]bool, stats *platform.ImportStats, prog *progress) error {
 	db, err := sql.Open("sqlite", readOnlyURI(path))
 	if err != nil {
 		return err
@@ -249,7 +284,12 @@ func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[
 	if err != nil {
 		return err
 	}
-	for _, c := range cursors {
+	prog.total += len(cursors)
+	prog.unopened--
+	base := prog.done
+	for i, c := range cursors {
+		prog.done = base + i // the threads before this one are finished; Import counts the last
+		prog.tick()
 		revision := strconv.FormatInt(c.ordinal, 10)
 		if im.unchanged(c.id, path, revision) {
 			seen[c.id] = true

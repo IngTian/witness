@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -92,7 +93,12 @@ func cmdImport(args []string) error {
 	if agent == "" {
 		return fmt.Errorf("usage: witness import --agent <claude|opencode|codex> [--session <id>]... [--quiet] [--auto] [--no-kick]")
 	}
-	stats, kicked, err := runImport(agent, sessions, !noKick, auto)
+	ctx, finish := context.Background(), func() {}
+	if !quiet { // --quiet is how the OpenCode plugin imports in the background: it stays silent
+		ctx, finish = importProgress(ctx, agent)
+	}
+	stats, kicked, err := runImport(ctx, agent, sessions, !noKick, auto)
+	finish()
 	if err != nil {
 		return err
 	}
@@ -112,9 +118,21 @@ func cmdImport(args []string) error {
 	return nil
 }
 
+// importProgress puts a progress line (stderr) under ctx for the importer to drive, and returns the
+// call that clears it — made before the summary prints, so the two never share a terminal row. An
+// import with nothing to read (Claude and file import nothing; an empty Codex home) draws nothing.
+func importProgress(ctx context.Context, agent string) (context.Context, func()) {
+	pl := startProgress()
+	return platform.WithImportProgress(ctx, func(done, total int, open bool) {
+		if total > 0 {
+			pl.update(distill.Progress{Where: agent, Stages: []distill.Stage{{Name: "importing", Done: done, Total: total, Open: open}}})
+		}
+	}), pl.finish
+}
+
 var importWorkerSpawner = func() { spawnDetached("worker-run") }
 
-func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platform.ImportStats, bool, error) {
+func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorker, auto bool) (platform.ImportStats, bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return platform.ImportStats{}, false, err
@@ -129,7 +147,7 @@ func runImport(agent string, sessionIDs []string, kickWorker, auto bool) (platfo
 	// The Importer owns its own reconcile mechanics (OpenCode takes the sync lock
 	// and reads its SQLite store; Claude is a hook-fed no-op) — cmd no longer
 	// branches on the runtime.
-	stats, err := p.Import(context.Background(), st, sessionIDs)
+	stats, err := p.Import(ctx, st, sessionIDs)
 	if err != nil {
 		return stats, false, err
 	}
