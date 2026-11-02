@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -248,8 +249,21 @@ func cmdIngest(reader io.Reader, quiet bool) (ingested, skipped int, err error) 
 		return 0, skipped, fmt.Errorf("another witness ingest or import is running; retry when it finishes")
 	}
 	defer unlock()
-	for _, s := range groupSessions(recs, time.Now()) {
+	sessions := groupSessions(recs, time.Now())
+	// The whole input is parsed and grouped first, so the total is exact. Measured: 20,000
+	// one-document sessions take 3.5 s to write, silent until the summary. --quiet stays silent.
+	report := func(int) {}
+	if !quiet {
+		pl := startImportProgress()
+		defer pl.finish() // before the caller prints the summary
+		report = func(done int) {
+			pl.update(distill.Progress{Where: "ingest", Stages: []distill.Stage{{Name: "sessions", Done: done, Total: len(sessions)}}})
+		}
+	}
+	report(0)
+	for i, s := range sessions {
 		n, err := applyIngestSession(st, s)
+		report(i + 1)
 		if err != nil {
 			return ingested, skipped, err
 		}

@@ -105,10 +105,10 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 	}
 	// The whole session list is read before the first import, so the total is exact.
 	progress := platform.ImportProgressFrom(ctx)
-	progress(0, len(sessions), false)
+	progress(0, len(sessions))
 	for i, s := range sessions {
 		n, err := im.importSession(ctx, db, s)
-		progress(i+1, len(sessions), false)
+		progress(i+1, len(sessions))
 		if err != nil {
 			return stats, err
 		}

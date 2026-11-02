@@ -4,8 +4,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // captureBoth swaps os.Stdout and os.Stderr for pipes around fn. A pipe is not a terminal, so a
@@ -89,5 +91,75 @@ func TestImportWithNothingToReadDrawsNothing(t *testing.T) {
 		if err != nil || errOut != "" {
 			t.Fatalf("%s: stderr %q, %v", agent, errOut, err)
 		}
+	}
+}
+
+// On a terminal the line is cleared BEFORE the summary prints; otherwise the summary lands on the
+// row still holding "codex · importing 1/1". A test process has no terminal, so this line is a
+// terminal-mode one writing to the same stream as stdout, as both do on a real terminal.
+func TestImportClearsTheLineBeforeTheSummary(t *testing.T) {
+	codexRollouts(t, "a")
+	out, _, err := captureBoth(t, func() error {
+		onATerminal(t)
+		return cmdImport([]string{"--agent", "codex", "--no-kick"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := strings.Index(out, "import codex: ")
+	if !strings.Contains(out, "codex · importing 1/1") || !regexp.MustCompile(`\r +\rimport codex: `).MatchString(out) ||
+		strings.Contains(out[summary:], "\r") {
+		t.Fatalf("the line must be drawn, then cleared, then the summary printed: %q", out)
+	}
+}
+
+// onATerminal makes the next progress line a terminal-mode one that writes to stdout, as stderr
+// and stdout share one terminal for a person running the command. Call it inside captureBoth.
+func onATerminal(t *testing.T) {
+	prev := startImportProgress
+	t.Cleanup(func() { startImportProgress = prev })
+	startImportProgress = func() *progressLine { return &progressLine{w: os.Stdout, tty: true, start: time.Now()} }
+}
+
+// `witness ingest` counts the SESSIONS it writes — known exactly once the input is parsed and
+// grouped, so here 3 records in 2 sessions are 2 — one per session written, and clears the line
+// before its summary. --quiet stays silent, and stdout is the summary it always printed.
+func TestIngestShowsProgressPerSession(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	input := filepath.Join(t.TempDir(), "docs.ndjson")
+	body := `{"text":"one","id":"a","session":"s"}` + "\n" + `{"text":"two","id":"b","session":"s"}` + "\n" +
+		`{"text":"alone","id":"c"}` + "\n" + "not json\n"
+	if err := os.WriteFile(input, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ingest := func(args ...string) error {
+		c := newIngestCmd()
+		c.SetArgs(append([]string{"--file", input}, args...))
+		return c.Execute()
+	}
+
+	out, errOut, err := captureBoth(t, func() error { return ingest() }) // a pipe: one log line on stderr
+	if err != nil || out != "ingested 3 record(s), skipped 1 malformed; distilling in the background — witness status to watch\n" ||
+		!strings.HasPrefix(errOut, "  ingest · sessions 0/2 · ") || strings.Count(errOut, "\n") != 1 {
+		t.Fatalf("pipe: stdout %q, stderr %q, %v", out, errOut, err)
+	}
+
+	out, errOut, err = captureBoth(t, func() error { onATerminal(t); return ingest() })
+	if err != nil || errOut != "" {
+		t.Fatal(err, errOut)
+	}
+	var frames []string
+	for _, m := range regexp.MustCompile(`ingest · sessions (\d+/\d+)`).FindAllStringSubmatch(out, -1) {
+		frames = append(frames, m[1])
+	}
+	const summary = "ingested 0 record(s), skipped 1 malformed; distilling in the background — witness status to watch\n"
+	if strings.Join(frames, " ") != "0/2 1/2 2/2" || !regexp.MustCompile(`\r +\r`+regexp.QuoteMeta(summary)+`$`).MatchString(out) {
+		t.Fatalf("want frames 0/2 1/2 2/2, the line cleared, then the summary: %q", out)
+	}
+
+	out, errOut, err = captureBoth(t, func() error { return ingest("--quiet") }) // still a terminal line
+
+	if err != nil || out != "" || errOut != "" {
+		t.Fatalf("--quiet: stdout %q, stderr %q, %v", out, errOut, err)
 	}
 }

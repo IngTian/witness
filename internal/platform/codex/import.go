@@ -46,15 +46,24 @@ type importCommitError struct{ error }
 
 func (e *importCommitError) Unwrap() error { return e.error }
 
+// historyDB is the one Codex history database this importer can read.
+const historyDB = "thread_history_1.sqlite"
+
 // progress counts source inputs for platform.ImportProgress: every rollout file, listed up front,
-// and every history thread, counted as its database is opened.
+// and every history thread, counted when its database is opened. Nothing is reported while a
+// history database is still uncounted, so every total reported is final: a log keeps only the
+// first line, and "importing 0/5" there for an import of 10 inputs was a total that lied.
 type progress struct {
 	report      platform.ImportProgress
 	done, total int
-	unopened    int // history databases whose threads are not in total yet
+	uncounted   int // history databases whose threads are not in total yet
 }
 
-func (p *progress) tick() { p.report(p.done, p.total, p.unopened > 0) }
+func (p *progress) tick() {
+	if p.uncounted == 0 {
+		p.report(p.done, p.total)
+	}
+}
 
 func skipSourceError(ctx context.Context, stats *platform.ImportStats, source string, err error) error {
 	if ctx.Err() != nil {
@@ -126,15 +135,19 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 		return stats, err
 	}
 	var dbs []string
+	uncounted := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "thread_history_") || !strings.HasSuffix(entry.Name(), ".sqlite") {
 			continue
 		}
 		dbs = append(dbs, filepath.Join(home, entry.Name()))
+		if entry.Name() == historyDB {
+			uncounted++
+		}
 	}
-	// Every rollout is listed before anything is imported, so the progress total is exact from the
-	// start; only a history database's threads are learned later, as it is opened. Databases are
-	// still imported first: a session in both is taken from the database.
+	// Every rollout is listed before anything is imported; a history database's threads are
+	// counted as it is opened, before the first of them is imported. Databases are still imported
+	// first: a session in both is taken from the database.
 	var files []string
 	for _, folder := range []string{"sessions", "archived_sessions"} {
 		dir := filepath.Join(home, folder)
@@ -157,19 +170,19 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 			return stats, err
 		}
 	}
-	prog := &progress{report: platform.ImportProgressFrom(ctx), total: len(files), unopened: len(dbs)}
+	prog := &progress{report: platform.ImportProgressFrom(ctx), total: len(files), uncounted: uncounted}
 	prog.tick()
 	for _, dbPath := range dbs {
 		mark := *prog
 		var sourceErr error
-		if filepath.Base(dbPath) != "thread_history_1.sqlite" {
+		if filepath.Base(dbPath) != historyDB {
 			sourceErr = fmt.Errorf("unsupported Codex history filename %q; update witness to support this version", filepath.Base(dbPath))
 		} else {
 			sourceErr = im.importDB(ctx, dbPath, wanted, seen, &stats, prog)
+			prog.uncounted = mark.uncounted - 1 // also when it failed before its threads were counted
 		}
-		// However it ended, this database is counted and finished: one that failed partway is
-		// skipped whole, so its unreached threads are done too and the bar cannot stall short.
-		prog.unopened = mark.unopened - 1
+		// However it ended, this database is finished: one that failed partway is skipped whole,
+		// so its unreached threads are done too and the bar cannot stall short.
 		prog.done = mark.done + prog.total - mark.total
 		prog.tick()
 		if sourceErr != nil {
@@ -285,7 +298,7 @@ func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[
 		return err
 	}
 	prog.total += len(cursors)
-	prog.unopened--
+	prog.uncounted--
 	base := prog.done
 	for i, c := range cursors {
 		prog.done = base + i // the threads before this one are finished; Import counts the last

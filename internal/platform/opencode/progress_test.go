@@ -24,9 +24,9 @@ func TestImportProgressCountsEverySessionRead(t *testing.T) {
 	}
 	defer st.Close()
 
-	var got [][3]any
-	ctx := platform.WithImportProgress(context.Background(), func(done, total int, open bool) {
-		got = append(got, [3]any{done, total, open})
+	var got [][2]int
+	ctx := platform.WithImportProgress(context.Background(), func(done, total int) {
+		got = append(got, [2]int{done, total})
 	})
 	stats, err := (&Importer{Store: st, DBPath: dbPath}).Import(ctx, nil)
 	if err != nil {
@@ -35,7 +35,7 @@ func TestImportProgressCountsEverySessionRead(t *testing.T) {
 	if stats.Sessions != 1 || stats.Records != 2 {
 		t.Fatalf("import itself changed: %+v", stats)
 	}
-	want := [][3]any{{0, 2, false}, {1, 2, false}, {2, 2, false}}
+	want := [][2]int{{0, 2}, {1, 2}, {2, 2}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("progress = %v, want %v", got, want)
 	}

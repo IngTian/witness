@@ -122,13 +122,16 @@ func cmdImport(args []string) error {
 // call that clears it — made before the summary prints, so the two never share a terminal row. An
 // import with nothing to read (Claude and file import nothing; an empty Codex home) draws nothing.
 func importProgress(ctx context.Context, agent string) (context.Context, func()) {
-	pl := startProgress()
-	return platform.WithImportProgress(ctx, func(done, total int, open bool) {
+	pl := startImportProgress()
+	return platform.WithImportProgress(ctx, func(done, total int) {
 		if total > 0 {
-			pl.update(distill.Progress{Where: agent, Stages: []distill.Stage{{Name: "importing", Done: done, Total: total, Open: open}}})
+			pl.update(distill.Progress{Where: agent, Stages: []distill.Stage{{Name: "importing", Done: done, Total: total}}})
 		}
 	}), pl.finish
 }
+
+// startImportProgress is swapped by a test for a terminal-mode line, which no test process has.
+var startImportProgress = startProgress
 
 var importWorkerSpawner = func() { spawnDetached("worker-run") }
 

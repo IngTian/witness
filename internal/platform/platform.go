@@ -23,9 +23,9 @@ type ImportStats struct {
 // ImportProgress is told how many source inputs an import has finished out of the total it has
 // found: an OpenCode session, a Codex history thread or rollout file. A first import is every
 // session the user ever had — thousands on a mature OpenCode archive — and `witness import`
-// printed nothing until the end. open means the total can still grow (a Codex history database
-// not opened yet), so an estimate drawn from it is a floor. A failed input counts as finished.
-type ImportProgress func(done, total int, open bool)
+// printed nothing until the end. An importer reports only once its inputs are all counted, so
+// total is final from the first report; a failed input counts as finished.
+type ImportProgress func(done, total int)
 
 type importProgressKey struct{}
 
@@ -42,5 +42,5 @@ func ImportProgressFrom(ctx context.Context) ImportProgress {
 	if fn, _ := ctx.Value(importProgressKey{}).(ImportProgress); fn != nil {
 		return fn
 	}
-	return func(int, int, bool) {}
+	return func(int, int) {}
 }

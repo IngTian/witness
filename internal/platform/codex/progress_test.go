@@ -5,31 +5,29 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/IngTian/witness/internal/platform"
 )
 
-type report struct {
-	done, total int
-	open        bool
-}
+type report struct{ done, total int }
 
 func recordProgress(t *testing.T) (context.Context, *[]report) {
 	t.Helper()
 	var got []report
-	return platform.WithImportProgress(context.Background(), func(done, total int, open bool) {
-		got = append(got, report{done, total, open})
+	return platform.WithImportProgress(context.Background(), func(done, total int) {
+		got = append(got, report{done, total})
 	}), &got
 }
 
-// The bar for `witness import --agent codex` must be TRUE: rollouts are all known before the first
-// import, a history database's threads join the total once (when it is opened, the only time it
-// is Open), and every input — including the two that fail here — ends counted, so it finishes at
-// exactly its total instead of stalling short.
+// The bar for `witness import --agent codex` must be TRUE. Nothing is reported until the history
+// database's threads are counted, so the first total is already the final one — a log keeps only
+// that first line. Each thread ticks as it is reached, and every input, including the four that
+// fail here, ends counted, so the bar finishes at exactly its total instead of stalling short.
 func TestImportProgressCountsEveryInputOnce(t *testing.T) {
 	im, st := testImporter(t)
-	db, err := sql.Open("sqlite", filepath.Join(im.Home, "thread_history_1.sqlite"))
+	db, err := sql.Open("sqlite", filepath.Join(im.Home, historyDB))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,9 +44,12 @@ func TestImportProgressCountsEveryInputOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A history file this witness does not support: no threads, but it must stop being Open.
-	if err := os.WriteFile(filepath.Join(im.Home, "thread_history_2.sqlite"), nil, 0600); err != nil {
-		t.Fatal(err)
+	// History files this witness does not support, one sorting before the real database: neither
+	// adds threads, and the one read first must not report a total the real database then grows.
+	for _, name := range []string{"thread_history_0.sqlite", "thread_history_2.sqlite"} {
+		if err := os.WriteFile(filepath.Join(im.Home, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	rollout(t, im.Home, "r1", message("user", "one"))
 	rollout(t, im.Home, "r2", message("user", "two"))
@@ -65,34 +66,20 @@ func TestImportProgressCountsEveryInputOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Failed != 3 || st.RawCount("codex:t1") != 1 || st.RawCount("codex:r2") != 1 {
+	if stats.Failed != 4 || st.RawCount("codex:t1") != 1 || st.RawCount("codex:r1") != 1 || st.RawCount("codex:r2") != 1 {
 		t.Fatalf("import itself changed: %+v", stats)
 	}
-
-	const want = 3 + 3 // three rollouts, three history threads
-	r := *got
-	if len(r) == 0 || r[0] != (report{0, 3, true}) {
-		t.Fatalf("first report must be the 3 listed rollouts, Open until the databases are read: %+v", r)
-	}
-	if last := r[len(r)-1]; last != (report{want, want, false}) {
-		t.Fatalf("must finish at exactly its total, failures included: last %+v of %+v", last, r)
-	}
-	for i := 1; i < len(r); i++ {
-		p, c := r[i-1], r[i]
-		switch {
-		case c.done < p.done || c.done > c.total:
-			t.Fatalf("done went backwards or past total at %d: %+v", i, r)
-		case !p.open && c.total != p.total:
-			t.Fatalf("a total that is not Open moved at %d: %+v", i, r)
-		case !p.open && c.open:
-			t.Fatalf("reopened at %d: %+v", i, r)
-		}
+	// 3 threads + 3 rollouts. t1 is reached (0), t2 is reached (1) and fails, the database is then
+	// finished whole (3), the unsupported file after it changes nothing (3), then each rollout.
+	want := []report{{0, 6}, {1, 6}, {3, 6}, {3, 6}, {4, 6}, {5, 6}, {6, 6}}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("progress = %v, want %v", *got, want)
 	}
 }
 
-// With one history database — the usual Codex home — the total is final as soon as it is opened,
-// so nothing after that may be Open (that would print a floor, "≥", for an exact estimate).
-func TestImportProgressIsClosedOnceTheOnlyDatabaseIsCounted(t *testing.T) {
+// With one history database — the usual Codex home — every thread ticks as it is reached and the
+// database's end counts the last one.
+func TestImportProgressTicksEveryThread(t *testing.T) {
 	im, _ := testImporter(t)
 	db := testHistoryDB(t, im.Home)
 	sqlMessages(t, db)
@@ -103,14 +90,26 @@ func TestImportProgressIsClosedOnceTheOnlyDatabaseIsCounted(t *testing.T) {
 	if _, err := im.Import(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	r := *got
-	if r[0] != (report{0, 0, true}) || r[len(r)-1] != (report{2, 2, false}) {
-		t.Fatalf("%+v", r)
+	if want := []report{{0, 2}, {1, 2}, {2, 2}}; !reflect.DeepEqual(*got, want) {
+		t.Fatalf("progress = %v, want %v", *got, want)
 	}
-	for _, x := range r[1:] {
-		if x.open || x.total != 2 {
-			t.Fatalf("once counted, the total is exact: %+v", r)
-		}
+}
+
+// A history database that fails before its threads are counted still stops holding the bar back:
+// the rollouts are reported, and finish.
+func TestImportProgressSurvivesAnUnreadableDatabase(t *testing.T) {
+	im, _ := testImporter(t)
+	if err := os.WriteFile(filepath.Join(im.Home, historyDB), nil, 0600); err != nil {
+		t.Fatal(err) // an empty file: no projection table, so importDB fails before counting
+	}
+	rollout(t, im.Home, "r1", message("user", "one"))
+	ctx, got := recordProgress(t)
+	stats, err := im.Import(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []report{{0, 1}, {1, 1}}; stats.Failed != 1 || !reflect.DeepEqual(*got, want) {
+		t.Fatalf("progress = %v, want %v (failed %d)", *got, want, stats.Failed)
 	}
 }
 
