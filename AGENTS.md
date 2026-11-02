@@ -6,8 +6,8 @@ directly.
 
 ## What this is
 
-`witness` is a single pure-Go binary that captures Claude Code and OpenCode
-sessions into a **person-centric growth archive** (raw turns → observations →
+`witness` is a single pure-Go binary that captures Claude Code, OpenCode and Codex
+sessions (and ingested files) into a **person-centric growth archive** (raw turns → observations →
 facets → narrative profile). It is a **pure capture+serve tool** — no coaching,
 no injection into sessions. See [README.md](README.md) for the full model.
 

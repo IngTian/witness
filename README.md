@@ -25,7 +25,7 @@ just *"what is true now"*.
 
 ## Two ways people use it
 
-**1. Watch your own growth as you work with AI.** Install it into Claude Code or OpenCode and it
+**1. Watch your own growth as you work with AI.** Install it into Claude Code, OpenCode or Codex and it
 captures your sessions in the background — no prompting, no ritual. It distills how your thinking,
 workstyle, habits, and blind spots shift over months, with evidence for every claim. This is the
 setup witness ships configured out of the box.
@@ -65,7 +65,7 @@ domain-agnostic, the batteries included are not.
 
 witness is the answer if you've ever wanted to:
 
-- **Remember what you learned across your AI coding sessions** — Claude Code, OpenCode — instead of losing it when the context window resets.
+- **Remember what you learned across your AI coding sessions** — Claude Code, OpenCode, Codex — instead of losing it when the context window resets.
 - Have a **second brain / AI memory** for your thinking, workstyle, and habits, queryable by your agent.
 - **Track how you grow as a developer over time** — the traps you fall into and climb out of — with provenance for every recorded change.
 - Keep a **journal / retrospective** of how you thought and changed, re-readable months later.
