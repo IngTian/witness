@@ -1,9 +1,12 @@
 package commands
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"slices"
+
+	"github.com/mattn/go-isatty"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
@@ -105,6 +108,24 @@ func seedDefaultLensOnOpen(st *store.Store) {
 	}
 	_ = st.SetMetaString(defaultMigratedKey, "done")
 	slog.Info("seeded the built-in default lens into the registry as an ordinary enabled lens (#44 slice 1a); disable or deregister it any time — it will not come back")
+	// Say it once, in the house style — but only to a person. slog cannot be that channel (it is
+	// discarded until witness.log opens, and it printed "(#44 slice 1a)" into the editor when it
+	// was not), and a hook must print nothing: its stdin is a JSON payload and its stderr belongs
+	// to the editor, so this needs a terminal on both.
+	if seedNoticeWanted() {
+		fmt.Fprintln(os.Stderr, errLine("✓", "[ok]", ansiGreen, `added the built-in "default" lens — it runs on every session`))
+		arrow := "->"
+		if useColorErr {
+			arrow = "↳"
+		}
+		fmt.Fprintln(os.Stderr, "  "+styledErr(ansiDim, arrow+" turn it off  ")+" witness lens disable default")
+	}
+}
+
+// seedNoticeWanted gates the first-run notice: a person at a terminal (stdin AND stderr), never a
+// hook, never --json. A var so a test can stand in for the terminal.
+var seedNoticeWanted = func() bool {
+	return isatty.IsTerminal(os.Stdin.Fd()) && stderrIsTerminal && !jsonOutputMode()
 }
 
 // seedDefaultLens registers the bundled default prompts into the archive's registry as

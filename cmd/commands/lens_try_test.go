@@ -166,7 +166,7 @@ func TestLensTryReviewFlagsMalformedFacets(t *testing.T) {
 	if !strings.Contains(out, "verifies_claims") {
 		t.Fatalf("well-formed facet should render, got:\n%s", out)
 	}
-	if !strings.Contains(out, "2 facet(s) had no dimension/key/value") {
+	if !strings.Contains(out, "2 facets had no dimension/key/value") {
 		t.Fatalf("malformed facets should be flagged as a prompt-schema problem, got:\n%s", out)
 	}
 }

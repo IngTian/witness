@@ -16,10 +16,11 @@ func TestFacetsListingShowsDecayedConfidence(t *testing.T) {
 	f := store.Facet{Lens: "default", Dimension: "traits", Key: "satisfices",
 		Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9, ConfidenceSeq: 100}}}
 	out := captureStdout(t, func() {
-		renderCurrentFacets("default", []store.Facet{f}, 100+int64(store.FacetDecayHalfLifeObs),
+		renderCurrentFacets("default", "default", []store.Facet{f}, 100+int64(store.FacetDecayHalfLifeObs),
 			true, true, func() store.EmptyReason { return store.NoCapture })
 	})
-	if !strings.Contains(out, "(confidence 0.45)") || strings.Contains(out, "(confidence 0.90)") {
+	// The confidence column leads each facet row: "    0.45  satisfices  …".
+	if !strings.Contains(out, "    0.45  satisfices") || strings.Contains(out, "0.90") {
 		t.Errorf("`witness facets` must show the decayed 0.45, not the stored 0.90:\n%s", out)
 	}
 }

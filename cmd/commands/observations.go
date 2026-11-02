@@ -3,6 +3,7 @@ package commands
 import (
 	"crypto/sha1"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ func newObservationsCmd() *cobra.Command {
 		GroupID: groupRead,
 		Short:   "Search what witness has noticed about you.",
 		Long:    "Search the specific things witness has noticed about your work patterns, preferences, and growth. Each observation is timestamped and organized by lens and dimension.",
+		RunE:    groupRunE, // a typo'd subcommand is an error, not its help page and exit 0
 	}
 
 	var searchLens string
@@ -106,7 +108,9 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	hits := vector.Search(obs, qv, lensName, k)
+	// Observations carry the lens's mined name, which a registered lens may override.
+	dataName := lensDataName(st, lensName)
+	hits := vector.Search(obs, qv, dataName, k)
 	if asJSON {
 		out := observationSearchJSON{Lens: lensName, Query: query, Limit: k, Hits: []observationHitJSON{}}
 		for _, h := range hits {
@@ -125,7 +129,9 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 		}
 		return emitJSON(out)
 	}
-	renderObservationHits(lensName, hits, func() store.EmptyReason { return st.WhyEmpty(lensName) })
+	renderObservationHits(lensName, query, hits,
+		slices.Contains(st.RegisteredLenses(), lensName), slices.Contains(st.LoadConfig().EnabledLenses, lensName),
+		func() store.EmptyReason { return st.WhyEmpty(dataName) })
 	return nil
 }
 
@@ -148,33 +154,54 @@ type observationHitJSON struct {
 	Score       float64 `json:"score"`
 }
 
-func renderObservationHits(lensName string, hits []vector.Hit, whyEmpty func() store.EmptyReason) {
+// renderObservationHits prints the hits most relevant first. lensName is what the user typed;
+// registered/enabled decide which next step an empty result can honestly suggest.
+func renderObservationHits(lensName, query string, hits []vector.Hit, registered, enabled bool, whyEmpty func() store.EmptyReason) {
 	if len(hits) == 0 {
+		fmt.Println(title("observations", lensName, fmt.Sprintf("no hits for %q", query)))
+		fmt.Println()
 		// vector.Search is top-k with no score threshold, so zero hits never means "your
 		// query missed" — it means there is nothing embedded to search. Say which layer is
-		// actually missing instead of leaving the user to guess (#166).
-		fmt.Printf("No observations found in the %q lens.\n", lensName)
-		switch whyEmpty() {
-		case store.NoCapture:
-			fmt.Println("This archive holds no raw turns at all, so nothing is capturing — wire an editor with `witness wire claude`, or add the plugin to opencode.json for OpenCode.")
-		case store.NoObservations:
-			fmt.Printf("Capture is working, but nothing has been mined into %q yet — try `witness lens backfill %s`.\n", lensName, lensName)
+		// actually missing instead of leaving the user to guess (#166). An unregistered lens
+		// comes first: every other step (backfill, doctor) would fail or mislead for it.
+		reason := store.NoCapture
+		if registered {
+			reason = whyEmpty()
+		}
+		switch {
+		case !registered:
+			fmt.Printf("  %s no lens %q is registered\n", skipGlyph(), lensName)
+			fmt.Println(hint("see lenses", "witness lens list"))
+		case reason == store.NoCapture:
+			fmt.Printf("  %s nothing to search — nothing is capturing (the archive holds no raw turns)\n", skipGlyph())
+			fmt.Println(hint("wire editor", wireCommand()))
+		case reason == store.NoObservations:
+			fmt.Printf("  %s nothing has been mined into %q yet\n", skipGlyph(), lensName)
+			if !enabled {
+				fmt.Println(hint("enable it", "witness lens enable "+lensName))
+			}
+			fmt.Println(hint("mine history", "witness lens backfill "+lensName))
 		default:
-			fmt.Printf("%q has observations, but none carry embeddings, so nothing is searchable — check `witness doctor`.\n", lensName)
+			fmt.Printf("  %s %q has observations, but none carry embeddings, so nothing is searchable\n", warnGlyph(), lensName)
+			fmt.Println(hint("diagnose", "witness doctor"))
 		}
 		return
 	}
-	fmt.Printf("Growth observations (%s lens), most relevant first:\n\n", lensName)
+	fmt.Println(title("observations", lensName, fmt.Sprintf("%s for %q", countNoun(len(hits), "hit", "hits"), query)))
 	for _, h := range hits {
 		o := h.Obs
-		fmt.Printf("- [%s | %s | score %.3f] %s\n", valueOrNever(o.TS), o.Dimension, h.Score, o.Observation)
+		// 2 indent + 5 score + 2 gap = the 9-column hanging indent every line of a hit shares.
+		fmt.Println()
+		fmt.Printf("  %s  %s\n", bold(cyan(fmt.Sprintf("%.3f", h.Score))), dim(o.Dimension+" · "+shortTime(valueOrNever(o.TS))))
+		fmt.Printf("         %s\n", fitLine(o.Observation, 9))
 		if o.Evidence != "" {
-			fmt.Printf("  evidence: %s\n", o.Evidence)
+			fmt.Printf("         %s\n", dim(glyph("↳", "->")+" "+fitLine(o.Evidence, 11)))
 		}
-		fmt.Printf("  id: %s\n", o.ID)
+		ids := o.ID
 		if o.Session != "" {
-			fmt.Printf("  session: %s\n", o.Session)
+			ids += " · session " + o.Session
 		}
+		fmt.Printf("         %s\n", dim(ids))
 	}
 }
 
@@ -226,14 +253,18 @@ func cmdObservationRecord(session, lensName, dimension, observation, evidence st
 		// Duplicate vs. cap: check the dedup case first so a re-recorded obs at the
 		// cap isn't mislabeled a quota error (mirrors the MCP path).
 		if st.StagedExists(session, o.ID) {
-			fmt.Printf("already recorded (%s/%s) id=%s\n", lensName, dimension, o.ID)
+			fmt.Println(result(skipGlyph(), fmt.Sprintf("already recorded %s/%s %s", lensName, dimension, o.ID), "nothing staged"))
 			return nil
 		}
 		return fmt.Errorf("too many staged observations for session %s (limit %d)", session, maxCLIStagedPerSession)
 	}
-	spawnDetached("worker-run")
-	fmt.Printf("recorded (%s/%s) id=%s\n", lensName, dimension, o.ID)
-	fmt.Println("distill worker kicked in the background")
+	if !spawnDetachedOK("worker-run") {
+		// Staged is durable — the next capture or `worker run` folds it in — so this is a warning.
+		fmt.Println(result(warnGlyph(), fmt.Sprintf("recorded %s/%s %s", lensName, dimension, o.ID), "the worker did not start"))
+		fmt.Println(hint("fold it in", "witness worker run"))
+		return nil
+	}
+	fmt.Println(result(okGlyph(), fmt.Sprintf("recorded %s/%s %s", lensName, dimension, o.ID), "worker started in the background"))
 	return nil
 }
 
@@ -252,10 +283,11 @@ func cmdObservationDelete(obsID string) error {
 		return err
 	}
 	if !deleted {
-		fmt.Println("no observation with id " + obsID)
+		// Exit 0 on purpose: deleting what is already gone is idempotent, the MCP tool's contract too.
+		fmt.Println(result(skipGlyph(), "no observation "+obsID, "nothing deleted"))
 		return nil
 	}
-	fmt.Println("deleted " + obsID)
+	fmt.Println(result(okGlyph(), "deleted "+obsID, ""))
 	return nil
 }
 

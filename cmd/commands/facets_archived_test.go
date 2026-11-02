@@ -56,9 +56,9 @@ func TestFacetsListingHidesArchivedByDefault(t *testing.T) {
 	if !strings.Contains(out, "survivor") {
 		t.Errorf("the active facet should be listed:\n%s", out)
 	}
-	// The count in the header is part of the claim too.
-	if !strings.Contains(out, "- 1\n") {
-		t.Errorf("the header count should be 1, not 3:\n%s", out)
+	// The count in the title is part of the claim too.
+	if !strings.Contains(out, "witness facets · default  1 active · 1 dimension\n") {
+		t.Errorf("the title count should be 1, not 3:\n%s", out)
 	}
 }
 
