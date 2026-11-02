@@ -78,6 +78,18 @@ func resolveMergeSource(target string) (dbPath, dir string, err error) {
 	return "", "", fmt.Errorf("%s holds no witness database (expected witness.db, as `witness export --all` writes)", target)
 }
 
+// premergeBackupPath is the sibling directory --apply backs the archive up to. Root is cleaned at
+// resolution; the inside-root check is the backstop for the failure it once had: a trailing slash
+// put the backup INSIDE the archive, and following the undo instructions deleted it.
+func premergeBackupPath(root string, now time.Time) (string, error) {
+	root = filepath.Clean(root)
+	p := root + ".premerge-" + now.UTC().Format("20060102-150405")
+	if rel, err := filepath.Rel(root, p); err == nil && !strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("the backup path %s would be inside the archive %s", p, root)
+	}
+	return p, nil
+}
+
 func cmdMerge(target string, apply bool) error {
 	dbPath, dir, err := resolveMergeSource(target)
 	if err != nil {
@@ -102,85 +114,123 @@ func cmdMerge(target string, apply bool) error {
 
 	ctx := context.Background()
 	now := time.Now()
-	// Always plan first (a rolled-back transaction): it costs seconds, and it is what lets --apply
-	// skip the backup when there is nothing to merge — a re-run must not leave a backup behind.
+	// Always plan first (a rolled-back transaction): it is what lets --apply skip the backup when
+	// there is nothing to merge — a re-run must not leave a backup behind.
 	rep, err := st.Merge(ctx, dbPath, false, now)
 	if err != nil {
 		return err
 	}
-	files := planMergeFiles(st, dir)
+	files := planMergeFiles(st, dir, rep)
 	if rep.Empty() && !files.changes() {
+		if files.notes() {
+			// Never "everything is already here" when the export holds a definition that differs
+			// from ours: prompt text is in no database, and that claim invites discarding the export.
+			fmt.Printf("no data to merge from %s, but it holds definitions that differ from yours:\n", target)
+			printMergeFiles(st.Root, files, false)
+			return nil
+		}
 		fmt.Printf("nothing to merge — everything in %s is already here\n", target)
 		return nil
 	}
 
 	backup := ""
 	if apply {
-		backup = st.Root + ".premerge-" + now.UTC().Format("20060102-150405")
+		if backup, err = premergeBackupPath(st.Root, now); err != nil {
+			return err
+		}
 		if _, err := st.ExportAll(backup, false); err != nil {
 			return fmt.Errorf("could not back this archive up before merging (%w); nothing was merged", err)
 		}
 		if rep, err = st.Merge(ctx, dbPath, true, now); err != nil {
-			return fmt.Errorf("%w (nothing was merged; this archive is unchanged)", err)
+			return fmt.Errorf("%w (nothing was merged; this archive is unchanged — the backup at %s is a copy of it and can be deleted)", err, backup)
 		}
 		files.apply(st)
 	}
 	printMergeReport(target, st.Root, rep, files, apply, backup)
+	if n := len(files.failed); n > 0 {
+		// The data is merged, but a lens prompt that failed to register exists ONLY in the export.
+		// Exit non-zero so `merge x --apply && rm -rf x` cannot delete it.
+		return fmt.Errorf("merged, but %d lens %s NOT registered (see above) — keep %s and retry", n,
+			map[bool]string{true: "definition was", false: "definitions were"}[n == 1], target)
+	}
 	return nil
 }
 
 // mergeFiles is the file half of a merge: lens definitions, portrait prompts, profile.
 type mergeFiles struct {
-	register  []mergeLens // incoming-only lenses: registered, not enabled
+	register  []mergeLens // incoming-only lenses that pass registration: registered, not enabled
 	differ    []mergeLens // same name, different definition: ours kept
-	refused   []string    // incoming lens dirs with names registration would refuse
+	refused   []string    // incoming lens dirs registration would refuse, with the reason
 	summarize []string    // portrait prompts that differ from ours: NEVER copied, reported
+	unknown   []string    // lenses whose DATA arrived with no definition here or in the export
+	disabled  []string    // lenses with data here whose definition is registered but not enabled
 	srcDir    string
 	profile   bool
 	results   []string // what --apply actually did
+	failed    []string // lenses --apply could not register
 }
 
 type mergeLens struct{ name, path string }
 
 func (f *mergeFiles) changes() bool { return len(f.register) > 0 }
 
-func planMergeFiles(st *store.Store, dir string) *mergeFiles {
+// notes reports whether there is something worth telling the user even with nothing to merge.
+func (f *mergeFiles) notes() bool { return len(f.differ) > 0 || len(f.summarize) > 0 }
+
+func planMergeFiles(st *store.Store, dir string, rep *store.MergeReport) *mergeFiles {
 	f := &mergeFiles{srcDir: dir}
-	if dir == "" {
-		return f
-	}
 	registered := st.RegisteredLenses()
-	entries, _ := os.ReadDir(filepath.Join(dir, "lenses"))
-	for _, e := range entries {
-		// Staging residue (.tmp/.bak) and stray files are not lenses.
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.HasSuffix(e.Name(), ".tmp") || strings.HasSuffix(e.Name(), ".bak") {
-			continue
-		}
-		l := mergeLens{name: e.Name(), path: filepath.Join(dir, "lenses", e.Name())}
-		switch {
-		case store.ValidLensName(l.name) != nil:
-			f.refused = append(f.refused, l.name)
-		case slices.Contains(registered, l.name):
-			if !sameLensDef(l.path, filepath.Join(st.LensesDir(), l.name)) {
-				f.differ = append(f.differ, l)
+	inExport := map[string]bool{}
+	if dir != "" {
+		entries, _ := os.ReadDir(filepath.Join(dir, "lenses"))
+		for _, e := range entries {
+			// Staging residue (.tmp/.bak) and stray files are not lenses.
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.HasSuffix(e.Name(), ".tmp") || strings.HasSuffix(e.Name(), ".bak") {
+				continue
 			}
-		default:
-			f.register = append(f.register, l)
+			l := mergeLens{name: e.Name(), path: filepath.Join(dir, "lenses", e.Name())}
+			inExport[l.name] = true
+			switch {
+			case slices.Contains(registered, l.name):
+				if !sameLensDef(l.path, filepath.Join(st.LensesDir(), l.name)) {
+					f.differ = append(f.differ, l)
+				}
+			default:
+				// Every check RegisterLens will make, now: the dry run must not promise a
+				// registration the apply then refuses — that kept a re-run from converging,
+				// taking another full-archive backup every time.
+				if err := st.CheckLensRegistration(l.name, l.path); err != nil {
+					f.refused = append(f.refused, fmt.Sprintf("%s (%v)", l.name, err))
+					continue
+				}
+				f.register = append(f.register, l)
+			}
+		}
+		// Portrait prompts are reported, never copied. One replaces the instruction the summarizer
+		// writes the portrait with — an archive of market records would reframe a personal portrait
+		// as a market report — and witness enables no foreign prompt without the user asking.
+		sums, _ := filepath.Glob(filepath.Join(dir, "summarize", "*.md"))
+		for _, src := range sums {
+			ours, err := os.ReadFile(filepath.Join(st.Root, "summarize", filepath.Base(src)))
+			theirs, err2 := os.ReadFile(src)
+			if err2 == nil && (err != nil || !bytes.Equal(ours, theirs)) {
+				f.summarize = append(f.summarize, src)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(dir, "profile")); err == nil {
+			f.profile = true
 		}
 	}
-	// Portrait prompts are reported, never copied. One replaces the instruction the summarizer
-	// writes the portrait with — an archive of market records would reframe a personal portrait as
-	// a market report — and witness enables no foreign prompt without the user asking.
-	sums, _ := filepath.Glob(filepath.Join(dir, "summarize", "*.md"))
-	for _, src := range sums {
-		ours, err := os.ReadFile(filepath.Join(st.Root, "summarize", filepath.Base(src)))
-		theirs, err2 := os.ReadFile(src)
-		if err2 == nil && (err != nil || !bytes.Equal(ours, theirs)) {
-			f.summarize = append(f.summarize, src)
+	// Data for a lens arrives whatever the source is — a single .db carries no lens definitions at
+	// all — and nothing reviews a lens that is not registered AND enabled. Say so.
+	enabled := st.LoadConfig().EnabledLenses
+	for _, l := range rep.Lenses {
+		switch {
+		case !slices.Contains(registered, l) && !inExport[l]:
+			f.unknown = append(f.unknown, l)
+		case slices.Contains(registered, l) && !slices.Contains(enabled, l):
+			f.disabled = append(f.disabled, l)
 		}
-	}
-	if _, err := os.Stat(filepath.Join(dir, "profile")); err == nil {
-		f.profile = true
 	}
 	return f
 }
@@ -200,10 +250,11 @@ func sameLensDef(a, b string) bool {
 func (f *mergeFiles) apply(st *store.Store) {
 	for _, l := range f.register {
 		if err := st.RegisterLens(l.name, l.path); err != nil {
-			f.results = append(f.results, fmt.Sprintf("%s: not registered (%v)", l.name, err))
+			f.failed = append(f.failed, l.name)
+			f.results = append(f.results, fmt.Sprintf("%s %s: NOT registered (%v) — its prompt exists only in the export", badGlyph(), l.name, err))
 			continue
 		}
-		f.results = append(f.results, l.name+": registered, NOT enabled")
+		f.results = append(f.results, l.name+": registered, NOT enabled — enable it with `witness lens enable "+l.name+"`")
 	}
 }
 
@@ -225,18 +276,24 @@ func printMergeReport(src, root string, r *store.MergeReport, f *mergeFiles, app
 	for _, d := range s.Diverged {
 		fmt.Printf("                %s %s differs from yours — yours keeps the id, theirs arrives as %s\n", warnGlyph(), d.From, d.To)
 	}
+	if s.Duplicates > 0 {
+		fmt.Printf("                %d skipped: a second copy of a transcript already here\n", s.Duplicates)
+	}
 	o := r.Observations
 	fmt.Printf("  observations  %d reviewed there · %d to review · %d already here", o.Reviewed, o.Unreviewed, o.AlreadyHere)
 	if o.SharedMined > 0 {
 		fmt.Printf(" · %d skipped (sessions you already mined)", o.SharedMined)
+	}
+	if o.Orphaned > 0 {
+		fmt.Printf(" · %d skipped (yours will be mined instead)", o.Orphaned)
 	}
 	fmt.Println()
 	if r.Staged > 0 {
 		fmt.Printf("  staged        %d recorded in-session, not yet distilled\n", r.Staged)
 	}
 	fc := r.Facets
-	fmt.Printf("  facets        %d incoming: %d new · %d already here · %d with later history adopted\n",
-		fc.Incoming, fc.New, fc.Shared, fc.FastForwarded)
+	fmt.Printf("  facets        %d incoming: %d new · %d already here · %d updated · %d with later history adopted\n",
+		fc.Incoming, fc.New, fc.Shared, fc.Updated, fc.FastForwarded)
 	if len(fc.SameKey) > 0 {
 		fmt.Printf("                %s %s with yours — the copy with newer evidence keeps the key,\n"+
 			"                  the other is kept beside it, archived into it:\n",
@@ -253,29 +310,7 @@ func printMergeReport(src, root string, r *store.MergeReport, f *mergeFiles, app
 			fmt.Printf("                  %s  %s/%s  (kept %s; other copy %s)\n", k.Lens, k.Dimension, k.Key, kept, k.LoserKey)
 		}
 	}
-
-	for _, l := range f.register {
-		if !applied {
-			fmt.Printf("  lens          %s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
-		}
-	}
-	for _, line := range f.results {
-		fmt.Printf("  lens          %s\n", line)
-	}
-	for _, l := range f.differ {
-		fmt.Printf("  lens          %s %s: their definition differs — yours is kept (theirs: witness lens register %s %s)\n",
-			warnGlyph(), l.name, l.name, l.path)
-	}
-	for _, n := range f.refused {
-		fmt.Printf("  lens          %s %s: not a valid lens name here, skipped\n", warnGlyph(), n)
-	}
-	for _, src := range f.summarize {
-		fmt.Printf("  summarize     %s not copied — it changes how your portrait is written. To use it:\n"+
-			"                  cp %s %s\n", filepath.Base(src), src, filepath.Join(root, "summarize", filepath.Base(src)))
-	}
-	if f.profile {
-		fmt.Printf("  profile       not merged — rebuilt from the merged facets; theirs stays in %s\n", filepath.Join(f.srcDir, "profile"))
-	}
+	printMergeFiles(root, f, applied)
 	fmt.Println("  config.toml   yours is kept")
 	fmt.Println()
 	fmt.Println(dim("nothing here called a model. Next, optionally:"))
@@ -285,6 +320,47 @@ func printMergeReport(src, root string, r *store.MergeReport, f *mergeFiles, app
 		fmt.Println("dry run — nothing written. Run again with --apply to merge (it backs this archive up first).")
 		return
 	}
-	fmt.Printf("%s merged. This archive as it was before: %s\n", okGlyph(), backup)
+	glyph := okGlyph()
+	if len(f.failed) > 0 {
+		glyph = warnGlyph()
+	}
+	fmt.Printf("%s merged. This archive as it was before: %s\n", glyph, backup)
 	fmt.Printf("  to undo: stop witness, then replace %s with that directory\n", root)
+}
+
+func printMergeFiles(root string, f *mergeFiles, applied bool) {
+	if !applied {
+		for _, l := range f.register {
+			fmt.Printf("  lens          %s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
+		}
+	}
+	for _, line := range f.results {
+		fmt.Printf("  lens          %s\n", line)
+	}
+	for _, l := range f.differ {
+		fmt.Printf("  lens          %s %s: their definition differs — yours is kept (theirs: witness lens register %s %q)\n",
+			warnGlyph(), l.name, l.name, l.path)
+	}
+	for _, n := range f.refused {
+		fmt.Printf("  lens          %s %s: would be refused here, skipped\n", warnGlyph(), n)
+	}
+	for _, n := range f.unknown {
+		fmt.Printf("  lens          %s %s: its data arrives, but there is no definition for it here — nothing will review\n"+
+			"                  it until you `witness lens register %s <dir>` and enable it\n", warnGlyph(), n, n)
+	}
+	for _, n := range f.disabled {
+		fmt.Printf("  lens          %s: data arrives for a lens you have registered but not enabled — `witness lens enable %s` to review it\n", n, n)
+	}
+	for _, src := range f.summarize {
+		dst := filepath.Join(root, "summarize", filepath.Base(src))
+		note := ""
+		if _, err := os.Stat(dst); err == nil {
+			note = " (this REPLACES yours — copy it aside first)"
+		}
+		fmt.Printf("  summarize     %s not copied — it changes how your portrait is written. To use it%s:\n"+
+			"                  mkdir -p %q && cp %q %q\n", filepath.Base(src), note, filepath.Dir(dst), src, dst)
+	}
+	if f.profile {
+		fmt.Printf("  profile       not merged — rebuilt from the merged facets; theirs stays in %s\n", filepath.Join(f.srcDir, "profile"))
+	}
 }

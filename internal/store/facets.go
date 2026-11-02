@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 )
@@ -28,15 +29,28 @@ func (f *facetIO) ReadFacets() ([]Facet, error) { return f.readFacets(false) }
 func (f *facetIO) ReadActiveFacets() ([]Facet, error) { return f.readFacets(true) }
 
 func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
+	return readFacetsFrom(context.Background(), f.db, activeOnly)
+}
+
+// rowQuerier is what reading needs from either a *sql.DB or a *sql.Tx. The merge reads this
+// archive's facets INSIDE its transaction, so a facet change that lands while it runs either
+// precedes the read or waits for the commit — read outside, a concurrent write (a
+// delete_observation resetting a review cursor) would be silently overwritten by the merge.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func readFacetsFrom(ctx context.Context, q rowQuerier, activeOnly bool) ([]Facet, error) {
 	where := ""
 	if activeOnly {
 		where = ` WHERE f.archived_at = ''`
 	}
-	rows, err := f.db.Query(
+	rows, err := q.QueryContext(ctx,
 		`SELECT f.id, f.lens, f.dimension, f.key, f.last_seen, f.archived_at, f.merged_into, f.archive_reason,
 		        v.value, v.claim, v.confidence_seq, v.valid_from, v.valid_to, v.recorded_at, v.because_of, v.confidence
 		   FROM facets f
-		   LEFT JOIN facet_versions v ON v.facet_id = f.id` + where + `
+		   LEFT JOIN facet_versions v ON v.facet_id = f.id`+where+`
 		  ORDER BY f.lens, f.dimension, f.key, v.pos`)
 	if err != nil {
 		return nil, err

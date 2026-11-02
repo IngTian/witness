@@ -319,8 +319,11 @@ func TestMergeSharedHistory(t *testing.T) {
 	inc.facets(incSame, incFF, incC)
 
 	rep := base.merge(inc.export(), true)
-	if rep.Facets.Shared != 2 || rep.Facets.FastForwarded != 1 || rep.Facets.New != 0 || len(rep.Facets.SameKey) != 0 {
-		t.Fatalf("want 2 shared, 1 fast-forwarded, nothing new or colliding; got %+v", rep.Facets)
+	// Both non-fast-forward facets CHANGED (a downgrade adopted, a retirement adopted): they are
+	// Updated, not Shared — counting them as "already here" is how the CLI once said "nothing to
+	// merge" and dropped exactly these changes.
+	if rep.Facets.Updated != 2 || rep.Facets.FastForwarded != 1 || rep.Facets.New != 0 || len(rep.Facets.SameKey) != 0 {
+		t.Fatalf("want 2 updated, 1 fast-forwarded, nothing new or colliding; got %+v", rep.Facets)
 	}
 	if s := base.facet("default", "d", "same"); len(s.Versions) != 1 || s.Current().Confidence != 0.6 {
 		t.Errorf("the newer-evidenced downgrade to 0.6 must survive, got %+v", s.Versions)

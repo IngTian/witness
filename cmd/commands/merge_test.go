@@ -120,14 +120,18 @@ func TestMergeCommandFilesAndBackup(t *testing.T) {
 		t.Errorf("the incoming session did not arrive")
 	}
 
-	// A second run has nothing to do, and must not leave another backup behind.
+	// A second run has no data to merge and must not leave another backup behind. The export still
+	// holds a portrait prompt that differs from ours, so it must say THAT — not "everything is
+	// already here": prompt text is in no database, and that claim invites discarding the export.
 	out = captureStdout(t, func() {
 		if err := cmdMerge(export, true); err != nil {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "nothing to merge") || len(premergeBackups(t, root)) != 1 {
-		t.Errorf("a no-op re-run must say so and write no backup; got %d backups:\n%s", len(premergeBackups(t, root)), out)
+	if !strings.Contains(out, "no data to merge") || !strings.Contains(out, "unified.md") ||
+		strings.Contains(out, "already here") || len(premergeBackups(t, root)) != 1 {
+		t.Errorf("a no-op re-run must report the differing prompt and write no backup; got %d backups:\n%s",
+			len(premergeBackups(t, root)), out)
 	}
 }
 

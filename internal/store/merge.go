@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -25,15 +26,18 @@ import (
 // so a session or observation deleted on one side comes back from the other; and two machines
 // that keep capturing between merges each grow a genuinely diverged chain for every facet both
 // touched, which this resolves by archiving one copy — one more archived copy per facet per round.
-// Repeated one-way merges are SAFE (every rule below is idempotent on natural keys), but a two-way
-// sync needs tombstones and a three-way facet merge, which this deliberately is not.
+// Re-merging the same source, and merging back, are handled (every rule below is idempotent on
+// natural keys and recognises its own earlier output), but a real two-way sync needs tombstones
+// and a three-way facet merge, which this deliberately is not.
 //
 // THE SHAPE. The incoming database is never opened in place: Open writes into a data dir (config,
 // a lens migration, the default-lens seed), and a backup must stay a backup. It is copied to a
 // temp file, migrated THERE, and everything that has to change on the incoming side — renaming a
 // diverged session, dropping observations this archive already mined — is done to that copy. The
 // copy is then ATTACHed and the whole merge runs in ONE transaction on a pinned connection, so it
-// lands completely or not at all, and a dry run is the same transaction rolled back.
+// lands completely or not at all, and a dry run is the same transaction rolled back. Every step is
+// linear in the archive sizes: the write lock is held for well under a second at tens of thousands
+// of observations, inside the 5s busy_timeout a concurrent capture hook waits.
 //
 // The model is never called. Facets are carried across with their full histories, so both sides
 // keep their real dates; duplicates the two archives minted under DIFFERENT keys are left for
@@ -69,15 +73,11 @@ func (s *Store) Merge(ctx context.Context, incomingDB string, apply bool, now ti
 	}
 
 	rep := &MergeReport{Source: incomingDB, IncomingSchema: from}
-	inc, err := s.readIncoming(copyPath, rep)
+	inc, err := readIncoming(ctx, copyPath, rep)
 	if err != nil {
 		return nil, err
 	}
-	base, err := s.readBaseSide()
-	if err != nil {
-		return nil, err
-	}
-	if err := s.mergeTx(ctx, copyPath, inc, base, rep, apply, now); err != nil {
+	if err := s.mergeTx(ctx, copyPath, inc, rep, apply, now); err != nil {
 		return nil, err
 	}
 	return rep, nil
@@ -87,6 +87,12 @@ func (s *Store) Merge(ctx context.Context, incomingDB string, apply bool, now ti
 // running archive's data directory rather than a snapshot.
 var ErrMergeLiveArchive = errors.New("that is a live data directory (it has a witness.db-wal), not a snapshot; " +
 	"export it on the machine that owns it — `witness export --all <newdir>` — and merge that")
+
+// mergeArchiveReasonPrefix marks a facet the MERGE archived (a same-key loser). It is bookkeeping,
+// not a judgment about the facet, so a later merge never adopts it from the other side: adopting
+// it is how a merge back archived the winning facet into itself and left the trait with no active
+// copy at all.
+const mergeArchiveReasonPrefix = "the same key existed in a merged archive"
 
 // MergeReport is what a merge did, or — for a dry run — would do. Every count comes from the same
 // transaction the apply would commit, so the dry run cannot disagree with it.
@@ -100,6 +106,8 @@ type MergeReport struct {
 
 	Sessions     MergeSessions
 	RawRows      int
+	ProgressRows int // mining-progress rows added or upgraded
+	MetaKeys     int // importer keys and emergent marks written
 	Observations MergeObservations
 	Staged       int
 	Facets       MergeFacets
@@ -113,10 +121,11 @@ type MergeSessions struct {
 	LongerThere int // the incoming transcript extends ours: its tail is appended
 	LongerHere  int // ours extends the incoming one: nothing to do
 	Appended    int // raw rows appended across the LongerThere sessions
+	Duplicates  int // incoming sessions that were a second copy of one transcript (a merge back)
 	// Diverged sessions share an id but not a transcript — two machines ingesting the same named
-	// `file:` feed, typically. Ours keeps the id; the incoming one is renamed so its transcript AND
-	// what was mined from it arrive together, instead of its observations landing under our
-	// transcript.
+	// `file:` feed, typically. Ours keeps the id; the incoming one gets an id of its own so its
+	// transcript AND what was mined from it arrive together, instead of its observations landing
+	// under our transcript.
 	Diverged []RenamedSession
 }
 
@@ -132,6 +141,10 @@ type MergeObservations struct {
 	// not deterministic, so the incoming copy is a paraphrase with different obs_ids — union them
 	// and every such moment is counted twice, permanently, with no column to tell the copies apart.
 	SharedMined int
+	// Orphaned: observations the other side mined from a transcript it has since cleaned up, of a
+	// session whose transcript WE hold and never mined for that lens. They would arrive with no
+	// progress, so the lens would mine the session here again beside them; ours is mined instead.
+	Orphaned int
 }
 
 // MergeFacets counts L2.
@@ -139,7 +152,8 @@ type MergeFacets struct {
 	Incoming      int
 	New           int // no facet here with that key or shared history
 	Shared        int // same history already here (a restore, or a re-run): nothing new
-	FastForwarded int // same history, but the incoming side recorded later versions: adopted
+	Updated       int // same history, but the other side's later judgement (a downgrade, a retirement, a claim) was adopted
+	FastForwarded int // same history, and the incoming side recorded later versions: adopted
 	SameKey       []SameKeyFacet
 }
 
@@ -151,38 +165,32 @@ type SameKeyFacet struct {
 }
 
 // Empty reports whether the merge changes nothing at all — the second run of the same merge.
+// Every kind of write counts: a facet-only delta (the other machine's compaction, a downgrade, a
+// claim pass) is a real change, and reporting it as "nothing to merge" let the user discard it.
 func (r *MergeReport) Empty() bool {
 	return r.Sessions.New == 0 && r.Sessions.LongerThere == 0 && len(r.Sessions.Diverged) == 0 &&
-		r.RawRows == 0 && r.Observations.Reviewed == 0 && r.Observations.Unreviewed == 0 &&
-		r.Staged == 0 && r.Facets.New == 0 && r.Facets.FastForwarded == 0 && len(r.Facets.SameKey) == 0
+		r.RawRows == 0 && r.ProgressRows == 0 && r.MetaKeys == 0 &&
+		r.Observations.Reviewed == 0 && r.Observations.Unreviewed == 0 && r.Staged == 0 &&
+		r.Facets.New == 0 && r.Facets.Updated == 0 && r.Facets.FastForwarded == 0 && len(r.Facets.SameKey) == 0
 }
 
-// mergeSide is one archive's state as read BEFORE the merge transaction. Observations and facets
-// change only under WorkerLock (the caller holds it), so reading them outside the transaction is
-// consistent; raw rows can still arrive from a capture hook, so raw is read inside it.
+// mergeSide is one archive's state. The incoming side is read from the private temp copy; this
+// archive's side is read INSIDE the merge transaction, so a concurrent write (a delete_observation
+// resetting a review cursor) either lands before the read or waits for the commit, instead of being
+// silently overwritten by it.
 type mergeSide struct {
 	head    int64            // MAX(observations.seq): the decay clock's "now" on this side
-	lastTS  string           // MAX(observations.ts): how recent this side's evidence runs
 	cursors map[string]int64 // review_rowid:<lens>
 	facets  []Facet
 	obsTS   map[string]string // obs_id -> ts, for evidence time
 }
 
-func (s *Store) readBaseSide() (*mergeSide, error) {
-	side, err := readSide(s.db)
-	if err != nil {
-		return nil, fmt.Errorf("read this archive: %w", err)
-	}
-	return side, nil
-}
-
-func readSide(db *sql.DB) (*mergeSide, error) {
+func readSide(ctx context.Context, q rowQuerier) (*mergeSide, error) {
 	side := &mergeSide{cursors: map[string]int64{}, obsTS: map[string]string{}}
-	if err := db.QueryRow(`SELECT COALESCE(MAX(seq), 0), COALESCE(MAX(NULLIF(ts, '')), '') FROM observations`).
-		Scan(&side.head, &side.lastTS); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM observations`).Scan(&side.head); err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT key, value FROM meta WHERE key LIKE 'review_rowid:%'`)
+	rows, err := q.QueryContext(ctx, `SELECT key, value FROM meta WHERE key LIKE 'review\_rowid:%' ESCAPE '\'`)
 	if err != nil {
 		return nil, err
 	}
@@ -195,8 +203,10 @@ func readSide(db *sql.DB) (*mergeSide, error) {
 		n, _ := strconv.ParseInt(v, 10, 64)
 		side.cursors[strings.TrimPrefix(k, "review_rowid:")] = n
 	}
-	rows.Close()
-	ts, err := db.Query(`SELECT obs_id, ts FROM observations`)
+	if err := closeRows(rows); err != nil {
+		return nil, err
+	}
+	ts, err := q.QueryContext(ctx, `SELECT obs_id, ts FROM observations`)
 	if err != nil {
 		return nil, err
 	}
@@ -208,59 +218,77 @@ func readSide(db *sql.DB) (*mergeSide, error) {
 		}
 		side.obsTS[id] = t
 	}
-	ts.Close()
-	if side.facets, err = (&facetIO{db: db}).ReadFacets(); err != nil {
+	if err := closeRows(ts); err != nil {
+		return nil, err
+	}
+	if side.facets, err = readFacetsFrom(ctx, q, false); err != nil {
 		return nil, err
 	}
 	return side, nil
 }
 
+// closeRows ends an iteration and reports any error it stopped on, so a scan cut short cannot pass
+// for a complete read — a partial cursor map would move every row of ours above the new cursor.
+func closeRows(rows *sql.Rows) error {
+	err := rows.Err()
+	if cerr := rows.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // readIncoming migrates the temp copy and reads the incoming side, plus the report header.
-func (s *Store) readIncoming(copyPath string, rep *MergeReport) (*mergeSide, error) {
+func readIncoming(ctx context.Context, copyPath string, rep *MergeReport) (*mergeSide, error) {
 	db, err := openDB(copyPath) // migrates the COPY only
 	if err != nil {
 		return nil, fmt.Errorf("open incoming copy: %w", err)
 	}
 	defer db.Close()
-	side, err := readSide(db)
+	side, err := readSide(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("read incoming archive: %w", err)
 	}
-	if err := db.QueryRow(`SELECT COALESCE(MIN(NULLIF(ts,'')),''), COALESCE(MAX(NULLIF(ts,'')),'') FROM raw`).
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MIN(NULLIF(ts,'')),''), COALESCE(MAX(NULLIF(ts,'')),'') FROM raw`).
 		Scan(&rep.FirstTS, &rep.LastTS); err != nil {
 		return nil, err
 	}
-	cw, err := db.Query(`SELECT cwd FROM session_meta WHERE cwd <> '' GROUP BY cwd ORDER BY COUNT(*) DESC, cwd LIMIT 3`)
-	if err != nil {
+	if rep.Cwds, err = queryStrings(ctx, db, `SELECT cwd FROM session_meta WHERE cwd <> '' GROUP BY cwd ORDER BY COUNT(*) DESC, cwd LIMIT 3`); err != nil {
 		return nil, err
 	}
-	for cw.Next() {
-		var c string
-		_ = cw.Scan(&c)
-		rep.Cwds = append(rep.Cwds, c)
-	}
-	cw.Close()
 	// Lens names arrive as DATA here (observations, facets, progress) — not through RegisterLens —
 	// so they get the same name rule here, before anything is written.
-	ln, err := db.Query(`SELECT lens FROM observations UNION SELECT lens FROM facets UNION SELECT lens FROM progress`)
+	lenses, err := queryStrings(ctx, db, `SELECT lens FROM observations UNION SELECT lens FROM facets UNION SELECT lens FROM progress`)
 	if err != nil {
 		return nil, err
 	}
-	for ln.Next() {
-		var l string
-		_ = ln.Scan(&l)
+	for _, l := range lenses {
 		if l == "" {
 			continue
 		}
 		if err := ValidLensName(l); err != nil {
-			ln.Close()
 			return nil, fmt.Errorf("incoming archive holds data for an invalid lens: %w", err)
 		}
 		rep.Lenses = append(rep.Lenses, l)
 	}
-	ln.Close()
 	sort.Strings(rep.Lenses)
 	return side, nil
+}
+
+func queryStrings(ctx context.Context, q rowQuerier, query string, args ...any) ([]string, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, closeRows(rows)
 }
 
 const obsCols = "obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source, embedding"
@@ -275,14 +303,16 @@ func prefixCols(alias string) string {
 
 // mergeTx is the whole merge inside one transaction on a pinned connection with the incoming copy
 // ATTACHed as `inc`.
-func (s *Store) mergeTx(ctx context.Context, copyPath string, inc, base *mergeSide, rep *MergeReport, apply bool, now time.Time) (err error) {
+func (s *Store) mergeTx(ctx context.Context, copyPath string, inc *mergeSide, rep *MergeReport, apply bool, now time.Time) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 	// ATTACH is not allowed inside a transaction, so it precedes the BEGIN and the DETACH follows
-	// the end of it (defers run last-registered-first: rollback, then detach, then close).
+	// the end of it (defers run last-registered-first: rollback, then detach, then close). TEMP
+	// tables are created INSIDE the transaction, so a rollback — the dry run, or any error — takes
+	// them with it, and the pooled connection goes back clean.
 	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS inc`, copyPath); err != nil {
 		return fmt.Errorf("attach incoming copy: %w", err)
 	}
@@ -298,6 +328,10 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc, base *mergeSi
 		}
 	}()
 
+	base, err := readSide(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("read this archive: %w", err)
+	}
 	kinds, err := classifySessions(ctx, tx, rep)
 	if err != nil {
 		return fmt.Errorf("classify sessions: %w", err)
@@ -308,26 +342,36 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc, base *mergeSi
 	if err := mergeL0(ctx, tx, kinds, rep); err != nil {
 		return fmt.Errorf("merge transcripts: %w", err)
 	}
-	extraBase, extraInc, err := s.mergeObservations(ctx, tx, inc, base, rep)
+	// Decay-clock corrections, read before any observation moves: for each side, the timestamps of
+	// the rows the OTHER side contributes (see rebaseClocks).
+	arrivingForBase, err := queryStrings(ctx, tx, `SELECT o.ts FROM inc.observations o
+		WHERE o.ts <> '' AND NOT EXISTS (SELECT 1 FROM main.observations m WHERE m.obs_id = o.obs_id) ORDER BY o.ts`)
 	if err != nil {
+		return err
+	}
+	arrivingForInc, err := queryStrings(ctx, tx, `SELECT m.ts FROM main.observations m
+		WHERE m.ts <> '' AND NOT EXISTS (SELECT 1 FROM inc.observations o WHERE o.obs_id = m.obs_id) ORDER BY m.ts`)
+	if err != nil {
+		return err
+	}
+	if err := mergeObservations(ctx, tx, inc, base, rep); err != nil {
 		return fmt.Errorf("merge observations: %w", err)
 	}
 	var m int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM main.observations`).Scan(&m); err != nil {
 		return err
 	}
-	merged := mergeFacets(base, inc, m, extraBase, extraInc, now, &rep.Facets)
+	merged := mergeFacets(base, inc, m, arrivingForBase, arrivingForInc, now, &rep.Facets)
 	if err := writeFacetsTx(tx, merged); err != nil {
 		return fmt.Errorf("write facets: %w", err)
 	}
-	for _, q := range []string{`DROP TABLE IF EXISTS temp.merge_kind`, `DROP TABLE IF EXISTS temp.merge_moved`,
-		`DROP TABLE IF EXISTS temp.merge_inc_cur`, `DROP TABLE IF EXISTS temp.merge_base_cur`} {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
+	if !apply {
+		return nil // the deferred rollback discards everything, temp tables included; the report stands
+	}
+	for _, t := range []string{"merge_kind", "merge_mined", "merge_moved", "merge_inc_cur", "merge_base_cur"} {
+		if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS temp.`+t); err != nil {
 			return err
 		}
-	}
-	if !apply {
-		return nil // the deferred rollback discards everything; the report stands
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -335,6 +379,8 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc, base *mergeSi
 	committed = true
 	return nil
 }
+
+// --- sessions ---------------------------------------------------------------------------------
 
 // Session kinds.
 const (
@@ -351,59 +397,168 @@ func readTurns(ctx context.Context, tx *sql.Tx, schema, session string) ([]rawTu
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []rawTurn
 	for rows.Next() {
 		var t rawTurn
 		if err := rows.Scan(&t.role, &t.text); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	return out, closeRows(rows)
 }
 
-// classifySessions compares every incoming transcript with ours and renames the diverged ones in
-// the incoming copy. Identity is the ordered (role, text) list: `seq` is a plain ordinal with no
-// uniqueness, and `id` is a per-archive surrogate.
+// turnRelation is how an incoming transcript relates to one of ours: equal, a prefix of ours
+// (longer here), extended by theirs (longer there), or "" — diverged.
+func turnRelation(ours, theirs []rawTurn) string {
+	if len(ours) == 0 {
+		return ""
+	}
+	n := min(len(ours), len(theirs))
+	for i := 0; i < n; i++ {
+		if ours[i] != theirs[i] {
+			return ""
+		}
+	}
+	switch {
+	case len(theirs) == len(ours):
+		return kindEqual
+	case len(theirs) > len(ours):
+		return kindLongerThere
+	default:
+		return kindLongerHere
+	}
+}
+
+var renamedSuffix = regexp.MustCompile(`@[0-9a-f]{8}$`)
+
+// sessionFamily strips the suffix a merge gives a diverged session, so "feed" and "feed@3c755455"
+// are recognised as one session's copies.
+func sessionFamily(s string) string { return renamedSuffix.ReplaceAllString(s, "") }
+
+func transcriptHash8(turns []rawTurn) string {
+	h := sha1.New()
+	for _, t := range turns {
+		io.WriteString(h, t.role)
+		h.Write([]byte{0})
+		io.WriteString(h, t.text)
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:8]
+}
+
+// classifySessions matches every incoming transcript to ours. Identity is the ordered
+// (role, text) list: `seq` is a plain ordinal with no uniqueness, and `id` is a per-archive
+// surrogate.
+//
+// Matching is by FAMILY, not exact id: an incoming session is compared with our session of the
+// same id AND with every copy an earlier merge made of it ("<id>@<hash>"). Exact-id matching broke
+// two ordinary cases:
+//
+//   - a diverged feed that kept growing on the other machine arrived in FULL under a new id on
+//     every re-merge, because its new length gave it a new hash — so its shared turns were held,
+//     and later mined, two and three times;
+//   - merging back carried our own transcript home under its renamed id, so we held it twice, and
+//     a third round folded two transcripts into one session.
+//
+// So: if any member of the family is equal to, a prefix of, or extended by the incoming transcript,
+// that member is the match and the incoming session is renamed to it in the copy. Only when nothing
+// matches and our exact id is taken by a different transcript is a fresh id minted. An incoming
+// session that turns out to be a second copy of one already claimed (a merge back can carry both)
+// is dropped from the copy.
 func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[string]string, error) {
-	sessions, err := querySessions(ctx, tx, `SELECT DISTINCT session FROM inc.raw ORDER BY session`)
+	incoming, err := queryStrings(ctx, tx, `SELECT DISTINCT session FROM inc.raw ORDER BY session`)
 	if err != nil {
 		return nil, err
 	}
-	rep.Sessions.Incoming = len(sessions)
-	kinds := map[string]string{}
-	var diverged []string
-	for _, sess := range sessions {
-		k, err := compareSession(ctx, tx, sess)
-		if err != nil {
-			return nil, err
-		}
-		if k == "" {
-			diverged = append(diverged, sess)
-			continue
-		}
-		kinds[sess] = k
+	ours, err := queryStrings(ctx, tx, `SELECT DISTINCT session FROM main.raw`)
+	if err != nil {
+		return nil, err
 	}
-	for _, sess := range diverged {
-		to, err := renameIncomingSession(ctx, tx, sess)
+	rep.Sessions.Incoming = len(incoming)
+	family := map[string][]string{}
+	for _, o := range ours {
+		family[sessionFamily(o)] = append(family[sessionFamily(o)], o)
+	}
+	held := map[string]bool{}
+	for _, s := range incoming {
+		held[s] = true
+	}
+
+	kinds := map[string]string{}
+	for _, s := range incoming {
+		theirs, err := readTurns(ctx, tx, "inc", s)
 		if err != nil {
 			return nil, err
 		}
-		// Classified again under its new id: on a second run of the same merge the renamed copy is
-		// already here, and must read as equal — not diverge into yet another id, and not be
-		// reported as a change.
-		k, err := compareSession(ctx, tx, to)
-		if err != nil {
-			return nil, err
+		// Our exact id first, then the family root, then its other copies, in a stable order.
+		cands := []string{s, sessionFamily(s)}
+		rest := append([]string{}, family[sessionFamily(s)]...)
+		sort.Strings(rest)
+		cands = append(cands, rest...)
+
+		target, kind, oursHasS := "", "", false
+		seen := map[string]bool{}
+		for _, c := range cands {
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			mine, err := readTurns(ctx, tx, "main", c)
+			if err != nil {
+				return nil, err
+			}
+			if c == s && len(mine) > 0 {
+				oursHasS = true
+			}
+			if k := turnRelation(mine, theirs); k != "" {
+				target, kind = c, k
+				break
+			}
 		}
-		if k == "" {
-			return nil, fmt.Errorf("session %s diverges from ours even after renaming to %s", sess, to)
+		minted := false
+		if target == "" {
+			target, kind = s, kindNew
+			if oursHasS {
+				target, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), true
+			}
 		}
-		if k == kindNew {
-			rep.Sessions.Diverged = append(rep.Sessions.Diverged, RenamedSession{From: sess, To: to})
+		if target != s && held[target] {
+			// The copy already holds that id. If it is the same transcript, this is a duplicate.
+			other, err := readTurns(ctx, tx, "inc", target)
+			if err != nil {
+				return nil, err
+			}
+			if reflect.DeepEqual(other, theirs) {
+				if err := dropIncomingSession(ctx, tx, s); err != nil {
+					return nil, err
+				}
+				delete(held, s)
+				rep.Sessions.Duplicates++
+				continue
+			}
+			target, kind, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), kindNew, true
+			if held[target] { // same hash: the same transcript under a third id
+				if err := dropIncomingSession(ctx, tx, s); err != nil {
+					return nil, err
+				}
+				delete(held, s)
+				rep.Sessions.Duplicates++
+				continue
+			}
 		}
-		kinds[to] = k
+		if target != s {
+			if err := renameIncomingSession(ctx, tx, s, target); err != nil {
+				return nil, err
+			}
+			delete(held, s)
+			held[target] = true
+		}
+		kinds[target] = kind
+		if minted {
+			rep.Sessions.Diverged = append(rep.Sessions.Diverged, RenamedSession{From: s, To: target})
+		}
 	}
 	for _, k := range kinds {
 		switch k {
@@ -428,114 +583,105 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	return kinds, nil
 }
 
-// compareSession returns the kind of an incoming session, or "" if it diverges from ours.
-func compareSession(ctx context.Context, tx *sql.Tx, sess string) (string, error) {
-	theirs, err := readTurns(ctx, tx, "inc", sess)
-	if err != nil {
-		return "", err
-	}
-	ours, err := readTurns(ctx, tx, "main", sess)
-	if err != nil {
-		return "", err
-	}
-	if len(ours) == 0 {
-		return kindNew, nil
-	}
-	n := min(len(ours), len(theirs))
-	for i := 0; i < n; i++ {
-		if ours[i] != theirs[i] {
-			return "", nil
+var mergeSessionTables = []string{"raw", "session_meta", "progress", "observations", "staged"}
+
+// renameIncomingSession moves an incoming session to another id, in the incoming COPY, so its
+// transcript and everything mined from it arrive together. Staged rows carry the session inside
+// their JSON payload too, and DrainStaged trusts the payload — renaming only the column filed the
+// other machine's in-session observation under OUR transcript. Importer keys are dropped: they
+// describe the session under its native id, and no importer will ever see the renamed one.
+func renameIncomingSession(ctx context.Context, tx *sql.Tx, from, to string) error {
+	for _, table := range mergeSessionTables {
+		q := `UPDATE inc.` + table + ` SET session = ? WHERE session = ?`
+		if table == "staged" {
+			q = `UPDATE inc.staged SET session = ?1, payload = json_set(payload, '$.session', ?1) WHERE session = ?2`
+		}
+		if _, err := tx.ExecContext(ctx, q, to, from); err != nil {
+			return fmt.Errorf("rename in %s: %w", table, err)
 		}
 	}
-	switch {
-	case len(theirs) == len(ours):
-		return kindEqual, nil
-	case len(theirs) > len(ours):
-		return kindLongerThere, nil
-	default:
-		return kindLongerHere, nil
-	}
+	return dropImporterKeys(ctx, tx, from)
 }
 
-func querySessions(ctx context.Context, tx *sql.Tx, q string, args ...any) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
+func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess string) error {
+	for _, table := range mergeSessionTables {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM inc.`+table+` WHERE session = ?`, sess); err != nil {
+			return fmt.Errorf("drop duplicate from %s: %w", table, err)
 		}
-		out = append(out, s)
 	}
-	return out, rows.Err()
+	return dropImporterKeys(ctx, tx, sess)
 }
 
-// renameIncomingSession gives a diverged incoming session an id of its own, in the incoming COPY,
-// so its transcript and everything mined from it arrive together. The suffix is a hash of the
-// transcript itself, not of the backup file, so merging a re-export of the same archive produces
-// the same id — and the second run finds the renamed copy already here instead of minting another.
-//
-// Its importer keys are dropped: they describe the session under its native id, and no importer
-// will ever see the renamed one.
-func renameIncomingSession(ctx context.Context, tx *sql.Tx, sess string) (string, error) {
-	turns, err := readTurns(ctx, tx, "inc", sess)
-	if err != nil {
-		return "", err
-	}
-	h := sha1.New()
-	for _, t := range turns {
-		io.WriteString(h, t.role)
-		h.Write([]byte{0})
-		io.WriteString(h, t.text)
-		h.Write([]byte{0})
-	}
-	to := sess + "@" + hex.EncodeToString(h.Sum(nil))[:8]
-	for _, table := range []string{"raw", "session_meta", "progress", "observations", "staged"} {
-		if _, err := tx.ExecContext(ctx, `UPDATE inc.`+table+` SET session = ? WHERE session = ?`, to, sess); err != nil {
-			return "", fmt.Errorf("rename in %s: %w", table, err)
-		}
-	}
+func dropImporterKeys(ctx context.Context, tx *sql.Tx, sess string) error {
 	for _, ns := range PerSessionMetaNamespaces {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM inc.meta WHERE key = ?`, ns+":"+sess); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return to, nil
+	return nil
 }
 
-// dropSharedMined removes, from the incoming copy, the MINED observations and progress of every
-// (session, lens) this archive already mined. Mining is not deterministic: the incoming copy of a
-// session both machines mined is a paraphrase with different obs_ids, so a union would count every
-// such moment twice — permanently, since L1 is append-only and carries no source column. This is
-// the one merge defect nothing can undo afterwards, so it is prevented here.
+// dropSharedMined keeps the merge from importing a session twice. Three rules, each removing rows
+// from the incoming COPY:
 //
-// "Already mined here" is EITHER a progress mark OR mined rows: cleanup removes a session's
-// progress along with its transcript but keeps the observations, and those still count.
+//  1. PARAPHRASES. For every (session, lens) this archive already mined, the incoming MINED rows
+//     whose obs_id we do not hold. Mining is not deterministic, so they are a second wording of
+//     moments we already have; a union would count each twice, permanently, since L1 is append-only
+//     and carries no source column. An IDENTICAL row (a restore) stays: the insert dedupes it, and
+//     it is the record that the incoming side already folded that observation.
+//  2. THEIR PROGRESS, wherever we mined the session: our watermark wins, and if their transcript is
+//     longer its tail is appended (mergeL0) and mined here. Where our cleanup reclaimed the
+//     transcript but kept its observations, mergeL0 marks the returning transcript mined at its
+//     full length instead — NOT at their count, which may be partial: keeping a partial count of
+//     theirs left our tail pending, re-mined beside the observations we already hold.
+//  3. THEIR ORPHANS. Mined rows from a transcript the other side has since cleaned up (no raw, no
+//     progress there), of a session whose transcript we hold and never mined for that lens. They
+//     would arrive with no progress beside our transcript, so the lens would mine it here and
+//     duplicate them; ours is mined instead.
 //
-// Ours wins, not the larger count: our progress stays, so if the incoming transcript is longer its
-// tail is appended (mergeL0) and mined here. Active observations (recorded in-session through MCP)
-// are never mined and never paraphrased, so they are kept and deduped by obs_id like anything else.
+// "Already mined here" is a progress mark OR mined rows (cleanup removes progress, keeps L1). It is
+// materialised ONCE into an indexed set: as a correlated subquery over observations, which has no
+// (session, lens) index, it scanned the whole lens per incoming row — quadratic, ~15 minutes at
+// 75k observations a side, with the archive's write lock held and every capture hook in that window
+// losing its turn to SQLITE_BUSY.
 func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
-	const minedHere = `(EXISTS (SELECT 1 FROM main.progress p WHERE p.session = %[1]s.session AND p.lens = %[1]s.lens AND p.distilled > 0)
-	   OR EXISTS (SELECT 1 FROM main.observations m WHERE m.session = %[1]s.session AND m.lens = %[1]s.lens AND m.source <> 'active'))`
-	// Only PARAPHRASES go — rows whose obs_id we do not hold. An IDENTICAL row (a restore: same
-	// session, same text, same id) is harmless, since the insert dedupes it, and it must stay: it is
-	// the record that the incoming side already folded that observation. Deleting it too made our
-	// copy look unreviewed, so mergeObservations moved it above the cursor and it was folded twice.
+	for _, q := range []string{
+		`CREATE TEMP TABLE merge_mined(session TEXT NOT NULL, lens TEXT NOT NULL, PRIMARY KEY(session, lens)) WITHOUT ROWID`,
+		`INSERT OR IGNORE INTO temp.merge_mined(session, lens)
+		   SELECT session, lens FROM main.progress WHERE distilled > 0
+		   UNION SELECT session, lens FROM main.observations WHERE source <> 'active'`,
+	} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	const minedHere = `EXISTS (SELECT 1 FROM temp.merge_mined k WHERE k.session = %[1]s.session AND k.lens = %[1]s.lens)`
+	const notHeld = `NOT EXISTS (SELECT 1 FROM main.observations same WHERE same.obs_id = inc.observations.obs_id)`
+
 	res, err := tx.ExecContext(ctx, `DELETE FROM inc.observations WHERE source <> 'active' AND `+
-		fmt.Sprintf(minedHere, "inc.observations")+
-		` AND NOT EXISTS (SELECT 1 FROM main.observations same WHERE same.obs_id = inc.observations.obs_id)`)
+		fmt.Sprintf(minedHere, "inc.observations")+` AND `+notHeld)
 	if err != nil {
 		return err
 	}
 	n, _ := res.RowsAffected()
 	rep.Observations.SharedMined = int(n)
-	_, err = tx.ExecContext(ctx, `DELETE FROM inc.progress WHERE `+fmt.Sprintf(minedHere, "inc.progress"))
-	return err
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM inc.progress WHERE `+fmt.Sprintf(minedHere, "inc.progress")); err != nil {
+		return err
+	}
+
+	res, err = tx.ExecContext(ctx, `DELETE FROM inc.observations WHERE source <> 'active'
+		AND NOT EXISTS (SELECT 1 FROM inc.progress p WHERE p.session = inc.observations.session AND p.lens = inc.observations.lens)
+		AND NOT EXISTS (SELECT 1 FROM inc.raw r WHERE r.session = inc.observations.session)
+		AND EXISTS (SELECT 1 FROM main.raw r WHERE r.session = inc.observations.session)
+		AND NOT EXISTS (SELECT 1 FROM main.progress p WHERE p.session = inc.observations.session AND p.lens = inc.observations.lens)
+		AND `+notHeld)
+	if err != nil {
+		return err
+	}
+	n, _ = res.RowsAffected()
+	rep.Observations.Orphaned = int(n)
+	return nil
 }
 
 // mergeL0 merges transcripts, session metadata, mining progress, importer keys, the staged buffer
@@ -589,17 +735,32 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 		return err
 	}
 
-	// progress: ours wins where we have mined; theirs fills in what we never mined. The rows for
-	// sessions we already mined were dropped from the copy by dropSharedMined. Dropping progress
-	// instead would make every incoming session pending for every lens — re-mined at model cost,
-	// and, mining being non-deterministic, minting duplicate observations.
-	if _, err := tx.ExecContext(ctx, `INSERT INTO main.progress(session, lens, distilled, retries, distilled_at, next_attempt, drift_at)
+	// progress: ours wins where we have mined; theirs fills in what we never mined, or upgrades a
+	// row of ours still at 0 (pending). Dropping theirs instead would make every incoming session
+	// pending for every lens — re-mined at model cost and, mining being non-deterministic, minting
+	// duplicate observations.
+	res, err = tx.ExecContext(ctx, `INSERT INTO main.progress(session, lens, distilled, retries, distilled_at, next_attempt, drift_at)
 		SELECT session, lens, distilled, retries, distilled_at, next_attempt, drift_at FROM inc.progress WHERE true
 		ON CONFLICT(session, lens) DO UPDATE SET distilled = excluded.distilled, retries = excluded.retries,
 		  distilled_at = excluded.distilled_at, next_attempt = excluded.next_attempt, drift_at = excluded.drift_at
-		WHERE progress.distilled = 0 AND excluded.distilled > 0`); err != nil {
+		WHERE progress.distilled = 0 AND excluded.distilled > 0`)
+	if err != nil {
 		return err
 	}
+	n, _ = res.RowsAffected()
+	rep.ProgressRows = int(n)
+	// A transcript that just arrived for a session we mined before our cleanup reclaimed it: our
+	// observations of it are still here, so mark it mined at its length. Left unmarked it would be
+	// mined a second time beside them.
+	res, err = tx.ExecContext(ctx, `INSERT INTO main.progress(session, lens, distilled)
+		SELECT k.session, k.lens, (SELECT COUNT(*) FROM main.raw r WHERE r.session = k.session)
+		FROM temp.merge_mined k JOIN temp.merge_kind mk ON mk.session = k.session AND mk.kind = ?
+		WHERE NOT EXISTS (SELECT 1 FROM main.progress p WHERE p.session = k.session AND p.lens = k.lens)`, kindNew)
+	if err != nil {
+		return err
+	}
+	n, _ = res.RowsAffected()
+	rep.ProgressRows += int(n)
 
 	// Importer keys. Every importer requires RawCount(session) == len(keys); a mismatch makes the
 	// next import REPLACE the session — deleting its raw and progress and re-mining it. So the keys
@@ -620,21 +781,26 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 			}
 			keys = append(keys, e)
 		}
-		rows.Close()
+		if err := closeRows(rows); err != nil {
+			return err
+		}
 		for _, e := range keys {
+			var res sql.Result
 			switch kinds[strings.TrimPrefix(e.k, ns+":")] {
 			case kindLongerHere:
 				// Ours has rows theirs never saw; their keys would cover fewer rows than we hold.
 				continue
 			case kindEqual:
-				_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.meta(key, value) VALUES (?, ?)`, e.k, e.v)
+				res, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.meta(key, value) VALUES (?, ?)`, e.k, e.v)
 			default: // new, longer_there, or a session with keys but no transcript
-				_, err = tx.ExecContext(ctx, `INSERT INTO main.meta(key, value) VALUES (?, ?)
-					ON CONFLICT(key) DO UPDATE SET value = excluded.value`, e.k, e.v)
+				res, err = tx.ExecContext(ctx, `INSERT INTO main.meta(key, value) VALUES (?, ?)
+					ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE meta.value <> excluded.value`, e.k, e.v)
 			}
 			if err != nil {
 				return err
 			}
+			n, _ := res.RowsAffected()
+			rep.MetaKeys += int(n)
 		}
 	}
 
@@ -649,9 +815,14 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 
 	// emerge_seen marks are keyed by a hash of member obs_ids — content, not position — so a
 	// union is exact. Dropping one would only cost a re-verification.
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.meta(key, value)
+	res, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.meta(key, value)
 		SELECT key, value FROM inc.meta WHERE key LIKE 'emerge\_seen:%' ESCAPE '\'`)
-	return err
+	if err != nil {
+		return err
+	}
+	n, _ = res.RowsAffected()
+	rep.MetaKeys += int(n)
+	return nil
 }
 
 // mergeObservations unions L1 while keeping every lens's review cursor EXACT: afterwards, the rows
@@ -676,112 +847,107 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 // here stays put — it is already in the incoming facets, and moving it above the cursor would fold
 // it a second time.
 //
-// It returns the two decay-clock corrections mergeFacets needs: how many rows the OTHER side brought
-// that are newer than each side's own last evidence.
-func (s *Store) mergeObservations(ctx context.Context, tx *sql.Tx, inc, base *mergeSide, rep *MergeReport) (extraBase, extraInc int64, err error) {
+// Every insert filters out rows already here rather than relying on INSERT OR IGNORE: an ignored
+// row still CONSUMES an AUTOINCREMENT value, so re-merging an archive whose 3,000 rows were all
+// present pushed the sequence 3,000 past MAX(seq) — and the next observation anyone mined advanced
+// the decay clock by 3,000 at once, halving every facet in the profile.
+//
+// The work is skipped only when there is nothing to place: no new folded row, no new unfolded row,
+// and none of OUR unfolded rows that the incoming side already folded. Skipping on "no new folded
+// row" alone left those last rows above our cursor, folded a second time, and queued new unfolded
+// rows "ours, then theirs".
+func mergeObservations(ctx context.Context, tx *sql.Tx, inc, base *mergeSide, rep *MergeReport) error {
 	for _, q := range []string{
 		`CREATE TEMP TABLE merge_inc_cur(lens TEXT PRIMARY KEY, cur INTEGER NOT NULL)`,
 		`CREATE TEMP TABLE merge_base_cur(lens TEXT PRIMARY KEY, cur INTEGER NOT NULL)`,
 	} {
 		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return 0, 0, err
+			return err
 		}
 	}
 	for table, cur := range map[string]map[string]int64{"merge_inc_cur": inc.cursors, "merge_base_cur": base.cursors} {
 		for l, c := range cur {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO temp.`+table+`(lens, cur) VALUES (?, ?)`, l, c); err != nil {
-				return 0, 0, err
+				return err
 			}
 		}
 	}
 	const incFolded = `o.seq <= COALESCE((SELECT cur FROM temp.merge_inc_cur c WHERE c.lens = o.lens), 0)`
+	const notHere = `NOT EXISTS (SELECT 1 FROM main.observations here WHERE here.obs_id = o.obs_id)`
+	const ourUnfolded = `m.seq > COALESCE((SELECT cur FROM temp.merge_base_cur c WHERE c.lens = m.lens), 0)`
 
-	// Decay-clock corrections, counted BEFORE anything is inserted.
-	if base.lastTS != "" {
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inc.observations o WHERE o.ts > ?
-			AND NOT EXISTS (SELECT 1 FROM main.observations m WHERE m.obs_id = o.obs_id)`, base.lastTS).Scan(&extraBase); err != nil {
-			return 0, 0, err
-		}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inc.observations o WHERE NOT `+notHere).
+		Scan(&rep.Observations.AlreadyHere); err != nil {
+		return err
 	}
-	if inc.lastTS != "" {
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM main.observations WHERE ts > ?`, inc.lastTS).Scan(&extraInc); err != nil {
-			return 0, 0, err
-		}
-	}
-	var already int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inc.observations o
-		WHERE EXISTS (SELECT 1 FROM main.observations m WHERE m.obs_id = o.obs_id)`).Scan(&already); err != nil {
-		return 0, 0, err
-	}
-	rep.Observations.AlreadyHere = already
 
 	// O1
-	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.observations(`+obsCols+`)
-		SELECT `+prefixCols("o")+` FROM inc.observations o WHERE `+incFolded+` ORDER BY o.seq`)
+	res, err := tx.ExecContext(ctx, `INSERT INTO main.observations(`+obsCols+`)
+		SELECT `+prefixCols("o")+` FROM inc.observations o WHERE `+incFolded+` AND `+notHere+` ORDER BY o.seq`)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
 	n1, _ := res.RowsAffected()
 	rep.Observations.Reviewed = int(n1)
 
-	if n1 == 0 {
-		// Nothing folded arrives, so no cursor has to move and none of our rows needs renumbering —
-		// which is also what keeps a second run of the same merge a no-op.
-		res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.observations(`+obsCols+`)
-			SELECT `+prefixCols("o")+` FROM inc.observations o WHERE NOT (`+incFolded+`) ORDER BY o.ts, o.seq`)
-		if err != nil {
-			return 0, 0, err
-		}
-		n, _ := res.RowsAffected()
-		rep.Observations.Unreviewed = int(n)
-		return extraBase, extraInc, nil
+	var newUnfolded, overlap int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM inc.observations o WHERE NOT (`+incFolded+`) AND `+notHere).
+		Scan(&newUnfolded); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM main.observations m WHERE `+ourUnfolded+`
+		AND m.obs_id IN (SELECT o.obs_id FROM inc.observations o WHERE `+incFolded+`)`).Scan(&overlap); err != nil {
+		return err
+	}
+	if n1 == 0 && newUnfolded == 0 && overlap == 0 {
+		return nil // nothing arrives and nothing moves — which is also what keeps a re-run a no-op
 	}
 
 	var g1 int64
-	if err := tx.QueryRowContext(ctx, `SELECT MAX(seq) FROM main.observations`).Scan(&g1); err != nil {
-		return 0, 0, err
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM main.observations`).Scan(&g1); err != nil {
+		return err
 	}
 	// O2: our unfolded rows (below the incoming block, above our own cursor), minus any the
 	// incoming side already folded.
 	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE merge_moved AS
 		SELECT `+prefixCols("m")+`, m.seq AS oldseq FROM main.observations m
-		WHERE m.seq <= ? AND m.seq > COALESCE((SELECT cur FROM temp.merge_base_cur c WHERE c.lens = m.lens), 0)
+		WHERE m.seq <= ? AND `+ourUnfolded+`
 		  AND m.obs_id NOT IN (SELECT o.obs_id FROM inc.observations o WHERE `+incFolded+`)`, base.head); err != nil {
-		return 0, 0, err
+		return err
 	}
 	var moved int64
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM temp.merge_moved`).Scan(&moved); err != nil {
-		return 0, 0, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM main.observations WHERE seq IN (SELECT oldseq FROM temp.merge_moved)`); err != nil {
-		return 0, 0, err
+		return err
 	}
-	res, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.observations(`+obsCols+`)
+	res, err = tx.ExecContext(ctx, `INSERT INTO main.observations(`+obsCols+`)
 		SELECT `+obsCols+` FROM (
 		  SELECT `+obsCols+`, 0 AS src, oldseq AS ord FROM temp.merge_moved
 		  UNION ALL
 		  SELECT `+prefixCols("o")+`, 1, o.seq FROM inc.observations o
-		  WHERE NOT (`+incFolded+`) AND o.obs_id NOT IN (SELECT obs_id FROM temp.merge_moved)
+		  WHERE NOT (`+incFolded+`) AND `+notHere+` AND o.obs_id NOT IN (SELECT obs_id FROM temp.merge_moved)
 		) ORDER BY ts, src, ord`)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
 	n2, _ := res.RowsAffected()
 	rep.Observations.Unreviewed = int(n2 - moved)
 
 	// O3: every lens's cursor to g1. A lens with no cursor on either side had every row unfolded,
 	// so all of them are above g1 now and g1 is still exact for it.
-	lenses, err := querySessions(ctx, tx, `SELECT DISTINCT lens FROM main.observations`)
+	lenses, err := queryStrings(ctx, tx, `SELECT DISTINCT lens FROM main.observations`)
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
 	for _, l := range lenses {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO main.meta(key, value) VALUES (?, ?)
 			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, reviewRowidKey(l), strconv.FormatInt(g1, 10)); err != nil {
-			return 0, 0, err
+			return err
 		}
 	}
-	return extraBase, extraInc, nil
+	return nil
 }
 
 // --- facets -----------------------------------------------------------------------------------
@@ -844,17 +1010,29 @@ func evidenceTime(obsTS map[string]string, v *FacetVersion) string {
 	return best
 }
 
+func currentEvidence(obsTS map[string]string, f *Facet) string {
+	if cur := f.Current(); cur != nil {
+		return evidenceTime(obsTS, cur)
+	}
+	if n := len(f.Versions); n > 0 {
+		return evidenceTime(obsTS, &f.Versions[n-1])
+	}
+	return ""
+}
+
 // rebaseClocks moves one side's decay clocks into the merged archive's seq space. Decay is
-// "observations since last confirmed", measured as head - clock. Each clock keeps its distance from
-// its own side's head, PLUS the observations the other side brought that are newer than this
-// side's latest evidence: those were real chances to confirm the facet, and none did. Without that
-// term an old laptop's facets would sit 10 observations from the head of a merged archive holding
-// thousands of newer ones — confident forever, the problem #173 exists to fix. When the two
-// archives ran at the same time the term is ~0 and this reduces to keeping each side's distance.
+// "observations since last confirmed", measured as head - clock. Each version keeps its distance
+// from its own side's head, PLUS the observations the other side contributes that are newer than
+// THIS VERSION's own evidence: those were real chances to confirm it, and none did.
+//
+// Per version, not per side. Measured against a side's newest row, one late observation on an
+// otherwise idle laptop cancelled thousands of real chances — a June facet sat 1 observation from
+// the head of a merged archive holding 300 newer ones, confident forever, the problem #173 exists
+// to fix. otherTS is the other side's contributed timestamps, sorted.
 //
 // 0 stays 0 ("no clock"). The clamp at 1 keeps a clock from reaching 0 by arithmetic, which would
 // silently mean "never decays".
-func rebaseClocks(facets []Facet, sideHead, mergedHead, extra int64) {
+func rebaseClocks(facets []Facet, sideHead, mergedHead int64, ownTS map[string]string, otherTS []string) {
 	for i := range facets {
 		for j := range facets[i].Versions {
 			v := &facets[i].Versions[j]
@@ -865,7 +1043,9 @@ func rebaseClocks(facets []Facet, sideHead, mergedHead, extra int64) {
 			if d < 0 {
 				d = 0
 			}
-			c := mergedHead - (d + extra)
+			e := evidenceTime(ownTS, v)
+			newer := len(otherTS) - sort.Search(len(otherTS), func(k int) bool { return otherTS[k] > e })
+			c := mergedHead - (d + int64(newer))
 			if c < 1 {
 				c = 1
 			}
@@ -888,34 +1068,50 @@ func unionIDs(a, b []string) []string {
 
 func facetID(lens, dim, key string) string { return lens + "|" + dim + "|" + key }
 
+func keyAt(id string) string { return id[strings.LastIndex(id, "|")+1:] }
+
 // mergeFacets merges the incoming L2 into ours. Rules, per incoming facet:
 //
 //  1. SHARED HISTORY — some facet of ours in the same key family has a chain that is equal to, a
 //     prefix of, or extended by the incoming one (a restore, a re-run, a merge back). Nothing new is
-//     stored. If theirs is longer it is adopted (fast-forward: they recorded a positive change we
-//     have not seen). At each shared version, confidence and its clock are taken TOGETHER from the
-//     side whose evidence is newer — taking one side's confidence with the other's clock is how a
-//     downgrade gets lost (the #175 failure) — and citations are unioned. Archive state comes from
-//     the side that acted on the facet last.
+//     stored. A longer chain is adopted only if its extension is evidenced AFTER the other side's
+//     last shared version: chain length alone let a February change overrule our December
+//     reaffirmation of the old value, leaving a closed version citing evidence from after it
+//     closed. When that check fails the pair is treated as diverged (rule 3) instead. At each shared
+//     version, confidence and its clock are taken TOGETHER from the side whose evidence is newer —
+//     one side's confidence with the other's clock is how a downgrade got lost (#175) — and
+//     citations are unioned. Archive state: see adoptShared.
 //  2. NEW — no facet of ours with that key: stored as it was, lineage and all.
 //  3. SAME KEY, DIVERGED — both archives minted the key independently. Active beats archived; then
 //     the copy with newer evidence keeps the key; ties go to ours. The other copy moves to
 //     <key>__mN with its whole history, and if both were active it is archived INTO the winner,
 //     whose current version gains its citations — exactly what compaction does for a survivor.
 //
-// Lineage is a text reference ("dimension/key") resolved within a lens, so a rename rewrites the
-// references on the renamed copy's side only: its own absorbed facets keep pointing at it.
-func mergeFacets(base, inc *mergeSide, mergedHead, extraBase, extraInc int64, now time.Time, rep *MergeFacets) []Facet {
+// Lineage is a text reference ("dimension/key") resolved within a lens, so a rename rewrites a
+// reference with the rename map of the side it CAME from: a loser's own absorbed facets keep
+// pointing at it, and a reference adopted from the other side follows the other side's renames.
+func mergeFacets(base, inc *mergeSide, mergedHead int64, arrivingForBase, arrivingForInc []string, now time.Time, rep *MergeFacets) []Facet {
 	nowStr := now.UTC().Format(time.RFC3339)
 	baseFacets := cloneFacets(base.facets)
 	incFacets := cloneFacets(inc.facets)
-	rebaseClocks(baseFacets, base.head, mergedHead, extraBase)
-	rebaseClocks(incFacets, inc.head, mergedHead, extraInc)
+	// Evidence time is read over BOTH archives' observations: an observation has the same timestamp
+	// in every archive that holds it, and a version citing one this side lacks would otherwise fall
+	// back to its RecordedAt — making two identical copies of a facet look as if one were newer.
+	// Verified on a real archive split in two: 1,553 identical facets were reported as updated.
+	allTS := make(map[string]string, len(base.obsTS)+len(inc.obsTS))
+	for _, m := range []map[string]string{inc.obsTS, base.obsTS} {
+		for id, t := range m {
+			allTS[id] = t
+		}
+	}
+	rebaseClocks(baseFacets, base.head, mergedHead, allTS, arrivingForBase)
+	rebaseClocks(incFacets, inc.head, mergedHead, allTS, arrivingForInc)
 	rep.Incoming = len(incFacets)
 
 	result := map[string]*Facet{}
 	fromBase := map[string]bool{}
-	family := map[string][]string{} // lens|dim|family -> ids of OUR facets
+	incomingRef := map[*Facet]bool{} // our facets whose MergedInto was adopted from the other side
+	family := map[string][]string{}  // lens|dim|family -> ids of OUR facets
 	for i := range baseFacets {
 		f := &baseFacets[i]
 		id := facetID(f.Lens, f.Dimension, f.Key)
@@ -962,15 +1158,32 @@ nextIncoming:
 			if b == nil || !fromBase[cid] {
 				continue
 			}
-			if rel := chainRelation(b.Versions, f.Versions); rel != chainUnrelated {
-				adoptShared(b, f, rel, base.obsTS, inc.obsTS)
-				if rel == chainBaseShorter {
-					rep.FastForwarded++
-				} else {
-					rep.Shared++
+			rel := chainRelation(b.Versions, f.Versions)
+			switch rel {
+			case chainUnrelated:
+				continue
+			case chainBaseShorter: // theirs extends ours: only if the extension is newer evidence
+				if currentEvidence(allTS, f) <= evidenceTime(allTS, &b.Versions[len(b.Versions)-1]) {
+					continue
 				}
-				continue nextIncoming
+			case chainIncShorter: // ours extends theirs: only if our extension is not older than their last word
+				if currentEvidence(allTS, b) < evidenceTime(allTS, &f.Versions[len(f.Versions)-1]) {
+					continue
+				}
 			}
+			changed := adoptShared(b, f, rel, allTS, allTS)
+			if changed && f.MergedInto != "" && b.MergedInto == f.MergedInto {
+				incomingRef[b] = true
+			}
+			switch {
+			case rel == chainBaseShorter:
+				rep.FastForwarded++
+			case changed:
+				rep.Updated++
+			default:
+				rep.Shared++
+			}
+			continue nextIncoming
 		}
 
 		// 2. New.
@@ -986,7 +1199,7 @@ nextIncoming:
 		if b.Active() != f.Active() {
 			incWins = f.Active()
 		} else {
-			incWins = currentEvidence(inc.obsTS, f) > currentEvidence(base.obsTS, b)
+			incWins = currentEvidence(allTS, f) > currentEvidence(allTS, b)
 		}
 		newKey := freeKey(f.Lens, f.Dimension, f.Key)
 		newID := facetID(f.Lens, f.Dimension, newKey)
@@ -1009,14 +1222,14 @@ nextIncoming:
 			Key: keyAt(id), LoserKey: newKey, IncomingWon: incWins})
 	}
 
-	// Lineage rewrite, each side's references by its own rename map.
+	// Lineage rewrite, each reference by the rename map of the side it came from.
 	for _, fc := range result {
 		dim, key, ok := ParseFacetRef(fc.MergedInto)
 		if !ok {
 			continue
 		}
 		renames := incRename
-		if fromBase[facetID(fc.Lens, fc.Dimension, fc.Key)] {
+		if fromBase[facetID(fc.Lens, fc.Dimension, fc.Key)] && !incomingRef[fc] {
 			renames = baseRename
 		}
 		if nk, ok := renames[facetID(fc.Lens, dim, key)]; ok {
@@ -1024,14 +1237,24 @@ nextIncoming:
 		}
 	}
 	// Same-key losers that were both active, archived into their winner — after the rewrite, so the
-	// new link is not itself rewritten.
+	// new link is not itself rewritten, and only into a winner that is still active.
 	for _, a := range archives {
 		loser, winner := result[a.loser], result[a.winner]
+		if !winner.Active() {
+			continue
+		}
 		loser.ArchivedAt = nowStr
 		loser.MergedInto = FacetRef(winner.Dimension, winner.Key)
-		loser.ArchiveReason = "the same key existed in a merged archive (witness merge, " + nowStr[:10] + ")"
+		loser.ArchiveReason = mergeArchiveReasonPrefix + " (witness merge, " + nowStr[:10] + ")"
 		if wc, lc := winner.Current(), loser.Current(); wc != nil && lc != nil {
 			wc.BecauseOf = unionIDs(wc.BecauseOf, lc.BecauseOf)
+		}
+	}
+	// Backstop: a facet archived into itself has no active copy anywhere, and drops out of the
+	// profile until a review happens to re-assert its key. Whatever produced it, undo it.
+	for _, fc := range result {
+		if dim, key, ok := ParseFacetRef(fc.MergedInto); ok && dim == fc.Dimension && key == fc.Key {
+			fc.ArchivedAt, fc.MergedInto, fc.ArchiveReason = "", "", ""
 		}
 	}
 
@@ -1047,27 +1270,33 @@ nextIncoming:
 	return out
 }
 
-func keyAt(id string) string { return id[strings.LastIndex(id, "|")+1:] }
-
-func currentEvidence(obsTS map[string]string, f *Facet) string {
-	if cur := f.Current(); cur != nil {
-		return evidenceTime(obsTS, cur)
-	}
-	if n := len(f.Versions); n > 0 {
-		return evidenceTime(obsTS, &f.Versions[n-1])
-	}
-	return ""
-}
-
-// adoptShared folds an incoming facet whose history ours shares into ours (rule 1).
-func adoptShared(b *Facet, f *Facet, rel int, baseTS, incTS map[string]string) {
+// adoptShared folds an incoming facet whose history ours shares into ours (rule 1), and reports
+// whether anything about ours changed — a facet-only delta is a real change, and the CLI's
+// "nothing to merge" must not hide it.
+//
+// Archive state follows three rules, each from a reproduced failure:
+//   - An archive the MERGE made (a same-key loser) is bookkeeping and is never adopted. Adopting it
+//     on a merge back archived the winning facet into itself.
+//   - A facet of ours archived INTO a survivor stays archived, whatever the other side's LastSeen
+//     says. The other machine re-confirming its own copy after a merge un-archived the merge's loser
+//     and left two active copies of one trait. (The reviewer's own rule is the same: evidence for a
+//     merged-into facet is redirected, never used to resurrect it.)
+//   - Otherwise the side that acted on the facet LAST wins: a facet the other side compacted away
+//     stays archived, and one we merely retired comes back if they reasserted it afterwards.
+func adoptShared(b, f *Facet, rel int, baseTS, incTS map[string]string) bool {
+	before := cloneFacets([]Facet{*b})[0]
 	n := min(len(b.Versions), len(f.Versions))
 	for i := 0; i < n; i++ {
 		bv, iv := &b.Versions[i], &f.Versions[i]
 		if evidenceTime(incTS, iv) > evidenceTime(baseTS, bv) {
 			bv.Confidence, bv.ConfidenceSeq = iv.Confidence, iv.ConfidenceSeq
 		}
-		bv.BecauseOf = unionIDs(bv.BecauseOf, iv.BecauseOf)
+		// Only when the union adds an id. Assigning it unconditionally turned a facet with no
+		// citations (nil) into an empty slice, which the change check below counted as an update —
+		// on a real archive, an identical copy reported "4 updated" and was not a no-op.
+		if u := unionIDs(bv.BecauseOf, iv.BecauseOf); len(u) != len(bv.BecauseOf) {
+			bv.BecauseOf = u
+		}
 		if bv.ValidTo == "" && iv.ValidTo != "" {
 			bv.ValidTo = iv.ValidTo
 		}
@@ -1078,10 +1307,9 @@ func adoptShared(b *Facet, f *Facet, rel int, baseTS, incTS map[string]string) {
 	if rel == chainBaseShorter {
 		b.Versions = append(b.Versions, f.Versions[n:]...)
 	}
-	// Archive state from the side that acted on the facet LAST: a facet one side compacted away
-	// stays archived unless the other side reasserted it afterwards. Without this a merge back
-	// would quietly undo one side's compaction.
-	if b.ArchivedAt != f.ArchivedAt || b.MergedInto != f.MergedInto {
+	mergeMade := strings.HasPrefix(f.ArchiveReason, mergeArchiveReasonPrefix)
+	mergedIntoSurvivor := b.ArchivedAt != "" && b.MergedInto != ""
+	if !mergeMade && !mergedIntoSurvivor && (b.ArchivedAt != f.ArchivedAt || b.MergedInto != f.MergedInto) {
 		if max(f.ArchivedAt, f.LastSeen) > max(b.ArchivedAt, b.LastSeen) {
 			b.ArchivedAt, b.MergedInto, b.ArchiveReason = f.ArchivedAt, f.MergedInto, f.ArchiveReason
 		}
@@ -1089,6 +1317,7 @@ func adoptShared(b *Facet, f *Facet, rel int, baseTS, incTS map[string]string) {
 	if f.LastSeen > b.LastSeen {
 		b.LastSeen = f.LastSeen
 	}
+	return !reflect.DeepEqual(before, *b)
 }
 
 func cloneFacets(in []Facet) []Facet {
