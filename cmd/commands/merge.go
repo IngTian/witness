@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/store"
-	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -64,26 +62,6 @@ other archive is served to your agents through the MCP tools like your own.`),
 // `witness merge x && rm -rf x` would delete the only copy of an archive that was never merged.
 // A script with no one to answer reads EOF, which is a "no" — so it fails loudly, and says --yes.
 var errMergeDeclined = errors.New("not merged — nothing was written")
-
-// askYesNo is the production prompt. Anything but y/yes is a no, including EOF from a pipe.
-func askYesNo(prompt string) bool {
-	fmt.Print(prompt)
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	answer := strings.TrimSpace(line)
-	if !isatty.IsTerminal(os.Stdin.Fd()) {
-		fmt.Println(answer) // a terminal echoes what was typed; piped input would leave the line open
-	}
-	switch strings.ToLower(answer) {
-	case "y", "yes":
-		return true
-	}
-	// Only when NOBODY answered — /dev/null or a closed pipe. Keyed on EOF, not on "is a terminal":
-	// /dev/null is a character device, and someone who typed "n" doesn't need told about --yes.
-	if err != nil && answer == "" {
-		fmt.Println("(no answer — pass --yes to merge without asking)")
-	}
-	return false
-}
 
 // resolveMergeSource accepts an `export --all` directory or a single database file. It never
 // suggests a command that reuses the source path: an earlier draft's "create one with: witness

@@ -61,16 +61,6 @@ func premergeBackups(t *testing.T, root string) []string {
 	return m
 }
 
-// answer is a scripted reply to the merge prompt; *asked records whether the prompt was shown.
-func answer(reply bool, asked *bool) func(string) bool {
-	return func(string) bool {
-		if asked != nil {
-			*asked = true
-		}
-		return reply
-	}
-}
-
 // A lens that exists only in the export is registered but NOT enabled: enabling it would mine
 // every session here, and a lens is a prompt someone else wrote. A portrait prompt is never
 // copied — it would replace how this archive's portrait is written. The plan is shown before the
@@ -168,32 +158,6 @@ func TestMergeCommandYesSkipsThePrompt(t *testing.T) {
 	st := openBase(t)
 	if recs, _ := st.ReadRaw("theirs"); asked || len(recs) != 1 {
 		t.Errorf("--yes must merge without asking (asked=%v, rows=%d)", asked, len(recs))
-	}
-}
-
-// The production prompt: only y/yes merges. Anything else — including EOF, which is what a script
-// with nobody to answer reads — is a no. The --yes hint is for EOF alone: the first version keyed
-// it on "not a terminal", so `</dev/null` (a character device) got no hint and a piped "n" did.
-func TestMergeAskYesNo(t *testing.T) {
-	for in, want := range map[string]bool{"y\n": true, "YES\n": true, " y \n": true, "n\n": false, "\n": false, "": false, "yep\n": false} {
-		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = w.WriteString(in)
-		w.Close()
-		old := os.Stdin
-		os.Stdin = r
-		var got bool
-		out := captureStdout(t, func() { got = askYesNo("? ") })
-		os.Stdin = old
-		r.Close()
-		if got != want {
-			t.Errorf("askYesNo(%q) = %v, want %v", in, got, want)
-		}
-		if hinted := strings.Contains(out, "--yes"); hinted != (in == "") {
-			t.Errorf("askYesNo(%q): --yes hint shown=%v; want it exactly when nobody answered:\n%s", in, hinted, out)
-		}
 	}
 }
 
