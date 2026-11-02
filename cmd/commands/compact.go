@@ -17,23 +17,21 @@ import (
 // retire ones that were never traits. Nothing is deleted; archived facets keep every version
 // and link to the facet that absorbed them.
 //
-// DRY RUN BY DEFAULT, and that is deliberate rather than cautious boilerplate. This is the one
-// command that rewrites the shape of someone's profile, the judgment is a model's, and the
-// result is not obvious in advance — so the default prints the plan and changes nothing, and
-// --apply is a separate, explicit act.
+// IT SHOWS THE PLAN, THEN ASKS. This is the one command that rewrites the shape of someone's
+// profile, the judgment is a model's, and the result is not obvious in advance — so nothing is
+// applied without a yes. The plan applied is exactly the one shown: Apply replays the actions
+// Plan produced and makes no fresh judgment, and the worker lock is held across the question, so
+// no review rewrites the facets in between.
 //
-// Within ONE invocation the plan printed is the plan applied (Apply replays the actions Plan
-// produced and makes no fresh judgment). Across invocations it is not: --apply re-plans, so its
-// proposals can differ from a previous dry run's. That is why the dry-run footer says so rather
-// than implying a hand-off. Persisting a plan to disk would buy that hand-off, and is not worth
-// a new on-disk format until someone actually wants to approve a plan in one sitting and apply
-// it in another.
+// It used to be a dry run unless --apply, and --apply PLANNED AGAIN: two rounds of model calls,
+// and what it applied could differ from the dry run the user had approved. Asking inside one
+// invocation removes both. --apply still works, as --yes, for scripts written against it.
 func newCompactCmd() *cobra.Command {
-	var apply bool
+	var yes bool
 	var lensOnly string
 	c := &cobra.Command{
-		Use:     "compact [--apply]",
-		Short:   "Consolidate redundant facets into a minimal profile (dry run unless --apply)",
+		Use:     "compact",
+		Short:   "Consolidate redundant facets into a minimal profile (shows the plan, then asks)",
 		GroupID: groupAdmin,
 		Long: "Rebalance the active facet profile: merge facets that say the same thing, retire ones that were never really traits.\n\n" +
 			"Facets only ever accumulated before this existed — nothing removed or combined one, and no prompt asked " +
@@ -41,19 +39,27 @@ func newCompactCmd() *cobra.Command {
 			"which makes every review call larger and the profile less useful, not more.\n\n" +
 			"Nothing is deleted. A compacted facet is ARCHIVED with its full version history intact and a link to the " +
 			"facet that absorbed it, so any node in the live profile can be unfolded into the trajectory behind it.\n\n" +
-			"Prints a plan and changes nothing unless you pass --apply. Re-runnable: each pass consolidates what it " +
-			"can see, so running it again after new reviews is normal.",
+			"Prints the plan, then asks before applying it; the plan applied is exactly the one shown. Anything but " +
+			"'y' writes nothing. --yes applies without asking, for scripts. Re-runnable: each pass consolidates what " +
+			"it can see, so running it again after new reviews is normal.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmdCompact(apply, lensOnly)
+			return cmdCompact(yes, lensOnly, askYesNo)
 		},
 	}
-	c.Flags().BoolVar(&apply, "apply", false, "apply the plan (default: dry run, prints the plan and writes nothing)")
+	c.Flags().BoolVar(&yes, "yes", false, "apply the plan without asking, for scripts")
+	// The old spelling, from when compact was a dry run unless told. Same variable, so a script
+	// written against it keeps working; hidden so help shows one way to say it.
+	c.Flags().BoolVar(&yes, "apply", false, "same as --yes")
+	_ = c.Flags().MarkHidden("apply")
 	c.Flags().StringVar(&lensOnly, "lens", "", "compact only this lens (default: every enabled lens)")
 	return c
 }
 
-func cmdCompact(apply bool, lensOnly string) error {
+// cmdCompact plans, shows the plan, asks, and applies that same plan. ask is injected so tests can
+// answer; yes skips it. Declining exits 0, as a dry run always did: unlike a merge, nothing a
+// following command does can lose data because the plan went unapplied.
+func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	st, err := store.Open()
 	if err != nil {
 		return err
@@ -112,14 +118,9 @@ func cmdCompact(apply bool, lensOnly string) error {
 	}
 
 	printCompactPlans(plans)
-	if !apply {
-		fmt.Println()
-		// Be precise about what --apply does: it plans AGAIN and applies that fresh plan, so
-		// the proposals can differ slightly from the ones printed above. Saying "commit this
-		// plan" would promise a hand-off between runs that does not exist (Plan and Apply are
-		// one invocation; only a single run guarantees the plan shown is the plan applied).
-		fmt.Println(dim("dry run — nothing written. --apply re-plans and commits in one run, so"))
-		fmt.Println(dim("its proposals may differ slightly from the ones above."))
+	fmt.Println()
+	if !yes && !ask("Apply this plan? Nothing is deleted; archived facets keep their history. [y/N]: ") {
+		fmt.Println("not applied — nothing written")
 		return nil
 	}
 	if err := c.Apply(ctx, plans, time.Now()); err != nil {

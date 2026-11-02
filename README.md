@@ -156,7 +156,7 @@ Then just work. Capture runs in the background — no prompting, no ritual. Chec
 witness profile              # the narrative, across everything
 witness profile math         # one lens
 witness facets               # the structured attributes behind it
-witness compact              # consolidate a grown-over profile (dry run)
+witness compact              # consolidate a grown-over profile (shows the plan, then asks)
 witness doctor               # health check
 ```
 
