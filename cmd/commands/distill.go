@@ -95,9 +95,15 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 		st0.Close()
 	}
 
+	// The whole backlog can be hundreds of sessions and hours of model calls, so the drain shows
+	// sessions done/total on stderr — unless --quiet, which asked for no human-readable status.
+	progressWhere := "backlog"
+	if quiet {
+		progressWhere = ""
+	}
 	// A drain pass = one full foreground worker run (mine + review + re-check to empty).
 	// It reports ran=false only when another worker already holds the lock.
-	ran, err := runWorker(false)
+	ran, err := runWorkerInRange(false, sessionTimeRange{}, progressWhere)
 	if err != nil {
 		return err
 	}
@@ -112,7 +118,7 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 		ctx, stop := procCtl.NotifyStop(context.Background())
 		defer stop()
 		if err := backfillDrainWithRetry(ctx, backfillRetryDeps{
-			rerun:            func() error { _, e := runWorker(false); return e },
+			rerun:            func() error { _, e := runWorkerInRange(false, sessionTimeRange{}, progressWhere); return e },
 			waitForNextRetry: waitForNextBackfillRetry,
 			sleep:            interruptibleSleep,
 			maxWait:          backfillMaxWait,

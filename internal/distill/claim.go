@@ -50,6 +50,8 @@ type Claimer struct {
 	// the user asked, and a first pass over a mature archive is tens of calls. A caller that
 	// wants to drain progressively sets a small number.
 	MaxBatches int
+	// Progress, when set, is called as claim batches complete. nil is silent.
+	Progress ProgressFunc
 }
 
 func (c *Claimer) runnerFor(ln *lens.Lens) MineFunc {
@@ -102,6 +104,19 @@ func (c *Claimer) WriteClaims(ctx context.Context, ln *lens.Lens, facets []*stor
 		return 0
 	}
 
+	// The batch count is known up front (batching is local), bound included — otherwise a
+	// MaxBatches run would show 1/3 and stop there.
+	claimed, claims := 0, 0
+	for rest := pending; len(rest) > 0 && (c.MaxBatches == 0 || claims < c.MaxBatches); claims++ {
+		_, rest = nextClaimBatch(rest)
+	}
+	tick := func() {
+		if c.Progress != nil {
+			c.Progress(Progress{Where: ln.Name, Stages: []Stage{{Name: "writing claims", Done: claimed, Total: claims}}})
+		}
+	}
+	tick()
+
 	written := 0
 	for batches := 0; len(pending) > 0; batches++ {
 		if c.MaxBatches > 0 && batches >= c.MaxBatches {
@@ -110,6 +125,8 @@ func (c *Claimer) WriteClaims(ctx context.Context, ln *lens.Lens, facets []*stor
 		batch, rest := nextClaimBatch(pending)
 		pending = rest
 		got, err := c.claimBatch(ctx, ln, batch)
+		claimed++
+		tick()
 		if err != nil {
 			// Never fail a fold over this. The facets keep falling back to their values, which
 			// is exactly the pre-claim behaviour, and the next run tries again.

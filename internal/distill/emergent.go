@@ -78,7 +78,13 @@ func kBand(n int) []int {
 }
 
 // Candidates builds ranked emergent-arc candidates for one lens. Pure over its inputs.
-func Candidates(obs []store.Observation, facets []store.Facet, lens string) []CandidateArc {
+//
+// onK, when non-nil, is called after each k of the band: the band is where the time goes. Every k
+// is a full O(n²) mutual-kNN, so the step count is known up front and each costs about the same —
+// measured on a real 17,413-observation lens, 14 k values at 2m33s–2m50s each, 38 minutes of CPU
+// before the first verify call. Everything after the band (re-expansion, coverage, the sort) took
+// 5s there, so it is not counted as a step.
+func Candidates(obs []store.Observation, facets []store.Facet, lens string, onK func(done, total int)) []CandidateArc {
 	band := kBand(len(obs))
 
 	// Persistence at the PAIR level (base-invariant, and robust to a cluster gaining or
@@ -92,7 +98,13 @@ func Candidates(obs []store.Observation, facets []store.Facet, lens string) []Ca
 	m := len(idx.obs)
 	need := (len(band) + 1) / 2 // >= half the band (ceil)
 	together := make(map[int64]int)
-	for _, k := range band {
+	step := func(done int) {
+		if onK != nil {
+			onK(done, len(band))
+		}
+	}
+	step(0)
+	for i, k := range band {
 		nodes, adj := vector.MutualKNNAdj(obs, lens, k)
 		for _, cc := range vector.ConnectedComponents(adj) {
 			if len(cc) < 2 {
@@ -111,6 +123,7 @@ func Candidates(obs []store.Observation, facets []store.Facet, lens string) []Ca
 				}
 			}
 		}
+		step(i + 1)
 	}
 	// Build the co-membership adjacency (edge iff the pair was together at >= need k's).
 	adj := make([][]int, m)
@@ -400,6 +413,9 @@ type EmergentReviewer struct {
 	// MaxVerify caps verify calls per lens per pass (the explicit budget knob, §2d).
 	// 0 = unbounded (the first cold-start pass); a periodic re-run sets a ceiling.
 	MaxVerify int
+	// Progress, when set, is called as each lens's clustering steps and then its verify calls
+	// complete; Where is the lens. nil is silent.
+	Progress ProgressFunc
 }
 
 func (r *EmergentReviewer) runnerFor(ln *lens.Lens) MineFunc {
@@ -447,22 +463,56 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 			slog.Error("emergent: read observations", "lens", ln.Name, "err", err)
 			continue
 		}
-		cands := Candidates(obs, facets, ln.Name)
-		verified := 0
-		for _, c := range cands {
+		// Clustering is CPU and a verify is a model call, so they are reported as two phases —
+		// the verify snapshots drop this stage — rather than one sum whose estimate would price a
+		// verify at the minutes of a k step. The verify stage is Open here: its total is unknown
+		// until clustering ends, so the estimate is a floor.
+		var cluster func(done, total int)
+		if r.Progress != nil && len(obs) > 0 {
+			cluster = func(done, total int) {
+				r.Progress(Progress{Where: ln.Name, Stages: []Stage{
+					{Name: "clustering", Done: done, Total: total},
+					{Name: "verifying arcs", Open: true},
+				}})
+			}
+		}
+		// Drop the already-judged clusters BEFORE the loop, so the verify total is known before
+		// the first call. Same calls as skipping them inside it: a lens's candidates are deduped
+		// by member set, so no verify below can change whether a later candidate was seen.
+		var todo []pendingMark
+		for _, c := range Candidates(obs, facets, ln.Name, cluster) {
+			if sig := arcSignature(ln.Name, c.Members); !r.seenUnchanged(ln.Name, sig, c) {
+				todo = append(todo, pendingMark{ln.Name, sig, c}) // unseen (idempotency skip)
+			}
+		}
+		verified, calls := 0, 0
+		tick := func() {
+			if r.Progress == nil || len(todo) == 0 {
+				return
+			}
+			total := len(todo)
+			if r.MaxVerify > 0 {
+				// A failed verify does not spend the budget, so each failure can add one call.
+				total = min(total, r.MaxVerify+calls-verified)
+			}
+			r.Progress(Progress{Where: ln.Name, Stages: []Stage{{Name: "verifying arcs", Done: calls, Total: total, Open: total < len(todo)}}})
+		}
+		tick()
+		for _, t := range todo {
 			if r.MaxVerify > 0 && verified >= r.MaxVerify {
 				break // budget exhausted — remaining candidates are DEFERRED (not marked seen)
 			}
-			sig := arcSignature(ln.Name, c.Members)
-			if r.seenUnchanged(ln.Name, sig, c) {
-				continue // already verified this exact cluster; skip (idempotency)
-			}
+			sig, c := t.sig, t.cand
 			rf, ok, err := r.verify(ctx, ln, c)
+			calls++ // a failed call is still a call done
+			if err == nil {
+				verified++
+			}
+			tick()
 			if err != nil {
 				slog.Error("emergent: verify candidate", "lens", ln.Name, "err", err)
 				continue // NOT marked seen → re-proposed next pass
 			}
-			verified++
 			if !ok {
 				r.markSeen(ln.Name, sig, c, false) // rejected: nothing to persist, safe to stamp now
 				continue

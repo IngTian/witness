@@ -71,7 +71,7 @@ func TestCandidatesCrossSessionDenseClusterSurfaces(t *testing.T) {
 		dirObs("x0", "sx", []float32{0, 1, 0}),
 		dirObs("x1", "sy", []float32{0, 0, 1}),
 	)
-	cands := Candidates(obs, nil, "math")
+	cands := Candidates(obs, nil, "math", nil)
 	if len(cands) == 0 {
 		t.Fatal("expected at least one candidate arc from the dense cross-session cluster")
 	}
@@ -102,7 +102,7 @@ func TestCandidatesSingleSessionClusterFiltered(t *testing.T) {
 		// a second distinct cluster to keep the graph non-trivial, also single-session
 		dirObs("b1", "s2", []float32{0, 1, 0}),
 	}
-	cands := Candidates(obs, nil, "math")
+	cands := Candidates(obs, nil, "math", nil)
 	for _, c := range cands {
 		if len(c.Sessions) < 2 {
 			t.Fatalf("a single-session cluster must be filtered out; got candidate with sessions %v", c.Sessions)
@@ -119,7 +119,7 @@ func TestCandidatesCoverageAnnotated(t *testing.T) {
 		Lens: "math", Dimension: "thinking", Key: "known_thing",
 		Versions: []store.FacetVersion{{Value: "v", BecauseOf: arcIDs("c", 7)}},
 	}}
-	cands := Candidates(obs, facets, "math")
+	cands := Candidates(obs, facets, "math", nil)
 	if len(cands) == 0 {
 		t.Fatal("a fully-covered cluster must still be RETURNED (annotate, not gate)")
 	}
@@ -143,7 +143,7 @@ func TestCandidatesSalienceRanksUncoveredFirst(t *testing.T) {
 		Lens: "math", Dimension: "thinking", Key: "known",
 		Versions: []store.FacetVersion{{Value: "v", BecauseOf: arcIDs("k", 6)}},
 	}}
-	cands := Candidates(obs, facets, "math")
+	cands := Candidates(obs, facets, "math", nil)
 	if len(cands) < 2 {
 		t.Fatalf("expected both arcs as candidates, got %d", len(cands))
 	}

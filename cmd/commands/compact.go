@@ -108,7 +108,10 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	}
 
 	fmt.Printf("planning compaction over %s...\n", pluralize(len(lenses), "lens", "lenses"))
+	pl := startProgress()
+	c.Progress = pl.update
 	plans, err := c.Plan(ctx)
+	pl.finish()
 	if err != nil {
 		return err
 	}
@@ -141,7 +144,11 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 		Runner: rs.RunFor(nil), RunnerFor: rs.RunFor,
 	}
 	for _, ln := range lenses {
-		if n := cl.Run(ctx, ln); n > 0 {
+		cp := startProgress()
+		cl.Progress = cp.update
+		n := cl.Run(ctx, ln)
+		cp.finish()
+		if n > 0 {
 			fmt.Printf("%s %s: wrote %s\n", okGlyph(), bold(ln.Name),
 				pluralize(n, "short claim", "short claims"))
 		}

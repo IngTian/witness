@@ -173,12 +173,12 @@ func TestFreshHoldsTheLockNotJustAProbe(t *testing.T) {
 	}
 	// The release must precede the drain, textually.
 	relIdx := strings.Index(fn, "releaseFresh()")
-	drainIdx := strings.Index(fn, "runWorker(false)")
+	drainIdx := strings.Index(fn, "runWorkerInRange(false")
 	if relIdx < 0 {
 		t.Fatal("no releaseFresh() call found — the lock would be held into the drain")
 	}
 	if drainIdx < 0 {
-		t.Fatal("runWorker(false) not found; this test's assumption about the drain call has drifted")
+		t.Fatal("runWorkerInRange(false not found; this test's assumption about the drain call has drifted")
 	}
 	// Find a release that is NOT the deferred safety net and sits before the drain.
 	explicit := -1

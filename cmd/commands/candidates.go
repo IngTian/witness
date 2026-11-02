@@ -30,7 +30,13 @@ func cmdCandidates(lens string) error {
 		return err
 	}
 
-	cands := distill.Candidates(obs, facets, lens)
+	// Progress on stderr: no model call here, but on a real 17,413-observation lens the clustering
+	// alone took 38 minutes, and it used to sit silent for all of it.
+	pl := startProgress()
+	cands := distill.Candidates(obs, facets, lens, func(done, total int) {
+		pl.update(distill.Progress{Where: lens, Stages: []distill.Stage{{Name: "clustering", Done: done, Total: total}}})
+	})
+	pl.finish()
 	total := 0
 	for _, o := range obs {
 		if o.Lens == lens {

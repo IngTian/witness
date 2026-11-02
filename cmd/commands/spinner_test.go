@@ -28,6 +28,18 @@ func TestSpinnerIsSilentWhenNotATerminal(t *testing.T) {
 	sp.Stop() // idempotent
 }
 
+// The frames go to stderr, so a terminal on stdout is not enough: `witness worker review 2>log` on a
+// terminal wrote 216 carriage returns into the log before the spinner checked stderr too.
+func TestSpinnerIsSilentWhenStderrIsRedirected(t *testing.T) {
+	oldColor, oldErr := useColor, stderrIsTerminal
+	defer func() { useColor, stderrIsTerminal = oldColor, oldErr }()
+	useColor, stderrIsTerminal = true, false
+	if sp := startSpinner("working…"); sp != nil {
+		sp.Stop()
+		t.Error("startSpinner must return nil when stderr, where its frames go, is not a terminal")
+	}
+}
+
 // A real spinner stops cleanly, is idempotent, and Stop blocks until the writer is done.
 //
 // Stop blocking matters: it is what prevents a final frame from interleaving with the profile

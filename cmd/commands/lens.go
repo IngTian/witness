@@ -366,7 +366,9 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// reset is already committed, so the worker's fresh store snapshot sees it.
 	st.Close()
 
-	ran, err := runWorker(false)
+	// A backfill re-mines the lens's whole history — hundreds of sessions, one or more model
+	// calls each — so it shows sessions done/total on stderr rather than sitting silent for hours.
+	ran, err := runWorkerInRange(false, sessionTimeRange{}, name)
 	if err != nil {
 		return err
 	}

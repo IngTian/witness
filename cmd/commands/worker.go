@@ -47,7 +47,8 @@ func cmdWorker(args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = runWorkerInRange(auto, timeRange)
+	// Silent: this is the detached worker every trigger spawns.
+	_, err = runWorkerInRange(auto, timeRange, "")
 	return err
 }
 
@@ -77,11 +78,17 @@ func workerFlags(args []string) (bool, sessionTimeRange, error) {
 	return auto, timeRange, err
 }
 
+// runWorker is the SILENT worker run: background wakeups, auto runs, and any caller that has not
+// asked for progress.
 func runWorker(auto bool) (bool, error) {
-	return runWorkerInRange(auto, sessionTimeRange{})
+	return runWorkerInRange(auto, sessionTimeRange{}, "")
 }
 
-func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
+// runWorkerInRange runs one worker pass. progressWhere opts a FOREGROUND caller into a progress
+// line on stderr for the drain, labelled with it (a backfill passes its lens): sessions mined /
+// total. "" is silent, and every background, detached or auto run must pass "" — nobody is
+// watching their stderr. (Startup gets no line: runners + embedder measured 0.3-0.5s.)
+func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere string) (bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return false, err
@@ -323,21 +330,23 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		// minutes inside one model call, and without this line a log that stops here is
 		// ambiguous between "never started draining" and "started and is waiting on a model".
 		slog.Info("worker: draining", "pending", len(pending()), "concurrency", conc)
-		for !stopRequested() {
-			n := w.Drain(ctx, distill.DrainOpts{
-				Conc:      conc,
-				Pending:   pending,
-				Stop:      stopRequested,
-				Attempted: attempted,
-				OnCommit: func(session string) {
-					_ = st.SetMetaString("worker_current", session)
-					_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
-				},
-			})
-			if n == 0 {
-				break
-			}
+		opts := distill.DrainOpts{
+			Conc:      conc,
+			Pending:   pending,
+			Stop:      stopRequested,
+			Attempted: attempted,
+			OnCommit: func(session string) {
+				_ = st.SetMetaString("worker_current", session)
+				_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+			},
 		}
+		var progress distill.ProgressFunc
+		if progressWhere != "" {
+			pl := startProgress()
+			defer pl.finish() // cleared before any review this run does: that is not mining
+			progress = pl.update
+		}
+		drainPass(func(o distill.DrainOpts) int { return w.Drain(ctx, o) }, opts, stopRequested, progress, progressWhere)
 	}
 
 	runDistillLoop(distillLoopDeps{
@@ -353,17 +362,62 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 				return
 			}
 			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runForLens}
-			if err := r.Run(ctx, time.Now()); err != nil {
+			// A foreground drain (lens backfill, worker run) reviews after it mines: the same
+			// fold line and profile spinner as `witness worker review`, or that stretch is minutes
+			// of silence after the mining line clears. A detached worker stays silent.
+			fold := &phaseProgress{start: startProgress}
+			if progressWhere != "" {
+				r.Progress = fold.update
+			}
+			err := r.Run(ctx, time.Now())
+			fold.finish()
+			if err != nil {
 				slog.Error("review", "err", err)
 			} else {
 				slog.Info("review complete")
+				var sp *spinner
+				if progressWhere != "" {
+					sp = startSpinner("distilling the profile from the latest facets…")
+				}
 				regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens)
+				sp.Stop()
 			}
 		},
 		ensureMiner:    func() bool { return getMiner() != nil },
 		hasUnattempted: func(p []string) bool { return miner.HasUnattempted(p, attempted) },
 	})
 	return true, nil
+}
+
+// drainPass calls drain until a call reaps nothing (or a stop is requested), carrying ONE progress
+// count across the calls: progress (nil = silent) gets each snapshot named where and continued
+// past the sessions earlier calls finished. A seam so the count's wiring is testable without the
+// embedder a real Drain needs.
+func drainPass(drain func(distill.DrainOpts) int, opts distill.DrainOpts, stop func() bool, progress distill.ProgressFunc, where string) {
+	finished := 0 // sessions reaped by this pass's earlier Drain calls
+	if progress != nil {
+		opts.Progress = func(p distill.Progress) { progress(continuedDrain(p, where, finished)) }
+	}
+	for !stop() {
+		n := drain(opts)
+		finished += n // Drain returns exactly the sessions it reaped, i.e. its final Done
+		if n == 0 {
+			break
+		}
+	}
+}
+
+// continuedDrain names a Drain snapshot and continues its count past the sessions earlier Drain
+// calls of the same pass already finished. Each Drain counts from zero, so without the offset a
+// second call that found a late arrival would drop the line from 312/312 back to 0/1.
+func continuedDrain(p distill.Progress, where string, finished int) distill.Progress {
+	stages := make([]distill.Stage, len(p.Stages))
+	for i, s := range p.Stages {
+		s.Done += finished
+		s.Total += finished
+		stages[i] = s
+	}
+	return distill.Progress{Where: where, Stages: stages}
 }
 
 // distillLoopDeps is the set of seams runDistillLoop needs. Extracted so the

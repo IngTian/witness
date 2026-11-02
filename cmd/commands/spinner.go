@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/mattn/go-isatty"
 )
 
 // A minimal spinner for the one place a witness command blocks on a model: read-time L4
@@ -15,17 +17,21 @@ import (
 // It follows the same contract as style.go: decorative only, and silent unless stdout is a real
 // TTY with NO_COLOR unset. That is what keeps `witness profile > file`, `| head`, `--json`, and
 // CI logs free of escape sequences and carriage returns — the frames would otherwise land in the
-// captured markdown.
+// captured markdown — and the MCP stdio server silent whatever its stderr is.
 //
-// Written to STDERR, deliberately, even though the TTY check is on stdout. The profile body is
-// stdout; a progress animation is not part of it. `witness profile > portrait.md` on a terminal
-// then still animates for the human while the file gets only the document.
+// Written to STDERR, deliberately: the profile body is stdout and a progress animation is not part
+// of it. So stderr must be a terminal too. Checking stdout alone put every frame into a redirected
+// stderr: a real `witness worker review 2>review.log` on a terminal wrote 216 carriage returns and
+// 860 escape codes into the log.
 
 // spinnerFrames is the braille cycle: single-width, present in the fonts a modern terminal uses,
 // and visually quiet next to the existing glyphs in style.go.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 const spinnerInterval = 90 * time.Millisecond
+
+// stderrIsTerminal is where the frames go; a var so a test can pin the redirected case.
+var stderrIsTerminal = isatty.IsTerminal(os.Stderr.Fd())
 
 // spinner animates a one-line status until Stop is called. The zero value is not usable; call
 // startSpinner. A nil *spinner is safe to Stop, so callers need no nil check.
@@ -49,7 +55,7 @@ func (s *spinner) w() io.Writer {
 // terminal (piped, redirected, NO_COLOR, or a test). A nil return still Stops safely, so the
 // caller never branches on it.
 func startSpinner(msg string) *spinner {
-	if !useColor {
+	if !useColor || !stderrIsTerminal {
 		return nil
 	}
 	s := &spinner{stop: make(chan struct{}), done: make(chan struct{}), msg: msg}
