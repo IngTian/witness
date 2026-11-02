@@ -642,7 +642,7 @@ type wireOutcome struct {
 // generic result line.
 type wirer interface{ wire() (wireOutcome, error) }
 type unwirer interface {
-	unwire() (removed bool, err error)
+	unwire() (removed bool, warning string, err error)
 }
 
 // pullOnlyNote closes the wire screen of an editor whose agents get the MCP tools.
@@ -851,10 +851,10 @@ func cmdUninstall(args []string) error {
 	}
 	fmt.Println(title("unwire "+target, "", ""))
 	fmt.Println()
-	removed := true
+	removed, warning := true, ""
 	var err error
 	if u, ok := in.(unwirer); ok {
-		removed, err = u.unwire()
+		removed, warning, err = u.unwire()
 	} else {
 		err = in.Uninstall()
 	}
@@ -862,17 +862,27 @@ func cmdUninstall(args []string) error {
 		return err
 	}
 	fmt.Println()
-	if !removed {
+	// A part that could not be checked makes it a warning: "✓ unwired" under a "! MCP server not
+	// removed" row claimed more than happened.
+	switch {
+	case warning != "" && removed:
+		fmt.Println(warnGlyph() + " unwired, but " + warning + " — data and config are untouched")
+	case warning != "":
+		fmt.Println(warnGlyph() + " nothing removed, and " + warning + " — data and config are untouched")
+	case !removed:
 		fmt.Println(skipGlyph() + " nothing to remove — data and config are untouched")
-		return nil
+	default:
+		fmt.Println(okGlyph() + " unwired — data and config are untouched")
 	}
-	fmt.Println(okGlyph() + " unwired — data and config are untouched")
-	fmt.Println(hint("reconnect", "witness wire "+target))
+	if removed {
+		fmt.Println(hint("reconnect", "witness wire "+target))
+	}
 	return nil
 }
 
-// cmdUninstallClaude reports, per part, what it removed, and whether it removed anything.
-func cmdUninstallClaude() (removed bool, err error) {
+// cmdUninstallClaude reports, per part, what it removed, whether it removed anything, and — as
+// warning — a part it could not check.
+func cmdUninstallClaude() (removed bool, warning string, err error) {
 	// Report what actually happened. This used to swallow BOTH the parse error and the
 	// write error and print "hooks removed" regardless — so an unparseable settings.json,
 	// or a read-only ~/.claude, left every witness hook wired while the user was told they
@@ -885,13 +895,13 @@ func cmdUninstallClaude() (removed bool, err error) {
 	case err == nil:
 		cleaned, err := removeWitnessHooks(data)
 		if err != nil {
-			return false, fmt.Errorf("%s: %w (edit it by hand to remove the witness hooks)", settings, err)
+			return false, "", fmt.Errorf("%s: %w (edit it by hand to remove the witness hooks)", settings, err)
 		}
 		// Compare before writing, the way codex does: re-marshalling an already-clean file
 		// produces equal JSON, and "hooks removed" on every re-run hid whether there were any.
 		if !jsonEqual(data, cleaned) {
 			if err := writeFileAtomic(settings, cleaned); err != nil {
-				return false, fmt.Errorf("write %s: %w", settings, err)
+				return false, "", fmt.Errorf("write %s: %w", settings, err)
 			}
 			fmt.Println(resultRow(okGlyph(), "hooks", "removed from "+tildePath(settings), ""))
 			removed = true
@@ -901,7 +911,7 @@ func cmdUninstallClaude() (removed bool, err error) {
 	case os.IsNotExist(err):
 		fmt.Println(resultRow(skipGlyph(), "hooks", "none — there is no "+tildePath(settings), ""))
 	default:
-		return false, fmt.Errorf("read %s: %w", settings, err)
+		return false, "", fmt.Errorf("read %s: %w", settings, err)
 	}
 	// The MCP removal stays best-effort: `claude` may not be on PATH, and it exits
 	// non-zero when the server simply isn't registered — neither is a failure to report.
@@ -912,13 +922,15 @@ func cmdUninstallClaude() (removed bool, err error) {
 		removed = true
 	case errors.Is(err, exec.ErrNotFound):
 		fmt.Println(resultRow(warnGlyph(), "MCP server", "not checked", "`claude` is not on PATH"))
+		warning = "the MCP server was not checked"
 	case errors.Is(err, context.DeadlineExceeded):
 		fmt.Println(resultRow(warnGlyph(), "MCP server", "not removed", fmt.Sprintf("`claude mcp remove witness` did not finish within %s", claudeMCPRemoveTimeout)))
 		fmt.Println(subHint("by hand", "claude mcp remove witness"))
+		warning = "the MCP server may still be registered"
 	default: // claude ran and refused: the server is not registered
 		fmt.Println(resultRow(skipGlyph(), "MCP server", "not registered", ""))
 	}
-	return removed, nil
+	return removed, warning, nil
 }
 
 // jsonEqual reports whether two JSON documents hold the same value, whatever their formatting.

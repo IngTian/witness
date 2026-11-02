@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"sort"
@@ -133,7 +134,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	if failed, proposed := compactTotals(plans); proposed == 0 && failed > 0 {
 		return errLines("compaction could not plan: "+pluralize(failed, "batch", "batches")+
 			" failed, nothing proposed — nothing written",
-			errRow("cause", tap.cause()), errHint("diagnose", "witness doctor"))
+			errRow("cause", cmp.Or(tap.cause(), "no runner error — see witness.log")), errHint("diagnose", "witness doctor"))
 	}
 
 	printCompactPlans(plans, tap.cause())

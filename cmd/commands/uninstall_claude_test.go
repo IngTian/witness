@@ -22,7 +22,7 @@ func TestUninstallClaudeReportsFailureInsteadOfClaimingSuccess(t *testing.T) {
 		if err := os.WriteFile(settings, []byte(`{"hooks": {`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := cmdUninstallClaude()
+		_, _, err := cmdUninstallClaude()
 		if err == nil {
 			t.Fatal("uninstall reported success on an unparseable settings.json — the hooks are still wired")
 		}
@@ -54,14 +54,14 @@ func TestUninstallClaudeReportsFailureInsteadOfClaimingSuccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-		if _, err := cmdUninstallClaude(); err == nil {
+		if _, _, err := cmdUninstallClaude(); err == nil {
 			t.Fatal("uninstall reported success when settings.json could not be written")
 		}
 	})
 
 	t.Run("no settings.json at all is not an error", func(t *testing.T) {
 		withClaudeDir(t)
-		if _, err := cmdUninstallClaude(); err != nil {
+		if _, _, err := cmdUninstallClaude(); err != nil {
 			t.Fatalf("a missing settings.json means nothing to remove, not a failure: %v", err)
 		}
 	})
@@ -73,7 +73,7 @@ func TestUninstallClaudeReportsFailureInsteadOfClaimingSuccess(t *testing.T) {
 		if err := os.WriteFile(settings, []byte(wired), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cmdUninstallClaude(); err != nil {
+		if _, _, err := cmdUninstallClaude(); err != nil {
 			t.Fatalf("uninstall on a normal install: %v", err)
 		}
 		got, err := os.ReadFile(settings)

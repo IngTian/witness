@@ -57,7 +57,7 @@ func TestClaudeMCPRemoveIsBoundedAndStubbable(t *testing.T) {
 
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	if _, err := cmdUninstallClaude(); err != nil {
+	if _, _, err := cmdUninstallClaude(); err != nil {
 		t.Fatalf("uninstall on an empty dir: %v", err)
 	}
 	if !called {

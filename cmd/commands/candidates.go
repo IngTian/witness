@@ -69,7 +69,7 @@ func cmdCandidates(lens string) error {
 		// Show a few member observations so a human can eyeball coherence.
 		for j, m := range c.Members {
 			if j >= 5 {
-				fmt.Printf("      %s\n", dim(fmt.Sprintf("… +%d more", len(c.Members)-5)))
+				fmt.Printf("      %s\n", dim("… +"+humanCount(len(c.Members)-5)+" more"))
 				break
 			}
 			fmt.Printf("      %s %s\n", dim("·"), truncate(m.Observation, 88))

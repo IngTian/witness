@@ -81,8 +81,7 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// watermarks already advanced per committed window inside foldLensWindowed (the #55
 	// per-lens state), so a persistent single-lens failure no longer strands healthy lenses.
 	if len(failed) > 0 {
-		return fmt.Errorf("review failed for %d lens(es): %s (committed windows kept; review left pending)",
-			len(failed), strings.Join(failed, ", "))
+		return fmt.Errorf("review failed for %s (committed windows kept; review left pending)", strings.Join(failed, ", "))
 	}
 	return r.Store.StampReview()
 }

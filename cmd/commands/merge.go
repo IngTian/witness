@@ -283,7 +283,7 @@ func (f *mergeFiles) apply(st *store.Store) {
 // lensRow is one lens line of a merge screen. Every lens row leads with a glyph, so the names line
 // up under each other whatever the row says.
 func lensRow(glyph, name, text string) string {
-	return mergeRow("lens") + glyph + " " + bold(name) + "  " + text
+	return mergeRow("lens") + padGlyph(glyph) + " " + bold(name) + "  " + text
 }
 
 // joinNonZero renders the non-zero parts of a count line ("552 new · 3 longer there"), or none.
@@ -376,7 +376,9 @@ func printMergeDone(root string, r *store.MergeReport, f *mergeFiles, backup str
 		countOf(r.Facets.New, "facet", "facets"))
 	fmt.Println("  " + kvRow("backup", tildePath(backup), "this archive as it was before"))
 	fmt.Println("  " + kvRow("to undo", "stop witness, then replace "+tildePath(root)+" with the backup", ""))
-	fmt.Println(hint("dedupe", "witness compact") + "  " + dim("(same trait under different keys; calls the model)"))
+	// The note goes on its own line: after the command it made the hint uncopyable as a whole line.
+	fmt.Println(dim("  the same trait may now sit under two keys; compact merges them (it calls the model)"))
+	fmt.Println(hint("dedupe", "witness compact"))
 }
 
 func printMergeFiles(root string, f *mergeFiles) {
@@ -405,11 +407,12 @@ func printMergeFiles(root string, f *mergeFiles) {
 		if _, err := os.Stat(dst); err == nil {
 			note = " (using it REPLACES yours — copy yours aside first)"
 		}
-		fmt.Println(mergeRow("summarize") + skipGlyph() + " " + bold(filepath.Base(src)) + "  not copied — it changes how your portrait is written" + note)
+		fmt.Println(mergeRow("summarize") + padGlyph(skipGlyph()) + " " + bold(filepath.Base(src)) + "  not copied — it changes how your portrait is written" + note)
 		fmt.Println(subHint("use it", fmt.Sprintf("mkdir -p %q && cp %q %q", filepath.Dir(dst), src, dst)))
 	}
 	if f.profile {
-		fmt.Println(mergeRow("profile") + skipGlyph() + " not merged — rebuilt from the merged facets")
+		fmt.Println(mergeRow("profile") + padGlyph(skipGlyph()) + " not merged — rebuilt from the merged facets " +
+			dim("(theirs stays in "+tildePath(filepath.Join(f.srcDir, "profile"))+")"))
 	}
 }
 

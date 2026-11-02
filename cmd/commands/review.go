@@ -43,9 +43,8 @@ func cmdReviewFull(full bool) error {
 	if profErr != nil {
 		// The facets landed; only the narrative did not. Say so rather than "profile regenerated".
 		fmt.Println(warnGlyph() + " " + done + " — the profile was NOT regenerated (the previous one is kept)")
-		if c := tap.cause(); c != "" {
-			fmt.Println("  " + kvRow("cause", c, ""))
-		}
+		tap.note(profErr) // a model error during it, if one was seen; else its own (missing prompts …)
+		fmt.Println("  " + kvRow("cause", tap.cause(), ""))
 		fmt.Println(hint("diagnose", "witness doctor"))
 		return nil
 	}

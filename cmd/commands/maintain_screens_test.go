@@ -188,6 +188,65 @@ func TestTruncateCutsRunesNotBytes(t *testing.T) {
 	}
 }
 
+// Every lens row leads with a glyph so the names line up — in a pipe too, where the glyphs are
+// ASCII of different widths ("+" against "[!]"): there they used to start 2 columns apart.
+func TestMergeLensRowsLineUpInPlainOutput(t *testing.T) {
+	f := &mergeFiles{srcDir: "/x", register: []mergeLens{{"math", "/x/lenses/math"}},
+		differ: []mergeLens{{"default", "/x/lenses/default"}}, disabled: []string{"notes"}, unknown: []string{"old"}}
+	out := captureStdout(t, func() { printMergeFiles("/root", f) })
+	col := -1
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "  lens") {
+			continue
+		}
+		name := -1
+		for _, n := range []string{"math", "default", "notes", "old"} {
+			if i := strings.Index(line, " "+n+"  "); i >= 0 {
+				name = i
+			}
+		}
+		if col == -1 {
+			col = name
+		} else if name != col {
+			t.Fatalf("lens names start at different columns (%d, %d):\n%s", col, name, out)
+		}
+	}
+	if col == -1 {
+		t.Fatalf("no lens rows:\n%s", out)
+	}
+}
+
+// The no-op import of a hook-fed agent still kicks the worker when work is pending; the watch hint
+// it prints then needs the line to say so, or "nothing to import" sits over "watch it".
+func TestImportOfAHookFedAgentSaysWhenItStartedTheWorker(t *testing.T) {
+	out := captureStdout(t, func() { printImportResult(platform.ImportStats{Agent: "claude"}, true, false) })
+	if !strings.HasPrefix(out, "[-] claude: nothing to import — it is captured live by its hooks (distilling in the background)\n") ||
+		!strings.Contains(out, "witness status") {
+		t.Fatalf("got:\n%s", out)
+	}
+}
+
+// A cause row with no cause is dropped, not printed as a bare label.
+func TestAnEmptyCauseRowIsDropped(t *testing.T) {
+	err := errLines("compaction could not plan", errRow("cause", ""), errHint("diagnose", "witness doctor"))
+	if strings.Contains(err.Error(), "cause") {
+		t.Fatalf("a bare cause label explains nothing:\n%v", err)
+	}
+}
+
+// `worker review` said "profile regenerated" whatever regenerateProfile did. When the review lands
+// but the narrative cannot be regenerated — here its prompts cannot be found — it says so, with why.
+func TestReviewSaysWhenTheProfileWasNotRegenerated(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv(noDefaultLensEnv, "1")
+	t.Setenv("WITNESS_PROMPTS", filepath.Join(t.TempDir(), "none"))
+	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") ||
+		!strings.Contains(out, "cause") || strings.Contains(out, "profile regenerated\n") {
+		t.Fatalf("(%v)\n%s", err, out)
+	}
+}
+
 func TestMergeNamesAMissingSource(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	err := cmdMerge(filepath.Join(t.TempDir(), "nope"), true, nil)
@@ -288,7 +347,23 @@ func TestUnwireSaysWhetherAnythingWasRemoved(t *testing.T) {
 		withClaudeDir(t)
 		removeClaudeMCP = func() error { return &exec.Error{Name: "claude", Err: exec.ErrNotFound} }
 		out, _ := captureStdoutErr(t, func() error { return cmdUninstall([]string{"claude"}) })
-		if !strings.Contains(out, "[!]  MCP server    not checked (`claude` is not on PATH)") {
+		// The row warns, so the result must too: "[-] nothing to remove" under a "[!] not checked"
+		// row claimed the MCP server was known to be gone.
+		if !strings.Contains(out, "[!]  MCP server    not checked (`claude` is not on PATH)") ||
+			!strings.Contains(out, "[!] nothing removed, and the MCP server was not checked") {
+			t.Fatalf("got:\n%s", out)
+		}
+	})
+	t.Run("claude mcp remove wedged", func(t *testing.T) {
+		dir := withClaudeDir(t)
+		wired := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/x/hooks/witness.sh capture"}]}]}}`
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(wired), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		removeClaudeMCP = func() error { return fmt.Errorf("timed out: %w", context.DeadlineExceeded) }
+		out, _ := captureStdoutErr(t, func() error { return cmdUninstall([]string{"claude"}) })
+		if !strings.Contains(out, "[!] unwired, but the MCP server may still be registered") ||
+			!strings.Contains(out, "claude mcp remove witness") || strings.Contains(out, "[ok] unwired") {
 			t.Fatalf("got:\n%s", out)
 		}
 	})
@@ -401,11 +476,39 @@ func TestCleanupAsksThroughTheSharedPrompt(t *testing.T) {
 	}
 
 	in := strings.NewReader("30\ny\n")
-	if got := readLine(in); got != "30" {
-		t.Fatalf("readLine = %q", got)
+	if got, eof := readLine(in); got != "30" || eof {
+		t.Fatalf("readLine = %q, eof %v", got, eof)
 	}
-	if rest := readLine(in); rest != "y" {
+	if rest, _ := readLine(in); rest != "y" {
 		t.Fatalf("readLine consumed past its newline; the next reader got %q", rest)
+	}
+	if _, eof := readLine(in); !eof {
+		t.Fatal("an exhausted input must report EOF")
+	}
+
+	// The production confirmation, on a pipe that ends before any answer (cron, /dev/null): a no —
+	// and NOT askYesNo's "pass --yes to skip this question", because cleanup has no --yes
+	// (`witness cleanup --yes` is an unknown flag). It used to print exactly that.
+	st = openBase(t)
+	if err := st.AppendRaw(store.RawRecord{TS: "2025-01-01T00:00:00Z", Session: "old2", Seq: 0, Role: "user", Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	r, w, perr := os.Pipe() // the real command, reading a real (non-terminal) stdin
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	_, _ = w.WriteString("30\n")
+	_ = w.Close()
+	prevStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = prevStdin; _ = r.Close() })
+	out = captureStdout(t, func() { err = newCleanupCmd().RunE(nil, nil) })
+	if err != nil || strings.Contains(out, "--yes") || !strings.HasSuffix(out, "[y/N]: \nnot deleted — nothing written\n") {
+		t.Fatalf("an unanswered prune (%v):\n%s", err, out)
+	}
+	if newCleanupCmd().Flags().Lookup("yes") != nil {
+		t.Fatal("cleanup grew a --yes: confirmFrom exists only because it has none")
 	}
 }
 

@@ -139,7 +139,7 @@ func printImportResult(stats platform.ImportStats, kicked, noKick bool) {
 	case hookFed && stats.Records == 0 && stats.Failed == 0:
 		// A hook-fed source has nothing to pull: `import --agent claude` reported "imported 0 raw
 		// record(s)" as if it had looked and found nothing.
-		fmt.Printf("%s %s: nothing to import — it is captured live by its hooks\n", skipGlyph(), name)
+		fmt.Printf("%s %s: nothing to import — it is captured live by its hooks%s\n", skipGlyph(), name, note)
 		fmt.Println(hint("wire it", "witness wire "+stats.Agent))
 	case stats.Records == 0:
 		fmt.Printf("%s %s: up to date — nothing new since the last import%s\n", glyph, name, note)

@@ -21,10 +21,16 @@ import (
 // color the glyphs are ASCII of different widths ([ok], [!], *), so they are padded to one width
 // there and the labels still line up.
 func resultRow(glyph, name, value, note string) string {
-	if !useColor {
-		glyph = fmt.Sprintf("%-4s", glyph)
+	return "  " + padGlyph(glyph) + " " + kvRow(name, value, note)
+}
+
+// padGlyph pads an ASCII glyph ([ok], [!], +) to one width when color is off, so whatever follows
+// it lines up from row to row; on a terminal every glyph is already one column.
+func padGlyph(glyph string) string {
+	if useColor {
+		return glyph
 	}
-	return "  " + glyph + " " + kvRow(name, value, note)
+	return fmt.Sprintf("%-4s", glyph)
 }
 
 // subHint is a next step that belongs to the row above it, indented under that row's value column
@@ -59,6 +65,9 @@ func errHint(label, command string) string {
 // errRow is an aligned "  label  text" line inside an error message — the cause of a failure,
 // shown under its headline instead of only in witness.log.
 func errRow(label, text string) string {
+	if strings.TrimSpace(text) == "" {
+		return "" // errLines drops it: a bare "cause" label explains nothing
+	}
 	return "  " + errText(ansiDim, fmt.Sprintf("%-15s", label)) + " " + text
 }
 

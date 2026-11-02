@@ -22,7 +22,7 @@ func newCleanupCmd() *cobra.Command {
 		Long:    "Interactively delete old raw messages for idle sessions while keeping derived observations, facets, and profiles. This is never automatic and asks for confirmation before deleting.",
 		Args:    cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return cmdCleanup(os.Stdin, askYesNo)
+			return cmdCleanup(os.Stdin, confirmFrom(os.Stdin))
 		},
 	}
 }
@@ -33,9 +33,9 @@ func newCleanupCmd() *cobra.Command {
 // durable record. There is no automatic retention: pruning is a deliberate,
 // confirmed user action, never a silent background delete.
 //
-// The confirmation goes through ask (askYesNo in production) like every other y/N: this was the one
-// destructive prompt with its own reader, and a piped or Ctrl-D answer left "Proceed? [y/N]:
-// Aborted; nothing deleted." on one line.
+// The confirmation is ask (confirmFrom in production): askYesNo's rule and look, minus its "pass
+// --yes" note — cleanup has no --yes, deliberately. A piped or Ctrl-D answer used to leave
+// "Proceed? [y/N]: Aborted; nothing deleted." on one line.
 func cmdCleanup(in io.Reader, ask func(prompt string) bool) error {
 	st, err := store.Open()
 	if err != nil {
@@ -43,13 +43,8 @@ func cmdCleanup(in io.Reader, ask func(prompt string) bool) error {
 	}
 	defer st.Close()
 
-	fmt.Print(bold("Prune raw transcripts idle for how many days?") + " " + dim("[90]") + ": ")
-	line := readLine(in)
-	if f, ok := in.(*os.File); !ok || !isatty.IsTerminal(f.Fd()) {
-		fmt.Println(line) // a terminal echoes what was typed; piped input would leave the line open
-	}
 	days := 90
-	if t := strings.TrimSpace(line); t != "" {
+	if t := promptLine(in, bold("Prune raw transcripts idle for how many days?")+" "+dim("[90]")+": "); t != "" {
 		n, err := strconv.Atoi(t)
 		if err != nil || n <= 0 {
 			return fmt.Errorf("not a positive number of days: %q", t)
@@ -85,10 +80,34 @@ func cmdCleanup(in io.Reader, ask func(prompt string) bool) error {
 	return nil
 }
 
+// confirmFrom is cleanup's y/N, read from in: only y/yes is a yes, and EOF is a no. It is not
+// askYesNo because that one answers EOF with "(no answer — pass --yes to skip this question)", and
+// `witness cleanup --yes` is an unknown flag: a destructive prune is never unattended.
+func confirmFrom(in io.Reader) func(prompt string) bool {
+	return func(prompt string) bool {
+		a := strings.ToLower(promptLine(in, prompt))
+		return a == "y" || a == "yes"
+	}
+}
+
+// promptLine prints prompt, reads one answer from in, and ends the prompt's line whenever the
+// terminal did not: piped input is never echoed, and Ctrl-D echoes nothing, which left the next
+// line glued to the prompt.
+func promptLine(in io.Reader, prompt string) string {
+	fmt.Print(prompt)
+	line, eof := readLine(in)
+	if f, ok := in.(*os.File); !ok || !isatty.IsTerminal(f.Fd()) {
+		fmt.Println(line) // a terminal echoes what was typed; piped input would leave the line open
+	} else if eof {
+		fmt.Println()
+	}
+	return strings.TrimSpace(line)
+}
+
 // readLine reads one line, a byte at a time, so nothing past the newline is buffered away from the
-// next reader: askYesNo reads the confirmation from the same stdin, and a bufio.Reader here would
-// swallow a piped "y" along with the day count.
-func readLine(in io.Reader) string {
+// next reader: the confirmation is read from the same stdin, and a bufio.Reader here would swallow
+// a piped "y" along with the day count. eof reports that the input ended before a newline.
+func readLine(in io.Reader) (line string, eof bool) {
 	var b strings.Builder
 	buf := make([]byte, 1)
 	for {
@@ -100,8 +119,9 @@ func readLine(in io.Reader) string {
 			b.WriteByte(buf[0])
 		}
 		if err != nil {
+			eof = true
 			break
 		}
 	}
-	return strings.TrimRight(b.String(), "\r")
+	return strings.TrimRight(b.String(), "\r"), eof
 }

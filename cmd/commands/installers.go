@@ -18,23 +18,29 @@ func init() {
 
 type claudeInstaller struct{}
 
-func (claudeInstaller) Install() error                    { _, err := cmdInstallClaude(); return err }
-func (claudeInstaller) Uninstall() error                  { _, err := cmdUninstallClaude(); return err }
-func (claudeInstaller) wire() (wireOutcome, error)        { return cmdInstallClaude() }
-func (claudeInstaller) unwire() (removed bool, err error) { return cmdUninstallClaude() }
+func (claudeInstaller) Install() error                { _, err := cmdInstallClaude(); return err }
+func (claudeInstaller) Uninstall() error              { _, _, err := cmdUninstallClaude(); return err }
+func (claudeInstaller) wire() (wireOutcome, error)    { return cmdInstallClaude() }
+func (claudeInstaller) unwire() (bool, string, error) { return cmdUninstallClaude() }
 
 type openCodeInstaller struct{}
 
-func (openCodeInstaller) Install() error                    { _, err := cmdInstallOpenCode(); return err }
-func (openCodeInstaller) Uninstall() error                  { _, err := cmdUninstallOpenCode(); return err }
-func (openCodeInstaller) wire() (wireOutcome, error)        { return cmdInstallOpenCode() }
-func (openCodeInstaller) unwire() (removed bool, err error) { return cmdUninstallOpenCode() }
+func (openCodeInstaller) Install() error             { _, err := cmdInstallOpenCode(); return err }
+func (openCodeInstaller) Uninstall() error           { _, err := cmdUninstallOpenCode(); return err }
+func (openCodeInstaller) wire() (wireOutcome, error) { return cmdInstallOpenCode() }
+func (openCodeInstaller) unwire() (bool, string, error) {
+	removed, err := cmdUninstallOpenCode()
+	return removed, "", err
+}
 
 // codexInstaller wires only hooks: Codex captures but supplies no RunnerProvider, and
 // its MCP registration lives in a config.toml witness does not own. See install_codex.go.
 type codexInstaller struct{}
 
-func (codexInstaller) Install() error                    { _, err := cmdInstallCodex(); return err }
-func (codexInstaller) Uninstall() error                  { _, err := cmdUninstallCodex(); return err }
-func (codexInstaller) wire() (wireOutcome, error)        { return cmdInstallCodex() }
-func (codexInstaller) unwire() (removed bool, err error) { return cmdUninstallCodex() }
+func (codexInstaller) Install() error             { _, err := cmdInstallCodex(); return err }
+func (codexInstaller) Uninstall() error           { _, err := cmdUninstallCodex(); return err }
+func (codexInstaller) wire() (wireOutcome, error) { return cmdInstallCodex() }
+func (codexInstaller) unwire() (bool, string, error) {
+	removed, err := cmdUninstallCodex()
+	return removed, "", err
+}
