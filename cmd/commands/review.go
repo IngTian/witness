@@ -27,19 +27,29 @@ func cmdReviewFull(full bool) error {
 	}
 	defer st.Close()
 	defer setupLogging(st)()
-	ran, err := forceReviewOpts(st, full)
+	tap := &causeTap{}
+	ran, profErr, err := forceReviewTapped(st, full, tap)
 	if err != nil {
 		return err
 	}
 	if !ran {
-		fmt.Println("a distillation worker is already running; skipping review (it reviews as part of that drain)")
+		fmt.Print(workerBusy(st, "review skipped; its drain reviews"))
 		return nil
 	}
+	done := "review complete"
 	if full {
-		fmt.Println("review complete (incl. emergent long-arc pass); profile regenerated")
-	} else {
-		fmt.Println("review complete; profile regenerated")
+		done += ", with the emergent long-arc pass"
 	}
+	if profErr != nil {
+		// The facets landed; only the narrative did not. Say so rather than "profile regenerated".
+		fmt.Println(warnGlyph() + " " + done + " — the profile was NOT regenerated (the previous one is kept)")
+		if c := tap.cause(); c != "" {
+			fmt.Println("  " + kvRow("cause", c, ""))
+		}
+		fmt.Println(hint("diagnose", "witness doctor"))
+		return nil
+	}
+	fmt.Println(okGlyph() + " " + done + " — profile regenerated")
 	return nil
 }
 
@@ -57,11 +67,19 @@ func forceReview(st *store.Store) (bool, error) { return forceReviewOpts(st, fal
 
 // forceReviewOpts is forceReview with an optional S3 emergent long-arc pass (full=true).
 func forceReviewOpts(st *store.Store, full bool) (bool, error) {
+	ran, _, err := forceReviewTapped(st, full, &causeTap{})
+	return ran, err
+}
+
+// forceReviewTapped is forceReviewOpts that notes the first model error in tap — a failed fold
+// names it under its headline — and returns the profile regeneration's own failure (profErr)
+// separately: the review's facets have landed by then, so it is not the review failing.
+func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, profErr, err error) {
 	// Hold the same single-consumer lock the worker uses so foreground review and a
 	// background drain cannot race facet/profile commits or open duplicate runner sets.
 	unlock, ok := st.WorkerLock()
 	if !ok {
-		return false, nil
+		return false, nil, nil
 	}
 	defer unlock()
 
@@ -69,26 +87,30 @@ func forceReviewOpts(st *store.Store, full bool) (bool, error) {
 	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	ctx := context.Background()
 	// Same runner lifecycle as the worker: open the set of runtimes the active lenses
 	// need, review through the per-lens resolver, then close each private runtime.
 	rs, err := newRunnerSet(ctx, st, cfg, lenses)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer rs.Close()
-	runFn := rs.RunFor(nil) // the default runner (unified summary + default fallback)
+	runFn := tap.wrap(rs.RunFor(nil)) // the default runner (unified summary + default fallback)
+	runFor := tap.wrapFor(rs.RunFor)
 	// Progress on stderr: a fold is one model call per window, and a real archive's default
 	// lens had 109 windows waiting. This is the foreground path only — the drain (worker.go)
 	// builds its own Reviewer and leaves Progress nil.
 	fold := &phaseProgress{start: startProgress}
-	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor, Progress: fold.update}
+	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runFor, Progress: fold.update}
 	err = r.Run(ctx, time.Now())
 	fold.finish()
 	if err != nil {
-		return false, err
+		if c := tap.cause(); c != "" {
+			return false, nil, fmt.Errorf("%w\n%s\n%s", err, errRow("cause", c), errHint("diagnose", "witness doctor"))
+		}
+		return false, nil, err
 	}
 	// S3 emergent long-arc pass (issue #16): after the ordinary fold, cluster L1 and
 	// verify candidate arcs the fold is blind to, merging accepted ones into L2. Additive
@@ -97,7 +119,7 @@ func forceReviewOpts(st *store.Store, full bool) (bool, error) {
 	// worker. Best-effort: a failure here must not undo the review that already landed.
 	if full {
 		arcs := &phaseProgress{start: startProgress}
-		er := &distill.EmergentReviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor, Progress: arcs.update}
+		er := &distill.EmergentReviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runFor, Progress: arcs.update}
 		err := er.RunFull(ctx, time.Now())
 		arcs.finish()
 		if err != nil {
@@ -106,9 +128,9 @@ func forceReviewOpts(st *store.Store, full bool) (bool, error) {
 	}
 	// The same spinner, and message, as the read-time regeneration (profilepull.go).
 	sp := startSpinner("distilling the profile from the latest facets…")
-	regenerateProfile(ctx, st, cfg, lenses, runFn, rs.RunFor)
+	profErr = regenerateProfile(ctx, st, cfg, lenses, runFn, runFor)
 	sp.Stop()
-	return true, nil
+	return true, profErr, nil
 }
 
 // phaseProgress draws each phase of a pass — a new Where, or a new set of stages — on a fresh

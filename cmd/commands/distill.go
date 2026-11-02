@@ -39,7 +39,8 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 	}
 	spawnDetached(args...)
 	if !quiet {
-		fmt.Println("distill worker kicked in the background; run `witness status` to watch progress")
+		fmt.Println(bgGlyph() + " worker started in the background")
+		fmt.Println(hint("watch it", "witness status"))
 	}
 	return nil
 }
@@ -83,16 +84,25 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 		return fmt.Errorf("the foreground drain covers the whole backlog and cannot be limited with " +
 			"--since/--until; add --detach to drain a time range in the background")
 	}
-	if !quiet {
-		fmt.Println("distilling the full backlog in the foreground; this may take a while — run `witness status` in another shell to watch")
-	}
 	// Snapshot the monotonic drift counter before the drain so we can report how many
 	// prose_drift events THIS backfill produced (#57) — surfaced at the moment the user
-	// runs it, not only on a later `witness doctor`.
+	// runs it, not only on a later `witness doctor`. The same open checks the lock BEFORE any
+	// banner: this used to announce "distilling the full backlog" and only then find that
+	// another worker held it.
 	driftBefore := 0
 	if st0, err := store.Open(); err == nil {
 		driftBefore = st0.DriftTotal()
+		busy := st0.WorkerActive()
+		if busy && !quiet {
+			fmt.Print(workerBusy(st0, "the backlog is already draining"))
+		}
 		st0.Close()
+		if busy {
+			return nil
+		}
+	}
+	if !quiet {
+		fmt.Println(dim("distilling the backlog in the foreground — Ctrl-C stops it"))
 	}
 
 	// The whole backlog can be hundreds of sessions and hours of model calls, so the drain shows
@@ -101,14 +111,21 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 	if quiet {
 		progressWhere = ""
 	}
+	// tap keeps the first runner/model error, so an unfinished drain can say why on the screen.
+	tap := &causeTap{}
 	// A drain pass = one full foreground worker run (mine + review + re-check to empty).
 	// It reports ran=false only when another worker already holds the lock.
-	ran, err := runWorkerInRange(false, sessionTimeRange{}, progressWhere)
+	ran, err := runWorkerTapped(false, sessionTimeRange{}, progressWhere, tap)
 	if err != nil {
 		return err
 	}
-	if !ran {
-		fmt.Println("another distillation worker is already running; it is draining the backlog — nothing to do")
+	if !ran { // lost the race for the lock after the check above
+		if st1, err := store.Open(); err == nil {
+			if !quiet {
+				fmt.Print(workerBusy(st1, "the backlog is already draining"))
+			}
+			st1.Close()
+		}
 		return nil
 	}
 
@@ -118,7 +135,7 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 		ctx, stop := procCtl.NotifyStop(context.Background())
 		defer stop()
 		if err := backfillDrainWithRetry(ctx, backfillRetryDeps{
-			rerun:            func() error { _, e := runWorkerInRange(false, sessionTimeRange{}, progressWhere); return e },
+			rerun:            func() error { _, e := runWorkerTapped(false, sessionTimeRange{}, progressWhere, tap); return e },
 			waitForNextRetry: waitForNextBackfillRetry,
 			sleep:            interruptibleSleep,
 			maxWait:          backfillMaxWait,
@@ -137,24 +154,43 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 	}
 	defer st.Close()
 	stats := st.Stats(activeLensNames(st))
-	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
-		hint := "a missing embedding model or provider failure is the usual cause"
-		if stats.BackedOff > 0 && !waitBackoffs {
-			hint = "re-run with `--all --wait-backoffs` to wait out transient mining backoffs"
-		}
-		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log; %s)", stats.Pending, stats.BackedOff, hint)
+	if stats.Pending+stats.BackedOff > 0 {
+		return backlogUnfinished(stats.Pending, stats.BackedOff, waitBackoffs, tap.cause())
 	}
 	if !quiet {
-		msg := "backfill complete"
+		fmt.Println(okGlyph() + " backlog distilled")
 		// A drifted lens still advances its watermark (so it's not "pending"), but it
-		// distilled to zero observations — report it here so a below-floor triage model
+		// distilled to zero observations — report it here so a below-floor mine model
 		// is visible now, not silently a thin archive.
 		if drifted := st.DriftTotal() - driftBefore; drifted > 0 {
-			msg += fmt.Sprintf(" (%d session-lens drifted: model returned no observations — raise triage_model, then re-mine; see `witness doctor`)", drifted)
+			fmt.Println(dim(fmt.Sprintf("  %s drifted: the model returned no observations — raise mine_model, then re-mine",
+				pluralize(drifted, "session-lens", "session-lenses"))))
+			fmt.Println(hint("see which", "witness doctor"))
 		}
-		fmt.Println(msg)
 	}
 	return nil
+}
+
+// backlogUnfinished is the failure a foreground drain reports when work remains: what is left, the
+// first error the drain hit, and only next steps that exist. It used to suggest `--all
+// --wait-backoffs`; `witness worker run` has no --all, so following the hint failed as well.
+func backlogUnfinished(pending, backedOff int, waited bool, cause string) error {
+	var parts []string
+	if backedOff > 0 {
+		parts = append(parts, pluralize(backedOff, "session", "sessions")+" backed off")
+	}
+	if pending > 0 {
+		parts = append(parts, pluralize(pending, "session", "sessions")+" still pending")
+	}
+	if cause == "" {
+		cause = "see witness.log — usually a missing embedding model or a provider outage"
+	}
+	retry := ""
+	if backedOff > 0 && !waited {
+		retry = errHint("retry them", "witness worker run --wait-backoffs")
+	}
+	return errLines("backlog not finished: "+strings.Join(parts, ", "),
+		errRow("cause", cause), retry, errHint("diagnose", "witness doctor"))
 }
 
 // backfillMaxWait bounds how far out a mining backoff the foreground `--all
@@ -247,7 +283,7 @@ func backfillLogWaiting(quiet bool, d time.Duration) {
 		return
 	}
 	// Round to the second so the message is readable ("waiting 4m59s" not nanoseconds).
-	fmt.Printf("backlog has backed-off sessions; waiting %s for the next retry (Ctrl-C to stop and report progress)\n", d.Round(time.Second))
+	fmt.Println(dim(fmt.Sprintf("waiting %s to retry the backed-off sessions — Ctrl-C stops and reports", d.Round(time.Second))))
 }
 
 func parseSessionTimeRange(sinceValue, untilValue string, now time.Time) (sessionTimeRange, error) {
@@ -362,47 +398,84 @@ func cmdDistillStatus(asJSON bool) error {
 		}
 		return emitJSON(out)
 	}
-	// Decorative rendering (same fields as --json above). Glyph reflects worker
-	// liveness: running/stopping = active, idle = neutral.
-	fmt.Println(header("witness status"))
+	// Decorative rendering (same fields as --json above): the house title, then kvRow rows like
+	// every other read command. The worker glyph is enabledGlyph's (ASCII in a pipe); stopping is
+	// the one state it has no mark for, so it is yellow on a terminal.
+	fmt.Println(title("status", "", ""))
 	fmt.Println()
-	workerGlyph := dim("○")
-	statusText := status
+	workerText := enabledGlyph(false) + " " + status
 	switch status {
 	case "running":
-		workerGlyph = green("●")
-		statusText = green(status)
+		workerText = enabledGlyph(true) + " " + green(status)
 	case "stopping":
-		workerGlyph = yellow("●")
-		statusText = yellow(status)
+		workerText = "* " + status
+		if useColor {
+			workerText = yellow("● " + status)
+		}
 	}
-	fmt.Printf("%s %s %s", workerGlyph, bold("worker:"), statusText)
+	var about []string
 	if pid != "" {
-		fmt.Printf("  %s", dim("pid="+pid))
+		about = append(about, "pid "+pid)
 	}
 	if mode != "" {
-		fmt.Printf("  %s", dim("mode="+mode))
+		about = append(about, mode)
 	}
 	if heartbeat != "" {
-		fmt.Printf("  %s", dim("♥ "+heartbeat))
+		about = append(about, "heartbeat "+shortTime(heartbeat))
 	}
-	fmt.Println()
+	fmt.Println("  " + kvRow("worker", workerText, strings.Join(about, " · ")))
 	if current != "" {
-		fmt.Printf("  %s %s\n", label("current"), current)
+		fmt.Println("  " + kvRow("current", current, ""))
 	}
-	fmt.Printf("  %s %d sessions · %d messages\n", label("raw"), stat.Sessions, stat.RawRecords)
-	fmt.Printf("  %s %d observations · %d facets\n", label("distilled"), stat.Observations, stat.Facets)
-	queueLine := fmt.Sprintf("%d pending · %d backing off", stat.Pending, stat.BackedOff)
+	fmt.Println("  " + kvRow("raw", humanCount(stat.Sessions)+" sessions · "+humanCount(stat.RawRecords)+" messages", ""))
+	fmt.Println("  " + kvRow("distilled", humanCount(stat.Observations)+" observations · "+humanCount(stat.Facets)+" facets", ""))
+	queueLine := humanCount(stat.Pending) + " pending · " + humanCount(stat.BackedOff) + " backing off"
 	if stat.BackedOff > 0 {
-		fmt.Printf("  %s %s\n", label("queue"), yellow(queueLine))
-	} else {
-		fmt.Printf("  %s %s\n", label("queue"), queueLine)
+		queueLine = yellow(queueLine)
 	}
-	fmt.Printf("  %s raw %s  ·  distilled %s\n", label("through"),
-		valueOrNever(lastRaw), valueOrNever(lastDistilled))
+	fmt.Println("  " + kvRow("queue", queueLine, ""))
+	fmt.Println("  " + kvRow("fresh", "raw "+timeOrNever(lastRaw)+" · distilled "+timeOrNever(lastDistilled), behind(lastRaw, lastDistilled)))
 	fmt.Println()
-	fmt.Println(footer("run `witness doctor` for a deep check"))
+	switch {
+	case stat.Sessions == 0:
+		fmt.Println(warnGlyph() + " nothing captured yet — connect an editor")
+		fmt.Println(hint("connect", "witness wire claude"))
+	case stat.BackedOff > 0:
+		fmt.Println(warnGlyph() + " " + pluralize(stat.BackedOff, "session", "sessions") + " backing off — mining is failing")
+		fmt.Println(hint("diagnose", "witness doctor"))
+	default:
+		fmt.Println(hint("deep check", "witness doctor"))
+	}
 	return nil
+}
+
+// timeOrNever is shortTime for a stamp that may be empty.
+func timeOrNever(ts string) string {
+	if strings.TrimSpace(ts) == "" {
+		return "never"
+	}
+	return shortTime(ts)
+}
+
+// behind says how far distillation trails capture, from the two status stamps: "1h05m behind",
+// "caught up", or "" when either is missing or unreadable.
+func behind(raw, distilled string) string {
+	r, err1 := time.Parse(time.RFC3339, raw)
+	d, err2 := time.Parse(time.RFC3339, distilled)
+	if err1 != nil || err2 != nil {
+		return ""
+	}
+	lag := r.Sub(d)
+	switch {
+	case lag < time.Minute:
+		return "caught up"
+	case lag < time.Hour:
+		return fmt.Sprintf("%dm behind", int(lag.Minutes()))
+	case lag < 48*time.Hour:
+		return fmt.Sprintf("%dh%02dm behind", int(lag.Hours()), int(lag.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd behind", int(lag.Hours()/24))
+	}
 }
 
 type distillStatusJSON struct {
@@ -459,7 +532,7 @@ func cmdDistillStop(autoOnly bool) error {
 	// running — no `ps` probe, no stale-meta self-heal (a crashed worker's flock was
 	// already released by the OS).
 	if !st.WorkerActive() {
-		fmt.Println("distill worker is not running")
+		fmt.Println(skipGlyph() + " no worker is running — nothing to stop")
 		return nil
 	}
 	// A worker is live. worker_pid is the kill TARGET, not the liveness authority:
@@ -473,10 +546,10 @@ func cmdDistillStop(autoOnly bool) error {
 	// key to update here.
 	pid := st.MetaString("worker_pid")
 	if err := terminateWorker(pid); err != nil {
-		fmt.Println("distill stop requested; the running worker will exit at its next checkpoint")
+		fmt.Println(okGlyph() + " stop requested — the worker exits at its next checkpoint")
 		return nil
 	}
-	fmt.Printf("distill stop requested; sent TERM to worker pid=%s\n", pid)
+	fmt.Println(okGlyph() + " stop requested — sent TERM to worker pid " + pid)
 	return nil
 }
 

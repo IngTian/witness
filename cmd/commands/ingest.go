@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -206,16 +207,16 @@ is idempotent; a changed body under the same id updates it.`),
 				defer f.Close()
 				r = f
 			}
-			ing, skip, err := cmdIngest(r, quiet)
+			res, err := ingestInput(r, quiet)
 			if err != nil {
 				return err
 			}
 			if !quiet {
-				fmt.Printf("ingested %d record(s)", ing)
-				if skip > 0 {
-					fmt.Printf(", skipped %d malformed", skip)
+				src := "stdin"
+				if strings.TrimSpace(file) != "" {
+					src = filepath.Base(file)
 				}
-				fmt.Println("; distilling in the background — witness status to watch")
+				printIngestResult(res, src)
 			}
 			return nil
 		},
@@ -225,16 +226,64 @@ is idempotent; a changed body under the same id updates it.`),
 	return c
 }
 
+// ingestResult is what an ingest did, for its one result line: records written and the sessions
+// they landed in, lines that held no record, records parsed (so "nothing new" and "nothing there"
+// can be told apart), and — when a worker was started — how many lenses are enabled to mine.
+type ingestResult struct {
+	ingested, sessions, skipped, parsed, lenses int
+}
+
+// printIngestResult is ingest's result line. It used to say "distilling in the background" every
+// time, including after ingesting 0 records — when no worker is started (cmdIngest spawns one only
+// when something was written).
+func printIngestResult(r ingestResult, src string) {
+	skippedNote := func() {
+		if r.skipped > 0 {
+			fmt.Println(dim("  skipped " + pluralize(r.skipped, "line", "lines") + " — not JSON, or no \"text\""))
+		}
+	}
+	switch {
+	case r.parsed == 0:
+		fmt.Printf("%s %s holds no records\n", warnGlyph(), src)
+		skippedNote()
+		fmt.Println(dim(`  expected NDJSON: one {"text": "…"} object per line`))
+	case r.ingested == 0:
+		fmt.Printf("%s nothing new — every record in %s is already archived\n", skipGlyph(), src)
+		skippedNote()
+	case r.lenses == 0:
+		fmt.Printf("%s ingested %s into %s — no lens is enabled to distill them\n", warnGlyph(),
+			countOf(r.ingested, "record", "records"), countOf(r.sessions, "session", "sessions"))
+		skippedNote()
+		fmt.Println(hint("add a lens", "witness lens register <name> <dir>"))
+	default:
+		glyph := okGlyph()
+		if r.skipped > 0 {
+			glyph = warnGlyph()
+		}
+		fmt.Printf("%s ingested %s into %s, distilling in the background\n", glyph,
+			countOf(r.ingested, "record", "records"), countOf(r.sessions, "session", "sessions"))
+		skippedNote()
+		fmt.Println(hint("watch it", "witness status"))
+	}
+}
+
 // cmdIngest is the testable driver: parse → group → per-session dedup+write → kick the
 // worker. Returns records written + malformed lines skipped.
 func cmdIngest(reader io.Reader, quiet bool) (ingested, skipped int, err error) {
+	r, err := ingestInput(reader, quiet)
+	return r.ingested, r.skipped, err
+}
+
+// ingestInput is cmdIngest with the whole result.
+func ingestInput(reader io.Reader, quiet bool) (res ingestResult, err error) {
 	recs, skipped := parseNDJSON(reader)
+	res.skipped, res.parsed = skipped, len(recs)
 	if len(recs) == 0 {
-		return 0, skipped, nil
+		return res, nil
 	}
 	st, err := store.Open()
 	if err != nil {
-		return 0, skipped, err
+		return res, err
 	}
 	defer st.Close()
 	// Serialize the whole read-modify-write, the same way the OpenCode importer does for
@@ -246,7 +295,7 @@ func cmdIngest(reader io.Reader, quiet bool) (ingested, skipped int, err error) 
 	// the batch, and `ingest` is a deliberate user action that can simply be re-run.
 	unlock, ok := st.ImportLock("file")
 	if !ok {
-		return 0, skipped, fmt.Errorf("another witness ingest or import is running; retry when it finishes")
+		return res, fmt.Errorf("another witness ingest or import is running; retry when it finishes")
 	}
 	defer unlock()
 	sessions := groupSessions(recs, time.Now())
@@ -265,14 +314,18 @@ func cmdIngest(reader io.Reader, quiet bool) (ingested, skipped int, err error) 
 		n, err := applyIngestSession(st, s)
 		report(i + 1)
 		if err != nil {
-			return ingested, skipped, err
+			return res, err
 		}
-		ingested += n
+		res.ingested += n
+		if n > 0 {
+			res.sessions++
+		}
 	}
-	if ingested > 0 {
+	if res.ingested > 0 {
 		spawnDetached("worker-run")
+		res.lenses = len(activeLensNames(st))
 	}
-	return ingested, skipped, nil
+	return res, nil
 }
 
 // applyIngestSession commits one grouped session with TRUE MERGE/APPEND semantics keyed

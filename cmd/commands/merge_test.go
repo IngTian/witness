@@ -86,7 +86,7 @@ func TestMergeCommandFilesAndBackup(t *testing.T) {
 	if !errors.Is(err, errMergeDeclined) {
 		t.Errorf("declining must fail the command, got %v", err)
 	}
-	if !asked || !strings.Contains(out, "math: will be registered, NOT enabled") {
+	if !asked || !strings.Contains(out, "+ math  will be registered, NOT enabled") {
 		t.Errorf("the plan must be shown and then asked about (asked=%v):\n%s", asked, out)
 	}
 	st := openBase(t)

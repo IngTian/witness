@@ -89,6 +89,12 @@ func runWorker(auto bool) (bool, error) {
 // total. "" is silent, and every background, detached or auto run must pass "" — nobody is
 // watching their stderr. (Startup gets no line: runners + embedder measured 0.3-0.5s.)
 func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere string) (bool, error) {
+	return runWorkerTapped(auto, timeRange, progressWhere, nil)
+}
+
+// runWorkerTapped is runWorkerInRange that notes the first runner, embedder or model error in tap,
+// so a foreground caller can put the cause of an unfinished drain on the screen. nil notes nothing.
+func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string, tap *causeTap) (bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return false, err
@@ -214,6 +220,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 			rs, rsErr = newRunnerSet(ctx, st, cfg, lenses)
 			if rsErr != nil {
 				slog.Error("open runners", "runner", cfg.Runner, "err", rsErr)
+				tap.note(rsErr)
 			}
 		}
 		return rs != nil
@@ -222,12 +229,12 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 	// pass and as the Worker's default Run; per-lens routing goes through rs.RunFor. It is
 	// only reached after ensureRunners() opened the set (the drain/review gates below), so
 	// rs is non-nil here; the guard is a belt-and-suspenders against a misroute.
-	runFn := func(ctx context.Context, model, prompt, input string) (string, error) {
+	runFn := tap.wrap(func(ctx context.Context, model, prompt, input string) (string, error) {
 		if rs == nil {
 			return "", &runnerDownError{name: cfg.Runner}
 		}
 		return rs.RunFor(nil)(ctx, model, prompt, input)
-	}
+	})
 
 	// Drain pending sessions. The embedder is heavy (~448MB) and loaded once per
 	// short-lived worker process ONLY when there is mining to do; it is shared
@@ -266,12 +273,12 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 	// slice 2): a lens declaring its own runtime mines/reviews against that runner. Only
 	// reached after ensureRunners() (getMiner/runReview gate on it), so rs is non-nil; the
 	// runFn fallback is a belt-and-suspenders that would back off rather than nil-deref.
-	runForLens := func(ln *lens.Lens) distill.MineFunc {
+	runForLens := tap.wrapFor(func(ln *lens.Lens) distill.MineFunc {
 		if rs == nil {
 			return runFn
 		}
 		return rs.RunFor(ln)
-	}
+	})
 	// getMiner performs the worker's one-time heavy startup: opening the runner set (which for
 	// OpenCode spawns a private `opencode serve` and validates models) and loading the ~448MB
 	// embedding model through GoMLX.
@@ -309,6 +316,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 			emb, err := embed.New()
 			if err != nil {
 				slog.Error("embedder", "err", err, "assets", embed.AssetsDir()) // can't mine this run; review may still run
+				tap.note(fmt.Errorf("embedding model: %w", err))
 				minerFailed = true
 				return nil
 			}
@@ -379,7 +387,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 				if progressWhere != "" {
 					sp = startSpinner("distilling the profile from the latest facets…")
 				}
-				regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens)
+				_ = regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
 				sp.Stop()
 			}
 		},
@@ -481,16 +489,20 @@ func runDistillLoop(d distillLoopDeps) {
 // Best-effort: any failure (missing prompts, a claude -p hiccup) is logged and
 // swallowed, leaving the prior summaries in place — the profile is derived and
 // non-critical, and must never break the worker.
-func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc) {
+//
+// It returns the failure so a FOREGROUND caller (`witness worker review`) does not print "profile
+// regenerated" over one that was not; the worker ignores it.
+func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc) error {
 	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts(st.Root)
 	if err != nil {
 		slog.Warn("profile: summarizer prompts unavailable; skipping", "err", err)
-		return
+		return err
 	}
 	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
 	if err := sm.Summarize(ctx); err != nil {
 		slog.Warn("profile: summary regeneration failed; keeping prior", "err", err)
-		return
+		return err
 	}
 	slog.Info("profile regenerated")
+	return nil
 }

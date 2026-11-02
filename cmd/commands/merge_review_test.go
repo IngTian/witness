@@ -28,7 +28,7 @@ func TestReviewRefusedLensIsReportedAndDoesNotRetakeBackups(t *testing.T) {
 	root := openBase(t).Root
 
 	out := captureStdout(t, func() { _ = cmdMerge(export, false, answer(false, nil)) })
-	if strings.Contains(out, "math: will be registered") || !strings.Contains(out, "would be refused") {
+	if strings.Contains(out, "math  will be registered") || !strings.Contains(out, "math (") || !strings.Contains(out, "would be refused") {
 		t.Errorf("the plan promised a registration the merge will refuse:\n%s", out)
 	}
 	_ = captureStdout(t, func() { _ = cmdMerge(export, true, nil) })
@@ -82,7 +82,7 @@ func TestReviewDataForAnUndefinedLensIsReported(t *testing.T) {
 	openBase(t)
 
 	out := captureStdout(t, func() { _ = cmdMerge(db, false, answer(false, nil)) })
-	if !strings.Contains(out, "math: its data arrives, but there is no definition for it here") {
+	if !strings.Contains(out, "math  its data arrives, but there is no definition for it here") {
 		t.Errorf("data for an undefined lens must be reported:\n%s", out)
 	}
 }

@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -66,8 +67,40 @@ func TestDistillBackfillFailsWhenWorkRemains(t *testing.T) {
 	if err == nil {
 		t.Fatal("--all with undistillable pending work must return an error, not report success")
 	}
-	if !strings.Contains(err.Error(), "incomplete") {
-		t.Fatalf("expected an 'incomplete' error, got: %v", err)
+	// The failure names its cause on the screen (here the missing embedding model), and suggests
+	// only flags that exist: it used to say "re-run with `--all --wait-backoffs`", and `witness
+	// worker run --all` is an unknown flag.
+	msg := err.Error()
+	if !strings.Contains(msg, "backlog not finished: 1 session still pending") ||
+		!strings.Contains(msg, "cause") || !strings.Contains(msg, "embedding model") ||
+		strings.Contains(msg, "--all") {
+		t.Fatalf("want the unfinished count, the embedder as the cause, and no --all; got:\n%v", err)
+	}
+	for _, flag := range regexp.MustCompile(`witness worker run( --[a-z-]+)*`).FindAllString(msg, -1) {
+		for _, f := range strings.Fields(flag)[3:] {
+			if workerRunCmd(t).Flags().Lookup(strings.TrimPrefix(f, "--")) == nil {
+				t.Errorf("the hint suggests %s, which `witness worker run` does not have", f)
+			}
+		}
+	}
+}
+
+// The backed-off variant suggests --wait-backoffs — a flag that exists — and drops it once the
+// caller already waited.
+func TestBacklogUnfinishedHintsOnlyRealFlags(t *testing.T) {
+	err := backlogUnfinished(0, 4, false, "claude runner disabled by WITNESS_DISABLE_EXTERNAL_RUNNERS")
+	if want := "backlog not finished: 4 sessions backed off"; !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("got %q, want prefix %q", err, want)
+	}
+	if !strings.Contains(err.Error(), "claude runner disabled by WITNESS_DISABLE_EXTERNAL_RUNNERS") ||
+		!strings.Contains(err.Error(), "witness worker run --wait-backoffs") {
+		t.Errorf("the cause and the retry must both be shown:\n%v", err)
+	}
+	if workerRunCmd(t).Flags().Lookup("wait-backoffs") == nil {
+		t.Fatal("the hint names `worker run --wait-backoffs`; that flag must exist")
+	}
+	if waited := backlogUnfinished(0, 4, true, "x"); strings.Contains(waited.Error(), "--wait-backoffs") {
+		t.Errorf("after waiting out the backoffs, retrying with the same flag is not a next step:\n%v", waited)
 	}
 }
 

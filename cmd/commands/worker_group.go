@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -16,6 +18,23 @@ func newWorkerCmd() *cobra.Command {
 		Use:    "worker",
 		Short:  "Operator controls for the background distillation worker.",
 		Hidden: true,
+		// A group with no RunE takes any argument: cobra rejects an unknown subcommand only on
+		// the root, so `witness worker stpo` printed this help page and exited 0 — a typo read as
+		// success. This keeps bare `witness worker` as it was (help) and makes the typo
+		// `unknown command "stpo" for "witness worker"`, exit 1. In RunE rather than as
+		// Args: cobra.NoArgs, because the docs name the group as prose (`witness worker …`) and
+		// doccontract_test checks a documented line against the command's Args validator.
+		RunE: func(c *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return c.Help()
+			}
+			msg := fmt.Sprintf("unknown command %q for %q", args[0], c.CommandPath())
+			c.SuggestionsMinimumDistance = 2 // cobra's own default, applied only on the root's path
+			if s := c.SuggestionsFor(args[0]); len(s) > 0 {
+				msg += " — did you mean " + strings.Join(s, " or ") + "?"
+			}
+			return errors.New(msg)
+		},
 	}
 
 	var quiet, detach, waitBackoffs bool

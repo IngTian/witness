@@ -52,12 +52,12 @@ func TestClaudeMCPRemoveIsBoundedAndStubbable(t *testing.T) {
 	// The seam exists and is overridable.
 	prev := removeClaudeMCP
 	called := false
-	removeClaudeMCP = func() { called = true }
+	removeClaudeMCP = func() error { called = true; return nil }
 	t.Cleanup(func() { removeClaudeMCP = prev })
 
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	if err := cmdUninstallClaude(); err != nil {
+	if _, err := cmdUninstallClaude(); err != nil {
 		t.Fatalf("uninstall on an empty dir: %v", err)
 	}
 	if !called {

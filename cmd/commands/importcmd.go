@@ -3,8 +3,10 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -23,7 +25,7 @@ func newImportCmd() *cobra.Command {
 	var noKick bool
 	var hook bool
 	c := &cobra.Command{
-		Use:    "import --agent <claude|opencode|codex>",
+		Use:    "import --agent <" + importAgents("|") + ">",
 		Short:  "Import agent session data and kick background distillation.",
 		Long:   "Import agent data into L0 raw records and kick the background distillation worker when work is pending. OpenCode imports its local SQLite database; Codex reads local JSONL rollouts or paginated history; Claude relies on already-captured hook data.",
 		Args:   cobra.NoArgs,
@@ -32,7 +34,10 @@ func newImportCmd() *cobra.Command {
 			if hook {
 				return cmdImportHook(agent, os.Stdin)
 			}
-			args := []string{"--agent", agent}
+			var args []string
+			if agent != "" { // a bare `witness import` asks "which agent?" instead of "--agent requires a value"
+				args = append(args, "--agent", agent)
+			}
 			for _, session := range sessions {
 				args = append(args, "--session", session)
 			}
@@ -48,7 +53,7 @@ func newImportCmd() *cobra.Command {
 			return cmdImport(args)
 		},
 	}
-	c.Flags().StringVar(&agent, "agent", "", "agent to import from: claude, opencode or codex")
+	c.Flags().StringVar(&agent, "agent", "", "agent to import from: "+importAgents(", "))
 	c.Flags().BoolVar(&hook, "hook", false, "best-effort import of session_id from a lifecycle hook on stdin")
 	_ = c.Flags().MarkHidden("hook")
 	c.Flags().StringArrayVar(&sessions, "session", nil, "native session id to import (repeatable)")
@@ -87,11 +92,11 @@ func cmdImport(args []string) error {
 			sessions = append(sessions, strings.TrimSpace(args[i+1]))
 			i++
 		default:
-			return fmt.Errorf("usage: witness import --agent <claude|opencode|codex> [--session <id>]... [--quiet] [--auto] [--no-kick]")
+			return fmt.Errorf("usage: witness import --agent <%s> [--session <id>]... [--quiet] [--auto] [--no-kick]", importAgents("|"))
 		}
 	}
 	if agent == "" {
-		return fmt.Errorf("usage: witness import --agent <claude|opencode|codex> [--session <id>]... [--quiet] [--auto] [--no-kick]")
+		return fmt.Errorf("which agent? witness import --agent <%s>", importAgents("|"))
 	}
 	ctx, finish := context.Background(), func() {}
 	if !quiet { // --quiet is how the OpenCode plugin imports in the background: it stays silent
@@ -103,19 +108,51 @@ func cmdImport(args []string) error {
 		return err
 	}
 	if !quiet {
-		fmt.Printf("import %s: imported %d raw record(s) from %d session(s)\n", stats.Agent, stats.Records, stats.Sessions)
-		if stats.Failed > 0 {
-			fmt.Printf("skipped %d source input(s) due to errors; successful imports kept — see witness.log for details\n", stats.Failed)
-		}
-		if kicked {
-			fmt.Println("distill worker kicked in the background; run `witness status` to watch progress")
-		} else if noKick {
-			fmt.Println("background distillation not requested (--no-kick)")
-		} else {
-			fmt.Println("no distill work pending")
-		}
+		printImportResult(stats, kicked, noKick)
 	}
 	return nil
+}
+
+// importAgents lists the agents import takes — the editors, in the one order wire uses
+// (platform.InstallTargets). The "file" source is pushed in by `witness ingest`; its import was a
+// silent no-op that reported "imported 0 raw record(s)" although the usage never offered it.
+func importAgents(sep string) string { return strings.Join(platform.InstallTargets(), sep) }
+
+func printImportResult(stats platform.ImportStats, kicked, noKick bool) {
+	name := bold(stats.Agent)
+	note := ""
+	switch {
+	case kicked:
+		note = " " + dim("(distilling in the background)")
+	case noKick:
+		note = " " + dim("(not distilling: --no-kick)")
+	}
+	glyph := okGlyph()
+	if stats.Failed > 0 {
+		glyph = warnGlyph()
+	}
+	hookFed := false
+	if p, ok := platform.ByName(stats.Agent); ok {
+		_, hookFed = p.(platform.Capturer)
+	}
+	switch {
+	case hookFed && stats.Records == 0 && stats.Failed == 0:
+		// A hook-fed source has nothing to pull: `import --agent claude` reported "imported 0 raw
+		// record(s)" as if it had looked and found nothing.
+		fmt.Printf("%s %s: nothing to import — it is captured live by its hooks\n", skipGlyph(), name)
+		fmt.Println(hint("wire it", "witness wire "+stats.Agent))
+	case stats.Records == 0:
+		fmt.Printf("%s %s: up to date — nothing new since the last import%s\n", glyph, name, note)
+	default:
+		fmt.Printf("%s %s: imported %s from %s%s\n", glyph, name, countOf(stats.Records, "record", "records"),
+			countOf(stats.Sessions, "session", "sessions"), note)
+	}
+	if stats.Failed > 0 {
+		fmt.Println(dim("  skipped " + pluralize(stats.Failed, "source input", "source inputs") + " with errors — the rest were kept; details in witness.log"))
+	}
+	if kicked {
+		fmt.Println(hint("watch it", "witness status"))
+	}
 }
 
 // importProgress puts a progress line (stderr) under ctx for the importer to drive, and returns the
@@ -144,15 +181,15 @@ func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorke
 	defer setupLogging(st)()
 
 	p, ok := platform.ByName(agent)
-	if !ok {
-		return platform.ImportStats{}, false, fmt.Errorf("unknown import agent %q (want claude, opencode or codex)", agent)
+	if _, editor := platform.InstallerFor(agent); !ok || !editor {
+		return platform.ImportStats{}, false, fmt.Errorf("unknown agent %q — want one of: %s", agent, importAgents(", "))
 	}
 	// The Importer owns its own reconcile mechanics (OpenCode takes the sync lock
 	// and reads its SQLite store; Claude is a hook-fed no-op) — cmd no longer
 	// branches on the runtime.
 	stats, err := p.Import(ctx, st, sessionIDs)
 	if err != nil {
-		return stats, false, err
+		return stats, false, missingSource(agent, err)
 	}
 
 	cfg := st.LoadConfig()
@@ -166,6 +203,18 @@ func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorke
 		return stats, true, nil
 	}
 	return stats, false, nil
+}
+
+// missingSource names an importer's absent source plainly. The importers wrap the stat error, so
+// it read "open opencode db /x/opencode.db: stat /x/opencode.db: no such file or directory" — the
+// path twice, and no word on what to do. Any other error passes through unchanged. Worded from the
+// agent's name and the error's own path, so no venue is special-cased here.
+func missingSource(agent string, err error) error {
+	var pe *fs.PathError
+	if !errors.Is(err, fs.ErrNotExist) || !errors.As(err, &pe) {
+		return err
+	}
+	return fmt.Errorf("nothing to import: %s does not exist — is %s installed here?", tildePath(pe.Path), agent)
 }
 
 // cmdImportHook is a best-effort reconcile trigger, not a transcript reader.
