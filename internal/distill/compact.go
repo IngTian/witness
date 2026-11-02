@@ -139,6 +139,10 @@ type Compactor struct {
 	BatchChars   int    // 0 → compactBatchChars
 	MinSurvivors int    // 0 → compactMinSurvivors
 
+	// Progress, when set, is called as Plan's model calls complete. nil is silent.
+	Progress ProgressFunc
+	prog     compactProgress
+
 	// decaySeq is the observation high-water mark, read once by Plan, so every confidence the
 	// model is shown is the CURRENT (decayed) one. Both stages used to render the stored value:
 	// a facet stored at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh
@@ -146,6 +150,30 @@ type Compactor struct {
 	// and Apply gave that survivor the fresher member's clock — so a stale confidence came out
 	// fresh. The review already sends decayed values (slimFacets); compaction now agrees with it.
 	decaySeq int64
+}
+
+// compactProgress is Plan's running count. Grouping batches are all known before the first call
+// (batching is local); merges are a running total, known for a dimension only once it has been
+// grouped, so until every batch is grouped the merge stage is Open.
+type compactProgress struct {
+	lens, dim       string
+	grouped, groups int
+	merged, merges  int
+}
+
+func (c *Compactor) tick() {
+	if c.Progress == nil {
+		return
+	}
+	p := c.prog
+	where := p.lens
+	if p.dim != "" {
+		where += "/" + p.dim
+	}
+	c.Progress(Progress{Where: where, Stages: []Stage{
+		{Name: "grouping", Done: p.grouped, Total: p.groups},
+		{Name: "writing merges", Done: p.merged, Total: p.merges, Open: p.grouped < p.groups},
+	}})
 }
 
 func (c *Compactor) batchChars() int {
@@ -177,6 +205,16 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 	if c.decaySeq, err = c.Store.ObservationHighWater(); err != nil {
 		return nil, fmt.Errorf("read observation high-water: %w", err)
 	}
+	// Every grouping batch is known before the first call (batching is local), so the total is
+	// exact from the start; only the merges are discovered as we go.
+	c.prog = compactProgress{}
+	for _, ln := range c.Lenses {
+		active := activeForLens(all, ln.Name)
+		for _, dim := range dimensionsOf(active) {
+			c.prog.groups += len(compactBatches(facetsInDimension(active, dim), c.batchChars()))
+		}
+	}
+	c.tick()
 	var plans []CompactPlan
 	for _, ln := range c.Lenses {
 		plan, err := c.planLens(ctx, ln, all)
@@ -213,9 +251,13 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 
 	for _, dim := range dimensionsOf(active) {
 		inDim := facetsInDimension(active, dim)
+		c.prog.lens, c.prog.dim = ln.Name, dim
+		c.tick()
 		var grouped []compactAction // stage-1 output for THIS dimension, awaiting values
 		for _, batch := range compactBatches(inDim, c.batchChars()) {
 			actions, err := c.groupBatch(ctx, ln, dim, batch)
+			c.prog.grouped++ // a failed call is still a call done
+			c.tick()
 			if err != nil {
 				// A failed batch must NOT discard the batches that already succeeded. This
 				// aborted the whole lens once and threw away 12 valid actions from 5 good
@@ -257,6 +299,12 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 		// blind to what the dimension's other survivors cover, so it bleeds into their
 		// territory and re-creates the overlap compaction exists to remove. The sibling list
 		// from stage 1 is exactly the boundary information needed, and it is already in hand.
+		for _, a := range grouped {
+			if a.Action == "merge" {
+				c.prog.merges++
+			}
+		}
+		c.tick()
 		written, failures := c.writeValues(ctx, ln, dim, grouped, byKey, plan.Skipped)
 		plan.Failed += failures
 
@@ -375,6 +423,8 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 			}
 		}
 		claim, value, err := c.writeOne(ctx, ln, dim, a, members, grouped)
+		c.prog.merged++
+		c.tick()
 		if err != nil {
 			slog.Error("compact: writing a merged value failed (group dropped, others kept)",
 				"lens", ln.Name, "dimension", dim, "survivor", a.Key, "absorbing", len(a.Absorb), "err", err)
