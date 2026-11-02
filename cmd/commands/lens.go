@@ -172,7 +172,7 @@ func cmdLens(args []string) error {
 		name, dir := args[1], args[2]
 		// The store's own error for a missing directory was a bare "stat …: no such file or
 		// directory", which says neither what was wanted nor that the path is the problem.
-		const want = "(want a directory holding lens.json + extract.md + review.md)"
+		const want = "(want lens.json + extract.md + review.md)"
 		if fi, err := os.Stat(dir); os.IsNotExist(err) {
 			return fmt.Errorf("lens directory %s does not exist %s", dir, want)
 		} else if err != nil {
@@ -566,9 +566,10 @@ func promptExcerpt(s string) string {
 			break
 		}
 	}
-	// Cut on runes: a byte cut split a multi-byte character into invalid UTF-8.
-	if r := []rune(first); len(r) > 52 {
-		first = string(r[:52]) + "…"
+	// Cut on runes: a byte cut split a multi-byte character into invalid UTF-8. 48 keeps the row
+	// (16-column label + count + quotes) inside an 80-column terminal.
+	if r := []rune(first); len(r) > 48 {
+		first = string(r[:48]) + glyph("…", "...")
 	}
 	return fmt.Sprintf("%d lines · %q", n, first)
 }
@@ -607,6 +608,18 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 	}
 	fmt.Println(title("lens list", "", summary))
 	fmt.Println()
+	// kvRow's label column is 14 wide, so a longer name (corpus-example is 14) pushed its own
+	// value right of every other row's: pad every name to the longest first.
+	nameW := 0
+	for _, name := range append(slices.Clone(reg), orphans...) {
+		nameW = max(nameW, len([]rune(name)))
+	}
+	row := func(name, value, note string) string {
+		return kvRow(name+strings.Repeat(" ", nameW-len([]rune(name))), value, note)
+	}
+	// The mark column is one character in both modes (warnGlyph's plain "[!]" is three), so a
+	// flagged row lines up with the enabled/disabled rows in a pipe too.
+	flag := glyph(yellow("!"), "!")
 	for _, name := range reg {
 		isEnabled := slices.Contains(enabled, name)
 		status := "disabled"
@@ -618,19 +631,19 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 		l, err := lens.LoadRegistered(name, st.LensesDir())
 		switch {
 		case err != nil && isEnabled:
-			fmt.Printf("  %s %s\n", warnGlyph(), kvRow(name, yellow("enabled, but its definition does not load"), ""))
+			fmt.Printf("  %s %s\n", flag, row(name, yellow("enabled, but its definition does not load"), ""))
 		case err != nil:
-			fmt.Printf("  %s %s\n", enabledGlyph(false), kvRow(name, status, "definition does not load"))
+			fmt.Printf("  %s %s\n", enabledGlyph(false), row(name, status, "definition does not load"))
 		default:
 			note := countNoun(len(l.Dimensions), "dim", "dims")
 			if l.Name != name {
 				note += fmt.Sprintf(" · mines as %q", l.Name)
 			}
-			fmt.Printf("  %s %s\n", enabledGlyph(isEnabled), kvRow(name, status, note))
+			fmt.Printf("  %s %s\n", enabledGlyph(isEnabled), row(name, status, note))
 		}
 	}
 	for _, name := range orphans {
-		fmt.Printf("  %s %s\n", warnGlyph(), kvRow(name, yellow("enabled, but not registered"), ""))
+		fmt.Printf("  %s %s\n", flag, row(name, yellow("enabled, but not registered"), ""))
 	}
 	fmt.Println()
 	for _, name := range orphans {

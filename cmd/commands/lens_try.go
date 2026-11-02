@@ -154,9 +154,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// on-disk path. A registered name wins over a same-named dir in cwd: names have no
 	// path separators/extension, so the ambiguity is negligible, and "I typed my lens's
 	// name" is the overwhelmingly likely intent.
-	path := file
+	path, registered := file, false
 	if resolved, ok := registeredLensPath(st, file); ok {
-		path = resolved
+		path, registered = resolved, true
 	}
 
 	// Load the candidate. Strict first; on a reserved-name collision fall back to the
@@ -248,10 +248,16 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// Progress on stderr, so stdout (and --json) is untouched: each preview is a model call per
 	// chunk and can run for minutes, and nothing prints until all of them are back.
 	update, finish := tryProgress()
+	// A registered lens is shown by the name the user typed — corpus-example, not the "regime"
+	// its lens.json mines as. (--json keeps ln.Name, its documented field.)
+	display := ln.Name
+	if registered && !candidate {
+		display = file
+	}
 	var mu sync.Mutex
 	previewed := 0
 	show := func(more ...distill.Stage) {
-		update(distill.Progress{Where: ln.Name, Stages: append(
+		update(distill.Progress{Where: display, Stages: append(
 			[]distill.Stage{{Name: "previewing sessions", Done: previewed, Total: len(sessions)}}, more...)})
 	}
 	show()
@@ -288,7 +294,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 		// The document is unchanged and complete on stdout; only the exit status says it was empty.
 		return allFailed(results)
 	}
-	return lensTryRenderHuman(st, cfg, ln, candidate, sessions, results, review)
+	return lensTryRenderHuman(st, cfg, ln, display, candidate, sessions, results, review)
 }
 
 // reviewPreview is the outcome of the optional --review pass.
@@ -465,8 +471,7 @@ func modelLabel(model string) string {
 // lensTryRenderHuman prints the pre-computed results in SAMPLE ORDER (results[i] pairs
 // with sessions[i]). Rendering after the fan-out barrier — not during — is what keeps
 // output deterministic regardless of which session's mine finished first.
-func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
-	name := ln.Name
+func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, name string, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
 	if candidate {
 		name += " (candidate — the lens's own name is reserved)"
 	}

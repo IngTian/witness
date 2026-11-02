@@ -97,6 +97,35 @@ func TestExpandUnfoldsTheMergeTrajectory(t *testing.T) {
 	}
 }
 
+// Expanding an ARCHIVED facet said "nothing was merged into this facet — its own versions are the
+// whole story", when its story went on in the facet it was merged into. It must point there (with
+// a command that works) and drop the dead-end sentence; a retired one says it was retired.
+func TestExpandAnArchivedFacetPointsAtWhereItWent(t *testing.T) {
+	archivedFixture(t)
+	out := captureStdout(t, func() {
+		if err := cmdFacetTrajectory(nil, "thinking/absorbed_one", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "witness facets default --expand thinking/survivor") {
+		t.Errorf("an absorbed facet must point at its survivor:\n%s", out)
+	}
+	if strings.Contains(out, "whole story") {
+		t.Errorf("an archived facet's own versions are not the whole story:\n%s", out)
+	}
+	if err := cmdFacetTrajectory([]string{"default"}, "thinking/survivor", false); err != nil {
+		t.Errorf("the suggested --expand must work: %v", err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdFacetTrajectory(nil, "habits/retired_one", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "retired by compaction") || strings.Contains(out, "whole story") {
+		t.Errorf("a retired facet says so, and only that:\n%s", out)
+	}
+}
+
 func TestExpandRejectsAMalformedRef(t *testing.T) {
 	archivedFixture(t)
 	if err := cmdFacetTrajectory(nil, "notaref", false); err == nil {

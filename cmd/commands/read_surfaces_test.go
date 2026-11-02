@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -179,6 +180,95 @@ func TestLensDisableRejectsATypoButCleansUpAnOrphan(t *testing.T) {
 	}
 }
 
+// The other no-op and typo paths of the lens mutations: deregistering a name that was never
+// registered printed "deregistered" with exit 0; re-enabling or re-disabling says nothing changed.
+func TestLensMutationsSayWhenNothingChanged(t *testing.T) {
+	st := readFixture(t)
+	if _, err := runCLI(t, "lens", "deregister", "nope"); err == nil {
+		t.Error("deregistering a name that is not registered must fail")
+	}
+	registerRenamedLens(t, st, "math", "math")
+	for _, step := range []struct{ args, want string }{
+		{"disable math", "[-] lens math is already disabled  (nothing changed)"},
+		{"enable math", "[ok] enabled lens math"},
+		{"enable math", "[-] lens math is already enabled  (nothing changed)"},
+	} {
+		out, err := runCLI(t, append([]string{"lens"}, strings.Fields(step.args)...)...)
+		if err != nil || !strings.Contains(out, step.want) {
+			t.Errorf("lens %s: want %q, got err=%v\n%s", step.args, step.want, err, out)
+		}
+	}
+}
+
+// kvRow's label column is 14 wide, so a 14-character name (the shipped corpus-example) put its
+// value two columns right of every other row's — and in a pipe the orphan's "[!]" did the same.
+func TestLensListColumnsLineUp(t *testing.T) {
+	st := readFixture(t)
+	registerRenamedLens(t, st, "corpus-example", "regime")
+	registerRenamedLens(t, st, "ghost", "ghost")
+	if err := st.EnableLens("ghost"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeregisterLens("ghost"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCLI(t, "lens", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	col := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		for _, name := range []string{"corpus-example", "default", "ghost"} {
+			if i := strings.Index(line, " "+name+" "); i >= 0 {
+				rest := line[i+len(name)+1:]
+				col[name] = len(line) - len(strings.TrimLeft(rest, " ")) // where the value starts
+			}
+		}
+	}
+	if len(col) != 3 || col["corpus-example"] != col["default"] || col["ghost"] != col["default"] {
+		t.Errorf("every row's value must start in the same column, got %v:\n%s", col, out)
+	}
+}
+
+// The empty profile said "it's generated after the next background review" in every case — on an
+// archive that captures nothing, or for a lens that is not registered, that review never comes.
+func TestProfileEmptyNamesTheMissingLayer(t *testing.T) {
+	st := readFixture(t)
+	for _, c := range []struct{ lens, want string }{
+		{"nope", "witness lens list"},
+		{store.ProfileUnified, "witness wire <"},
+		{"default", "witness wire <"},
+	} {
+		out := captureStdout(t, func() { renderProfileEmpty(st, c.lens) })
+		if !strings.Contains(out, c.want) || strings.Contains(out, "next background review") {
+			t.Errorf("profile %s, empty: want %q\n%s", c.lens, c.want, out)
+		}
+	}
+	if err := st.AppendRaw(store.RawRecord{Session: "s1", TS: "2026-11-01T00:00:00Z", Role: "user", Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DisableLens("default"); err != nil {
+		t.Fatal(err)
+	}
+	if out := captureStdout(t, func() { renderProfileEmpty(st, "default") }); !strings.Contains(out, "witness lens enable default") {
+		t.Errorf("a disabled lens's profile points at enabling it:\n%s", out)
+	}
+	if out := captureStdout(t, func() { renderProfileEmpty(st, store.ProfileUnified) }); !strings.Contains(out, "witness facets") {
+		t.Errorf("capturing but no facets yet points at facets, which says why:\n%s", out)
+	}
+}
+
+// doctor read "✓ witness doctor" on an archive that had captured nothing, the one state where a
+// new user most needs it to say why every read command comes back empty.
+func TestDoctorSaysWhenNothingIsCaptured(t *testing.T) {
+	readFixture(t)
+	t.Setenv("WITNESS_ASSETS", t.TempDir()) // no model: the embedder check fails fast
+	out, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	if !strings.Contains(out, "nothing captured yet") || !strings.Contains(out, "witness wire <") {
+		t.Errorf("an empty archive must say nothing is captured and how to wire an editor:\n%s", out)
+	}
+}
+
 // `observations search q --lens nope` suggested `witness lens backfill nope`, which then failed
 // with "not registered".
 func TestObservationSearchOnAnUnregisteredLensSuggestsACommandThatWorks(t *testing.T) {
@@ -227,6 +317,27 @@ func TestLensTryFailsOnlyWhenEverySessionFailed(t *testing.T) {
 	}
 	if err := allFailed(nil); err != nil {
 		t.Errorf("no sessions is not a mine failure: %v", err)
+	}
+}
+
+// `lens try corpus-example` titled the preview "regime" — its lens.json name — while every other
+// command, and the user, calls it corpus-example. A fake runner: no CLI is spawned.
+func TestLensTryTitlesARegisteredLensByItsRegisteredName(t *testing.T) {
+	s := seedTryStore(t, store.RunnerOpenCode)
+	opened := false
+	previous := runnerForStore
+	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+		return limitedPreviewRunner{opened: &opened}, nil
+	}
+	t.Cleanup(func() { runnerForStore = previous })
+	registerRenamedLens(t, s, "corpus-example", "regime")
+	var err error
+	out := captureStdout(t, func() { err = cmdLensTry("corpus-example", lensTryOpts{nSessions: 1}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "witness lens try · corpus-example") || strings.Contains(out, "· regime") {
+		t.Errorf("the title must use the registered name:\n%s", out)
 	}
 }
 
@@ -280,6 +391,13 @@ func TestLastLoggedErrorFindsTheNewestCause(t *testing.T) {
 	}
 	if got := lastLoggedError(filepath.Join(t.TempDir(), "none")); got != "" {
 		t.Errorf("no log, no cause: %q", got)
+	}
+	// A runner error carries the CLI's multi-line stderr: printed as-is it broke doctor's indent
+	// in a pipe (column 0) and could fill the screen. One line, bounded; witness.log keeps the rest.
+	_ = os.WriteFile(p, []byte(`{"level":"ERROR","err":"claude -p: exit 1:\nline two\n`+strings.Repeat("x ", 400)+`"}`+"\n"), 0o600)
+	got := lastLoggedError(p)
+	if strings.Contains(got, "\n") || !strings.HasPrefix(got, "claude -p: exit 1: line two x") || len([]rune(got)) > 310 {
+		t.Errorf("want one bounded line, got %d runes: %q", len([]rune(got)), got)
 	}
 }
 

@@ -156,11 +156,19 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	if len(tributaries) > 0 {
 		summary += fmt.Sprintf(" · %d merged in", len(tributaries))
 	}
-	fmt.Println(title("facets", lensName+" · "+store.FacetRef(dimension, key), summary))
+	scope := lensName + " · " + store.FacetRef(dimension, key)
+	if !fits(cols("witness facets · " + scope + "  " + summary)) {
+		// A long key already fills the title line: the summary goes under it, not off the edge.
+		fmt.Println(title("facets", scope, ""))
+		fmt.Println("  " + dim(summary))
+	} else {
+		fmt.Println(title("facets", scope, summary))
+	}
 	fmt.Println()
-	// --expand is how a facet is read IN FULL, so its value is never cut to the terminal.
+	// --expand is how a facet is read IN FULL, so its value is never cut to the terminal — only
+	// wrapped at its indent, where a soft wrap would have run it back to column 0.
 	if cur := target.Current(); cur != nil {
-		fmt.Printf("  %s\n", cur.Value)
+		fmt.Printf("  %s\n", wrapHanging(cur.Value, 2))
 	}
 	if !target.Active() {
 		// An archived facet is not the end of its own story: say where it went (or that it was
@@ -177,20 +185,29 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	}
 
 	if len(tributaries) == 0 {
-		fmt.Println()
-		fmt.Println(dim("  nothing was merged into this facet — its own versions are the whole story"))
+		// Only for a live facet: an archived one's story went on in the facet it was merged into,
+		// which the hint above already points at.
+		if target.Active() {
+			fmt.Println()
+			fmt.Println(dim("  nothing was merged into this facet — its own versions are the whole story"))
+		}
 		return nil
 	}
 	for _, f := range tributaries {
 		fmt.Println()
-		fmt.Printf("  %s %s  %s\n", dim(glyph("←", "<-")), store.FacetRef(f.Dimension, f.Key),
-			dim(fmt.Sprintf("archived %s · %s", shortTime(f.ArchivedAt), countNoun(len(f.Versions), "version", "versions"))))
+		ref := store.FacetRef(f.Dimension, f.Key)
+		meta := fmt.Sprintf("archived %s · %s", shortTime(f.ArchivedAt), countNoun(len(f.Versions), "version", "versions"))
+		if fits(4 + cols(ref) + 2 + cols(meta)) {
+			fmt.Printf("  %s %s  %s\n", dim(glyph("←", "<-")), ref, dim(meta))
+		} else { // a long key keeps its whole name (it is what --expand takes); the meta drops a line
+			fmt.Printf("  %s %s\n    %s\n", dim(glyph("←", "<-")), ref, dim(meta))
+		}
 		if f.ArchiveReason != "" {
 			fmt.Printf("    %s %s\n", dim("why:"), f.ArchiveReason)
 		}
 		// The tributary's ORIGINAL value, whole: seeing what was folded in is the point.
 		if cur := f.Current(); cur != nil {
-			fmt.Printf("    %s\n", cur.Value)
+			fmt.Printf("    %s\n", wrapHanging(cur.Value, 4))
 		}
 	}
 	return nil

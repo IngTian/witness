@@ -181,7 +181,12 @@ func cmdDoctor(asJSON bool) error {
 	row := func(key, value, note string) { fmt.Println("    " + kvRow(key, value, note)) }
 	// Warnings are a short colored headline; the why and the fix go on the dim lines under it.
 	warn := func(headline string) { fmt.Printf("    %s %s\n", warnGlyph(), yellow(headline)) }
-	because := func(why string) { fmt.Println("      " + dim(wrapHanging(why, 6))) }
+	because := func(why string) {
+		// Dimmed line by line, so a wrapped explanation stays dim where styles reset per line.
+		for _, l := range strings.Split(wrapHanging(why, 6), "\n") {
+			fmt.Println("      " + dim(strings.TrimLeft(l, " ")))
+		}
+	}
 	fix := func(label, command string) { fmt.Println("  " + hint(label, command)) }
 	// Lenses are named by what the user registered them as; the stats key on the mined name.
 	shown := func(mined string) string { return lensRegisteredName(st, mined) }
@@ -323,8 +328,19 @@ func cmdDoctor(asJSON bool) error {
 
 // lastLoggedError is the err field of the newest witness.log line that has one — the cause behind
 // "sessions backing off", which the backoff line itself does not carry. Only the log's tail is
-// read; "" when there is no log or no error in it.
+// read; "" when there is no log or no error in it. A runner error can carry the CLI's whole
+// multi-line stderr, so it comes back as one line, cut to a size doctor can show (witness.log,
+// whose path doctor prints next to it, keeps the rest).
 func lastLoggedError(path string) string {
+	const limit = 300
+	cause := []rune(strings.Join(strings.Fields(newestLoggedErr(path)), " "))
+	if len(cause) > limit {
+		return string(cause[:limit]) + glyph("…", "...")
+	}
+	return string(cause)
+}
+
+func newestLoggedErr(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""

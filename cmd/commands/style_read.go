@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"golang.org/x/text/width"
 )
 
 // Helpers the read surfaces (facets, observations, profile, doctor, config, lens) share on top of
@@ -49,28 +51,57 @@ func errLine(fancy, plain, color, msg string) string {
 
 // wrapHanging word-wraps s to the terminal width, starting at column `used` and continuing every
 // later line at that same column — so a long list keeps its indent instead of soft-wrapping back to
-// column 0. Piped output is returned whole, on one line.
+// column 0. Line breaks already in s are kept (a facet value can have paragraphs). Piped output is
+// returned whole.
 func wrapHanging(s string, used int) string {
 	width := termWidth(os.Stdout)
 	if !useColor || width <= used+10 {
 		return s
 	}
+	pad := strings.Repeat(" ", used)
 	var b strings.Builder
-	col := used
-	for i, w := range strings.Fields(s) {
-		if i > 0 {
-			if col+1+len([]rune(w)) >= width {
-				b.WriteString("\n" + strings.Repeat(" ", used))
-				col = used
-			} else {
-				b.WriteByte(' ')
-				col++
-			}
+	for li, line := range strings.Split(s, "\n") {
+		if li > 0 {
+			b.WriteString("\n" + pad)
 		}
-		b.WriteString(w)
-		col += len([]rune(w))
+		col := used
+		for i, w := range strings.Fields(line) {
+			if i > 0 {
+				if col+1+cols(w) >= width {
+					b.WriteString("\n" + pad)
+					col = used
+				} else {
+					b.WriteByte(' ')
+					col++
+				}
+			}
+			b.WriteString(w)
+			col += cols(w)
+		}
 	}
 	return b.String()
+}
+
+// fits reports whether a line n columns wide fits the terminal. Piped output has no width, so
+// everything fits there.
+func fits(n int) bool {
+	w := termWidth(os.Stdout)
+	return !useColor || w <= 0 || n < w
+}
+
+// cols is the width s takes on a terminal: a CJK character fills two columns, which a rune count
+// misses — and this archive's text is often Chinese. (fitLine in style.go still counts runes.)
+func cols(s string) int {
+	n := 0
+	for _, r := range s {
+		switch width.LookupRune(r).Kind() {
+		case width.EastAsianWide, width.EastAsianFullwidth:
+			n += 2
+		default:
+			n++
+		}
+	}
+	return n
 }
 
 var mdBold = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
