@@ -55,7 +55,7 @@ func askYesNo(prompt string) bool {
 	// Only when NOBODY answered — /dev/null or a closed pipe. Keyed on EOF, not on "is a terminal":
 	// /dev/null is a character device, and someone who typed "n" doesn't need told about --yes.
 	if err != nil && answer == "" {
-		fmt.Println("(no answer — pass --yes to skip this question)")
+		fmt.Println(dim("(no answer — pass --yes to skip this question)"))
 	}
 	return false
 }

@@ -107,7 +107,7 @@ func TestImportClearsTheLineBeforeTheSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	summary := strings.Index(out, "import codex: ")
-	if !strings.Contains(out, "codex · importing 1/1") || !regexp.MustCompile(`\r +\rimport codex: `).MatchString(out) ||
+	if !regexp.MustCompile(`codex .*?importing 1/1`).MatchString(out) || !regexp.MustCompile(`\r +\rimport codex: `).MatchString(out) ||
 		strings.Contains(out[summary:], "\r") {
 		t.Fatalf("the line must be drawn, then cleared, then the summary printed: %q", out)
 	}
@@ -149,7 +149,7 @@ func TestIngestShowsProgressPerSession(t *testing.T) {
 		t.Fatal(err, errOut)
 	}
 	var frames []string
-	for _, m := range regexp.MustCompile(`ingest · sessions (\d+/\d+)`).FindAllStringSubmatch(out, -1) {
+	for _, m := range regexp.MustCompile(`ingest .*?sessions (\d+/\d+)`).FindAllStringSubmatch(out, -1) {
 		frames = append(frames, m[1])
 	}
 	const summary = "ingested 0 record(s), skipped 1 malformed; distilling in the background — witness status to watch\n"

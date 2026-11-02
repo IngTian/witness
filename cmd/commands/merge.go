@@ -149,7 +149,7 @@ func cmdMerge(target string, yes bool, ask func(prompt string) bool) error {
 	// capture hook until the user answered. The worker lock stays held, so no review rewrites the
 	// facets meanwhile; the apply recomputes the same deterministic merge, and can differ from what
 	// was shown only by turns captured while the prompt was open.
-	if !yes && !ask("Merge it? This archive is backed up first. [y/N]: ") {
+	if !yes && !ask(bold("Merge it?")+dim(" This archive is backed up first.")+" [y/N]: ") {
 		return errMergeDeclined
 	}
 
@@ -282,14 +282,14 @@ func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
 	if r.FirstTS != "" {
 		span = r.FirstTS[:min(10, len(r.FirstTS))] + " → " + r.LastTS[:min(10, len(r.LastTS))]
 	}
-	fmt.Printf("  incoming      %s · schema v%d", span, r.IncomingSchema)
+	fmt.Printf(mergeRow("incoming")+"%s · schema v%d", span, r.IncomingSchema)
 	if len(r.Cwds) > 0 {
 		fmt.Printf(" · mostly in %s", strings.Join(r.Cwds, ", "))
 	}
 	fmt.Println()
 
 	s := r.Sessions
-	fmt.Printf("  sessions      %d new · %d already here · %d longer there (%s appended) · %d longer here\n",
+	fmt.Printf(mergeRow("sessions")+"%d new · %d already here · %d longer there (%s appended) · %d longer here\n",
 		s.New, s.Equal, s.LongerThere, pluralize(s.Appended, "turn", "turns"), s.LongerHere)
 	for _, d := range s.Diverged {
 		fmt.Printf("                %s %s differs from yours — yours keeps the id, theirs arrives as %s\n", warnGlyph(), d.From, d.To)
@@ -298,7 +298,7 @@ func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
 		fmt.Printf("                %d skipped: a second copy of a transcript already here\n", s.Duplicates)
 	}
 	o := r.Observations
-	fmt.Printf("  observations  %d reviewed there · %d to review · %d already here", o.Reviewed, o.Unreviewed, o.AlreadyHere)
+	fmt.Printf(mergeRow("observations")+"%d reviewed there · %d to review · %d already here", o.Reviewed, o.Unreviewed, o.AlreadyHere)
 	if o.SharedMined > 0 {
 		fmt.Printf(" · %d skipped (sessions you already mined)", o.SharedMined)
 	}
@@ -307,10 +307,10 @@ func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
 	}
 	fmt.Println()
 	if r.Staged > 0 {
-		fmt.Printf("  staged        %d recorded in-session, not yet distilled\n", r.Staged)
+		fmt.Printf(mergeRow("staged")+"%d recorded in-session, not yet distilled\n", r.Staged)
 	}
 	fc := r.Facets
-	fmt.Printf("  facets        %d incoming: %d new · %d already here · %d updated · %d with later history adopted\n",
+	fmt.Printf(mergeRow("facets")+"%d incoming: %d new · %d already here · %d updated · %d with later history adopted\n",
 		fc.Incoming, fc.New, fc.Shared, fc.Updated, fc.FastForwarded)
 	if len(fc.SameKey) > 0 {
 		fmt.Printf("                %s %s with yours — the copy with newer evidence keeps the key,\n"+
@@ -329,14 +329,14 @@ func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
 		}
 	}
 	printMergeFiles(root, f)
-	fmt.Println("  config.toml   yours is kept")
+	fmt.Println(mergeRow("config.toml") + "yours is kept")
 	fmt.Println()
 }
 
 // printMergeDone reports the applied merge and how to undo it.
 func printMergeDone(root string, r *store.MergeReport, f *mergeFiles, backup string) {
 	for _, line := range f.results {
-		fmt.Printf("  lens          %s\n", line)
+		fmt.Printf(mergeRow("lens")+"%s\n", line)
 	}
 	glyph := okGlyph()
 	if len(f.failed) > 0 {
@@ -344,29 +344,29 @@ func printMergeDone(root string, r *store.MergeReport, f *mergeFiles, backup str
 	}
 	fmt.Printf("%s merged: %d sessions, %d observations, %d facets new here.\n", glyph,
 		r.Sessions.New, r.Observations.Reviewed+r.Observations.Unreviewed, r.Facets.New)
-	fmt.Printf("  this archive as it was before: %s\n", backup)
-	fmt.Printf("  to undo: stop witness, then replace %s with that directory\n", root)
+	fmt.Printf("  %s %s\n", dim("this archive as it was before:"), backup)
+	fmt.Printf("  %s stop witness, then replace %s with that directory\n", dim("to undo:"), root)
 	fmt.Println(dim("  nothing here called a model. Optionally, `witness compact` merges duplicates the two"))
 	fmt.Println(dim("  archives wrote under different keys (that one does call the model)."))
 }
 
 func printMergeFiles(root string, f *mergeFiles) {
 	for _, l := range f.register {
-		fmt.Printf("  lens          %s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
+		fmt.Printf(mergeRow("lens")+"%s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
 	}
 	for _, l := range f.differ {
-		fmt.Printf("  lens          %s %s: their definition differs — yours is kept (theirs: witness lens register %s %q)\n",
+		fmt.Printf(mergeRow("lens")+"%s %s: their definition differs — yours is kept (theirs: witness lens register %s %q)\n",
 			warnGlyph(), l.name, l.name, l.path)
 	}
 	for _, n := range f.refused {
-		fmt.Printf("  lens          %s %s: would be refused here, skipped\n", warnGlyph(), n)
+		fmt.Printf(mergeRow("lens")+"%s %s: would be refused here, skipped\n", warnGlyph(), n)
 	}
 	for _, n := range f.unknown {
-		fmt.Printf("  lens          %s %s: its data arrives, but there is no definition for it here — nothing will review\n"+
+		fmt.Printf(mergeRow("lens")+"%s %s: its data arrives, but there is no definition for it here — nothing will review\n"+
 			"                  it until you `witness lens register %s <dir>` and enable it\n", warnGlyph(), n, n)
 	}
 	for _, n := range f.disabled {
-		fmt.Printf("  lens          %s: data arrives for a lens you have registered but not enabled — `witness lens enable %s` to review it\n", n, n)
+		fmt.Printf(mergeRow("lens")+"%s: data arrives for a lens you have registered but not enabled — `witness lens enable %s` to review it\n", n, n)
 	}
 	for _, src := range f.summarize {
 		dst := filepath.Join(root, "summarize", filepath.Base(src))
@@ -374,10 +374,14 @@ func printMergeFiles(root string, f *mergeFiles) {
 		if _, err := os.Stat(dst); err == nil {
 			note = " (this REPLACES yours — copy it aside first)"
 		}
-		fmt.Printf("  summarize     %s not copied — it changes how your portrait is written. To use it%s:\n"+
+		fmt.Printf(mergeRow("summarize")+"%s not copied — it changes how your portrait is written. To use it%s:\n"+
 			"                  mkdir -p %q && cp %q %q\n", filepath.Base(src), note, filepath.Dir(dst), src, dst)
 	}
 	if f.profile {
-		fmt.Printf("  profile       not merged — rebuilt from the merged facets; theirs stays in %s\n", filepath.Join(f.srcDir, "profile"))
+		fmt.Printf(mergeRow("profile")+"not merged — rebuilt from the merged facets; theirs stays in %s\n", filepath.Join(f.srcDir, "profile"))
 	}
 }
+
+// mergeRow is a plan row's label: dim, padded on the plain text to 14 columns so the values line up
+// (and a pipe sees exactly the same bytes as before color).
+func mergeRow(name string) string { return "  " + dim(fmt.Sprintf("%-14s", name)) }

@@ -107,7 +107,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 		Runner: rs.RunFor(nil), RunnerFor: rs.RunFor,
 	}
 
-	fmt.Printf("planning compaction over %s...\n", pluralize(len(lenses), "lens", "lenses"))
+	fmt.Println(dim(fmt.Sprintf("planning compaction over %s…", pluralize(len(lenses), "lens", "lenses"))))
 	pl := startProgress()
 	c.Progress = pl.update
 	plans, err := c.Plan(ctx)
@@ -122,8 +122,8 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 
 	printCompactPlans(plans)
 	fmt.Println()
-	if !yes && !ask("Apply this plan? Nothing is deleted; archived facets keep their history. [y/N]: ") {
-		fmt.Println("not applied — nothing written")
+	if !yes && !ask(bold("Apply this plan?")+dim(" Nothing is deleted; archived facets keep their history.")+" [y/N]: ") {
+		fmt.Println(dim("not applied — nothing written"))
 		return nil
 	}
 	if err := c.Apply(ctx, plans, time.Now()); err != nil {

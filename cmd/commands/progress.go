@@ -47,6 +47,12 @@ type progressLine struct {
 	lastDoneAt time.Time
 	lastDraw   time.Time
 	minRedraw  time.Duration // 0 in tests; a 20k-input pass must not mean 20k terminal writes
+
+	// Terminal styling. color follows style.go's rule but for STDERR, where the line goes: a
+	// terminal, NO_COLOR unset. cols reports the terminal width (nil: unbounded, as in tests) so a
+	// line never wraps — a wrapped line breaks the \r redraw into a new line every second.
+	color bool
+	cols  func() int
 }
 
 const progressRedraw = time.Second
@@ -57,6 +63,13 @@ func startProgress() *progressLine {
 	// The clock starts at the first update, not here: setup (opening the store, a migration, listing
 	// the work) is not the pass, and counting it once made a 5 s import open on "~3m18s left".
 	p := &progressLine{w: os.Stderr, tty: isatty.IsTerminal(os.Stderr.Fd()), minRedraw: 100 * time.Millisecond}
+	p.color = p.tty && os.Getenv("NO_COLOR") == ""
+	p.cols = func() int {
+		if n := termWidth(os.Stderr); n > 0 {
+			return n
+		}
+		return 80
+	}
 	if p.tty {
 		p.stop, p.done = make(chan struct{}), make(chan struct{})
 		go p.tick()
@@ -115,47 +128,148 @@ func (p *progressLine) update(pr distill.Progress) {
 	}
 }
 
-// draw rewrites the terminal line. Caller holds mu.
-func (p *progressLine) draw() {
-	line := spinnerFrames[p.frame%len(spinnerFrames)] + " " + p.render()
-	n := utf8.RuneCountInString(line)
-	fmt.Fprintf(p.w, "\r%s%s", line, spaces(max(0, p.width-n)))
-	p.width = n
-	p.lastDraw = time.Now()
+// progressView is what both renderings show, computed once per draw.
+type progressView struct {
+	where       string
+	stages      [][2]string // {name, "6/45"}
+	done, total int
+	open        bool
+	elapsed     string
+	left        string // "" when there is no estimate yet
 }
 
-// render is the line without the spinner frame. Caller holds mu.
-func (p *progressLine) render() string {
-	var parts []string
-	if p.cur.Where != "" {
-		parts = append(parts, p.cur.Where)
-	}
-	done, total, open := 0, 0, false
+// view computes the snapshot's numbers. Caller holds mu.
+func (p *progressLine) view() progressView {
+	v := progressView{where: p.cur.Where}
 	for _, s := range p.cur.Stages {
 		if s.Total == 0 && !s.Open {
 			continue // a stage with nothing to do yet says nothing
 		}
 		if s.Total > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d/%d", s.Name, s.Done, s.Total))
+			v.stages = append(v.stages, [2]string{s.Name, fmt.Sprintf("%d/%d", s.Done, s.Total)})
 		}
-		done, total, open = done+s.Done, total+s.Total, open || s.Open
+		v.done, v.total, v.open = v.done+s.Done, v.total+s.Total, v.open || s.Open
 	}
-	elapsed := time.Since(p.start)
-	parts = append(parts, shortDuration(elapsed))
-	if worked := p.lastDone - p.base; worked > 0 && total > done {
+	v.elapsed = shortDuration(time.Since(p.start))
+	if worked := p.lastDone - p.base; worked > 0 && v.total > v.done {
 		rate := p.lastDoneAt.Sub(p.start) / time.Duration(worked)
-		remaining := time.Duration(total - done)
+		remaining := time.Duration(v.total - v.done)
 		// Count down through the call in flight, but never below the calls certainly left after it.
 		left := max(rate*remaining-time.Since(p.lastDoneAt), rate*(remaining-1))
 		if left >= time.Second { // "≥0s left" says nothing
-			bound := "~"
-			if open { // work not yet discovered can only add to it
-				bound = "≥"
-			}
-			parts = append(parts, bound+shortDuration(left)+" left")
+			v.left = shortDuration(left)
 		}
 	}
+	return v
+}
+
+// bound marks an estimate: "≥" while work not yet discovered can only add to it, else "~".
+func bound(open bool) string {
+	if open {
+		return "≥"
+	}
+	return "~"
+}
+
+// render is the plain one-line form, used in logs. Caller holds mu.
+func (p *progressLine) render() string {
+	v := p.view()
+	var parts []string
+	if v.where != "" {
+		parts = append(parts, v.where)
+	}
+	for _, st := range v.stages {
+		parts = append(parts, st[0]+" "+st[1])
+	}
+	parts = append(parts, v.elapsed)
+	if v.left != "" {
+		parts = append(parts, bound(v.open)+v.left+" left")
+	}
 	return "  " + strings.Join(parts, " · ")
+}
+
+// progressBarCells are the bar widths tried, widest first: a narrow terminal gets a shorter bar
+// before it loses the bar altogether.
+var progressBarCells = []int{22, 14, 8}
+
+// segment is one styled run of the terminal line; plain is what it occupies on screen.
+type segment struct{ plain, code string }
+
+// terminalSegments lays the terminal line out:
+//
+//	⠙ default/biases  ━━━━━━━━━━──────────────  13%  grouping 6/45 · writing merges 0/6  11m40s · ≥1h12m left
+//
+// cells is the bar width; 0 drops it. Caller holds mu.
+func (p *progressLine) terminalSegments(cells int) []segment {
+	v := p.view()
+	segs := []segment{{spinnerFrames[p.frame%len(spinnerFrames)], ansiCyan}, {" ", ""}}
+	if v.where != "" {
+		segs = append(segs, segment{v.where, ansiBold}, segment{"  ", ""})
+	}
+	if cells > 0 && v.total > 0 {
+		filled := v.done * cells / v.total
+		segs = append(segs,
+			segment{strings.Repeat("━", filled), ansiCyan},
+			segment{strings.Repeat("─", cells-filled), ansiDim},
+			segment{fmt.Sprintf(" %3d%%", v.done*100/v.total), ansiBold},
+			segment{"  ", ""})
+	}
+	for i, st := range v.stages {
+		if i > 0 {
+			segs = append(segs, segment{" · ", ansiDim})
+		}
+		segs = append(segs, segment{st[0] + " ", ansiDim}, segment{st[1], ""})
+	}
+	segs = append(segs, segment{"  ", ""}, segment{v.elapsed, ansiDim})
+	if v.left != "" {
+		mark := ansiDim
+		if v.open {
+			mark = ansiYellow
+		}
+		segs = append(segs, segment{" · ", ansiDim}, segment{bound(v.open), mark}, segment{v.left, ""}, segment{" left", ansiDim})
+	}
+	return segs
+}
+
+func segmentsWidth(segs []segment) int {
+	n := 0
+	for _, s := range segs {
+		n += utf8.RuneCountInString(s.plain)
+	}
+	return n
+}
+
+// draw rewrites the terminal line, fitted to the terminal: the bar shrinks, then goes, then the tail
+// is cut, so the line never wraps. Padding is measured on the PLAIN text, so color codes cannot skew
+// it. Caller holds mu.
+func (p *progressLine) draw() {
+	limit := 0
+	if p.cols != nil {
+		limit = p.cols() - 1 // the last column would wrap on some terminals
+	}
+	segs := p.terminalSegments(0)
+	for _, cells := range progressBarCells {
+		if s := p.terminalSegments(cells); limit <= 0 || segmentsWidth(s) <= limit {
+			segs = s
+			break
+		}
+	}
+	var b strings.Builder
+	n := 0
+	for _, s := range segs {
+		text := s.plain
+		if w := utf8.RuneCountInString(text); limit > 0 && n+w > limit {
+			text = string([]rune(text)[:max(0, limit-n)])
+		}
+		n += utf8.RuneCountInString(text)
+		if p.color && s.code != "" && text != "" {
+			text = s.code + text + ansiReset
+		}
+		b.WriteString(text)
+	}
+	fmt.Fprintf(p.w, "\r%s%s", b.String(), spaces(max(0, p.width-n)))
+	p.width = n
+	p.lastDraw = time.Now()
 }
 
 // finish stops the redraw and clears the line, so whatever is printed next starts clean.

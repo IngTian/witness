@@ -2,10 +2,12 @@ package commands
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/distill"
 )
@@ -154,6 +156,76 @@ func TestProgressLineThrottlesRedraws(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), "\r"); n != 1 {
 		t.Errorf("1,000 updates inside one redraw interval drew %d times; want 1 (the ticker catches up)", n)
+	}
+}
+
+// The terminal form: a bar and a percentage, styled only when color is on, fitted so it never
+// wraps — a wrapped line turns every \r redraw into a new line.
+func TestProgressBarOnATerminal(t *testing.T) {
+	var buf bytes.Buffer
+	p := &progressLine{w: &buf, tty: true, start: time.Now()}
+	p.update(compactSnap("default/biases", 11, 44, 0, 0)) // 25%
+	out := buf.String()
+	if !strings.Contains(out, strings.Repeat("━", 5)+strings.Repeat("─", 17)) || !strings.Contains(out, " 25%") {
+		t.Errorf("want a 22-cell bar a quarter full and 25%%: %q", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("no color unless color is on: %q", out)
+	}
+	for _, tc := range []struct{ done, filled int }{{22, 11}, {44, 22}} {
+		buf.Reset()
+		p.update(compactSnap("default/biases", tc.done, 44, 0, 0))
+		if got := strings.Count(buf.String(), "━"); got != tc.filled {
+			t.Errorf("%d/44: %d cells filled, want %d: %q", tc.done, got, tc.filled, buf.String())
+		}
+	}
+
+	buf.Reset()
+	p.color = true
+	p.update(compactSnap("default/biases", 12, 44, 0, 0))
+	styled := buf.String()
+	for _, code := range []string{ansiCyan, ansiBold, ansiDim} {
+		if !strings.Contains(styled, code) {
+			t.Errorf("color on: missing %q in %q", code, styled)
+		}
+	}
+	// Padding is measured on the plain text: a colored line must not count escape bytes as width.
+	if p.width != utf8.RuneCountInString(regexp.MustCompile("\x1b\\[[0-9;]*m").ReplaceAllString(strings.TrimPrefix(styled, "\r"), "")) {
+		t.Errorf("width %d counted escape bytes", p.width)
+	}
+}
+
+func TestProgressLineFitsTheTerminal(t *testing.T) {
+	wide := &progressLine{w: &bytes.Buffer{}, tty: true, start: time.Now()}
+	wide.update(compactSnap("default/biases", 6, 45, 0, 0))
+	full := wide.width
+
+	// Too narrow even without the bar: cut, never wrap, and the line still starts where it should.
+	var tiny bytes.Buffer
+	pt := &progressLine{w: &tiny, tty: true, start: time.Now(), cols: func() int { return 20 }}
+	pt.update(compactSnap("default/biases", 6, 45, 0, 0))
+	if pt.width > 19 || !strings.Contains(tiny.String(), "default/") {
+		t.Errorf("cols=20: %d runes drawn, %q", pt.width, tiny.String())
+	}
+
+	bar := func(out string) int { return strings.Count(out, "━") + strings.Count(out, "─") }
+	for _, tc := range []struct {
+		cols    int
+		barWant int // cells
+	}{{full + 1, 22}, {full - 5, 14}, {full - 13, 8}, {40, 0}} {
+		var buf bytes.Buffer
+		cols := tc.cols
+		p := &progressLine{w: &buf, tty: true, start: time.Now(), cols: func() int { return cols }}
+		p.update(compactSnap("default/biases", 6, 45, 0, 0))
+		if p.width > cols-1 {
+			t.Errorf("cols=%d: drew %d runes; it would wrap", cols, p.width)
+		}
+		if got := bar(buf.String()); got != tc.barWant {
+			t.Errorf("cols=%d: a %d-cell bar, want %d (shrink before dropping): %q", cols, got, tc.barWant, buf.String())
+		}
+		if !strings.Contains(buf.String(), "default/") {
+			t.Errorf("cols=%d: the Where must survive: %q", cols, buf.String())
+		}
 	}
 }
 
