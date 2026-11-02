@@ -84,36 +84,39 @@ func TestDrainProgressCountsEverySession(t *testing.T) {
 }
 
 // A session captured mid-drain is mined by the next scan, so the total grows to include it —
-// which is why the stage is Open — and the bar still ends at its (grown) total.
+// which is why the stage is Open — and the bar still ends at its (grown) total. Both paths: the
+// parallel one counts a later batch on top of the sessions earlier batches finished.
 func TestDrainProgressTotalGrowsWithAMidDrainArrival(t *testing.T) {
-	s := newStore(t)
-	var calls atomic.Int32
-	w := drainWorker(s, func(ctx context.Context, model, prompt, input string) (string, error) {
-		calls.Add(1)
-		return (&safeMiner{}).run(ctx, model, prompt, input)
-	})
-	capture(t, s, "first", "user", "turn-first")
-	pending := func() []string {
-		if s.DistilledCount("first", "default") > 0 && s.RawCount("second") == 0 {
-			capture(t, s, "second", "user", "turn-second") // lands while the drain is running
+	for _, conc := range []int{1, 2} {
+		s := newStore(t)
+		var calls atomic.Int32
+		w := drainWorker(s, func(ctx context.Context, model, prompt, input string) (string, error) {
+			calls.Add(1)
+			return (&safeMiner{}).run(ctx, model, prompt, input)
+		})
+		capture(t, s, "first", "user", "turn-first")
+		pending := func() []string {
+			if s.DistilledCount("first", "default") > 0 && s.RawCount("second") == 0 {
+				capture(t, s, "second", "user", "turn-second") // lands while the drain is running
+			}
+			p, _ := s.PendingSessions([]string{"default"})
+			return p
 		}
-		p, _ := s.PendingSessions([]string{"default"})
-		return p
-	}
-	ev := &drainEvents{t: t}
-	w.Drain(context.Background(), DrainOpts{Conc: 1, Pending: pending, Progress: ev.record})
+		ev := &drainEvents{t: t}
+		w.Drain(context.Background(), DrainOpts{Conc: conc, Pending: pending, Progress: ev.record})
 
-	m := ev.mining(t)
-	if m[0].Total != 1 {
-		t.Fatalf("only one session was pending at the start: %+v", m[0])
-	}
-	last := m[len(m)-1]
-	if last.Total != 2 || last.Done != 2 || calls.Load() != 2 {
-		t.Fatalf("the arrival must join the total and be counted: ended %d/%d after %d calls", last.Done, last.Total, calls.Load())
-	}
-	for _, st := range m {
-		if !st.Open {
-			t.Fatalf("a drain's total can grow, so its stage is Open: %+v", st)
+		m := ev.mining(t)
+		if m[0].Total != 1 {
+			t.Fatalf("conc=%d: only one session was pending at the start: %+v", conc, m[0])
+		}
+		last := m[len(m)-1]
+		if last.Total != 2 || last.Done != 2 || calls.Load() != 2 {
+			t.Fatalf("conc=%d: the arrival must join the total and be counted: ended %d/%d after %d calls", conc, last.Done, last.Total, calls.Load())
+		}
+		for _, st := range m {
+			if !st.Open {
+				t.Fatalf("conc=%d: a drain's total can grow, so its stage is Open: %+v", conc, st)
+			}
 		}
 	}
 }

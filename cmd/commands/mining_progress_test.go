@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,40 @@ func TestContinuedDrainOffsetsAndNames(t *testing.T) {
 	if in.Stages[0].Done != 0 || in.Stages[0].Total != 1 {
 		t.Fatalf("the engine's snapshot must not be mutated: %+v", in)
 	}
+}
+
+// One worker pass can call Drain more than once (a late arrival found by the next call); its line
+// is ONE count across them, named for the caller, and a pass with no progress func stays silent.
+func TestDrainPassContinuesOneCount(t *testing.T) {
+	// Each fake Drain call reports its own zero-based count, like the real one.
+	runs := [][2]int{{2, 2}, {1, 1}, {0, 0}}
+	calls := 0
+	drain := func(o distill.DrainOpts) int {
+		r := runs[calls]
+		calls++
+		if o.Progress != nil && r[1] > 0 {
+			o.Progress(distill.Progress{Stages: []distill.Stage{{Name: "mining sessions", Done: 0, Total: r[1], Open: true}}})
+			o.Progress(distill.Progress{Stages: []distill.Stage{{Name: "mining sessions", Done: r[0], Total: r[1], Open: true}}})
+		}
+		return r[0]
+	}
+	never := func() bool { return false }
+
+	var got []string
+	drainPass(drain, distill.DrainOpts{}, never, func(p distill.Progress) {
+		got = append(got, fmt.Sprintf("%s %d/%d", p.Where, p.Stages[0].Done, p.Stages[0].Total))
+	}, "backlog")
+	if want := "backlog 0/2,backlog 2/2,backlog 2/3,backlog 3/3"; strings.Join(got, ",") != want || calls != 3 {
+		t.Fatalf("got %v after %d Drain calls, want %s after 3", got, calls, want)
+	}
+
+	calls = 0
+	drainPass(func(o distill.DrainOpts) int {
+		if o.Progress != nil {
+			t.Fatal("a silent pass must hand Drain a nil Progress")
+		}
+		return drain(o)
+	}, distill.DrainOpts{}, never, nil, "")
 }
 
 // tryRunner is a fake runtime for `lens try`: it counts extract and review calls and panics on
@@ -52,6 +87,10 @@ func (*tryRunner) ConcurrentRunSafe() bool                         { return true
 func lensTryProgress(t *testing.T, r *tryRunner, review bool) (snaps []distill.Progress, finished int) {
 	t.Helper()
 	s := seedTryStore(t, store.RunnerClaude) // s1
+	// Fewer workers than sessions, so the total (the sample) differs from the concurrency.
+	if err := s.SetConfigString("mine_concurrency", "2"); err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []string{"s2", "s3"} {
 		text := "hello"
 		if id == "s2" {

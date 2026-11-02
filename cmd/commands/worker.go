@@ -340,19 +340,13 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 				_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
 			},
 		}
-		finished := 0 // sessions reaped by this pass's earlier Drain calls
+		var progress distill.ProgressFunc
 		if progressWhere != "" {
 			pl := startProgress()
 			defer pl.finish() // cleared before any review this run does: that is not mining
-			opts.Progress = func(p distill.Progress) { pl.update(continuedDrain(p, progressWhere, finished)) }
+			progress = pl.update
 		}
-		for !stopRequested() {
-			n := w.Drain(ctx, opts)
-			finished += n // Drain returns exactly the sessions it reaped, i.e. its final Done
-			if n == 0 {
-				break
-			}
-		}
+		drainPass(func(o distill.DrainOpts) int { return w.Drain(ctx, o) }, opts, stopRequested, progress, progressWhere)
 	}
 
 	runDistillLoop(distillLoopDeps{
@@ -379,6 +373,24 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange, progressWhere strin
 		hasUnattempted: func(p []string) bool { return miner.HasUnattempted(p, attempted) },
 	})
 	return true, nil
+}
+
+// drainPass calls drain until a call reaps nothing (or a stop is requested), carrying ONE progress
+// count across the calls: progress (nil = silent) gets each snapshot named where and continued
+// past the sessions earlier calls finished. A seam so the count's wiring is testable without the
+// embedder a real Drain needs.
+func drainPass(drain func(distill.DrainOpts) int, opts distill.DrainOpts, stop func() bool, progress distill.ProgressFunc, where string) {
+	finished := 0 // sessions reaped by this pass's earlier Drain calls
+	if progress != nil {
+		opts.Progress = func(p distill.Progress) { progress(continuedDrain(p, where, finished)) }
+	}
+	for !stop() {
+		n := drain(opts)
+		finished += n // Drain returns exactly the sessions it reaped, i.e. its final Done
+		if n == 0 {
+			break
+		}
+	}
 }
 
 // continuedDrain names a Drain snapshot and continues its count past the sessions earlier Drain
