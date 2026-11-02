@@ -3,6 +3,7 @@
 package commands
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/mattn/go-isatty"
 
 	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
@@ -33,6 +36,28 @@ func emitJSON(v any) error {
 	}
 	fmt.Println(string(b))
 	return nil
+}
+
+// askYesNo prints prompt and reads one answer: only y/yes is a yes. Anything else — including EOF,
+// which is what a script with nobody to answer reads — is a no. Commands take it as a parameter so
+// tests can answer for the user.
+func askYesNo(prompt string) bool {
+	fmt.Print(prompt)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	answer := strings.TrimSpace(line)
+	if !isatty.IsTerminal(os.Stdin.Fd()) {
+		fmt.Println(answer) // a terminal echoes what was typed; piped input would leave the line open
+	}
+	switch strings.ToLower(answer) {
+	case "y", "yes":
+		return true
+	}
+	// Only when NOBODY answered — /dev/null or a closed pipe. Keyed on EOF, not on "is a terminal":
+	// /dev/null is a character device, and someone who typed "n" doesn't need told about --yes.
+	if err != nil && answer == "" {
+		fmt.Println("(no answer — pass --yes to skip this question)")
+	}
+	return false
 }
 
 // valueOrNever renders an empty timestamp as "never" for human-facing output.
