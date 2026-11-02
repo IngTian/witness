@@ -56,9 +56,9 @@ func TestFacetsListingHidesArchivedByDefault(t *testing.T) {
 	if !strings.Contains(out, "survivor") {
 		t.Errorf("the active facet should be listed:\n%s", out)
 	}
-	// The count in the header is part of the claim too.
-	if !strings.Contains(out, "- 1\n") {
-		t.Errorf("the header count should be 1, not 3:\n%s", out)
+	// The count in the title is part of the claim too.
+	if !strings.Contains(out, "witness facets · default  1 active · 1 dimension\n") {
+		t.Errorf("the title count should be 1, not 3:\n%s", out)
 	}
 }
 
@@ -94,6 +94,35 @@ func TestExpandUnfoldsTheMergeTrajectory(t *testing.T) {
 	}
 	if strings.Contains(out, "retired_one") {
 		t.Errorf("an unrelated retired facet must not appear in this trajectory:\n%s", out)
+	}
+}
+
+// Expanding an ARCHIVED facet said "nothing was merged into this facet — its own versions are the
+// whole story", when its story went on in the facet it was merged into. It must point there (with
+// a command that works) and drop the dead-end sentence; a retired one says it was retired.
+func TestExpandAnArchivedFacetPointsAtWhereItWent(t *testing.T) {
+	archivedFixture(t)
+	out := captureStdout(t, func() {
+		if err := cmdFacetTrajectory(nil, "thinking/absorbed_one", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "witness facets default --expand thinking/survivor") {
+		t.Errorf("an absorbed facet must point at its survivor:\n%s", out)
+	}
+	if strings.Contains(out, "whole story") {
+		t.Errorf("an archived facet's own versions are not the whole story:\n%s", out)
+	}
+	if err := cmdFacetTrajectory([]string{"default"}, "thinking/survivor", false); err != nil {
+		t.Errorf("the suggested --expand must work: %v", err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdFacetTrajectory(nil, "habits/retired_one", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "retired by compaction") || strings.Contains(out, "whole story") {
+		t.Errorf("a retired facet says so, and only that:\n%s", out)
 	}
 }
 

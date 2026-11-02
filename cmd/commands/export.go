@@ -2,6 +2,8 @@ package commands
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/IngTian/witness/internal/store"
@@ -74,18 +76,21 @@ func cmdExport(path string, force, all, asJSON bool) error {
 		if asJSON {
 			return emitJSON(exportAllJSON{Exported: path, All: true, Items: items})
 		}
-		fmt.Printf("exported complete archive to %s\n", path)
+		abs, _ := filepath.Abs(path)
+		fmt.Printf("%s exported the complete archive to %s\n", okGlyph(), tildePath(abs))
 		for _, it := range items {
-			name := it.Name
-			if it.Dir {
-				fmt.Printf("  %-14s %d files\n", name+"/", it.Files)
-				continue
+			switch {
+			case it.Name == "witness.db":
+				fmt.Println("    " + kvRow(it.Name, snapshotSummary(st, filepath.Join(path, it.Name)), ""))
+			case it.Dir:
+				fmt.Println("    " + kvRow(it.Name+"/", pluralize(it.Files, "file", "files"), ""))
+			default:
+				fmt.Println("    " + it.Name)
 			}
-			fmt.Printf("  %s\n", name)
 		}
-		fmt.Println("safe to sync this directory (cloud/backup); do NOT sync the live data dir (WAL corruption).")
-		fmt.Println("to restore: set WITNESS_HOME to this directory, or copy its contents into an EMPTY data dir with witness stopped.")
-		fmt.Println("onto a machine that already has an archive: `witness merge <this dir>` — copying would replace that archive.")
+		fmt.Println(dim("  safe to sync — unlike the live data dir, whose WAL a syncer can corrupt"))
+		fmt.Println(hint("restore", "WITNESS_HOME="+shellArg(abs)+" witness status"))
+		fmt.Println(hint("into another", "witness merge "+shellArg(abs)))
 		return nil
 	}
 	if err := st.Export(path, force); err != nil {
@@ -94,8 +99,27 @@ func cmdExport(path string, force, all, asJSON bool) error {
 	if asJSON {
 		return emitJSON(map[string]string{"exported": path})
 	}
-	fmt.Printf("exported archive snapshot to %s\n", path)
-	fmt.Println("safe to sync this file (cloud/backup); do NOT sync the live data dir (WAL corruption).")
-	fmt.Println("note: the database only — use --all to include config.toml, lenses/, summarize/ and profile/.")
+	abs, _ := filepath.Abs(path)
+	fmt.Printf("%s exported the database to %s\n", okGlyph(), tildePath(abs))
+	fmt.Println("    " + kvRow(filepath.Base(path), snapshotSummary(st, path), ""))
+	fmt.Println(dim("  safe to sync — unlike the live data dir, whose WAL a syncer can corrupt"))
+	fmt.Println(dim("  the database only: config.toml, lenses/, summarize/ and profile/ are not in it"))
+	dir := "<dir>" // a directory beside the snapshot when its name allows it, so the hint can be pasted
+	if d := strings.TrimSuffix(abs, ".db"); d != abs {
+		dir = shellArg(d)
+	}
+	fmt.Println(hint("everything", "witness export --all "+dir))
 	return nil
+}
+
+// snapshotSummary says what a snapshot holds: its size, then the archive's counts at the moment it
+// was taken. The output used to list file names only, so nothing showed the backup had the data.
+func snapshotSummary(st *store.Store, db string) string {
+	stat := st.Stats(activeLensNames(st))
+	parts := []string{countOf(stat.Sessions, "session", "sessions"),
+		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")}
+	if info, err := os.Stat(db); err == nil {
+		parts = append([]string{humanBytes(info.Size())}, parts...)
+	}
+	return strings.Join(parts, " · ")
 }

@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -44,6 +45,11 @@ func Run() int {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		return 0
 	}
+	// Until a command opens witness.log (setupLogging), slog must go nowhere. Its stdlib default is
+	// stderr, so the first-run "seeded the built-in default lens …" INFO line — internal issue number
+	// and all — was the first thing a new user saw, and the capture hooks printed it into the editor
+	// on their very first event. Anything a person must see is printed through the style helpers.
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := newRootCmd().Execute(); err != nil {
 		reportError(err)
 		return 1

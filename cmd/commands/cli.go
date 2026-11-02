@@ -47,6 +47,8 @@ func askYesNo(prompt string) bool {
 	answer := strings.TrimSpace(line)
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
 		fmt.Println(answer) // a terminal echoes what was typed; piped input would leave the line open
+	} else if err != nil {
+		fmt.Println() // Ctrl-D echoes no newline: without this the note below lands on the prompt line
 	}
 	switch strings.ToLower(answer) {
 	case "y", "yes":
@@ -55,7 +57,7 @@ func askYesNo(prompt string) bool {
 	// Only when NOBODY answered — /dev/null or a closed pipe. Keyed on EOF, not on "is a terminal":
 	// /dev/null is a character device, and someone who typed "n" doesn't need told about --yes.
 	if err != nil && answer == "" {
-		fmt.Println("(no answer — pass --yes to skip this question)")
+		fmt.Println(dim("(no answer — pass --yes to skip this question)"))
 	}
 	return false
 }
@@ -206,12 +208,16 @@ func reportError(err error) {
 		fmt.Fprintln(os.Stderr, string(b))
 		return
 	}
+	if useColorErr { // a terminal: the house failure glyph; a pipe or log keeps the plain form exactly
+		fmt.Fprintln(os.Stderr, styledErr(ansiRed, "✗")+" "+err.Error())
+		return
+	}
 	fmt.Fprintln(os.Stderr, "witness:", err)
 }
 
 func jsonOutputMode() bool {
 	for _, a := range os.Args[1:] {
-		if a == "--json" || strings.HasPrefix(a, "--json=") {
+		if a == "--json" || a == "-j" || strings.HasPrefix(a, "--json=") { // -j: every command's shorthand
 			return true
 		}
 	}

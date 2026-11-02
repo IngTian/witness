@@ -2,7 +2,10 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -166,77 +169,119 @@ func cmdDoctor(asJSON bool) error {
 	// Overall status glyph: bad if the embedder is down (doctor's core check
 	// failed), warn if distillation is stuck (sessions backing off) or an
 	// opencode model is misconfigured, else ok.
+	// An archive that has captured nothing is not healthy, however clean the rest reads: every
+	// read command then comes back empty, and doctor is where a new user goes to ask why.
 	overall := okGlyph()
 	if embErr != nil {
 		overall = badGlyph()
-	} else if stat.BackedOff > 0 || driftTotal > 0 || deferredErr != nil {
+	} else if stat.BackedOff > 0 || driftTotal > 0 || deferredErr != nil || stat.Sessions == 0 {
 		overall = warnGlyph()
 	}
-	fmt.Printf("%s  %s\n", overall, bold("witness doctor"))
-	fmt.Printf("   %s %s\n", dim("data root:"), st.Root)
+	fmt.Printf("%s  %s\n", overall, title("doctor", tildePath(st.Root), ""))
+	row := func(key, value, note string) { fmt.Println("    " + kvRow(key, value, note)) }
+	// Warnings are a short colored headline; the why and the fix go on the dim lines under it.
+	warn := func(headline string) { fmt.Printf("    %s %s\n", warnGlyph(), yellow(headline)) }
+	because := func(why string) {
+		// Dimmed line by line, so a wrapped explanation stays dim where styles reset per line.
+		for _, l := range strings.Split(wrapHanging(why, 6), "\n") {
+			fmt.Println("      " + dim(strings.TrimLeft(l, " ")))
+		}
+	}
+	fix := func(label, command string) { fmt.Println("  " + hint(label, command)) }
+	// Lenses are named by what the user registered them as; the stats key on the mined name.
+	shown := func(mined string) string { return lensRegisteredName(st, mined) }
 
 	// Runner block. This is the DEFAULT runner: one process distills every session
 	// regardless of source (Claude Code and OpenCode both feed the same L0), and it
 	// serves every lens that doesn't override it. So make the active backend, its
 	// models, and how to change them explicit —
 	// otherwise a user who installed both is left guessing which LLM mines their
-	// sessions. runnerCmd is the runner's own invocation hint (set above); empty
-	// models mean "let the runner pick its environment default".
+	// sessions. runnerCmd is the runner's own invocation hint (set above). The models are
+	// the EFFECTIVE ones (an empty review_model runs on mine_model), with their origin.
 	fmt.Println()
 	fmt.Println("  " + bold("Distillation"))
-	fmt.Printf("    %s %s  %s\n", label("runner"), cyan(cfg.Runner),
-		dim(fmt.Sprintf("(via `%s`; distills ALL sessions — Claude Code + OpenCode)", runnerCmd)))
-	fmt.Printf("    %s triage=%s  distill=%s\n", label("models"),
-		modelOrDefault(cfg.TriageModel, runnerCmd), modelOrDefault(cfg.DistillModel, runnerCmd))
+	eff := effectiveConfig(st, nil)
+	row("runner", cyan(cfg.Runner), "via "+runnerCmd+" · "+eff[0].from)
+	for _, s := range eff[1:] {
+		row(s.key, settingValue(s), s.from)
+	}
 	// Show the runner's model check unless it's the trivial "OK" with no models to
 	// check (Claude's no-op): a non-OK status, or any status when models are set, is
 	// worth surfacing. Runner-neutral — no branch on the runner name.
-	if modelStatus != "OK" || strings.TrimSpace(cfg.TriageModel) != "" || strings.TrimSpace(cfg.DistillModel) != "" {
-		fmt.Printf("    %s %s\n", label("models ok"), modelStatus)
+	if cause, bad := strings.CutPrefix(modelStatus, "INVALID: "); bad {
+		row("models", badGlyph()+" "+red("invalid"), "")
+		because(cause)
+	} else if modelStatus != "OK" || strings.TrimSpace(cfg.TriageModel) != "" || strings.TrimSpace(cfg.DistillModel) != "" {
+		row("models", okGlyph()+" "+modelStatus, "")
 	}
-	fmt.Printf("    %s review_every=%d  poignancy=%d\n", label("review"), cfg.ReviewEvery, cfg.ReviewPoignancy)
-	fmt.Printf("    %s enabled=%t  mine_concurrency=%d  chunking=%s  review_window=%d chars\n", label("auto"), cfg.AutoDistill, cfg.MineConcurrency, chunkingLabel(cfg.ChunkMaxChars), cfg.ReviewMaxChars)
-	// Surface prose_drift: the triage model returned no JSON observation array on some
+	cadence := countOf(cfg.ReviewEvery, "session", "sessions")
+	if cfg.ReviewPoignancy > 0 {
+		cadence += fmt.Sprintf(", or at poignancy %d", cfg.ReviewPoignancy)
+	}
+	row("review", "every "+cadence, "")
+	auto := "off"
+	if cfg.AutoDistill {
+		auto = "on"
+	}
+	row("worker", fmt.Sprintf("auto %s · %d parallel · chunking %s", auto, cfg.MineConcurrency, chunkingLabel(cfg.ChunkMaxChars)),
+		"review window "+humanCount(cfg.ReviewMaxChars)+" chars")
+	// Surface prose_drift: the mine model returned no JSON observation array on some
 	// pass, so those sessions distilled to zero observations even though they may not be
-	// uneventful. The remedy is a stronger triage model then a re-mine (#57).
+	// uneventful. The remedy is a stronger mine model then a re-mine (#57) — of the lens it
+	// happened on, by its registered name, never a <lens> placeholder.
 	if driftTotal > 0 {
-		last := "—"
+		headline := "prose drift: " + countOf(driftTotal, "event", "events")
 		if driftLastTS != "" {
-			last = driftLastTS
-			if driftLastLens != "" {
-				last += ", lens=" + driftLastLens
-			}
+			headline += ", last " + shortTime(driftLastTS)
 		}
-		fmt.Printf("    %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
-			"prose drift: %d event(s) (last %s) — triage model may be too weak to emit the observation array; `witness config set triage_model <stronger>`, then `witness lens backfill <lens> --fresh`",
-			driftTotal, last)))
+		lensFlag, backfill := "", "witness lens backfill <lens> --fresh"
+		if driftLastLens != "" {
+			name := shown(driftLastLens)
+			headline += " (lens " + name + ")"
+			lensFlag, backfill = " --lens "+name, "witness lens backfill "+name+" --fresh"
+		}
+		warn(headline)
+		because("the mine model may be too weak to return the observation array")
+		fix("raise it", "witness config set mine_model <stronger>"+lensFlag)
+		fix("then re-mine", backfill)
 	}
 	// `witness install` took a <claude|opencode> target before the install/wire split; it is
 	// now Args: cobra.NoArgs, so the old hint names a form that errors. Switching the runner
 	// is `config set runner` — what wire's own help points at — not a re-wire of the editor.
-	fmt.Printf("    %s witness config set runner <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
-	fmt.Printf("    %s witness config set <triage_model|distill_model> <model>  %s\n", dim("↳ set models:  "), dim("(or edit "+st.ConfigPath()+")"))
+	fix("set runner", "witness config set runner <claude|opencode>")
+	fix("set a model", "witness config set <mine_model|review_model> <model>")
 
 	fmt.Println()
 	fmt.Println("  " + bold("Archive"))
-	fmt.Printf("    %s %d sessions · %d raw messages · %d observations · %d facets\n",
-		label("layers"), stat.Sessions, stat.RawRecords, stat.Observations, stat.Facets)
+	row("layers", fmt.Sprintf("%s · %s raw messages · %s · %s",
+		countOf(stat.Sessions, "session", "sessions"), humanCount(stat.RawRecords),
+		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")), "")
+	if stat.Sessions == 0 {
+		warn("nothing captured yet — no editor is feeding this archive")
+		fix("wire editor", wireCommand())
+	}
 	// "N drifted" is the CURRENTLY-outstanding count (#69-2): distinct sessions whose
 	// last mine of some lens drifted and hasn't cleanly re-mined since. It drops as
 	// sessions recover, unlike the lifetime "drift events" total surfaced in the
 	// Distillation block above. Shown only when > 0 to keep a healthy archive's line clean.
-	queueLine := fmt.Sprintf("%d pending · %d backing off · last review: %s", stat.Pending, stat.BackedOff, lastReview)
+	queueLine := fmt.Sprintf("%s pending · %s backing off", humanCount(stat.Pending), humanCount(stat.BackedOff))
 	if stat.Drifted > 0 {
-		queueLine = fmt.Sprintf("%d pending · %d backing off · %d drifted · last review: %s", stat.Pending, stat.BackedOff, stat.Drifted, lastReview)
+		queueLine += fmt.Sprintf(" · %s drifted", humanCount(stat.Drifted))
 	}
 	if stat.BackedOff > 0 {
-		fmt.Printf("    %s %s\n", label("queue"), yellow(queueLine))
-		fmt.Printf("    %s %s\n", warnGlyph(), yellow("sessions are backing off — mining is failing; check witness.log"))
-	} else {
-		fmt.Printf("    %s %s\n", label("queue"), queueLine)
+		queueLine = yellow(queueLine)
 	}
-	fmt.Printf("    %s %s\n", label("profile"),
-		dim("collect-only (never injected); read via `witness profile`, MCP get_profile/get_facets, or witness.db"))
+	row("queue", queueLine, "last review "+shortTime(lastReview))
+	if stat.BackedOff > 0 {
+		warn(countOf(stat.BackedOff, "session", "sessions") + " backing off — mining is failing")
+		// The cause, on the screen: the backoff itself is logged without it, so this is the most
+		// recent error the worker did log.
+		if cause := lastLoggedError(st.LogPath()); cause != "" {
+			because("last error: " + cause)
+		}
+		because("full log: " + tildePath(st.LogPath()))
+	}
+	row("profile", dim("collect-only, never injected; read with witness profile or MCP get_profile"), "")
 	// Per-lens unreviewed backlog (#123): observations mined past the lens's review
 	// watermark but not yet folded into facets. Normally small (steady-state deltas fold
 	// in one window). A LARGE, persistent backlog is the visible signal of a frozen fold —
@@ -245,11 +290,13 @@ func cmdDoctor(asJSON bool) error {
 	// witness.log for a per-lens review error.
 	for _, ln := range activeLensNames(st) {
 		if d := st.UnreviewedDelta(ln); d > 0 {
-			line := fmt.Sprintf("lens %q: %d observation(s) mined but not yet folded into facets", ln, d)
+			line := fmt.Sprintf("%s: %s not yet folded into facets", shown(ln), countOf(d, "observation", "observations"))
 			if d > cfg.ReviewMaxChars/200 { // ~more than one window's worth of obs pending — nudge
-				fmt.Printf("    %s %s\n", warnGlyph(), yellow(line+" — review is behind; it folds in windows on the next `witness worker review`"))
+				warn(line)
+				because("review is behind; it folds in windows")
+				fix("catch up", "witness worker review")
 			} else {
-				fmt.Printf("    %s %s\n", label("review"), dim(line))
+				row("unreviewed", dim(line), "")
 			}
 		}
 	}
@@ -257,34 +304,63 @@ func cmdDoctor(asJSON bool) error {
 	fmt.Println()
 	fmt.Println("  " + bold("Embedder"))
 	if embErr != nil {
-		fmt.Printf("    %s %s %s\n", label("status"), badGlyph(), red(embedderStatus))
+		row("status", badGlyph()+" "+red("unavailable"), "")
+		because(strings.TrimPrefix(embedderStatus, "UNAVAILABLE: "))
 	} else {
 		status := embedderStatus
 		if embedDim > 0 {
 			status = fmt.Sprintf("%s (dim=%d)", embedderStatus, embedDim)
 		}
-		fmt.Printf("    %s %s %s\n", label("status"), okGlyph(), green(status))
+		row("status", okGlyph()+" "+green(status), "")
 		if embedDim > 0 {
-			retrieval := fmt.Sprintf("EN↔ZH %.4f  >  EN↔unrelated %.4f", enZh, enUnrelated)
+			pair := glyph("↔", "<->")
+			retrieval := fmt.Sprintf("EN%sZH %.4f  >  EN%sunrelated %.4f", pair, enZh, pair, enUnrelated)
 			mark := okGlyph()
 			if enZh <= enUnrelated {
 				mark = warnGlyph()
-				retrieval = yellow(retrieval + "  (expected EN↔ZH higher!)")
+				retrieval = yellow(retrieval + "  (expected EN" + pair + "ZH higher!)")
 			}
-			fmt.Printf("    %s %s %s\n", label("retrieval"), mark, retrieval)
+			row("retrieval", mark+" "+retrieval, "")
 		}
 	}
 	return deferredErr
 }
 
-// modelOrDefault renders an empty model setting as an explicit "(<runner>
-// default)" so the user sees WHY a model column is blank (it's not broken —
-// the runner picks its environment default) rather than an empty field.
-func modelOrDefault(model, runnerCmd string) string {
-	if strings.TrimSpace(model) == "" {
-		return "(" + runnerCmd + " default)"
+// lastLoggedError is the err field of the newest witness.log line that has one — the cause behind
+// "sessions backing off", which the backoff line itself does not carry. Only the log's tail is
+// read; "" when there is no log or no error in it. A runner error can carry the CLI's whole
+// multi-line stderr, so it comes back as one line, cut to a size doctor can show (witness.log,
+// whose path doctor prints next to it, keeps the rest).
+func lastLoggedError(path string) string {
+	const limit = 300
+	cause := []rune(strings.Join(strings.Fields(newestLoggedErr(path)), " "))
+	if len(cause) > limit {
+		return string(cause[:limit]) + glyph("…", "...")
 	}
-	return model
+	return string(cause)
+}
+
+func newestLoggedErr(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const tail = 256 << 10
+	if fi, err := f.Stat(); err == nil && fi.Size() > tail {
+		_, _ = f.Seek(fi.Size()-tail, io.SeekStart)
+	}
+	data, _ := io.ReadAll(f)
+	lines := strings.Split(string(data), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		var rec struct {
+			Err string `json:"err"`
+		}
+		if json.Unmarshal([]byte(lines[i]), &rec) == nil && rec.Err != "" {
+			return rec.Err
+		}
+	}
+	return ""
 }
 
 // chunkingLabel renders the ChunkMaxChars knob for the doctor report: the default

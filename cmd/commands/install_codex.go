@@ -208,34 +208,33 @@ func wireCodexHooks(path string, h codexHook) (changed bool, err error) {
 
 // cmdInstallCodex merges the witness hooks into ~/.codex/hooks.json, idempotently and
 // preserving every foreign hook.
-func cmdInstallCodex() error {
+func cmdInstallCodex() (wireOutcome, error) {
 	h, err := resolveCodexInstall()
 	if err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	path, err := codexHooksPath()
 	if err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	changed, err := wireCodexHooks(path, h)
 	if err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	if !changed {
-		fmt.Printf("hooks already wired in %s (unchanged, so Codex's hook trust is preserved)\n", path)
-		return nil
+		fmt.Println(resultRow(skipGlyph(), "hooks", tildePath(path), "unchanged — Codex's approval is kept"))
+		return wireOutcome{glyph: skipGlyph(), line: "already wired — nothing changed"}, nil
 	}
-	fmt.Printf("hooks wired into %s\n", path)
-	fmt.Printf("  %s on %s\n", h.program, strings.Join(codexHookEvents, ", "))
+	fmt.Println(resultRow(okGlyph(), "hooks", tildePath(path), strings.Join(codexHookEvents, " · ")))
 	// The one step installing cannot do. Codex hooks are inert until the exact
 	// definition is approved, so stating this plainly is the difference between working
-	// capture and an archive that stays empty with no error anywhere.
-	fmt.Println("REQUIRED: run /hooks inside Codex and approve the witness hooks — until you do,")
-	fmt.Println("          Codex will not run them and nothing will be captured.")
+	// capture and an archive that stays empty with no error anywhere. It is the RESULT line,
+	// printed last: in the middle of the screen it read as one note among several.
 	// Deliberately NOT a "Codex has no runner" note here: cmdInstall already prints that
 	// for any venue without a RunnerProvider, derived from the registry. Saying it twice
 	// is how two copies of one message drift apart.
-	return nil
+	return wireOutcome{glyph: warnGlyph(), line: bold("REQUIRED") + " approve the witness hooks in Codex — until then nothing is captured",
+		hints: [][2]string{{"in Codex, run", "/hooks"}}}, nil
 }
 
 // unwireCodexHooks strips our entries from the hooks.json at path, reporting whether
@@ -288,21 +287,21 @@ func isEmptyJSONObject(data []byte) bool {
 // bug cmdUninstallClaude had, where an unparseable or unwritable file left every hook
 // wired while the user was told they were gone, then deleted the binary and had Codex
 // fire a missing command on every turn.
-func cmdUninstallCodex() error {
+func cmdUninstallCodex() (removed bool, err error) {
 	path, err := codexHooksPath()
 	if err != nil {
-		return err
+		return false, err
 	}
 	changed, err := unwireCodexHooks(path)
 	switch {
 	case err == nil && changed:
-		fmt.Printf("hooks removed from %s\n", path)
+		fmt.Println(resultRow(okGlyph(), "hooks", "removed from "+tildePath(path), ""))
 	case err == nil:
-		fmt.Printf("no witness hooks in %s\n", path)
+		fmt.Println(resultRow(skipGlyph(), "hooks", "none in "+tildePath(path), ""))
 	case os.IsNotExist(err):
-		fmt.Printf("no %s, so no hooks to remove\n", path)
+		fmt.Println(resultRow(skipGlyph(), "hooks", "none — there is no "+tildePath(path), ""))
 	default:
-		return err
+		return false, err
 	}
-	return nil
+	return changed, nil
 }

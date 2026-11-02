@@ -55,8 +55,7 @@ func TestImportShowsProgressOnStderrOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "import codex: imported 2 raw record(s) from 2 session(s)\n" +
-		"background distillation not requested (--no-kick)\n"; out != want {
+	if want := "[ok] codex: imported 2 records from 2 sessions (not distilling: --no-kick)\n"; out != want {
 		t.Fatalf("stdout changed:\n%q\nwant\n%q", out, want)
 	}
 	if !strings.HasPrefix(errOut, "  codex · importing 0/2 · ") || strings.Count(errOut, "\n") != 1 {
@@ -106,8 +105,8 @@ func TestImportClearsTheLineBeforeTheSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	summary := strings.Index(out, "import codex: ")
-	if !strings.Contains(out, "codex · importing 1/1") || !regexp.MustCompile(`\r +\rimport codex: `).MatchString(out) ||
+	summary := strings.Index(out, "[ok] codex: ")
+	if !regexp.MustCompile(`codex .*?importing 1/1`).MatchString(out) || !regexp.MustCompile(`\r +\r\[ok\] codex: `).MatchString(out) ||
 		strings.Contains(out[summary:], "\r") {
 		t.Fatalf("the line must be drawn, then cleared, then the summary printed: %q", out)
 	}
@@ -123,9 +122,13 @@ func onATerminal(t *testing.T) {
 
 // `witness ingest` counts the SESSIONS it writes — known exactly once the input is parsed and
 // grouped, so here 3 records in 2 sessions are 2 — one per session written, and clears the line
-// before its summary. --quiet stays silent, and stdout is the summary it always printed.
+// before its summary. --quiet stays silent, and stdout is only the summary.
+//
+// The second ingest of the same file writes nothing, so no worker starts: its summary must say
+// "nothing new", where it used to say "ingested 0 record(s) … distilling in the background".
 func TestIngestShowsProgressPerSession(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts")) // the default lens loads, so a worker has work
 	input := filepath.Join(t.TempDir(), "docs.ndjson")
 	body := `{"text":"one","id":"a","session":"s"}` + "\n" + `{"text":"two","id":"b","session":"s"}` + "\n" +
 		`{"text":"alone","id":"c"}` + "\n" + "not json\n"
@@ -139,7 +142,9 @@ func TestIngestShowsProgressPerSession(t *testing.T) {
 	}
 
 	out, errOut, err := captureBoth(t, func() error { return ingest() }) // a pipe: one log line on stderr
-	if err != nil || out != "ingested 3 record(s), skipped 1 malformed; distilling in the background — witness status to watch\n" ||
+	if err != nil || out != "[!] ingested 3 records into 2 sessions, distilling in the background\n"+
+		"  skipped 1 line — not JSON, or no \"text\"\n"+
+		"  -> watch it      witness status\n" ||
 		!strings.HasPrefix(errOut, "  ingest · sessions 0/2 · ") || strings.Count(errOut, "\n") != 1 {
 		t.Fatalf("pipe: stdout %q, stderr %q, %v", out, errOut, err)
 	}
@@ -149,10 +154,11 @@ func TestIngestShowsProgressPerSession(t *testing.T) {
 		t.Fatal(err, errOut)
 	}
 	var frames []string
-	for _, m := range regexp.MustCompile(`ingest · sessions (\d+/\d+)`).FindAllStringSubmatch(out, -1) {
+	for _, m := range regexp.MustCompile(`ingest .*?sessions (\d+/\d+)`).FindAllStringSubmatch(out, -1) {
 		frames = append(frames, m[1])
 	}
-	const summary = "ingested 0 record(s), skipped 1 malformed; distilling in the background — witness status to watch\n"
+	const summary = "[-] nothing new — every record in docs.ndjson is already archived\n" +
+		"  skipped 1 line — not JSON, or no \"text\"\n"
 	if strings.Join(frames, " ") != "0/2 1/2 2/2" || !regexp.MustCompile(`\r +\r`+regexp.QuoteMeta(summary)+`$`).MatchString(out) {
 		t.Fatalf("want frames 0/2 1/2 2/2, the line cleared, then the summary: %q", out)
 	}

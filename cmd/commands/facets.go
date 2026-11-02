@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -45,6 +46,10 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		lensName = strings.TrimSpace(args[0])
 	}
+	// Facets are tagged with the lens's MINED name (its lens.json `name`), which can differ from
+	// the name it was registered under: `witness facets corpus-example` must find the facets the
+	// worker wrote as "regime", not report an empty lens.
+	dataName := lensDataName(st, lensName)
 	// The live profile by default: an archived facet is history, and listing it beside the
 	// active ones would misrepresent what witness currently claims about the person.
 	read := st.ReadActiveFacets
@@ -58,7 +63,7 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	if asJSON {
 		filtered := []store.Facet{}
 		for _, f := range facets {
-			if f.Lens == lensName && f.Current() != nil {
+			if f.Lens == dataName && f.Current() != nil {
 				filtered = append(filtered, f)
 			}
 		}
@@ -80,7 +85,7 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	}
 	// whyEmpty is a closure, not a value: it costs two indexed queries and is only needed
 	// on the empty path, which is the uncommon one.
-	renderCurrentFacets(lensName, facets, hw, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(lensName) })
+	renderCurrentFacets(lensName, dataName, facets, hw, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(dataName) })
 	return nil
 }
 
@@ -110,6 +115,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		lensName = strings.TrimSpace(args[0])
 	}
+	dataName := lensDataName(st, lensName)
 	dimension, key, ok := store.ParseFacetRef(strings.TrimSpace(ref))
 	if !ok {
 		return fmt.Errorf("--expand wants a facet as dimension/key (e.g. thinking/zooms_out), got %q", ref)
@@ -121,7 +127,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	}
 	var target *store.Facet
 	for i := range all {
-		if all[i].Lens == lensName && all[i].Dimension == dimension && all[i].Key == key {
+		if all[i].Lens == dataName && all[i].Dimension == dimension && all[i].Key == key {
 			target = &all[i]
 			break
 		}
@@ -129,7 +135,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	if target == nil {
 		return fmt.Errorf("no facet %s/%s in lens %q (see `witness facets %s --all`)", dimension, key, lensName, lensName)
 	}
-	tributaries, err := st.FacetTrajectory(lensName, dimension, key)
+	tributaries, err := st.FacetTrajectory(dataName, dimension, key)
 	if err != nil {
 		return err
 	}
@@ -144,51 +150,100 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 
 	state := "active"
 	if !target.Active() {
-		state = "archived"
+		state = "archived " + shortTime(target.ArchivedAt)
+	}
+	summary := state + " · " + countOf(len(target.Versions), "version", "versions")
+	if len(tributaries) > 0 {
+		summary += fmt.Sprintf(" · %d merged in", len(tributaries))
+	}
+	scope := lensName + " · " + store.FacetRef(dimension, key)
+	if !fits(cols("witness facets · " + scope + "  " + summary)) {
+		// A long key already fills the title line: the summary goes under it, not off the edge.
+		fmt.Println(title("facets", scope, ""))
+		fmt.Println("  " + dim(summary))
+	} else {
+		fmt.Println(title("facets", scope, summary))
+	}
+	fmt.Println()
+	// --expand is how a facet is read IN FULL, so its value is never cut to the terminal — only
+	// wrapped at its indent, where a soft wrap would have run it back to column 0.
+	if cur := target.Current(); cur != nil {
+		fmt.Printf("  %s\n", wrapHanging(cur.Value, 2))
+	}
+	if !target.Active() {
+		// An archived facet is not the end of its own story: say where it went (or that it was
+		// retired) and why — the reason is persisted exactly for this audit trail.
+		fmt.Println()
+		if target.ArchiveReason != "" {
+			fmt.Printf("  %s %s\n", dim("why:"), target.ArchiveReason)
+		}
 		if target.MergedInto != "" {
-			state = "archived → merged into " + target.MergedInto
+			fmt.Println(hint("merged into", "witness facets "+lensName+" --expand "+target.MergedInto))
+		} else {
+			fmt.Println(dim("  retired by compaction — not merged into another facet"))
 		}
 	}
-	fmt.Printf("%s/%s (%s lens, %s)\n\n", dimension, bold(key), lensName, state)
-	if cur := target.Current(); cur != nil {
-		fmt.Printf("  %s\n\n", cur.Value)
-	}
-	fmt.Printf("%s %s, %s of its own\n",
-		label("history"), pluralize(len(tributaries), "facet merged in", "facets merged in"),
-		pluralize(len(target.Versions), "version", "versions"))
 
 	if len(tributaries) == 0 {
-		fmt.Println(dim("\n  nothing was merged into this facet — its own versions are the whole story"))
+		// Only for a live facet: an archived one's story went on in the facet it was merged into,
+		// which the hint above already points at.
+		if target.Active() {
+			fmt.Println()
+			fmt.Println(dim("  nothing was merged into this facet — its own versions are the whole story"))
+		}
 		return nil
 	}
 	for _, f := range tributaries {
 		fmt.Println()
-		fmt.Printf("  %s %s/%s %s\n", dim("←"), f.Dimension, f.Key,
-			dim(fmt.Sprintf("(archived %s, %s)", f.ArchivedAt, pluralize(len(f.Versions), "version", "versions"))))
+		ref := store.FacetRef(f.Dimension, f.Key)
+		meta := fmt.Sprintf("archived %s · %s", shortTime(f.ArchivedAt), countOf(len(f.Versions), "version", "versions"))
+		if fits(4 + cols(ref) + 2 + cols(meta)) {
+			fmt.Printf("  %s %s  %s\n", dim(glyph("←", "<-")), ref, dim(meta))
+		} else { // a long key keeps its whole name (it is what --expand takes); the meta drops a line
+			fmt.Printf("  %s %s\n    %s\n", dim(glyph("←", "<-")), ref, dim(meta))
+		}
+		if f.ArchiveReason != "" {
+			fmt.Printf("    %s %s\n", dim("why:"), f.ArchiveReason)
+		}
+		// The tributary's ORIGINAL value, whole: seeing what was folded in is the point.
 		if cur := f.Current(); cur != nil {
-			fmt.Printf("      %s\n", cur.Value)
+			fmt.Printf("    %s\n", wrapHanging(cur.Value, 4))
 		}
 	}
 	return nil
 }
 
-func renderCurrentFacets(lensName string, facets []store.Facet, decaySeq int64, registered, enabled bool, whyEmpty func() store.EmptyReason) {
-	count := 0
+// renderCurrentFacets prints one lens's listing. name is what the user typed — the title and every
+// suggested command use it; dataName is the name the facets are tagged with.
+func renderCurrentFacets(name, dataName string, facets []store.Facet, decaySeq int64, registered, enabled bool, whyEmpty func() store.EmptyReason) {
+	count, archived, perDim := 0, 0, map[string]int{}
 	for _, f := range facets {
-		if f.Lens == lensName && f.Current() != nil {
+		if f.Lens == dataName && f.Current() != nil {
 			count++
+			perDim[f.Dimension]++
+			if !f.Active() {
+				archived++
+			}
 		}
 	}
 	if count == 0 {
+		fmt.Println(title("facets", name, ""))
+		fmt.Println()
 		// Three distinct empty states, each with the ACCURATE next step — the deletable
 		// default (#102) makes "absent" and "disabled" normal, not a stuck reviewer:
 		switch {
 		case !registered:
-			fmt.Printf("No lens %q is registered, so it has no facets (see `witness lens list`; restore the built-in one with `witness lens load-default`).\n", lensName)
+			fmt.Printf("  %s no lens %q is registered, so it has no facets\n", skipGlyph(), name)
+			fmt.Println(hint("see lenses", "witness lens list"))
+			if name == store.LensDefault {
+				fmt.Println(hint("restore it", "witness lens load-default"))
+			}
 		case !enabled:
 			// `witness worker review` only iterates the ENABLED set, so it would no-op here —
 			// point at enable, not review.
-			fmt.Printf("Lens %q is registered but disabled, so it has no facets — enable it with `witness lens enable %s`, then distill.\n", lensName, lensName)
+			fmt.Printf("  %s lens %q is disabled, so it has no facets\n", skipGlyph(), name)
+			fmt.Println(hint("enable it", "witness lens enable "+name))
+			fmt.Println(hint("then mine it", "witness lens backfill "+name))
 		default:
 			// Registered AND enabled, so the lens itself is fine — the question is which
 			// layer is missing. "The reviewer runs after enough observations accumulate" is
@@ -196,42 +251,61 @@ func renderCurrentFacets(lensName string, facets []store.Facet, decaySeq int64, 
 			// wait for the reviewer describes a fix that will never arrive (#166).
 			switch whyEmpty() {
 			case store.NoCapture:
-				fmt.Printf("No facets for lens %q — and this archive holds no raw turns at all, so nothing is capturing.\n", lensName)
-				fmt.Println("Wire an editor: `witness wire claude`, or add the plugin to opencode.json for OpenCode. Waiting will not help.")
+				fmt.Printf("  %s no facets for %q — nothing is capturing (the archive holds no raw turns)\n", skipGlyph(), name)
+				fmt.Println(hint("wire editor", wireCommand()))
 			case store.NoObservations:
-				fmt.Printf("No facets for lens %q — capture is working, but nothing has been mined into it yet.\n", lensName)
-				fmt.Printf("Mine it over existing history with `witness lens backfill %s`.\n", lensName)
+				fmt.Printf("  %s no facets for %q — capture works, but nothing has been mined into it yet\n", skipGlyph(), name)
+				fmt.Println(hint("mine history", "witness lens backfill "+name))
 			default:
-				fmt.Printf("No facets for lens %q yet — the reviewer runs after enough observations accumulate; force one now with `witness worker review`.\n", lensName)
+				fmt.Printf("  %s no facets for %q yet — its observations have not been reviewed\n", skipGlyph(), name)
+				fmt.Println(hint("review now", "witness worker review"))
 			}
 		}
 		return
 	}
-	fmt.Printf("Growth facets (%s lens) - %d\n\n", lensName, count)
+	// The title says what is listed: under --all active and archived are counted apart, so the
+	// number is never a silent mix of the two.
+	summary := humanCount(count) + " active · " + countOf(len(perDim), "dimension", "dimensions")
+	if archived > 0 {
+		summary = fmt.Sprintf("%s facets · %s active · %s archived", humanCount(count), humanCount(count-archived), humanCount(archived))
+	}
+	fmt.Println(title("facets", name, summary))
+	dimension := ""
 	for _, f := range facets {
-		if f.Lens != lensName {
+		if f.Lens != dataName {
 			continue
 		}
 		cur := f.Current()
 		if cur == nil {
 			continue
 		}
-		fmt.Printf("- %s/%s (confidence %.2f)\n", f.Dimension, f.Key, cur.DecayedConfidence(decaySeq))
+		if f.Dimension != dimension { // the read is ORDER BY dimension, so each group is contiguous
+			dimension = f.Dimension
+			fmt.Printf("\n  %s  %s\n", bold(dimension), dim(humanCount(perDim[dimension])))
+		}
+		meta := fmt.Sprintf("%d obs", len(cur.BecauseOf))
+		if f.LastSeen != "" {
+			meta = "seen " + shortTime(f.LastSeen) + " · " + meta
+		}
+		// 4 indent + 4 confidence + 2 gap put the key at column 10; it is cut, never the meta.
+		fmt.Printf("    %s  %s  %s\n", confidence(cur.DecayedConfidence(decaySeq)),
+			bold(fitLine(f.Key, 10+2+len([]rune(meta)))), dim(meta))
 		// Only reachable under --all. An archived facet listed without saying so would read as
 		// a live claim about the person, which is exactly what compaction decided it is not.
 		if !f.Active() {
+			where := "retired"
 			if f.MergedInto != "" {
-				fmt.Printf("  %s %s\n", dim("archived — merged into"), f.MergedInto)
-			} else {
-				fmt.Printf("  %s\n", dim("archived — retired"))
+				where = "merged into " + f.MergedInto
 			}
+			fmt.Printf("          %s\n", yellow("archived — "+where))
 		}
-		fmt.Printf("  %s\n", cur.Value)
-		if f.LastSeen != "" {
-			fmt.Printf("  last_seen: %s\n", f.LastSeen)
-		}
-		if len(cur.BecauseOf) > 0 {
-			fmt.Printf("  because_of: %s\n", strings.Join(cur.BecauseOf, ", "))
-		}
+		// The gist (the short claim, once compaction wrote one), cut to the terminal; a pipe gets
+		// it whole. --expand reads one facet in full.
+		fmt.Printf("          %s\n", fitLine(cur.Gist(), 10))
 	}
+}
+
+// wireCommand is the copyable "connect an editor" step, naming the editors wire really accepts.
+func wireCommand() string {
+	return "witness wire <" + strings.Join(platform.InstallTargets(), "|") + ">"
 }

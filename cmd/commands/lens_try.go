@@ -59,9 +59,9 @@ func newLensTryCmd() *cobra.Command {
 	}
 	c.Flags().IntVar(&trySessions, "sessions", 3, "number of sessions to sample")
 	c.Flags().StringVar(&trySession, "session", "", "preview one specific session id (bypasses sampling)")
-	c.Flags().StringVar(&tryModel, "model", "", "override the triage (extract) model for this run (e.g. test above a drift floor without editing config)")
+	c.Flags().StringVar(&tryModel, "model", "", "override mine_model for this run (e.g. test above a drift floor without editing config)")
 	c.Flags().BoolVar(&tryReviewFlag, "review", false, "also preview the REVIEW prompt: synthesize profile facets from the mined observations")
-	c.Flags().StringVar(&tryReviewMdl, "review-model", "", "override the distill (review) model for --review (defaults to distill_model)")
+	c.Flags().StringVar(&tryReviewMdl, "review-model", "", "override review_model for --review (defaults to review_model)")
 	c.Flags().BoolVar(&tryRecent, "recent", false, "sample the most recent sessions instead of the largest")
 	c.Flags().BoolVarP(&tryJSON, "json", "j", false, "output as JSON")
 	return c
@@ -154,9 +154,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// on-disk path. A registered name wins over a same-named dir in cwd: names have no
 	// path separators/extension, so the ambiguity is negligible, and "I typed my lens's
 	// name" is the overwhelmingly likely intent.
-	path := file
+	path, registered := file, false
 	if resolved, ok := registeredLensPath(st, file); ok {
-		path = resolved
+		path, registered = resolved, true
 	}
 
 	// Load the candidate. Strict first; on a reserved-name collision fall back to the
@@ -248,10 +248,16 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// Progress on stderr, so stdout (and --json) is untouched: each preview is a model call per
 	// chunk and can run for minutes, and nothing prints until all of them are back.
 	update, finish := tryProgress()
+	// A registered lens is shown by the name the user typed — corpus-example, not the "regime"
+	// its lens.json mines as. (--json keeps ln.Name, its documented field.)
+	display := ln.Name
+	if registered && !candidate {
+		display = file
+	}
 	var mu sync.Mutex
 	previewed := 0
 	show := func(more ...distill.Stage) {
-		update(distill.Progress{Where: ln.Name, Stages: append(
+		update(distill.Progress{Where: display, Stages: append(
 			[]distill.Stage{{Name: "previewing sessions", Done: previewed, Total: len(sessions)}}, more...)})
 	}
 	show()
@@ -282,9 +288,13 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	finish() // clear the line before the results print over it
 
 	if opts.asJSON {
-		return lensTryEmitJSON(st, cfg, ln, candidate, sessions, results, review)
+		if err := lensTryEmitJSON(st, cfg, ln, candidate, sessions, results, review); err != nil {
+			return err
+		}
+		// The document is unchanged and complete on stdout; only the exit status says it was empty.
+		return allFailed(results)
 	}
-	return lensTryRenderHuman(st, cfg, ln, candidate, sessions, results, review)
+	return lensTryRenderHuman(st, cfg, ln, display, candidate, sessions, results, review)
 }
 
 // reviewPreview is the outcome of the optional --review pass.
@@ -461,37 +471,39 @@ func modelLabel(model string) string {
 // lensTryRenderHuman prints the pre-computed results in SAMPLE ORDER (results[i] pairs
 // with sessions[i]). Rendering after the fan-out barrier — not during — is what keeps
 // output deterministic regardless of which session's mine finished first.
-func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
-	name := ln.Name
+func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, name string, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
 	if candidate {
-		name += dim(" (candidate — file's name was reserved)")
+		name += " (candidate — the lens's own name is reserved)"
 	}
-	fmt.Printf("%s %s   %s %s\n", label("lens"), bold(name), dim("extract model:"), modelLabel(distill.ModelFor(cfg, ln, distill.PhaseExtract)))
-	fmt.Printf("%s previewing %d session(s), read-only — nothing is written\n\n", label("try"), len(sessions))
+	fmt.Println(title("lens try", name, countOf(len(sessions), "session", "sessions")+" · read-only, nothing is written"))
+	fmt.Println()
+	fmt.Println("  " + kvRow("mine_model", settingValue(setting{value: distill.ModelFor(cfg, ln, distill.PhaseExtract)}), ""))
+	fmt.Println()
 
-	total, driftedAny := 0, false
+	total, driftedAny, failed := 0, false, 0
 	for i, sess := range sessions {
 		r := results[i]
 		turns := st.RawCount(sess)
 		chars := st.RawChars(sess)
-		fmt.Printf("%s %s  %s\n", cyan("── session"), sess,
-			dim(fmt.Sprintf("(%d turns, %d chars) ──", turns, chars)))
+		fmt.Printf("%s %s  %s\n", cyan(glyph("── session", "-- session")), sess,
+			dim(fmt.Sprintf("(%s · %s chars)", countOf(turns, "turn", "turns"), humanSize(chars))))
 
 		if r.err != nil {
 			// A transport error (or panic) on one session doesn't sink the others — report
 			// it and move on, so a rate-limit on session 2 still lets 1 and 3 render.
+			failed++
 			fmt.Printf("   %s %s\n\n", badGlyph(), red("mine failed: "+r.err.Error()))
 			continue
 		}
 		if r.chunks > 1 {
-			fmt.Printf("   %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
-				"session rendered to %d chunks — arc-spanning lenses may fragment across chunk boundaries", r.chunks)))
+			fmt.Printf("   %s %s\n", warnGlyph(), yellow(fmt.Sprintf("rendered to %d chunks", r.chunks)))
+			fmt.Printf("     %s\n", dim("an arc-spanning lens may fragment across chunk boundaries"))
 		}
 		if r.drifted {
 			driftedAny = true
-			fmt.Printf("   %s %s\n", warnGlyph(), yellow(
-				"model returned no observation array (prose drift) — the triage model may be too weak for this prompt; "+
-					"raise it with `witness config set triage_model <stronger>` or pass --model"))
+			fmt.Printf("   %s %s\n", warnGlyph(), yellow("no observation array returned (prose drift)"))
+			fmt.Printf("     %s\n", dim("the mine model may be too weak for this prompt — or retry with --model"))
+			fmt.Println(" " + hint("raise it", "witness config set mine_model <stronger>"))
 		}
 		if len(r.obs) == 0 && !r.drifted {
 			fmt.Printf("   %s\n", dim("(no observations — a quiet session for this lens, or the prompt found nothing)"))
@@ -500,37 +512,64 @@ func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candid
 			total++
 			fmt.Printf("   %s %s\n", dim(fmt.Sprintf("[%s p%d]", o.Dimension, o.Poignancy)), o.Observation)
 			if o.Evidence != "" {
-				fmt.Printf("       %s\n", dim("↳ "+o.Evidence))
+				fmt.Printf("       %s\n", dim(glyph("↳", "->")+" "+o.Evidence))
 			}
 		}
 		fmt.Printf("   %s\n\n", dim(fmt.Sprintf("%d obs in %.1fs", len(r.obs), r.elapsed.Seconds())))
 	}
 
-	summary := fmt.Sprintf("%d observation(s) across %d session(s)", total, len(sessions))
-	if driftedAny {
-		summary += " — some sessions drifted (see above)"
+	summary := countOf(total, "observation", "observations")
+	switch {
+	case failed > 0:
+		summary += fmt.Sprintf(" · %d of %s failed", failed, countOf(len(sessions), "session", "sessions"))
+	default:
+		summary += " across " + countOf(len(sessions), "session", "sessions")
 	}
-	fmt.Printf("%s %s\n", label("total"), summary)
+	if driftedAny {
+		summary += " · some drifted (see above)"
+	}
+	// A summary row, not a result line: when every session failed, the returned error is the one ✗.
+	if failed > 0 || driftedAny {
+		summary = yellow(summary)
+	}
+	fmt.Println("  " + kvRow("total", summary, ""))
 
 	if review != nil {
 		lensTryRenderReviewHuman(review)
 	}
-	return nil
+	return allFailed(results)
+}
+
+// allFailed is a preview's exit status: an error only when EVERY session's mine failed — a preview
+// that previewed nothing, which printed "0 observation(s) across 2 session(s)" and exited 0, reading
+// as a quiet lens. One failure among several is reported per session and is not fatal.
+func allFailed(results []tryResult) error {
+	for _, r := range results {
+		if r.err == nil {
+			return nil
+		}
+	}
+	if len(results) == 0 {
+		return nil
+	}
+	return fmt.Errorf("every session's mine failed (%d of %d): %w", len(results), len(results), results[0].err)
 }
 
 // lensTryRenderReviewHuman prints the REVIEW-preview block: the facets the lens's
 // REVIEW prompt would synthesize from the observations just mined. Kept visually
 // separate from the per-session extract output so the two stages read distinctly.
 func lensTryRenderReviewHuman(review *reviewPreview) {
-	fmt.Printf("\n%s %s   %s %s\n", label("review"),
-		dim(fmt.Sprintf("synthesizing %d mined observation(s)", review.obsFed)), dim("review model:"), review.model)
+	fmt.Println()
+	fmt.Println(cyan(glyph("── review", "-- review")) + "  " +
+		dim("synthesizing "+countOf(review.obsFed, "mined observation", "mined observations")))
+	fmt.Println("  " + kvRow("review_model", review.model, ""))
 	fmt.Printf("   %s\n", dim("(over the sampled sessions only — register + backfill for full-history change detection)"))
 	if review.drifted {
 		// Mirror the extract-drift message: distinct from a transport failure, with the
 		// actionable fix (a stronger review model), not a generic "review failed".
-		fmt.Printf("   %s %s\n", warnGlyph(), yellow(
-			"REVIEW returned no facet array (prose drift) — the review model may be too weak for this prompt; "+
-				"raise it with `witness config set distill_model <stronger>` or pass --review-model"))
+		fmt.Printf("   %s %s\n", warnGlyph(), yellow("REVIEW returned no facet array (prose drift)"))
+		fmt.Printf("     %s\n", dim("the review model may be too weak for this prompt — or retry with --review-model"))
+		fmt.Println(" " + hint("raise it", "witness config set review_model <stronger>"))
 		return
 	}
 	if review.err != nil {
@@ -564,13 +603,13 @@ func lensTryRenderReviewHuman(review *reviewPreview) {
 		fmt.Printf("   %s %s = %s%s\n",
 			dim(fmt.Sprintf("[%s/%s c%.2f]", f.Dimension, f.Key, f.Confidence)), bold(f.Key), f.Value, change)
 		if len(f.BecauseOf) > 0 {
-			fmt.Printf("       %s\n", dim(fmt.Sprintf("↳ because_of %d obs", len(f.BecauseOf))))
+			fmt.Printf("       %s\n", dim(fmt.Sprintf("%s because_of %d obs", glyph("↳", "->"), len(f.BecauseOf))))
 		}
 	}
 	if malformed > 0 {
-		fmt.Printf("   %s %s\n", warnGlyph(), yellow(fmt.Sprintf(
-			"%d facet(s) had no dimension/key/value — the REVIEW prompt likely doesn't specify the facet "+
-				"output schema (each element needs dimension, key, value, confidence, because_of)", malformed)))
+		fmt.Printf("   %s %s\n", warnGlyph(), yellow(countOf(malformed, "facet", "facets")+" had no dimension/key/value"))
+		fmt.Printf("     %s\n", dim(wrapHanging("the REVIEW prompt likely doesn't specify the facet output schema "+
+			"(each element needs dimension, key, value, confidence, because_of)", 5)))
 	}
 }
 

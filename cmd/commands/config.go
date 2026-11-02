@@ -1,12 +1,11 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -27,11 +26,85 @@ func canonicalConfigKey(k string) string {
 	return ""
 }
 
+// setting is one config key as the engine will actually use it: value "" means the runner's own
+// default, and from says where the value came from ("" when there is nothing worth saying).
+type setting struct{ key, value, from string }
+
+// runnerBoundMetaKey mirrors store.runnerBoundKey: "1" once a runner was bound explicitly (config
+// set runner / wire), which is what makes config.toml win over $WITNESS_RUNNER.
+const runnerBoundMetaKey = "runner_bound"
+
+// effectiveConfig resolves runner, mine_model and review_model the way the engine does —
+// ResolveRunner, then distill.RunnerFor / distill.ModelFor — so every surface shows what will run,
+// not the raw field. Reading the raw field said review_model was "(runner default)" while review
+// actually ran on mine_model, because an empty review_model falls back to it. l == nil is the
+// default scope; otherwise l is the lens as loaded from the registry (its fields are the overrides).
+func effectiveConfig(st *store.Store, l *lens.Lens) []setting {
+	cfg := st.LoadConfig()
+	cfg.Runner = st.ResolveRunner(cfg)
+	runnerFrom := "built-in default"
+	switch {
+	case st.MetaString(runnerBoundMetaKey) == "1":
+		runnerFrom = "config.toml"
+	case strings.TrimSpace(os.Getenv("WITNESS_RUNNER")) != "":
+		runnerFrom = "$WITNESS_RUNNER"
+	}
+	if l == nil {
+		mineFrom, reviewFrom := "", ""
+		if cfg.TriageModel != "" {
+			mineFrom = "config.toml"
+		}
+		switch {
+		case cfg.DistillModel != "":
+			reviewFrom = "config.toml"
+		case cfg.TriageModel != "":
+			reviewFrom = "falls back to mine_model"
+		}
+		return []setting{
+			{"runner", cfg.Runner, runnerFrom},
+			{"mine_model", distill.ModelFor(cfg, nil, distill.PhaseExtract), mineFrom},
+			{"review_model", distill.ModelFor(cfg, nil, distill.PhaseReview), reviewFrom},
+		}
+	}
+	runner, from := distill.RunnerFor(cfg, l), "inherited from default"
+	if l.Runner != "" {
+		from = "lens override"
+	}
+	out := []setting{{"runner", runner, from}}
+	for _, m := range []struct {
+		key, override string
+		phase         distill.Phase
+	}{{"mine_model", l.ExtractModel, distill.PhaseExtract}, {"review_model", l.ReviewModel, distill.PhaseReview}} {
+		from := "inherited from default"
+		switch {
+		case m.override != "":
+			from = "lens override"
+		case runner != cfg.Runner:
+			// ModelFor drops the default's model for a lens on another runtime: that name belongs
+			// to the default runner and would be a bad model on this one.
+			from = runner + "'s own default"
+		case m.phase == distill.PhaseReview && cfg.DistillModel == "" && cfg.TriageModel != "":
+			from = "falls back to default mine_model"
+		}
+		out = append(out, setting{m.key, distill.ModelFor(cfg, l, m.phase), from})
+	}
+	return out
+}
+
+// settingValue renders a setting's value for a person: "runner default" (dim) when it is empty.
+func settingValue(s setting) string {
+	if s.value == "" {
+		return dim("runner default")
+	}
+	return s.value
+}
+
 func newConfigCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:     "config",
 		GroupID: groupConfig,
 		Short:   "Get or set config (runner, models) — default scope or per-lens.",
+		RunE:    groupRunE, // a typo'd subcommand is an error, not its help page and exit 0
 		Long: `Get or set config knobs that control distillation: runner, mine_model (mining / triage), review_model (review).
 
 The config tree has TWO scopes:
@@ -39,7 +112,7 @@ The config tree has TWO scopes:
   • PER-LENS scope (--lens <name>): a lens's runner/model overrides; empty = inherit from default.
 
 Canonical keys:
-  runner        distillation runtime: "claude" or "opencode" (also settable via ` + "`witness install`" + `)
+  runner        distillation runtime: "claude" or "opencode" (also set by ` + "`witness wire <editor>`" + `)
   mine_model    MINING model — L0 turns → L1 observations, per session (frequent, dominant cost). Empty = the runner's default.
   review_model  REVIEW model — L1 observations → L2 facets + L4 profile, batched. Empty = falls back to mine_model, so one setting covers the whole pipeline.
 
@@ -115,11 +188,7 @@ func cmdConfigGet(args []string, lensName string) error {
 			return err
 		}
 		if v == "" {
-			if lensName != "" {
-				v = "(inherited from default)"
-			} else {
-				v = "(runner default)"
-			}
+			v = "(runner default)" // inheritance is already resolved, so empty can only mean this
 		}
 		fmt.Println(v)
 		return nil
@@ -154,24 +223,26 @@ func cmdConfigSet(key, value string, lensName string) error {
 	if err := configApplySet(st, canonical, value, lensName); err != nil {
 		return err
 	}
-	shown := value
-	if shown == "" {
-		switch {
-		case lensName != "":
-			shown = "(cleared — inherits from default)"
-		case canonical == "runner":
-			// Say what actually happened. "(runner default)" implied a value had been chosen,
-			// while the effect is the opposite: the key is gone and resolution falls back.
-			shown = "(cleared — unbound; resolves from WITNESS_RUNNER, else the built-in default)"
-		default:
-			shown = "(runner default)"
-		}
-	}
-	scope := "default"
+	scope := "default scope"
 	if lensName != "" {
-		scope = fmt.Sprintf("lens %q", lensName)
+		scope = "lens " + lensName
 	}
-	fmt.Printf("set %s · %s = %s\n", scope, canonical, shown)
+	if value != "" {
+		fmt.Println(result(okGlyph(), "set "+canonical+" = "+value, scope))
+		return nil
+	}
+	// A clear says what resolution falls back to. `config unset` used to print "set … = (runner
+	// default)", which read as if a value had been chosen when the key was removed.
+	then := "runner default"
+	switch {
+	case lensName != "":
+		then = "inherits from default"
+	case canonical == "runner":
+		then = "unbound; $WITNESS_RUNNER, else the built-in default"
+	case canonical == "review_model":
+		then = "falls back to mine_model"
+	}
+	fmt.Println(result(okGlyph(), "cleared "+canonical, scope+" → "+then))
 	return nil
 }
 
@@ -182,85 +253,26 @@ func cmdConfigList(lensName string) error {
 	}
 	defer st.Close()
 
-	if lensName == "" {
-		// DEFAULT scope: render the three default keys.
-		cfg := st.LoadConfig()
-		runner := st.ResolveRunner(cfg)
-		fmt.Println(header("config · default"))
-		fmt.Println()
-		fmt.Println(kvRow("runner", runner, "default"))
-		mine := cfg.TriageModel
-		if mine == "" {
-			mine = dim("(runner default)")
+	var l *lens.Lens
+	scope := "default"
+	if lensName != "" {
+		if err := configCheckLensExists(st, lensName); err != nil {
+			return err
 		}
-		fmt.Println(kvRow("mine_model", mine, "default"))
-		review := cfg.DistillModel
-		if review == "" {
-			review = dim("(runner default)")
+		// LoadRegistered does not resolve inheritance: its model/runner fields are exactly the
+		// lens.json overrides, which is what tells an override from an inherited value.
+		if l, err = lens.LoadRegistered(lensName, st.LensesDir()); err != nil {
+			return fmt.Errorf("load lens %q: %w", lensName, err)
 		}
-		fmt.Println(kvRow("review_model", review, "default"))
-		fmt.Println()
-		fmt.Println(footer("precedence: per-lens › default › environment"))
-		return nil
+		scope = "lens " + lensName
 	}
-
-	// LENS scope: render the lens's overrides + inherited values with origin notes.
-	if err := configCheckLensExists(st, lensName); err != nil {
-		return err
-	}
-	// Read the RAW lens.json to know override vs. inherited (LoadRegistered resolves inherited values).
-	rawCfg, err := configReadRawLensJSON(st, lensName)
-	if err != nil {
-		return err
-	}
-	// Also load the resolved lens to get the effective values (including inherited ones).
-	l, err := lens.LoadRegistered(lensName, st.LensesDir())
-	if err != nil {
-		return fmt.Errorf("load lens %q: %w", lensName, err)
-	}
-	fmt.Printf("%s\n", header(fmt.Sprintf("config · lens: %s", lensName)))
+	fmt.Println(title("config", scope, ""))
 	fmt.Println()
-	// runner
-	runnerOrigin := "inherited from default"
-	if strings.TrimSpace(rawCfg.Runner) != "" {
-		runnerOrigin = "lens override"
+	for _, s := range effectiveConfig(st, l) {
+		fmt.Println("  " + kvRow(s.key, settingValue(s), s.from))
 	}
-	runnerVal := l.Runner
-	if runnerVal == "" {
-		// Resolved to empty — need to show the default runner value, not blank.
-		runnerVal = st.ResolveRunner(st.LoadConfig())
-	}
-	fmt.Println(kvRow("runner", runnerVal, runnerOrigin))
-	// mine_model (extract)
-	mineOrigin := "inherited from default"
-	if strings.TrimSpace(rawCfg.ExtractModel) != "" {
-		mineOrigin = "lens override"
-	}
-	mineVal := l.ExtractModel
-	if mineVal == "" {
-		cfg := st.LoadConfig()
-		mineVal = cfg.TriageModel
-		if mineVal == "" {
-			mineVal = dim("(runner default)")
-		}
-	}
-	fmt.Println(kvRow("mine_model", mineVal, mineOrigin))
-	// review_model
-	reviewOrigin := "inherited from default"
-	if strings.TrimSpace(rawCfg.ReviewModel) != "" {
-		reviewOrigin = "lens override"
-	}
-	reviewVal := l.ReviewModel
-	if reviewVal == "" {
-		cfg := st.LoadConfig()
-		reviewVal = cfg.DistillModel
-		if reviewVal == "" {
-			reviewVal = dim("(runner default)")
-		}
-	}
-	fmt.Println(kvRow("review_model", reviewVal, reviewOrigin))
 	fmt.Println()
-	fmt.Println(footer("precedence: per-lens › default › environment"))
+	fmt.Println("  " + footer("precedence: per-lens › default › environment"))
 	return nil
 }
 
@@ -314,51 +326,25 @@ func configApplySet(st *store.Store, key, value, lensName string) error {
 	}
 }
 
-// configReadValue reads the effective value of a config key for the given scope.
-// lensName="" means default scope; non-empty means lens scope (returns the resolved value,
-// which may be inherited from the default).
+// configReadValue reads the EFFECTIVE value of a config key for the given scope — what the engine
+// will use, inheritance and the review→mine fallback resolved. lensName="" means default scope.
 func configReadValue(st *store.Store, key, lensName string) (string, error) {
-	if lensName == "" {
-		// DEFAULT scope
-		cfg := st.LoadConfig()
-		switch key {
-		case "runner":
-			return st.ResolveRunner(cfg), nil
-		case "mine_model":
-			return cfg.TriageModel, nil
-		case "review_model":
-			return cfg.DistillModel, nil
-		default:
-			return "", fmt.Errorf("unknown config key %q", key)
+	var l *lens.Lens
+	if lensName != "" {
+		if err := configCheckLensExists(st, lensName); err != nil {
+			return "", err
+		}
+		var err error
+		if l, err = lens.LoadRegistered(lensName, st.LensesDir()); err != nil {
+			return "", fmt.Errorf("load lens %q: %w", lensName, err)
 		}
 	}
-	// LENS scope
-	if err := configCheckLensExists(st, lensName); err != nil {
-		return "", err
-	}
-	l, err := lens.LoadRegistered(lensName, st.LensesDir())
-	if err != nil {
-		return "", fmt.Errorf("load lens %q: %w", lensName, err)
-	}
-	switch key {
-	case "runner":
-		if l.Runner != "" {
-			return l.Runner, nil
+	for _, s := range effectiveConfig(st, l) {
+		if s.key == key {
+			return s.value, nil
 		}
-		return st.ResolveRunner(st.LoadConfig()), nil
-	case "mine_model":
-		if l.ExtractModel != "" {
-			return l.ExtractModel, nil
-		}
-		return st.LoadConfig().TriageModel, nil
-	case "review_model":
-		if l.ReviewModel != "" {
-			return l.ReviewModel, nil
-		}
-		return st.LoadConfig().DistillModel, nil
-	default:
-		return "", fmt.Errorf("unknown config key %q", key)
 	}
+	return "", fmt.Errorf("unknown config key %q", key)
 }
 
 // configCheckLensExists returns an error if the lens is not registered.
@@ -370,25 +356,4 @@ func configCheckLensExists(st *store.Store, name string) error {
 		}
 	}
 	return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
-}
-
-// configReadRawLensJSON reads the raw lens.json (the on-disk struct) to distinguish
-// an override from an inherited value. lens.LoadRegistered resolves inherited values,
-// so it can't tell which fields are overrides — but the origin view needs that.
-// This is a READ of a file the CLI already owns the path to — NOT an engine change.
-func configReadRawLensJSON(st *store.Store, name string) (lens.LensConfig, error) {
-	path := filepath.Join(st.LensesDir(), name, "lens.json")
-	var cfg lens.LensConfig
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No lens.json means all fields ride the default (no overrides).
-			return cfg, nil
-		}
-		return cfg, fmt.Errorf("read lens.json: %w", err)
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse lens.json: %w", err)
-	}
-	return cfg, nil
 }

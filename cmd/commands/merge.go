@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -69,6 +70,9 @@ var errMergeDeclined = errors.New("not merged — nothing was written")
 func resolveMergeSource(target string) (dbPath, dir string, err error) {
 	target = strings.TrimSpace(target)
 	info, err := os.Stat(target)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", "", fmt.Errorf("%s does not exist (expected a directory from `witness export --all`, or a .db file)", tildePath(target))
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -118,8 +122,7 @@ func cmdMerge(target string, yes bool, ask func(prompt string) bool) error {
 	// `witness merge x --yes && rm -rf x` must not delete the only copy after merging nothing.
 	unlock, ok := st.WorkerLock()
 	if !ok {
-		return fmt.Errorf("a distillation worker is running and holds this archive; nothing was merged — " +
-			"wait for it to finish, or stop it with `witness worker stop`, then retry")
+		return workerBusyErr(st, "nothing was merged")
 	}
 	defer unlock()
 
@@ -136,11 +139,11 @@ func cmdMerge(target string, yes bool, ask func(prompt string) bool) error {
 		if files.notes() {
 			// Never "everything is already here" when the export holds a definition that differs
 			// from ours: prompt text is in no database, and that claim invites discarding the export.
-			fmt.Printf("no data to merge from %s, but it holds definitions that differ from yours:\n", target)
+			fmt.Printf("%s no data to merge from %s, but it holds definitions that differ from yours:\n", skipGlyph(), tildePath(target))
 			printMergeFiles(st.Root, files)
 			return nil
 		}
-		fmt.Printf("nothing to merge — everything in %s is already here\n", target)
+		fmt.Printf("%s nothing to merge — everything in %s is already here\n", skipGlyph(), tildePath(target))
 		return nil
 	}
 
@@ -149,7 +152,7 @@ func cmdMerge(target string, yes bool, ask func(prompt string) bool) error {
 	// capture hook until the user answered. The worker lock stays held, so no review rewrites the
 	// facets meanwhile; the apply recomputes the same deterministic merge, and can differ from what
 	// was shown only by turns captured while the prompt was open.
-	if !yes && !ask("Merge it? This archive is backed up first. [y/N]: ") {
+	if !yes && !ask(bold("Merge it?")+dim(" This archive is backed up first.")+" [y/N]: ") {
 		return errMergeDeclined
 	}
 
@@ -269,49 +272,75 @@ func (f *mergeFiles) apply(st *store.Store) {
 	for _, l := range f.register {
 		if err := st.RegisterLens(l.name, l.path); err != nil {
 			f.failed = append(f.failed, l.name)
-			f.results = append(f.results, fmt.Sprintf("%s %s: NOT registered (%v) — its prompt exists only in the export", badGlyph(), l.name, err))
+			f.results = append(f.results, lensRow(badGlyph(), l.name, fmt.Sprintf("NOT registered (%v) — its prompt exists only in the export", err)))
 			continue
 		}
-		f.results = append(f.results, l.name+": registered, NOT enabled — enable it with `witness lens enable "+l.name+"`")
+		f.results = append(f.results, lensRow(cyan("+"), l.name, "registered, NOT enabled")+"\n"+
+			subHint("enable", "witness lens enable "+l.name))
 	}
 }
 
+// lensRow is one lens line of a merge screen. Every lens row leads with a glyph, so the names line
+// up under each other whatever the row says.
+func lensRow(glyph, name, text string) string {
+	return mergeRow("lens") + padGlyph(glyph) + " " + bold(name) + "  " + text
+}
+
+// joinNonZero renders the non-zero parts of a count line ("552 new · 3 longer there"), or none.
+// A row of "0 already here · 0 longer there · 0 longer here" said nothing four times.
+func joinNonZero(none string, parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" && !strings.HasPrefix(p, "0 ") {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		return none
+	}
+	return strings.Join(kept, " · ")
+}
+
 func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
-	fmt.Println(header(fmt.Sprintf("merge %s → %s", src, root)))
+	fmt.Println(header(fmt.Sprintf("merge %s → %s", tildePath(src), tildePath(root))))
 	span := "no transcripts"
 	if r.FirstTS != "" {
 		span = r.FirstTS[:min(10, len(r.FirstTS))] + " → " + r.LastTS[:min(10, len(r.LastTS))]
 	}
-	fmt.Printf("  incoming      %s · schema v%d", span, r.IncomingSchema)
+	fmt.Printf(mergeRow("incoming")+"%s · schema v%d", span, r.IncomingSchema)
 	if len(r.Cwds) > 0 {
-		fmt.Printf(" · mostly in %s", strings.Join(r.Cwds, ", "))
+		cwds := make([]string, len(r.Cwds))
+		for i, c := range r.Cwds {
+			cwds[i] = tildePath(c)
+		}
+		fmt.Printf(" · mostly in %s", strings.Join(cwds, ", "))
 	}
 	fmt.Println()
 
 	s := r.Sessions
-	fmt.Printf("  sessions      %d new · %d already here · %d longer there (%s appended) · %d longer here\n",
-		s.New, s.Equal, s.LongerThere, pluralize(s.Appended, "turn", "turns"), s.LongerHere)
+	longer := ""
+	if s.LongerThere > 0 {
+		longer = fmt.Sprintf("%s longer there (%s appended)", humanCount(s.LongerThere), countOf(s.Appended, "turn", "turns"))
+	}
+	fmt.Println(mergeRow("sessions") + joinNonZero("none new", humanCount(s.New)+" new", humanCount(s.Equal)+" already here",
+		longer, humanCount(s.LongerHere)+" longer here"))
 	for _, d := range s.Diverged {
 		fmt.Printf("                %s %s differs from yours — yours keeps the id, theirs arrives as %s\n", warnGlyph(), d.From, d.To)
 	}
 	if s.Duplicates > 0 {
-		fmt.Printf("                %d skipped: a second copy of a transcript already here\n", s.Duplicates)
+		fmt.Printf("                %s skipped: a second copy of a transcript already here\n", humanCount(s.Duplicates))
 	}
 	o := r.Observations
-	fmt.Printf("  observations  %d reviewed there · %d to review · %d already here", o.Reviewed, o.Unreviewed, o.AlreadyHere)
-	if o.SharedMined > 0 {
-		fmt.Printf(" · %d skipped (sessions you already mined)", o.SharedMined)
-	}
-	if o.Orphaned > 0 {
-		fmt.Printf(" · %d skipped (yours will be mined instead)", o.Orphaned)
-	}
-	fmt.Println()
+	fmt.Println(mergeRow("observations") + joinNonZero("none new", humanCount(o.Reviewed)+" reviewed there",
+		humanCount(o.Unreviewed)+" to review", humanCount(o.AlreadyHere)+" already here",
+		humanCount(o.SharedMined)+" skipped (sessions you already mined)",
+		humanCount(o.Orphaned)+" skipped (yours will be mined instead)"))
 	if r.Staged > 0 {
-		fmt.Printf("  staged        %d recorded in-session, not yet distilled\n", r.Staged)
+		fmt.Printf(mergeRow("staged")+"%s recorded in-session, not yet distilled\n", humanCount(r.Staged))
 	}
 	fc := r.Facets
-	fmt.Printf("  facets        %d incoming: %d new · %d already here · %d updated · %d with later history adopted\n",
-		fc.Incoming, fc.New, fc.Shared, fc.Updated, fc.FastForwarded)
+	fmt.Println(mergeRow("facets") + joinNonZero("none new", humanCount(fc.New)+" new", humanCount(fc.Shared)+" already here",
+		humanCount(fc.Updated)+" updated", humanCount(fc.FastForwarded)+" with later history adopted"))
 	if len(fc.SameKey) > 0 {
 		fmt.Printf("                %s %s with yours — the copy with newer evidence keeps the key,\n"+
 			"                  the other is kept beside it, archived into it:\n",
@@ -329,55 +358,64 @@ func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
 		}
 	}
 	printMergeFiles(root, f)
-	fmt.Println("  config.toml   yours is kept")
+	fmt.Println(mergeRow("config.toml") + "yours is kept")
 	fmt.Println()
 }
 
 // printMergeDone reports the applied merge and how to undo it.
 func printMergeDone(root string, r *store.MergeReport, f *mergeFiles, backup string) {
 	for _, line := range f.results {
-		fmt.Printf("  lens          %s\n", line)
+		fmt.Println(line)
 	}
 	glyph := okGlyph()
 	if len(f.failed) > 0 {
 		glyph = warnGlyph()
 	}
-	fmt.Printf("%s merged: %d sessions, %d observations, %d facets new here.\n", glyph,
-		r.Sessions.New, r.Observations.Reviewed+r.Observations.Unreviewed, r.Facets.New)
-	fmt.Printf("  this archive as it was before: %s\n", backup)
-	fmt.Printf("  to undo: stop witness, then replace %s with that directory\n", root)
-	fmt.Println(dim("  nothing here called a model. Optionally, `witness compact` merges duplicates the two"))
-	fmt.Println(dim("  archives wrote under different keys (that one does call the model)."))
+	fmt.Printf("%s merged: %s, %s, %s new here\n", glyph, countOf(r.Sessions.New, "session", "sessions"),
+		countOf(r.Observations.Reviewed+r.Observations.Unreviewed, "observation", "observations"),
+		countOf(r.Facets.New, "facet", "facets"))
+	fmt.Println("  " + kvRow("backup", tildePath(backup), "this archive as it was before"))
+	fmt.Println("  " + kvRow("to undo", "stop witness, then replace "+tildePath(root)+" with the backup", ""))
+	// The note goes on its own line: after the command it made the hint uncopyable as a whole line.
+	fmt.Println(dim("  the same trait may now sit under two keys; compact merges them (it calls the model)"))
+	fmt.Println(hint("dedupe", "witness compact"))
 }
 
 func printMergeFiles(root string, f *mergeFiles) {
 	for _, l := range f.register {
-		fmt.Printf("  lens          %s: will be registered, NOT enabled — enable it with `witness lens enable %s`\n", l.name, l.name)
+		fmt.Println(lensRow(cyan("+"), l.name, "will be registered, NOT enabled"))
 	}
 	for _, l := range f.differ {
-		fmt.Printf("  lens          %s %s: their definition differs — yours is kept (theirs: witness lens register %s %q)\n",
-			warnGlyph(), l.name, l.name, l.path)
+		fmt.Println(lensRow(warnGlyph(), l.name, "their definition differs — yours is kept"))
+		fmt.Println(subHint("theirs", "witness lens register "+l.name+" "+shellArg(l.path)))
 	}
 	for _, n := range f.refused {
-		fmt.Printf("  lens          %s %s: would be refused here, skipped\n", warnGlyph(), n)
+		fmt.Println(lensRow(warnGlyph(), n, "would be refused here, skipped"))
 	}
 	for _, n := range f.unknown {
-		fmt.Printf("  lens          %s %s: its data arrives, but there is no definition for it here — nothing will review\n"+
-			"                  it until you `witness lens register %s <dir>` and enable it\n", warnGlyph(), n, n)
+		fmt.Println(lensRow(warnGlyph(), n, "its data arrives, but there is no definition for it here"))
+		fmt.Println(subHint("define it", "witness lens register "+n+" <dir>"))
 	}
 	for _, n := range f.disabled {
-		fmt.Printf("  lens          %s: data arrives for a lens you have registered but not enabled — `witness lens enable %s` to review it\n", n, n)
+		// True whether or not anything arrives: this also prints when there is no data to merge.
+		fmt.Println(lensRow(skipGlyph(), n, "registered here but not enabled — nothing reviews its data"))
+		fmt.Println(subHint("review it", "witness lens enable "+n))
 	}
 	for _, src := range f.summarize {
 		dst := filepath.Join(root, "summarize", filepath.Base(src))
 		note := ""
 		if _, err := os.Stat(dst); err == nil {
-			note = " (this REPLACES yours — copy it aside first)"
+			note = " (using it REPLACES yours — copy yours aside first)"
 		}
-		fmt.Printf("  summarize     %s not copied — it changes how your portrait is written. To use it%s:\n"+
-			"                  mkdir -p %q && cp %q %q\n", filepath.Base(src), note, filepath.Dir(dst), src, dst)
+		fmt.Println(mergeRow("summarize") + padGlyph(skipGlyph()) + " " + bold(filepath.Base(src)) + "  not copied — it changes how your portrait is written" + note)
+		fmt.Println(subHint("use it", fmt.Sprintf("mkdir -p %q && cp %q %q", filepath.Dir(dst), src, dst)))
 	}
 	if f.profile {
-		fmt.Printf("  profile       not merged — rebuilt from the merged facets; theirs stays in %s\n", filepath.Join(f.srcDir, "profile"))
+		fmt.Println(mergeRow("profile") + padGlyph(skipGlyph()) + " not merged — rebuilt from the merged facets " +
+			dim("(theirs stays in "+tildePath(filepath.Join(f.srcDir, "profile"))+")"))
 	}
 }
+
+// mergeRow is a plan row's label: kvRow's dim 14-column label, so the values line up with every
+// other row style (and a pipe sees exactly the same bytes as before color).
+func mergeRow(name string) string { return "  " + kvRow(name, "", "") }

@@ -1,7 +1,7 @@
 package commands
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,6 +26,7 @@ session; an archive can run any number, including none.
 The built-in "default" (person-growth) lens is just an ordinary lens: enable,
 disable, edit, or remove it like any other. It's added automatically on first
 use; 'witness lens load-default' brings it back if you removed it.`),
+		RunE: groupRunE,
 	}
 	lensCmd.AddCommand(
 		&cobra.Command{
@@ -71,6 +72,27 @@ use; 'witness lens load-default' brings it back if you removed it.`),
 		newLensTryCmd(),
 	)
 	return lensCmd
+}
+
+// groupRunE is the RunE of a command group (lens, config, observations). A group with no RunE
+// printed its help for ANY argument and exited 0 — cobra checks unknown subcommands only on the
+// root — so `witness lens enabel x` looked like success to a person and to a script. Bare, it still
+// prints help; with an argument it is the same "unknown command" error the root gives, suggestion
+// included. (Checked here rather than with Args: cobra.NoArgs, which would also reject the
+// alternation prose docs/cli.md writes as `witness lens register|enable|disable|list` and turn
+// the doc contract red over prose.)
+func groupRunE(c *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return c.Help()
+	}
+	if c.SuggestionsMinimumDistance <= 0 {
+		c.SuggestionsMinimumDistance = 2 // cobra's own default, which it applies only on the root
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", args[0], c.CommandPath())
+	if s := c.SuggestionsFor(args[0]); len(s) > 0 {
+		msg += " — did you mean " + strings.Join(s, " or ") + "?"
+	}
+	return errors.New(msg)
 }
 
 // newLensBackfillCmd builds `witness lens backfill <name> [--fresh]`, the single
@@ -131,6 +153,8 @@ func cmdLens(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: witness lens <register <name> <dir>|deregister <name>|enable <name>|disable <name>|list|load-default>")
 	}
+	enabled := st.LoadConfig().EnabledLenses
+	reg := st.RegisteredLenses()
 	switch args[0] {
 	case "load-default":
 		// Explicit restore, bypassing the first-open one-shot gate: register the bundled
@@ -140,84 +164,96 @@ func cmdLens(args []string) error {
 		if err := seedDefaultLens(st); err != nil {
 			return fmt.Errorf("load default lens: %w", err)
 		}
-		fmt.Println("loaded the built-in 'default' person-growth lens (registered + enabled)")
+		fmt.Println(result(okGlyph(), "loaded the built-in default lens", "registered + enabled"))
 	case "register":
 		if len(args) < 3 {
 			return fmt.Errorf("usage: witness lens register <name> <dir>")
 		}
-		if err := st.RegisterLens(args[1], args[2]); err != nil {
+		name, dir := args[1], args[2]
+		// The store's own error for a missing directory was a bare "stat …: no such file or
+		// directory", which says neither what was wanted nor that the path is the problem.
+		const want = "(want lens.json + extract.md + review.md)"
+		if fi, err := os.Stat(dir); os.IsNotExist(err) {
+			return fmt.Errorf("lens directory %s does not exist %s", dir, want)
+		} else if err != nil {
+			return err
+		} else if !fi.IsDir() {
+			return fmt.Errorf("%s is a file, not a lens directory %s", dir, want)
+		}
+		if err := st.RegisterLens(name, dir); err != nil {
 			return err
 		}
-		fmt.Printf("registered lens %q\n", args[1])
+		note := ""
+		if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil && l.Name != name {
+			note = fmt.Sprintf("mines as %q", l.Name)
+		}
+		fmt.Println(result(okGlyph(), "registered lens "+name, note))
+		if !slices.Contains(enabled, name) {
+			fmt.Println(hint("turn it on", "witness lens enable "+name))
+		}
 	case "deregister":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: witness lens deregister <name>")
 		}
-		if err := st.DeregisterLens(args[1]); err != nil {
+		name := args[1]
+		if !slices.Contains(reg, name) {
+			return fmt.Errorf("lens %q is not registered — nothing to deregister (see `witness lens list`)", name)
+		}
+		if err := st.DeregisterLens(name); err != nil {
 			return err
 		}
-		fmt.Printf("deregistered lens %q\n", args[1])
-		if args[1] == store.LensDefault {
-			fmt.Println("  (this was the built-in person-growth lens — it will NOT come back on its own; restore it any time with `witness lens load-default`)")
+		// The registry and the enabled set are separate (store.DeregisterLens leaves config
+		// alone), so deregistering an enabled lens leaves an orphan the worker skips every pass.
+		if slices.Contains(enabled, name) {
+			fmt.Println(result(warnGlyph(), "deregistered lens "+name, "still enabled in config.toml"))
+			fmt.Println(hint("finish", "witness lens disable "+name))
+		} else {
+			fmt.Println(result(okGlyph(), "deregistered lens "+name, ""))
+		}
+		if name == store.LensDefault {
+			// It will NOT come back on its own: the first-open seed is one-shot.
+			fmt.Println(hint("bring it back", "witness lens load-default"))
 		}
 	case "enable":
 		if len(args) < 2 || args[1] == "" {
 			return fmt.Errorf("usage: witness lens enable <name>")
 		}
-		if !slices.Contains(st.RegisteredLenses(), args[1]) {
-			return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", args[1], args[1])
+		name := args[1]
+		if !slices.Contains(reg, name) {
+			return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", name, name)
 		}
-		if err := st.EnableLens(args[1]); err != nil {
+		if slices.Contains(enabled, name) {
+			fmt.Println(result(skipGlyph(), "lens "+name+" is already enabled", "nothing changed"))
+			return nil
+		}
+		if err := st.EnableLens(name); err != nil {
 			return err
 		}
-		fmt.Printf("enabled lens %q (runs on every session)\n", args[1])
+		fmt.Println(result(okGlyph(), "enabled lens "+name, "runs on every session"))
 	case "disable":
 		if len(args) < 2 || args[1] == "" {
 			return fmt.Errorf("usage: witness lens disable <name>")
 		}
-		if err := st.DisableLens(args[1]); err != nil {
-			return err
-		}
-		fmt.Printf("disabled lens %q\n", args[1])
-		if args[1] == store.LensDefault {
-			fmt.Println("  (re-enable it with `witness lens enable default`, or `witness lens load-default` to restore the built-in lens)")
-		}
-	case "list":
-		enabled := st.LoadConfig().EnabledLenses
-		reg := st.RegisteredLenses()
-		// Since #44 slice 1a "default" has no special status — it is a registered lens
-		// like any other (auto-seeded on first use, or migrated in), so it appears in this loop
-		// naturally. An archive may have ZERO lenses (all disabled / none seeded), a legal
-		// "nothing to distill" state.
-		if len(reg) == 0 {
-			fmt.Println(dim("  no lenses registered — nothing is distilled (register one with `witness lens register <name> <dir>`)"))
+		name := args[1]
+		if !slices.Contains(enabled, name) {
+			// A name that is neither enabled nor registered is a typo, and "disabled lens nope"
+			// with exit 0 told the user it worked. Disabling an enabled-but-unregistered name
+			// stays allowed: that is how an orphan is cleaned up.
+			if !slices.Contains(reg, name) {
+				return fmt.Errorf("lens %q is not registered or enabled — nothing to disable (see `witness lens list`)", name)
+			}
+			fmt.Println(result(skipGlyph(), "lens "+name+" is already disabled", "nothing changed"))
 			return nil
 		}
-		fmt.Println(header("witness lens"))
-		fmt.Println()
-		lensDir := st.LensesDir()
-		for _, name := range reg {
-			isEnabled := slices.Contains(enabled, name)
-			glyph := enabledGlyph(isEnabled)
-			statusText := "disabled"
-			if isEnabled {
-				statusText = "enabled"
-			}
-			// Best-effort detail: load the lens to get dimension count.
-			// If loading fails (corrupt definition), fall back to just name + enabled/disabled.
-			l, err := lens.LoadRegistered(name, lensDir)
-			if err != nil {
-				fmt.Printf("  %s %s\n", glyph, kvRow(name, statusText, ""))
-				continue
-			}
-			dimCount := fmt.Sprintf("%d dims", len(l.Dimensions))
-			fmt.Printf("  %s %s\n", glyph, kvRow(name, statusText, dimCount))
+		if err := st.DisableLens(name); err != nil {
+			return err
 		}
-		fmt.Println()
-		enabledCount := len(enabled)
-		totalCount := len(reg)
-		summaryText := fmt.Sprintf("%s · %d enabled · run `witness lens show <name>`", pluralize(totalCount, "lens", "lenses"), enabledCount)
-		fmt.Println("  " + footer(summaryText))
+		fmt.Println(result(okGlyph(), "disabled lens "+name, "no new work runs it"))
+		if name == store.LensDefault {
+			fmt.Println(hint("re-enable", "witness lens enable default"))
+		}
+	case "list":
+		renderLensList(st, reg, enabled)
 	default:
 		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|show|load-default|backfill|try)", args[0])
 	}
@@ -319,24 +355,24 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// from `raw`, so those sessions are never offered and their obs never come back.
 		orphaned := st.OrphanedL0ObservationCount(minedName)
 		if !assumeYes {
-			fmt.Printf("\n%s backfill %q --fresh will DELETE %d observation(s) + %d facet(s) for this lens, then re-mine from your raw transcripts.\n",
-				warnGlyph(), name, obsAll, facetsN)
+			// Headline + one short line per permanent loss; the prompt is the shared askYesNo, so
+			// it accepts y/yes like every other confirmation and says so when nobody can answer.
+			fmt.Println()
+			fmt.Printf("%s %s\n", warnGlyph(), yellow(fmt.Sprintf("--fresh deletes %s + %s from lens %s, then re-mines it",
+				countOf(obsAll, "observation", "observations"), countOf(facetsN, "facet", "facets"), name)))
 			if active > 0 {
-				fmt.Printf("  %s\n", yellow(fmt.Sprintf("%d of those observations were recorded in-session (not mined) and are NOT reproducible by a re-mine — they will be lost permanently.", active)))
+				fmt.Printf("  %s %s recorded in-session, not mined — no re-mine can re-create them\n", warnGlyph(), humanCount(active))
 			}
 			if orphaned > 0 {
-				fmt.Printf("  %s\n", yellow(fmt.Sprintf("%d were mined from sessions whose raw transcripts `witness cleanup` has already reclaimed — there is no L0 left to re-mine them from, so they will be lost permanently.", orphaned)))
+				fmt.Printf("  %s %s from sessions `witness cleanup` reclaimed — no transcript is left to re-mine\n", warnGlyph(), humanCount(orphaned))
 			}
 			// Only make the re-derivable promise when it actually holds for everything.
-			if active == 0 && orphaned == 0 {
-				fmt.Println(dim("  Raw transcripts (L0) are kept. Mined observations are re-created from them."))
-			} else {
-				fmt.Println(dim("  Raw transcripts (L0) are kept, and every observation still backed by one is re-created from it."))
+			consequence := " Raw transcripts are kept; every observation is re-created from them."
+			if active > 0 || orphaned > 0 {
+				consequence = " Raw transcripts are kept, but the losses listed above are permanent."
 			}
-			fmt.Print("Proceed? [y/N]: ")
-			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-			if strings.ToLower(strings.TrimSpace(line)) != "y" {
-				fmt.Println("Aborted; nothing deleted.")
+			if !askYesNo(bold("Delete and re-mine?") + dim(consequence) + " [y/N]: ") {
+				fmt.Println(dim("not deleted — nothing written"))
 				return nil
 			}
 		}
@@ -344,13 +380,12 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		if err != nil {
 			return fmt.Errorf("drop lens %q data: %w", name, err)
 		}
-		fmt.Printf("backfill %q --fresh: dropped %d observation(s) + %d facet(s)\n", name, obs, facets)
+		fmt.Println(dim(fmt.Sprintf("dropped %s + %s", countOf(obs, "observation", "observations"), countOf(facets, "facet", "facets"))))
 	}
-	n, err := st.ResetLensWatermark(minedName)
-	if err != nil {
+	if _, err := st.ResetLensWatermark(minedName); err != nil {
 		return fmt.Errorf("reset lens %q watermark: %w", name, err)
 	}
-	fmt.Printf("reset watermark for lens %q (%d session row(s)); draining in the foreground…\n", name, n)
+	fmt.Println(dim("re-mining lens " + name + " over the whole history, in the foreground…"))
 	// Snapshot the monotonic drift counter before the drain so the completion line can
 	// report how many prose_drift events THIS backfill produced (#57) — a below-floor
 	// triage model surfaces here, at the moment of the backfill.
@@ -381,7 +416,8 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 			// stale vs. the imminent re-mine), and the worker's drain reviews when ReviewDue
 			// fires — which may not on a small archive. So point the user at `witness worker review`
 			// to guarantee the facets refresh, rather than silently promising consistency.
-			fmt.Println("another distillation worker is already running; it will pick up the re-mine — run `witness worker review` afterward to refresh this lens's facets/profile")
+			fmt.Println(result(warnGlyph(), "another worker is already running — it will pick up the re-mine", ""))
+			fmt.Println(hint("then refresh", "witness worker review"))
 			return nil
 		}
 		// --fresh is NOT fine: we already dropped this lens's observations AND facets. The
@@ -412,7 +448,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// low-poignancy archive, so without this a plain backfill's facets would drift from
 	// its re-mined observations and a --fresh backfill would be left with the empty facets
 	// it dropped. Reviewing unconditionally keeps L2 + L4 consistent with L1 either way.
-	fmt.Println("re-mine complete; running a review to refresh this lens's facets + profile…")
+	fmt.Println(dim("re-mine complete; reviewing to refresh the lens's facets + profile…"))
 	ranReview, err := forceReview(st2)
 	if err != nil {
 		return fmt.Errorf("backfill %q: review failed; observations were re-mined but facets/profile are not refreshed (run `witness worker review`): %w", name, err)
@@ -423,13 +459,16 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// --fresh) — don't claim success; tell the user how to finish.
 		return fmt.Errorf("backfill %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet refreshed; run `witness worker review` to finish", name)
 	}
-	msg := fmt.Sprintf("lens %q backfill complete", name)
 	// A drifted lens advanced its watermark (not "pending") but distilled to zero
-	// observations — report it so a below-floor triage model is visible now.
+	// observations — report it so a below-floor mine model is visible now.
 	if drifted := st2.DriftTotal() - driftBefore; drifted > 0 {
-		msg += fmt.Sprintf(" (%d session-lens drifted: model returned no observations — raise triage_model, then re-mine; see `witness doctor`)", drifted)
+		fmt.Println(result(warnGlyph(), "backfilled lens "+name,
+			countOf(drifted, "session", "sessions")+" drifted: the model returned no observations"))
+		fmt.Println(hint("raise it", "witness config set mine_model <stronger> --lens "+name))
+		fmt.Println(hint("then re-mine", "witness lens backfill "+name+" --fresh"))
+		return nil
 	}
-	fmt.Println(msg)
+	fmt.Println(result(okGlyph(), "backfilled lens "+name, "facets + profile refreshed"))
 	return nil
 }
 
@@ -475,31 +514,41 @@ func lensShow(name string, full bool) error {
 	if full {
 		fmt.Print(renderLensPrompts(l))
 	} else {
-		fmt.Print(renderLensCard(l, enabled))
+		fmt.Print(renderLensCard(name, l, enabled, effectiveConfig(st, l)))
 	}
 	return nil
 }
 
 // renderLensCard is the compact default `lens show` view: a settings card + a one-line
 // excerpt and line count for each prompt, so a glance fits on screen. The full text is
-// one flag away (`--prompts`), pointed to in the footer.
-func renderLensCard(l *lens.Lens, enabled bool) string {
+// one flag away (`--prompts`), pointed to on the hint line.
+//
+// name is the REGISTERED name — the one every lens command takes. The card used to print the
+// lens.json name, so for corpus-example (which mines as "regime") its own footer suggested
+// `witness lens show regime --prompts`, which fails with "not registered". The settings rows are
+// config list --lens's rows, so the same data reads the same way, effective values included.
+func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting) string {
 	var b strings.Builder
 	state := "disabled"
 	if enabled {
 		state = "enabled"
 	}
-	fmt.Fprintf(&b, "%s  %s\n", header("lens: "+l.Name), dim("("+state+")"))
-	if len(l.Dimensions) > 0 {
-		fmt.Fprintln(&b, "  "+kvRow("dimensions", strings.Join(l.Dimensions, ", "), ""))
+	if l.Name != name {
+		state += fmt.Sprintf(" · mines as %q", l.Name)
 	}
-	fmt.Fprintln(&b, "  "+kvRow("runner", modelOrDefaultLabel(l.Runner), ""))
-	fmt.Fprintln(&b, "  "+kvRow("mine model", modelOrDefaultLabel(l.ExtractModel), ""))
-	fmt.Fprintln(&b, "  "+kvRow("review model", modelOrDefaultLabel(l.ReviewModel), ""))
+	fmt.Fprintln(&b, title("lens", name, state))
+	fmt.Fprintln(&b)
+	if len(l.Dimensions) > 0 {
+		// 2 indent + the 14-wide label: continuation lines hang at column 16.
+		fmt.Fprintln(&b, "  "+kvRow("dimensions", wrapHanging(strings.Join(l.Dimensions, ", "), 16), ""))
+	}
+	for _, s := range settings {
+		fmt.Fprintln(&b, "  "+kvRow(s.key, settingValue(s), s.from))
+	}
 	fmt.Fprintln(&b, "  "+kvRow("extract.md", promptExcerpt(l.Extract), ""))
 	fmt.Fprintln(&b, "  "+kvRow("review.md", promptExcerpt(l.Review), ""))
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "  "+footer("full prompts: witness lens show "+l.Name+" --prompts"))
+	fmt.Fprintln(&b, hint("full prompts", "witness lens show "+name+" --prompts"))
 	return b.String()
 }
 
@@ -517,11 +566,119 @@ func promptExcerpt(s string) string {
 			break
 		}
 	}
-	const max = 52
-	if len(first) > max {
-		first = first[:max] + "…"
+	// Cut on runes: a byte cut split a multi-byte character into invalid UTF-8. 48 keeps the row
+	// (16-column label + count + quotes) inside an 80-column terminal.
+	if r := []rune(first); len(r) > 48 {
+		first = string(r[:48]) + glyph("…", "...")
 	}
 	return fmt.Sprintf("%d lines · %q", n, first)
+}
+
+// renderLensList is `witness lens list`. It counts what will actually run — names both registered
+// AND enabled — and gives an orphan (enabled in config.toml, but no definition) a row of its own.
+// The footer used to count config entries, so "2 lenses · 3 enabled" sat under two rows, and the
+// lens the worker skips every pass was invisible.
+func renderLensList(st *store.Store, reg, enabled []string) {
+	var orphans []string
+	for _, name := range enabled {
+		if !slices.Contains(reg, name) {
+			orphans = append(orphans, name)
+		}
+	}
+	// Since #44 slice 1a "default" has no special status — it is a registered lens like any
+	// other, so it appears in this loop naturally. An archive may have ZERO lenses (all
+	// disabled / none seeded), a legal "nothing to distill" state.
+	if len(reg) == 0 && len(orphans) == 0 {
+		fmt.Println(title("lens list", "", ""))
+		fmt.Println()
+		fmt.Printf("  %s no lenses registered — nothing is distilled\n", skipGlyph())
+		fmt.Println(hint("load default", "witness lens load-default"))
+		fmt.Println(hint("add your own", "witness lens register <name> <dir>"))
+		return
+	}
+	running := 0
+	for _, name := range reg {
+		if slices.Contains(enabled, name) {
+			running++
+		}
+	}
+	summary := fmt.Sprintf("%s · %d enabled", countOf(len(reg), "lens", "lenses"), running)
+	if len(orphans) > 0 {
+		summary += " · " + countOf(len(orphans), "orphan", "orphans")
+	}
+	fmt.Println(title("lens list", "", summary))
+	fmt.Println()
+	// kvRow's label column is 14 wide, so a longer name (corpus-example is 14) pushed its own
+	// value right of every other row's: pad every name to the longest first.
+	nameW := 0
+	for _, name := range append(slices.Clone(reg), orphans...) {
+		nameW = max(nameW, len([]rune(name)))
+	}
+	row := func(name, value, note string) string {
+		return kvRow(name+strings.Repeat(" ", nameW-len([]rune(name))), value, note)
+	}
+	// The mark column is one character in both modes (warnGlyph's plain "[!]" is three), so a
+	// flagged row lines up with the enabled/disabled rows in a pipe too.
+	flag := glyph(yellow("!"), "!")
+	for _, name := range reg {
+		isEnabled := slices.Contains(enabled, name)
+		status := "disabled"
+		if isEnabled {
+			status = "enabled"
+		}
+		// Best-effort detail. A definition that no longer loads is skipped by the worker, so an
+		// enabled one says so rather than reading as healthy.
+		l, err := lens.LoadRegistered(name, st.LensesDir())
+		switch {
+		case err != nil && isEnabled:
+			fmt.Printf("  %s %s\n", flag, row(name, yellow("enabled, but its definition does not load"), ""))
+		case err != nil:
+			fmt.Printf("  %s %s\n", enabledGlyph(false), row(name, status, "definition does not load"))
+		default:
+			note := countOf(len(l.Dimensions), "dim", "dims")
+			if l.Name != name {
+				note += fmt.Sprintf(" · mines as %q", l.Name)
+			}
+			fmt.Printf("  %s %s\n", enabledGlyph(isEnabled), row(name, status, note))
+		}
+	}
+	for _, name := range orphans {
+		fmt.Printf("  %s %s\n", flag, row(name, yellow("enabled, but not registered"), ""))
+	}
+	fmt.Println()
+	for _, name := range orphans {
+		fmt.Println(hint("clean up", "witness lens disable "+name))
+	}
+	fmt.Println(hint("inspect one", "witness lens show <name>"))
+}
+
+// lensDataName maps the name a lens is registered under (the one every command takes) to the name
+// the worker tags its observations, facets and profile with — the lens.json `name`, which may
+// differ: corpus-example mines as "regime". A name that is not registered, or does not load, is
+// returned as given, so data that outlived its lens's registration stays readable by its own name.
+func lensDataName(st *store.Store, name string) string {
+	if !slices.Contains(st.RegisteredLenses(), name) {
+		return name
+	}
+	if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil {
+		return l.Name
+	}
+	return name
+}
+
+// lensRegisteredName is lensDataName in reverse, for display: the registered name of the lens that
+// mines under `mined`, or `mined` itself when no registered lens does.
+func lensRegisteredName(st *store.Store, mined string) string {
+	reg := st.RegisteredLenses()
+	if slices.Contains(reg, mined) && lensDataName(st, mined) == mined {
+		return mined
+	}
+	for _, name := range reg {
+		if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil && l.Name == mined {
+			return name
+		}
+	}
+	return mined
 }
 
 // renderLensPrompts is the `--prompts` view: the two prompts verbatim, under plain

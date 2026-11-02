@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -42,12 +43,28 @@ time your archive is opened.
             gone); restore with 'witness lens load-default'; opt a fresh archive
             out entirely with WITNESS_NO_DEFAULT_LENS=1`),
 		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
-		Args:   cobra.ExactArgs(1),
+		Args:   editorArg("wire"),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdInstall(args)
 		},
 	}
 	return c
+}
+
+// editorArg is wire/unwire's argument check, worded for a person: cobra's ExactArgs said "accepts
+// 1 arg(s), received 0", which names neither the missing thing nor the choices.
+func editorArg(verb string) cobra.PositionalArgs {
+	return func(_ *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("which editor? witness %s <%s>", verb, strings.Join(platform.InstallTargets(), "|"))
+		}
+		return nil
+	}
+}
+
+// unknownEditor is the one wording for an editor witness cannot wire, in the registry's order.
+func unknownEditor(target string) error {
+	return fmt.Errorf("unknown editor %q — want one of: %s", target, strings.Join(platform.InstallTargets(), ", "))
 }
 
 func newUnwireCmd() *cobra.Command {
@@ -57,7 +74,7 @@ func newUnwireCmd() *cobra.Command {
 		Short:   "Remove an editor integration (data/config untouched).",
 		Long:    "Remove the Claude Code, OpenCode or Codex integration. The witness data store and config are left untouched.",
 		Hidden:  os.Getenv("WITNESS_NPM_PACKAGE") == "1",
-		Args:    cobra.ExactArgs(1),
+		Args:    editorArg("unwire"),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdUninstall(args)
 		},
@@ -455,10 +472,16 @@ func removeLegacyOpenCodePlugins(dir string) {
 	_ = os.Remove(openCodePluginPath(dir, legacyOpenCodePluginName))
 }
 
-func removeAllOpenCodePlugins(dir string) {
+// removeAllOpenCodePlugins deletes our plugin and its legacy name, returning the paths it actually
+// removed — so unwire reports what happened instead of "(if it was present)" on every run.
+func removeAllOpenCodePlugins(dir string) (removed []string) {
 	for _, name := range []string{openCodePluginName, legacyOpenCodePluginName} {
-		_ = os.Remove(openCodePluginPath(dir, name))
+		p := openCodePluginPath(dir, name)
+		if os.Remove(p) == nil {
+			removed = append(removed, p)
+		}
 	}
+	return removed
 }
 
 // repoShim resolves <repo>/hooks/witness.sh from the running binary at <repo>/bin/.
@@ -479,7 +502,12 @@ func repoShim() (string, error) {
 // the archive OUT of the person-growth default-lens auto-seed — a provisioned archive is
 // a blank engine the caller fills with its own lens(es). (wire, by contrast, leaves the
 // env unset so an editor user DOES get the default lens.)
+//
+// It says whether it CREATED the archive or adopted one already there, and its next steps carry
+// WITNESS_HOME when the archive is not the one every command would use anyway: printed bare, they
+// acted on the DEFAULT archive, because nothing but WITNESS_HOME selects another.
 func cmdProvision(path string) error {
+	prevHome := os.Getenv("WITNESS_HOME")
 	if strings.TrimSpace(path) != "" {
 		if err := os.Setenv("WITNESS_HOME", path); err != nil {
 			return err
@@ -488,13 +516,36 @@ func cmdProvision(path string) error {
 	// Suppress the person default on this fresh archive (read live by the first-open
 	// seed hook, see defaultseed.go). Set BEFORE Open.
 	_ = os.Setenv(noDefaultLensEnv, "1")
+	existed := false
+	if strings.TrimSpace(path) != "" {
+		_, err := os.Stat(filepath.Join(path, "witness.db"))
+		existed = err == nil
+	}
 	st, err := store.Open()
 	if err != nil {
+		if strings.TrimSpace(path) != "" {
+			return fmt.Errorf("cannot create an archive at %s: %w", tildePath(path), err)
+		}
 		return err
 	}
 	defer st.Close()
-	fmt.Printf("provisioned witness archive at %s\n", st.Root)
-	fmt.Println("next: witness lens register <name> <dir>  ·  witness ingest  ·  or witness wire <editor>")
+	root, _ := filepath.Abs(st.Root)
+	sessions := dim("(" + countOf(st.Stats(activeLensNames(st)).Sessions, "session", "sessions") + ")")
+	switch {
+	case strings.TrimSpace(path) == "": // the default data dir, which Open may have created or adopted
+		fmt.Printf("%s archive ready at %s %s\n", okGlyph(), tildePath(root), sessions)
+	case existed:
+		fmt.Printf("%s archive adopted at %s %s\n", okGlyph(), tildePath(root), sessions)
+	default:
+		fmt.Printf("%s archive created at %s %s\n", okGlyph(), tildePath(root), dim("(no lenses yet)"))
+	}
+	prefix := ""
+	if strings.TrimSpace(path) != "" && filepath.Clean(prevHome) != filepath.Clean(root) {
+		prefix = "WITNESS_HOME=" + shellArg(root) + " "
+		fmt.Println(dim("  every command uses it when WITNESS_HOME points there:"))
+	}
+	fmt.Println(hint("add a lens", prefix+"witness lens register <name> <dir>"))
+	fmt.Println(hint("feed it", prefix+"witness ingest --file <records.ndjson>"))
 	return nil
 }
 
@@ -505,13 +556,26 @@ func cmdProvision(path string) error {
 // auto-seeded once by the first-open hook (which fires the moment bindRunner opens the
 // store) and is fully deletable. Keeping install prompt-free is what makes it safe to
 // run as a hook subprocess and in CI, where a stray prompt would hang the session.
+//
+// The screen is a title, one glyph row per part (the installer's, then runner and lenses), and the
+// result line LAST. The result used to sit in the middle ("done — restart Claude Code" above the
+// runner and lens lines), so the installer returns it as a wireOutcome for cmdInstall to print.
 func cmdInstall(args []string) error {
 	target := installTarget(args)
 	in, ok := platform.InstallerFor(target)
 	if !ok {
-		return fmt.Errorf("unknown install target %q (want %s)", target, strings.Join(platform.InstallTargets(), " or "))
+		return unknownEditor(target)
 	}
-	if err := in.Install(); err != nil {
+	fmt.Println(title("wire "+target, "", ""))
+	fmt.Println()
+	out := wireOutcome{glyph: okGlyph(), line: "wired"}
+	var err error
+	if w, ok := in.(wirer); ok {
+		out, err = w.wire()
+	} else {
+		err = in.Install() // an installer that reports no outcome (a test's fake)
+	}
+	if err != nil {
 		return err
 	}
 	// Bind the default runner only if this venue can actually RUN a model. A capture
@@ -529,9 +593,13 @@ func cmdInstall(args []string) error {
 			return err
 		}
 	} else {
-		fmt.Printf("%s captures only; it runs no model. Distillation uses the configured runner"+
-			" (set one with: witness config set runner <%s>)\n",
-			target, strings.Join(platform.RunnerNames(), "|"))
+		// The runner it leaves alone is the EFFECTIVE one (ResolveRunner), not the raw config field.
+		using := "the configured runner"
+		if st, err := store.Open(); err == nil {
+			using = st.ResolveRunner(st.LoadConfig())
+			st.Close()
+		}
+		fmt.Println(resultRow(skipGlyph(), "runner", "unchanged", target+" runs no model; lenses use "+using))
 	}
 	// Report the resulting lens state. The first-open hook auto-seeds the built-in
 	// "default" lens on a fresh archive, and every enabled lens mines an LLM on every
@@ -539,43 +607,92 @@ func cmdInstall(args []string) error {
 	// it to a background slog line the user never sees. Read ACTUAL state (default is
 	// deletable and won't be re-seeded once removed, so it may legitimately be absent).
 	// Best-effort: never fail an otherwise-good install over a status line.
-	reportEnabledLenses()
+	lenses := reportEnabledLenses()
+
+	fmt.Println()
+	fmt.Println(out.glyph + " " + out.line)
+	for _, h := range out.hints {
+		fmt.Println(hint(h[0], h[1]))
+	}
+	fmt.Println(hint("change runner", "witness config set runner <"+strings.Join(platform.RunnerNames(), "|")+">"))
+	switch len(lenses) {
+	case 0:
+		fmt.Println(hint("add a lens", "witness lens load-default"))
+	case 1:
+		fmt.Println(hint("drop a lens", "witness lens disable "+lenses[0]))
+	default:
+		fmt.Println(hint("drop a lens", "witness lens disable <name>"))
+	}
+	if out.note != "" {
+		fmt.Println(dim("  " + out.note))
+	}
 	return nil
 }
 
-// reportEnabledLenses prints the enabled-lens set after install so the user knows what
+// wireOutcome is how an editor's installer closes the wire screen: the result line (glyph + text),
+// the next steps that belong to it, and a dim closing note. cmdInstall prints it last.
+type wireOutcome struct {
+	glyph, line string
+	hints       [][2]string
+	note        string
+}
+
+// wirer / unwirer are the installers that report what they did. The platform.Installer interface
+// only returns an error; a registered installer without these (a test's fake) still works, with a
+// generic result line.
+type wirer interface{ wire() (wireOutcome, error) }
+type unwirer interface {
+	unwire() (removed bool, warning string, err error)
+}
+
+// pullOnlyNote closes the wire screen of an editor whose agents get the MCP tools.
+const pullOnlyNote = "the profile is pull-only: agents read it over MCP, you with `witness profile`"
+
+// reportEnabledLenses prints the enabled-lens row after install so the user knows what
 // will run (and cost) on every session — the transparency the silent auto-seed otherwise
-// lacks. Best-effort and read-only.
-func reportEnabledLenses() {
+// lacks — and returns the names for the next-step hints. Best-effort and read-only.
+func reportEnabledLenses() []string {
 	st, err := store.Open()
 	if err != nil {
-		return
+		return nil
 	}
 	defer st.Close()
 	enabled := st.LoadConfig().EnabledLenses
 	if len(enabled) == 0 {
-		fmt.Println("lenses: none enabled — nothing will be distilled yet (add the built-in one with `witness lens load-default`, or register your own).")
-		return
+		fmt.Println(resultRow(warnGlyph(), "lenses", "none enabled", "nothing will be distilled yet"))
+		return nil
 	}
-	fmt.Printf("lenses: %s enabled — each mines every session; disable any with `witness lens disable <name>`.\n", strings.Join(enabled, ", "))
+	note := "mines every session"
+	if len(enabled) > 1 {
+		note = "each mines every session"
+	}
+	fmt.Println(resultRow(enabledGlyph(true), "lenses", strings.Join(enabled, ", "), note))
+	return enabled
 }
 
 // bindRunner pins config.toml's runner field to the integration that was just
 // wired, so distillation uses the same agent runtime the user installed for.
 // store.Open() already laid down the full template if config was missing; here
 // we only flip runner. Best-effort: a store open failure (rare; Open mkdirs) is
-// logged but does not fail install, since hooks/plugin are already in place.
+// reported on its row but does not fail install, since hooks/plugin are already in place.
 func bindRunner(target string) error {
 	st, err := store.Open()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "witness: could not open store to set runner: %v\n", err)
+		fmt.Println(resultRow(warnGlyph(), "runner", "not set", "could not open the archive: "+err.Error()))
 		return nil
 	}
 	defer st.Close()
+	// "unchanged" only when an earlier wire or `config set runner` had already bound this runner:
+	// a fresh archive resolves to the template's "claude" without anyone having chosen it.
+	unchanged := st.MetaString("runner_bound") == "1" && st.ResolveRunner(st.LoadConfig()) == target
 	if err := st.SetRunner(target); err != nil {
 		return fmt.Errorf("write runner to config: %w", err)
 	}
-	fmt.Printf("default runner set to %s (change with: witness config set runner <claude|opencode>)\n", target)
+	note := "the default"
+	if unchanged {
+		note = "the default, unchanged"
+	}
+	fmt.Println(resultRow(okGlyph(), "runner", target, note))
 	return nil
 }
 
@@ -589,50 +706,73 @@ func installTarget(args []string) string {
 // through the in-repo witness.sh shim; Windows copies the binary + assets to a
 // stable install dir and returns an exec-form invocation pointing at it. Every-
 // thing below is platform-independent.
-func cmdInstallClaude() error {
+func cmdInstallClaude() (wireOutcome, error) {
 	inv, err := resolveClaudeInstall()
 	if err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	settings := filepath.Join(claudeDir(), "settings.json")
 	if err := os.MkdirAll(claudeDir(), 0o755); err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	data, err := os.ReadFile(settings)
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return wireOutcome{}, err
 	}
 	merged, err := mergeWitnessHooks(data, inv)
 	if err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	if err := writeFileAtomic(settings, merged); err != nil {
-		return err
+		return wireOutcome{}, err
 	}
-	fmt.Printf("hooks wired into %s\n", settings)
+	fmt.Println(resultRow(okGlyph(), "hooks", tildePath(settings), pluralize(len(witnessHookSpecs(inv)), "event", "events")))
 
+	out := wireOutcome{glyph: okGlyph(), line: "wired — restart Claude Code (or open /hooks) to load the hooks", note: pullOnlyNote}
 	// Register the MCP server (idempotent: skip if already present). Both probes are
 	// bounded — see claudeMCPRemoveTimeout for why: an unbounded `claude` child hung
 	// `witness wire` forever and orphaned itself to PID 1, unreapable.
-	if out, _ := claudeCLIOutput("mcp", "list"); !mcpServerRegistered(out, "witness") {
-		if err := claudeCLIRun("mcp", "add", "-s", "user", "witness", // inv.target is what settings.json / `claude mcp add` should invoke for the MCP
-			// server: the shim on Unix, the installed exe on Windows. (This was an mcpTarget()
-			// method that returned exactly this field; the per-platform choice happens where the
-			// hookInvocation is CONSTRUCTED, not on read, so the accessor added a name without
-			// adding a decision.)
-			inv.target, "mcp"); err != nil {
-			fmt.Fprintf(os.Stderr, "witness: could not register MCP server (is `claude` on PATH?): %v\n", err)
-		} else {
-			fmt.Println("MCP server 'witness' registered")
-		}
+	if list, _ := claudeCLIOutput("mcp", "list"); mcpServerRegistered(list, "witness") {
+		fmt.Println(resultRow(okGlyph(), "MCP server", "witness", "already registered"))
+	} else if err := claudeCLIRun("mcp", "add", "-s", "user", "witness", // inv.target is what settings.json / `claude mcp add` should invoke for the MCP
+		// server: the shim on Unix, the installed exe on Windows. (This was an mcpTarget()
+		// method that returned exactly this field; the per-platform choice happens where the
+		// hookInvocation is CONSTRUCTED, not on read, so the accessor added a name without
+		// adding a decision.)
+		inv.target, "mcp"); err != nil {
+		// Capture works without it, so this is a warning, not a failure — but the result line
+		// must not read as full success, which the old "done — restart Claude Code" did.
+		fmt.Println(resultRow(warnGlyph(), "MCP server", "not registered", mcpAddFailure(err)))
+		out = wireOutcome{glyph: warnGlyph(), line: "wired, with a warning — capture works, but agents cannot read the profile yet",
+			hints: [][2]string{{"register MCP", mcpAddCommand(inv)}}}
 	} else {
-		fmt.Println("MCP server 'witness' already registered")
+		fmt.Println(resultRow(okGlyph(), "MCP server", "witness", "registered with Claude Code"))
 	}
-	fmt.Println("done — restart Claude Code (or open /hooks) to load the hooks.")
-	fmt.Println("note: witness collects everywhere; the profile is never injected into a session.")
-	fmt.Println("      agents read it on demand via the witness MCP tools;")
-	fmt.Println("      you can read it yourself with `witness profile`.")
-	return nil
+	return out, nil
+}
+
+// mcpAddFailure says why `claude mcp add` failed. It used to guess "is `claude` on PATH?" for every
+// failure, including the ones where claude ran and said no.
+func mcpAddFailure(err error) string {
+	var ee *exec.ExitError
+	switch {
+	case errors.Is(err, exec.ErrNotFound):
+		return "`claude` is not on PATH"
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("`claude mcp add` did not finish within %s", claudeMCPRemoveTimeout)
+	case errors.As(err, &ee):
+		return fmt.Sprintf("`claude mcp add` exited %d", ee.ExitCode())
+	}
+	return "`claude mcp add` failed: " + err.Error()
+}
+
+// mcpAddCommand is the registration to run by hand, quoted for the shell it will be pasted into.
+func mcpAddCommand(inv hookInvocation) string {
+	target := shellQuote(inv.target)
+	if inv.execForm { // Windows: PowerShell or cmd, neither of which reads POSIX single quotes the same
+		target = `"` + inv.target + `"`
+	}
+	return "claude mcp add -s user witness " + target + " mcp"
 }
 
 // mcpServerRegistered reports whether `claude mcp list` output already lists a
@@ -660,59 +800,89 @@ func mcpServerRegistered(out, name string) bool {
 // shell to run a .sh. Everything downstream is platform-agnostic — the plugin spawns an
 // argv array (no shell), and both the plugin source and the MCP config JSON-encode the
 // path, so a Windows path's backslashes are escaped correctly by construction.
-func cmdInstallOpenCode() error {
+func cmdInstallOpenCode() (wireOutcome, error) {
 	target, err := resolveOpenCodeInstall()
 	if err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	dir := opencodeDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	config := opencodeConfigPath()
 	data, err := os.ReadFile(config)
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return wireOutcome{}, err
 	}
 	merged, err := mergeOpenCodeMCP(data, target)
 	if err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 
 	plugins := filepath.Join(dir, "plugins")
 	if err := os.MkdirAll(plugins, 0o755); err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	pluginPath := openCodePluginPath(dir, openCodePluginName)
 	if err := writeFileAtomic(pluginPath, []byte(opencodeplugin.Source(target))); err != nil {
-		return err
+		return wireOutcome{}, err
 	}
 	removeLegacyOpenCodePlugins(dir)
-	fmt.Printf("OpenCode plugin installed at %s\n", pluginPath)
+	fmt.Println(resultRow(okGlyph(), "plugin", tildePath(pluginPath), ""))
 
 	if err := writeFileAtomic(config, merged); err != nil {
-		return err
+		return wireOutcome{}, err
 	}
-	fmt.Printf("OpenCode MCP server 'witness' registered in %s\n", config)
-	fmt.Println("done — restart OpenCode so the plugin and MCP server load.")
-	return nil
+	fmt.Println(resultRow(okGlyph(), "MCP server", "witness", "in "+tildePath(config)))
+	return wireOutcome{glyph: okGlyph(), line: "wired — restart OpenCode so the plugin and MCP server load", note: pullOnlyNote}, nil
 }
 
 // cmdUninstall removes the witness hooks/plugin and MCP server (idempotent).
-// Data, config, and the runner setting are left untouched.
+// Data, config, and the runner setting are left untouched. Like wire, it is a title, a glyph row
+// per part, and one result line that says whether anything was actually removed.
 func cmdUninstall(args []string) error {
 	target := installTarget(args)
 	in, ok := platform.InstallerFor(target)
 	if !ok {
-		return fmt.Errorf("unknown uninstall target %q (want %s)", target, strings.Join(platform.InstallTargets(), " or "))
+		return unknownEditor(target)
 	}
-	return in.Uninstall()
+	fmt.Println(title("unwire "+target, "", ""))
+	fmt.Println()
+	removed, warning := true, ""
+	var err error
+	if u, ok := in.(unwirer); ok {
+		removed, warning, err = u.unwire()
+	} else {
+		err = in.Uninstall()
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println()
+	// A part that could not be checked makes it a warning: "✓ unwired" under a "! MCP server not
+	// removed" row claimed more than happened.
+	switch {
+	case warning != "" && removed:
+		fmt.Println(warnGlyph() + " unwired, but " + warning + " — data and config are untouched")
+	case warning != "":
+		fmt.Println(warnGlyph() + " nothing removed, and " + warning + " — data and config are untouched")
+	case !removed:
+		fmt.Println(skipGlyph() + " nothing to remove — data and config are untouched")
+	default:
+		fmt.Println(okGlyph() + " unwired — data and config are untouched")
+	}
+	if removed {
+		fmt.Println(hint("reconnect", "witness wire "+target))
+	}
+	return nil
 }
 
-func cmdUninstallClaude() error {
+// cmdUninstallClaude reports, per part, what it removed, whether it removed anything, and — as
+// warning — a part it could not check.
+func cmdUninstallClaude() (removed bool, warning string, err error) {
 	// Report what actually happened. This used to swallow BOTH the parse error and the
 	// write error and print "hooks removed" regardless — so an unparseable settings.json,
 	// or a read-only ~/.claude, left every witness hook wired while the user was told they
@@ -725,23 +895,51 @@ func cmdUninstallClaude() error {
 	case err == nil:
 		cleaned, err := removeWitnessHooks(data)
 		if err != nil {
-			return fmt.Errorf("%s: %w (edit it by hand to remove the witness hooks)", settings, err)
+			return false, "", fmt.Errorf("%s: %w (edit it by hand to remove the witness hooks)", settings, err)
 		}
-		if err := writeFileAtomic(settings, cleaned); err != nil {
-			return fmt.Errorf("write %s: %w", settings, err)
+		// Compare before writing, the way codex does: re-marshalling an already-clean file
+		// produces equal JSON, and "hooks removed" on every re-run hid whether there were any.
+		if !jsonEqual(data, cleaned) {
+			if err := writeFileAtomic(settings, cleaned); err != nil {
+				return false, "", fmt.Errorf("write %s: %w", settings, err)
+			}
+			fmt.Println(resultRow(okGlyph(), "hooks", "removed from "+tildePath(settings), ""))
+			removed = true
+		} else {
+			fmt.Println(resultRow(skipGlyph(), "hooks", "none in "+tildePath(settings), ""))
 		}
-		fmt.Printf("hooks removed from %s\n", settings)
 	case os.IsNotExist(err):
-		fmt.Printf("no %s, so no hooks to remove\n", settings)
+		fmt.Println(resultRow(skipGlyph(), "hooks", "none — there is no "+tildePath(settings), ""))
 	default:
-		return fmt.Errorf("read %s: %w", settings, err)
+		return false, "", fmt.Errorf("read %s: %w", settings, err)
 	}
 	// The MCP removal stays best-effort: `claude` may not be on PATH, and it exits
 	// non-zero when the server simply isn't registered — neither is a failure to report.
 	// It is a package var so tests never spawn the real CLI (see removeClaudeMCPServer).
-	removeClaudeMCP()
-	fmt.Println("MCP server 'witness' removed (if it was present)")
-	return nil
+	switch err := removeClaudeMCP(); {
+	case err == nil:
+		fmt.Println(resultRow(okGlyph(), "MCP server", "removed", ""))
+		removed = true
+	case errors.Is(err, exec.ErrNotFound):
+		fmt.Println(resultRow(warnGlyph(), "MCP server", "not checked", "`claude` is not on PATH"))
+		warning = "the MCP server was not checked"
+	case errors.Is(err, context.DeadlineExceeded):
+		fmt.Println(resultRow(warnGlyph(), "MCP server", "not removed", fmt.Sprintf("`claude mcp remove witness` did not finish within %s", claudeMCPRemoveTimeout)))
+		fmt.Println(subHint("by hand", "claude mcp remove witness"))
+		warning = "the MCP server may still be registered"
+	default: // claude ran and refused: the server is not registered
+		fmt.Println(resultRow(skipGlyph(), "MCP server", "not registered", ""))
+	}
+	return removed, warning, nil
+}
+
+// jsonEqual reports whether two JSON documents hold the same value, whatever their formatting.
+func jsonEqual(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }
 
 // claudeMCPRemoveTimeout bounds the `claude mcp remove` subprocess.
@@ -762,12 +960,10 @@ const claudeMCPRemoveTimeout = 20 * time.Second
 // the orphan pile above got created.
 var removeClaudeMCP = removeClaudeMCPServer
 
-func removeClaudeMCPServer() {
-	if err := claudeCLIRun("mcp", "remove", "witness"); err != nil && errors.Is(err, context.DeadlineExceeded) {
-		fmt.Fprintf(os.Stderr, "witness: `claude mcp remove witness` did not finish within %s; skipping (remove it by hand with that command)\n",
-			claudeMCPRemoveTimeout)
-	}
-}
+// removeClaudeMCPServer runs `claude mcp remove witness` and returns its error for the caller to
+// word: nil removed it, exec.ErrNotFound means no claude, DeadlineExceeded means it wedged, and any
+// other failure is claude saying the server was not registered.
+func removeClaudeMCPServer() error { return claudeCLIRun("mcp", "remove", "witness") }
 
 // claudeCLICommand builds a BOUNDED `claude` invocation. Every call into the Claude CLI must
 // go through here (enforced by TestUninstallDoesNotSpawnClaudeWithoutAContext): exec.Command
@@ -808,31 +1004,44 @@ func claudeCLIOutput(args ...string) (string, error) {
 	return string(out), err
 }
 
-func cmdUninstallOpenCode() error {
+// cmdUninstallOpenCode reports, per part, what it removed. It used to print three "removed (if it
+// was present)" lines on every run, and to rewrite opencode.json even when witness was not in it —
+// which, for a .jsonc config, also dropped the user's comments.
+func cmdUninstallOpenCode() (removed bool, err error) {
 	dir := opencodeDir()
 	config := opencodeConfigPath()
-	configUpdated := false
-	if data, err := os.ReadFile(config); err == nil {
+	switch data, err := os.ReadFile(config); {
+	case err == nil:
+		root, err := parseOpenCodeConfig(data)
+		if err != nil {
+			return false, err
+		}
+		if mcp, _ := root["mcp"].(map[string]any); mcp["witness"] == nil {
+			fmt.Println(resultRow(skipGlyph(), "MCP server", "none in "+tildePath(config), ""))
+			break
+		}
 		cleaned, err := removeOpenCodeMCP(data)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if err := writeFileAtomic(config, cleaned); err != nil {
-			return err
+			return false, err
 		}
-		configUpdated = true
-	} else if !os.IsNotExist(err) {
-		return err
+		fmt.Println(resultRow(okGlyph(), "MCP server", "removed from "+tildePath(config), ""))
+		removed = true
+	case os.IsNotExist(err):
+		fmt.Println(resultRow(skipGlyph(), "MCP server", "none — there is no "+tildePath(config), ""))
+	default:
+		return false, err
 	}
-	removeAllOpenCodePlugins(dir)
-	fmt.Printf("OpenCode plugin removed from %s (if it was present)\n", openCodePluginPath(dir, openCodePluginName))
-	fmt.Printf("Legacy OpenCode plugin removed from %s (if it was present)\n", openCodePluginPath(dir, legacyOpenCodePluginName))
-	if configUpdated {
-		fmt.Println("OpenCode MCP server 'witness' removed from OpenCode config (if it was present)")
-	} else {
-		fmt.Println("OpenCode config not found; no MCP entry removed")
+	gone := removeAllOpenCodePlugins(dir)
+	for _, p := range gone {
+		fmt.Println(resultRow(okGlyph(), "plugin", "removed "+tildePath(p), ""))
 	}
-	return nil
+	if len(gone) == 0 {
+		fmt.Println(resultRow(skipGlyph(), "plugin", "none in "+tildePath(filepath.Join(dir, "plugins")), ""))
+	}
+	return removed || len(gone) > 0, nil
 }
 
 func mergeOpenCodeMCP(data []byte, shim string) ([]byte, error) {

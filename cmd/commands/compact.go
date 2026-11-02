@@ -1,9 +1,10 @@
 package commands
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,7 +32,7 @@ func newCompactCmd() *cobra.Command {
 	var lensOnly string
 	c := &cobra.Command{
 		Use:     "compact",
-		Short:   "Consolidate redundant facets into a minimal profile (shows the plan, then asks)",
+		Short:   "Consolidate redundant facets into a minimal profile (shows the plan, then asks).",
 		GroupID: groupAdmin,
 		Long: "Rebalance the active facet profile: merge facets that say the same thing, retire ones that were never really traits.\n\n" +
 			"Facets only ever accumulated before this existed — nothing removed or combined one, and no prompt asked " +
@@ -71,7 +72,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	// rewrites L2, so it must not interleave with a drain's facet commit.
 	unlock, ok := st.WorkerLock()
 	if !ok {
-		fmt.Println("a distillation worker is already running; try again once it finishes")
+		fmt.Print(workerBusy(st, "compact skipped"))
 		return nil
 	}
 	defer unlock()
@@ -81,6 +82,11 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	lenses, err := activeLenses(st)
 	if err != nil {
 		return err
+	}
+	if len(lenses) == 0 {
+		fmt.Println(skipGlyph() + " no enabled lenses — nothing to compact")
+		fmt.Println(hint("enable one", "witness lens enable <name>"))
+		return nil
 	}
 	if lensOnly != "" {
 		filtered := lenses[:0]
@@ -102,12 +108,15 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	}
 	defer rs.Close()
 
+	// tap keeps the first model error: a batch that fails is counted in the plan, but WHY it
+	// failed was only in witness.log.
+	tap := &causeTap{}
 	c := &distill.Compactor{
 		Store: st, Lenses: lenses, Config: cfg,
-		Runner: rs.RunFor(nil), RunnerFor: rs.RunFor,
+		Runner: tap.wrap(rs.RunFor(nil)), RunnerFor: tap.wrapFor(rs.RunFor),
 	}
 
-	fmt.Printf("planning compaction over %s...\n", pluralize(len(lenses), "lens", "lenses"))
+	fmt.Println(dim(fmt.Sprintf("planning compaction over %s…", pluralize(len(lenses), "lens", "lenses"))))
 	pl := startProgress()
 	c.Progress = pl.update
 	plans, err := c.Plan(ctx)
@@ -116,14 +125,22 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 		return err
 	}
 	if len(plans) == 0 {
-		fmt.Println(okGlyph() + " nothing to compact — no lens proposed a merge or retirement")
+		fmt.Println(skipGlyph() + " nothing to compact — no lens proposed a merge or retirement")
 		return nil
 	}
+	// Nothing proposed AND calls failed: there is no plan, only an outage. Asking "Apply this
+	// plan?" over it offered to apply nothing, and the reason (runner disabled, provider down) was
+	// in witness.log alone. Fail, with the cause, and do not ask.
+	if failed, proposed := compactTotals(plans); proposed == 0 && failed > 0 {
+		return errLines("compaction could not plan: "+pluralize(failed, "batch", "batches")+
+			" failed, nothing proposed — nothing written",
+			errRow("cause", cmp.Or(tap.cause(), "no runner error — see witness.log")), errHint("diagnose", "witness doctor"))
+	}
 
-	printCompactPlans(plans)
+	printCompactPlans(plans, tap.cause())
 	fmt.Println()
-	if !yes && !ask("Apply this plan? Nothing is deleted; archived facets keep their history. [y/N]: ") {
-		fmt.Println("not applied — nothing written")
+	if !yes && !ask(bold("Apply this plan?")+dim(" Nothing is deleted; archived facets keep their history.")+" [y/N]: ") {
+		fmt.Println(dim("not applied — nothing written"))
 		return nil
 	}
 	if err := c.Apply(ctx, plans, time.Now()); err != nil {
@@ -149,43 +166,52 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 		n := cl.Run(ctx, ln)
 		cp.finish()
 		if n > 0 {
-			fmt.Printf("%s %s: wrote %s\n", okGlyph(), bold(ln.Name),
-				pluralize(n, "short claim", "short claims"))
+			fmt.Println(resultRow(okGlyph(), ln.Name, "wrote "+pluralize(n, "short claim", "short claims"), ""))
 		}
 	}
 
-	fmt.Println()
 	for _, p := range plans {
 		active, archived := st.LensFacetCounts(p.Lens)
-		fmt.Printf("%s %s: %d active facets (%d archived, history kept)\n",
-			okGlyph(), bold(p.Lens), active, archived)
+		fmt.Println(resultRow(okGlyph(), p.Lens, countOf(active, "active facet", "active facets"),
+			humanCount(archived)+" archived, history kept"))
 	}
 	fmt.Println()
-	fmt.Println(dim("the profile narrative is regenerated on the next review (`witness worker review`)"))
+	fmt.Println(okGlyph() + " compacted — the profile narrative is regenerated on the next review")
+	fmt.Println(hint("regenerate", "witness worker review"))
 	return nil
 }
 
-// humanCount groups thousands so a six-digit character count is readable at a glance.
-func humanCount(n int) string {
-	s := strconv.Itoa(n)
-	if len(s) <= 3 {
-		return s
+// compactTotals sums the plans: batches that failed, and actions proposed.
+func compactTotals(plans []distill.CompactPlan) (failed, proposed int) {
+	for _, p := range plans {
+		failed += p.Failed
+		proposed += len(p.Actions)
 	}
-	var b strings.Builder
-	for i, r := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
+	return failed, proposed
 }
 
-func printCompactPlans(plans []distill.CompactPlan) {
+// refusals renders a plan's refused-proposal counts in a stable order: "2 absorb unseen facet ·
+// 1 merge too small". It printed a Go map literal (map[absorb_unseen_facet:2 …]) before.
+func refusals(skipped map[string]int) string {
+	reasons := make([]string, 0, len(skipped))
+	for r := range skipped {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, len(reasons))
+	for i, r := range reasons {
+		parts[i] = fmt.Sprintf("%s %s", humanCount(skipped[r]), strings.ReplaceAll(r, "_", " "))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// printCompactPlans shows each lens's plan. cause is the first model error this run hit, named
+// under a PARTIAL plan's warning ("" when none was seen).
+func printCompactPlans(plans []distill.CompactPlan, cause string) {
 	for _, p := range plans {
 		fmt.Println()
-		fmt.Println(header(fmt.Sprintf("%s — %d active facets, %d would be archived",
-			p.Lens, p.Before, p.Archived)))
+		fmt.Println(header(fmt.Sprintf("%s — %s active facets, %s would be archived",
+			p.Lens, humanCount(p.Before), humanCount(p.Archived))))
 		// Facet count and payload size move independently: a run once cut the count 70% while
 		// DOUBLING the text, which makes the review payload worse. Print both or the headline
 		// is misleading.
@@ -212,13 +238,15 @@ func printCompactPlans(plans []distill.CompactPlan) {
 		if len(p.Skipped) > 0 {
 			// A prompt regression shows up as a pile of skips. Surfacing it beats a quietly
 			// smaller plan that looks like "the profile is already tight".
-			fmt.Printf("  %s %v\n", dim("refused (invalid proposals):"), p.Skipped)
+			fmt.Printf("  %s %s\n", dim("refused"), refusals(p.Skipped))
 		}
 		if p.Failed > 0 {
 			// A partial plan must never read as a complete one. Without this, a run where
 			// most calls timed out looks identical to a profile that is already tight.
-			fmt.Printf("  %s %s failed (model error or timeout) — this plan is PARTIAL; see %s\n",
-				warnGlyph(), pluralize(p.Failed, "batch", "batches"), dim("witness.log"))
+			fmt.Printf("  %s %s failed — this plan is PARTIAL\n", warnGlyph(), pluralize(p.Failed, "batch", "batches"))
+			if cause != "" {
+				fmt.Printf("    %s %s\n", dim("first error"), cause)
+			}
 		}
 	}
 }

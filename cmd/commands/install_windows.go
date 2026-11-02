@@ -91,7 +91,7 @@ func installSelf() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("witness installed to %s\n", root)
+	fmt.Println(resultRow(okGlyph(), "installed", tildePath(root), ""))
 	// Put the install dir on the user PATH so `witness` runs from any new shell.
 	// Best-effort: the hooks/plugin use the absolute exe path and work regardless, so a
 	// PATH failure only affects the interactive `witness` command.

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -25,6 +26,18 @@ func cmdCandidates(lens string) error {
 	if err != nil {
 		return err
 	}
+	total := 0
+	for _, o := range obs {
+		if o.Lens == lens {
+			total++
+		}
+	}
+	// A typo'd lens used to draw a clustering bar and report "0 observations → 0 candidate arc(s)"
+	// as if the lens existed. A lens that is not registered but still has observations (it was
+	// deregistered) is still worth inspecting, so refuse only when there is neither.
+	if total == 0 && !slices.Contains(st.RegisteredLenses(), lens) {
+		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", lens)
+	}
 	facets, err := st.ReadActiveFacets()
 	if err != nil {
 		return err
@@ -37,31 +50,26 @@ func cmdCandidates(lens string) error {
 		pl.update(distill.Progress{Where: lens, Stages: []distill.Stage{{Name: "clustering", Done: done, Total: total}}})
 	})
 	pl.finish()
-	total := 0
-	for _, o := range obs {
-		if o.Lens == lens {
-			total++
-		}
-	}
-	fmt.Printf("lens %s: %d observations → %d candidate arc(s) (dry run — nothing written)\n\n",
-		bold(lens), total, len(cands))
+	fmt.Printf("lens %s: %s → %s %s\n\n", bold(lens), countOf(total, "observation", "observations"),
+		countOf(len(cands), "candidate arc", "candidate arcs"), dim("(dry run — nothing written)"))
 	if len(cands) == 0 {
 		fmt.Println(dim("  no emergent arcs proposed (no dense cross-session cluster the current facets don't already cover)"))
 		return nil
 	}
 	for i, c := range cands {
-		coverage := fmt.Sprintf("%.0f%%", c.BestFacetCoverage*100)
-		cov := coverage
+		cov := fmt.Sprintf("%.0f%%", c.BestFacetCoverage*100)
 		if c.CoveringFacet != "" {
-			cov = coverage + " of " + c.CoveringFacet
+			// "dimension|key" internally; every other surface writes a facet as dimension/key.
+			cov += " of " + strings.Replace(c.CoveringFacet, "|", "/", 1)
 		}
-		fmt.Printf("%s  %d obs · %d sessions · %d days · %s..%s · coverage %s\n",
-			bold(fmt.Sprintf("arc %d", i+1)), len(c.Members), len(c.Sessions), c.DistinctDays,
+		fmt.Printf("%s  %s · %s · %s · %s → %s · coverage %s\n",
+			bold(fmt.Sprintf("arc %d", i+1)), countOf(len(c.Members), "obs", "obs"),
+			countOf(len(c.Sessions), "session", "sessions"), countOf(c.DistinctDays, "day", "days"),
 			shortTS(c.SpanFrom), shortTS(c.SpanTo), cov)
 		// Show a few member observations so a human can eyeball coherence.
 		for j, m := range c.Members {
 			if j >= 5 {
-				fmt.Printf("      %s\n", dim(fmt.Sprintf("… +%d more", len(c.Members)-5)))
+				fmt.Printf("      %s\n", dim("… +"+humanCount(len(c.Members)-5)+" more"))
 				break
 			}
 			fmt.Printf("      %s %s\n", dim("·"), truncate(m.Observation, 88))
@@ -78,10 +86,14 @@ func shortTS(ts string) string {
 	return ts
 }
 
+// truncate cuts s to n characters with an ellipsis — by RUNES: cutting bytes split a multi-byte
+// character (an em dash, any CJK text) and printed the broken half as U+FFFD. 161 observations in
+// one real archive would have been cut that way.
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }
