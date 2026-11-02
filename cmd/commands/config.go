@@ -1,10 +1,8 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -358,25 +356,4 @@ func configCheckLensExists(st *store.Store, name string) error {
 		}
 	}
 	return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
-}
-
-// configReadRawLensJSON reads the raw lens.json (the on-disk struct) to distinguish
-// an override from an inherited value. lens.LoadRegistered resolves inherited values,
-// so it can't tell which fields are overrides — but the origin view needs that.
-// This is a READ of a file the CLI already owns the path to — NOT an engine change.
-func configReadRawLensJSON(st *store.Store, name string) (lens.LensConfig, error) {
-	path := filepath.Join(st.LensesDir(), name, "lens.json")
-	var cfg lens.LensConfig
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No lens.json means all fields ride the default (no overrides).
-			return cfg, nil
-		}
-		return cfg, fmt.Errorf("read lens.json: %w", err)
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse lens.json: %w", err)
-	}
-	return cfg, nil
 }

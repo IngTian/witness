@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -75,8 +76,9 @@ func TestConfigSetLensOverrideVsDefault(t *testing.T) {
 	if err := configApplySet(st, "review_model", "opus-lens", "default"); err != nil {
 		t.Fatal(err)
 	}
-	// Read the RAW lens.json to prove the storage-key routing (not just resolved LoadRegistered).
-	rawCfg, err := configReadRawLensJSON(st, "default")
+	// LoadRegistered does not resolve inheritance — its model fields are exactly what lens.json
+	// stores — so it proves the storage-key routing.
+	rawCfg, err := lens.LoadRegistered("default", st.LensesDir())
 	if err != nil {
 		t.Fatal(err)
 	}
