@@ -57,7 +57,7 @@ import (
 // added to a version number some binary has already written — it needs a new one, which is what
 // version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
 // them on the next open.)
-const schemaVersion = 12
+const schemaVersion = 13
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -328,6 +328,13 @@ func migrate(db *sql.DB) error {
 	if err := addFacetConfidenceSeqColumn(tx); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("v12 add facet_versions.confidence_seq: %w", err)
+	}
+
+	// 11. v12 -> v13: restart the decay clock on facet versions COMPACTION wrote without one.
+	// Must follow step 10, which creates the column. See repairCompactionDecayClock.
+	if err := repairCompactionDecayClock(tx, v); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v13 repair compaction decay clock: %w", err)
 	}
 
 	// 9. v10 -> v11: facet_versions.claim — the short statement of what a facet asserts,
@@ -688,6 +695,37 @@ func addFacetConfidenceSeqColumn(tx *sql.Tx) error {
 		`UPDATE facet_versions SET confidence_seq = COALESCE((SELECT MAX(seq) FROM observations), 0)`,
 	); err != nil {
 		return fmt.Errorf("backfill confidence_seq: %w", err)
+	}
+	return nil
+}
+
+// repairCompactionDecayClock is the v12->v13 step: give a decay clock back to the facet versions
+// compaction wrote without one.
+//
+// Compaction and decay shipped together in v0.9.0, and compaction's three version writes never set
+// confidence_seq. A 0 there reads as "no clock" (DecayedConfidence returns the stored value), so
+// every facet a `witness compact --apply` created or rewrote stopped decaying — permanently, unless
+// a later review happened to reconfirm it, and the facets that never recur are exactly the ones
+// decay exists for. The write path is fixed; this repairs the rows already written.
+//
+// After step 10's backfill, the reviewer stamps a real seq on every version it writes, so a 0 left
+// in a v12 database came from compaction (or from an archive with no observations at all, where
+// MAX(seq) is 0 and this is a no-op). Restarting those clocks at the current watermark is the same
+// honest reading step 10 used: we do not know when they were really confirmed. It can only make a
+// facet decay LATER than it should — never earlier — and the error is bounded by how long the
+// archive ran a compacting v0.9.x/v0.10.0 binary.
+//
+// VERSION-GATED, unlike the shape-guarded steps around it, because a data repair has no schema
+// shape to detect: it must run once, on the upgrade out of v12, and never again.
+func repairCompactionDecayClock(tx *sql.Tx, from int) error {
+	if from >= 13 {
+		return nil
+	}
+	if _, err := tx.Exec(
+		`UPDATE facet_versions SET confidence_seq = COALESCE((SELECT MAX(seq) FROM observations), 0)
+		 WHERE confidence_seq = 0`,
+	); err != nil {
+		return fmt.Errorf("restart frozen decay clocks: %w", err)
 	}
 	return nil
 }

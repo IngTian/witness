@@ -575,6 +575,14 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 				// absorbed facets were justified by, so the merged version carries the union
 				// of their observation ids. Without this a merge would orphan the evidence.
 				var because []string
+				// The decay clock (#173), carried the same way as provenance. The survivor
+				// speaks for every facet it absorbs, so it was last CONFIRMED when the freshest
+				// of them was. Not "now": a rewrite is not new evidence, and restarting the
+				// clock would hand every compacted facet a free confidence refresh. And not
+				// left at 0, which DecayedConfidence reads as "no clock" — that froze every
+				// facet compaction touched, and the ones that never recur are exactly the
+				// ones decay exists for.
+				var freshest int64
 				absorbed := 0
 				for _, k := range a.Absorb {
 					src, ok := byKey[plan.Lens+"|"+a.Dimension+"|"+k]
@@ -583,6 +591,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 					}
 					if cur := src.Current(); cur != nil {
 						because = mergeIDs(because, cur.BecauseOf)
+						freshest = max(freshest, cur.ConfidenceSeq)
 					}
 					src.ArchivedAt = nowStr
 					src.MergedInto = store.FacetRef(a.Dimension, a.Key)
@@ -603,6 +612,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 						Versions: []store.FacetVersion{{
 							Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
 							BecauseOf: because, Confidence: clampConf(a.Confidence),
+							ConfidenceSeq: freshest,
 						}},
 					}
 					applied++
@@ -613,14 +623,17 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 				// wording stays readable in the facet's own history.
 				if cur := f.Current(); cur != nil {
 					because = mergeIDs(because, cur.BecauseOf)
+					freshest = max(freshest, cur.ConfidenceSeq)
 					if cur.Value != a.Value {
 						f.Versions[len(f.Versions)-1].ValidTo = nowStr
 						f.Versions = append(f.Versions, store.FacetVersion{
 							Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
 							BecauseOf: because, Confidence: clampConf(a.Confidence),
+							ConfidenceSeq: freshest,
 						})
 					} else {
 						cur.BecauseOf = because
+						cur.ConfidenceSeq = freshest
 						// Same value, but a claim may be NEW: an existing facet whose text
 						// did not change still gains its short form on first compaction,
 						// which is how a profile acquires claims without a rewrite.
@@ -632,6 +645,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 					f.Versions = append(f.Versions, store.FacetVersion{
 						Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
 						BecauseOf: because, Confidence: clampConf(a.Confidence),
+						ConfidenceSeq: freshest,
 					})
 				}
 				f.LastSeen = nowStr
