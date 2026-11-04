@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command install for witness (working-copy / from-source).
 # Builds the binary, fetches the embedding model once, and wires the selected
-# agent integration (Claude Code or OpenCode). Idempotent — safe to re-run after
+# agent integration (Claude Code, OpenCode or Codex). Idempotent — safe to re-run after
 # a `git pull`.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
