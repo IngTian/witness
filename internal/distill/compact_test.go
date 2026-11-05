@@ -34,6 +34,7 @@ type fakeCompactStore struct {
 	facets    []store.Facet
 	writes    int
 	written   []store.Facet
+	events    []store.ConfidenceEvent
 	highWater int64 // the decay clock's "now"; 0 leaves every confidence as stored
 }
 
@@ -42,6 +43,12 @@ func (f *fakeCompactStore) ObservationHighWater() (int64, error) { return f.high
 func (f *fakeCompactStore) WriteFacets(fs []store.Facet) error {
 	f.writes++
 	f.written = fs
+	return nil
+}
+func (f *fakeCompactStore) WriteFacetsLogged(fs []store.Facet, evs []store.ConfidenceEvent) error {
+	f.writes++
+	f.written = fs
+	f.events = append(f.events, evs...)
 	return nil
 }
 

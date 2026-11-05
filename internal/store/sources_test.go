@@ -129,7 +129,7 @@ func TestPortraitSourcesRoundTrip(t *testing.T) {
 }
 
 func TestMigrateV13CreatesPortraitSources(t *testing.T) {
-	s := tempStore(t) // fully migrated to v14
+	s := tempStore(t) // fully migrated to current
 	// Simulate a v13 DB by dropping the table and rolling back the version
 	for _, stmt := range []string{
 		`DROP TABLE IF EXISTS portrait_sources`,
@@ -140,18 +140,18 @@ func TestMigrateV13CreatesPortraitSources(t *testing.T) {
 		}
 	}
 
-	// Open (via migrate) brings it to v14
+	// Open (via migrate) brings it to current (portrait_sources added in v14)
 	if err := migrate(s.db); err != nil {
-		t.Fatalf("migrate v13->v14: %v", err)
+		t.Fatalf("migrate v13->current: %v", err)
 	}
 
-	// Verify user_version=14
+	// Verify user_version=current
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 14 {
-		t.Errorf("user_version = %d, want 14", v)
+	if v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 
 	// Verify the table exists
@@ -171,8 +171,8 @@ func TestMigrateV13CreatesPortraitSources(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v2); err != nil {
 		t.Fatal(err)
 	}
-	if v2 != 14 {
-		t.Errorf("after second migrate: user_version = %d, want 14", v2)
+	if v2 != schemaVersion {
+		t.Errorf("after second migrate: user_version = %d, want %d", v2, schemaVersion)
 	}
 }
 

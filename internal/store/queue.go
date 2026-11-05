@@ -463,6 +463,11 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 		return 0, 0, err
 	}
 	nf, _ := res.RowsAffected()
+	// Delete confidence_log rows for this lens — confidence history is lens-specific, not
+	// shared across lenses, and has no value after the facets are gone.
+	if _, err = tx.Exec(`DELETE FROM confidence_log WHERE lens = ?`, lens); err != nil {
+		return 0, 0, err
+	}
 	// Derived caches about the data just deleted. Exact key for profile_sig; prefix match
 	// for emerge_seen (one row per cluster signature). A sibling lens is untouched — the
 	// prefix ends with ':' so "emerge_seen:math:" can never match "emerge_seen:mathsy:".

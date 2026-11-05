@@ -163,6 +163,7 @@ type ReviewStore interface {
 	// contiguous seq ranges (seq is a monotonic AUTOINCREMENT, never reused — #125).
 	ReadObservationsSinceOrdered(lens string, sinceRowid int64) ([]Observation, error)
 	WriteFacets(facets []Facet) error
+	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
 	StampReview() error
 	// ReviewRowid / StampReviewLens are the per-lens fold watermark: what the next
 	// fold reads (seq > ReviewRowid). StampReviewLens advances it to throughRowid —
@@ -183,6 +184,7 @@ type EmergentStore interface {
 	MetaKV            // MetaString / SetMetaString — signature state
 	ReadFacets() ([]Facet, error)
 	WriteFacets(facets []Facet) error
+	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
 }
 
 // CompactStore is the surface the Compactor drives: read the WHOLE profile (archived facets
@@ -192,6 +194,7 @@ type EmergentStore interface {
 type CompactStore interface {
 	ReadFacets() ([]Facet, error)
 	WriteFacets(facets []Facet) error
+	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
 	// ObservationHighWater lets the model be shown DECAYED confidence. Shown the stored value,
 	// it would merge a stale-but-high facet with a fresh one into a survivor that is both
 	// confident and fresh — a free refresh of exactly the kind decay exists to prevent.

@@ -18,6 +18,9 @@ type failingWriteFacets struct {
 }
 
 func (f failingWriteFacets) WriteFacets([]store.Facet) error { return f.err }
+func (f failingWriteFacets) WriteFacetsLogged([]store.Facet, []store.ConfidenceEvent) error {
+	return f.err
+}
 
 // An ACCEPTED arc whose L2 write fails must NOT be recorded as already-verified.
 //
