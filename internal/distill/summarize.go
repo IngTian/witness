@@ -56,7 +56,9 @@ type Summarizer struct {
 	// seam (issue #75 slice 2). A per-lens summary then runs on that lens's own runtime,
 	// like its review. nil → every summary uses Run. The unified cross-lens portrait has no
 	// single lens, so it always uses Run (the default runner).
-	RunFor func(ln *lens.Lens) SummarizeFunc
+	RunFor               func(ln *lens.Lens) SummarizeFunc
+	ResolvePrompt        string // prompts/summarize/resolve.md; "" turns the feature off
+	ResolveUnifiedPrompt string // prompts/summarize/resolve_unified.md
 }
 
 // runFor returns the SummarizeFunc for a lens: the per-lens runner via RunFor when wired,

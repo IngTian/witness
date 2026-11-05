@@ -229,12 +229,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// pass and as the Worker's default Run; per-lens routing goes through rs.RunFor. It is
 	// only reached after ensureRunners() opened the set (the drain/review gates below), so
 	// rs is non-nil here; the guard is a belt-and-suspenders against a misroute.
-	runFn := tap.wrap(func(ctx context.Context, model, prompt, input string) (string, error) {
+	untappedRunFn := func(ctx context.Context, model, prompt, input string) (string, error) {
 		if rs == nil {
 			return "", &runnerDownError{name: cfg.Runner}
 		}
 		return rs.RunFor(nil)(ctx, model, prompt, input)
-	})
+	}
+	runFn := tap.wrap(untappedRunFn)
 
 	// Drain pending sessions. The embedder is heavy (~448MB) and loaded once per
 	// short-lived worker process ONLY when there is mining to do; it is shared
@@ -273,12 +274,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// slice 2): a lens declaring its own runtime mines/reviews against that runner. Only
 	// reached after ensureRunners() (getMiner/runReview gate on it), so rs is non-nil; the
 	// runFn fallback is a belt-and-suspenders that would back off rather than nil-deref.
-	runForLens := tap.wrapFor(func(ln *lens.Lens) distill.MineFunc {
+	untappedRunForLens := func(ln *lens.Lens) distill.MineFunc {
 		if rs == nil {
-			return runFn
+			return untappedRunFn
 		}
 		return rs.RunFor(ln)
-	})
+	}
+	runForLens := tap.wrapFor(untappedRunForLens)
 	// getMiner performs the worker's one-time heavy startup: opening the runner set (which for
 	// OpenCode spawns a private `opencode serve` and validates models) and loading the ~448MB
 	// embedding model through GoMLX.
@@ -357,6 +359,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		drainPass(func(o distill.DrainOpts) int { return w.Drain(ctx, o) }, opts, stopRequested, progress, progressWhere)
 	}
 
+	reviewRan := false
 	runDistillLoop(distillLoopDeps{
 		stopRequested: stopRequested,
 		pending:       pending,
@@ -389,11 +392,72 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 				}
 				_ = regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
 				sp.Stop()
+				if progressWhere != "" {
+					sp = startSpinner("linking the profile to its sources…")
+				}
+				err := resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens) // best-effort: logged
+				if err == nil {
+					// Success: clear retry_after (post-review path ignores the gate but clears on success).
+					_ = st.SetMetaString("sources_retry_after", "")
+				}
+				sp.Stop()
+				reviewRan = true
 			}
 		},
 		ensureMiner:    func() bool { return getMiner() != nil },
 		hasUnattempted: func(p []string) bool { return miner.HasUnattempted(p, attempted) },
 	})
+
+	// End-of-run self-heal: if no review ran this worker run but portraits have stale sources,
+	// resolve them. This catches portraits that became stale after the last review (facet edits,
+	// portrait regeneration from a prompt change) without forcing a review. Only opens runners
+	// when StaleSources returns work; an idle worker with everything current never pays the cost.
+	// Respects stop request and context cancellation: after a stop, do not start new model calls.
+	// Bounded retries: if sources_retry_after is set and not yet expired, skip the self-heal.
+	if selfHealAllowed(reviewRan, stopRequested, ctx) {
+		// Check retry-after gate (only honored by self-heal path).
+		retryAfter := st.MetaString("sources_retry_after")
+		if retryAfter != "" {
+			if t, err := time.Parse(time.RFC3339, retryAfter); err == nil && time.Now().Before(t) {
+				slog.Info("profile: skipping source resolution self-heal until retry window expires", "retry_after", retryAfter)
+				// Skip the entire self-heal block below.
+			} else {
+				// Window expired or parse failed: proceed with self-heal.
+				retryAfter = "" // mark as expired
+			}
+		}
+
+		if retryAfter == "" {
+			lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
+			if err != nil {
+				slog.Warn("profile: source resolver prompts unavailable; self-heal skipped this run", "err", err)
+			} else {
+				sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
+				stale, err := sm.StaleSources()
+				if err != nil {
+					slog.Warn("profile: failed to check stale sources; self-heal skipped this run", "err", err)
+				} else if len(stale) > 0 {
+					if ensureRunners() {
+						var sp *spinner
+						if progressWhere != "" {
+							sp = startSpinner("linking the profile to its sources…")
+						}
+						err := resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens)
+						if err != nil {
+							// Self-heal failed: set retry_after = now + 6h.
+							retryAt := time.Now().Add(6 * time.Hour).UTC().Format(time.RFC3339)
+							_ = st.SetMetaString("sources_retry_after", retryAt)
+						} else {
+							// Success: clear retry_after.
+							_ = st.SetMetaString("sources_retry_after", "")
+						}
+						sp.Stop()
+					}
+				}
+			}
+		}
+	}
+
 	return true, nil
 }
 
@@ -505,4 +569,41 @@ func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, l
 	}
 	slog.Info("profile regenerated")
 	return nil
+}
+
+// resolvePortraitSources links portrait sentences to their source facets. Reads the resolver
+// prompts, builds a Summarizer with ResolvePrompt/ResolveUnifiedPrompt, and calls
+// ResolveSources(), which resolves every stale portrait and writes the links to disk.
+// Failures are logged but never propagated: source resolution is auxiliary metadata that must
+// never break the review or worker run. Returns error only for logging; callers must not
+// propagate it into the review's or worker's exit status.
+func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc) error {
+	lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
+	if err != nil {
+		slog.Warn("profile: resolver prompts unavailable; skipping source linking", "err", err)
+		return err
+	}
+	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
+	stale, err := sm.StaleSources()
+	if err != nil {
+		slog.Warn("profile: failed to check stale sources", "err", err)
+		return err
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	if err := sm.ResolveSources(ctx); err != nil {
+		slog.Warn("profile: source resolution failed", "err", err)
+		return err
+	}
+	slog.Info("profile: sources linked", "portraits", len(stale))
+	return nil
+}
+
+// selfHealAllowed returns true when the end-of-run self-heal should run. It checks:
+// - reviewRan: if a review already ran this worker run, skip (review already resolved)
+// - stopRequested: if a stop was requested, skip (no fresh model calls after stop)
+// - ctx.Err(): if context is cancelled, skip (worker is shutting down)
+func selfHealAllowed(reviewRan bool, stopRequested func() bool, ctx context.Context) bool {
+	return !reviewRan && !stopRequested() && ctx.Err() == nil
 }

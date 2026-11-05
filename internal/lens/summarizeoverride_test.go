@@ -159,3 +159,35 @@ func TestUnreadableOverrideIsAnError(t *testing.T) {
 		t.Errorf("error %q should name the override so the cause is actionable", err)
 	}
 }
+
+// TestLoadResolvePromptsIgnoresOverrides verifies that LoadResolvePrompts reads only the
+// bundled prompts, with no override lookup. An override present in the archive has no
+// effect. This guarantees consistent source linking: every install uses the same resolver
+// prompt, so a user-edited override can't fork the linking behavior from the population.
+func TestLoadResolvePromptsIgnoresOverrides(t *testing.T) {
+	base := t.TempDir()
+	bundleDir := filepath.Join(base, "bundle")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "summarize"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(bundleDir, "summarize", "resolve.md"), "BUNDLED RESOLVE")
+	write(t, filepath.Join(bundleDir, "summarize", "resolve_unified.md"), "BUNDLED RESOLVE UNIFIED")
+	t.Setenv("WITNESS_PROMPTS", bundleDir)
+
+	archiveRoot := filepath.Join(base, "archive")
+	t.Setenv("WITNESS_HOME", archiveRoot)
+	// Write an override that must NOT be picked up.
+	write(t, filepath.Join(archiveRoot, SummarizeOverrideDir, "resolve.md"), "OVERRIDE RESOLVE")
+	write(t, filepath.Join(archiveRoot, SummarizeOverrideDir, "resolve_unified.md"), "OVERRIDE RESOLVE UNIFIED")
+
+	lp, up, err := LoadResolvePrompts()
+	if err != nil {
+		t.Fatalf("LoadResolvePrompts: %v", err)
+	}
+	if lp != "BUNDLED RESOLVE" {
+		t.Errorf("lens resolve prompt = %q, want bundled; got override instead", lp)
+	}
+	if up != "BUNDLED RESOLVE UNIFIED" {
+		t.Errorf("unified resolve prompt = %q, want bundled; got override instead", up)
+	}
+}
