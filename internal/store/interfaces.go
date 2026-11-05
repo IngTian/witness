@@ -217,6 +217,11 @@ type SummaryStore interface {
 	// summarizer only ever visits lenses that HAVE facets, so a dropped lens's stale
 	// narrative is served to agents forever.
 	ListProfiles() ([]string, error)
+	// Portrait source methods: derived sentence→trait links, one JSON row per portrait.
+	WritePortraitSources(portrait, textHash string, src PortraitSources, at time.Time) error
+	ReadPortraitSources(portrait string) (src PortraitSources, textHash string, ok bool, err error)
+	DeletePortraitSources(portrait string) error
+	ListPortraitSources() ([]string, error)
 }
 
 // Compile-time proof that *Store satisfies every consumer interface. If a concern

@@ -57,8 +57,9 @@ import (
 // archive opened with a query referencing a column that did not exist. A column can never be
 // added to a version number some binary has already written — it needs a new one, which is what
 // version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
-// them on the next open.)
-const schemaVersion = 13
+// them on the next open.); v14 adds portrait_sources (derived sentence→trait links, one JSON
+// row per portrait, keyed to a hash of the portrait text).
+const schemaVersion = 14
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -882,6 +883,13 @@ CREATE TABLE IF NOT EXISTS progress (
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS portrait_sources (
+  portrait    TEXT PRIMARY KEY,
+  text_hash   TEXT NOT NULL,
+  resolved_at TEXT NOT NULL,
+  sources     TEXT NOT NULL
 );
 `
 
