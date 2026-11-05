@@ -311,11 +311,12 @@ func TestResolveSourcesIgnoresUnparseableReply(t *testing.T) {
 // TestResolveSourcesValidatesLinks verifies that unknown/archived keys, out-of-range
 // sentence numbers, invalid strengths, excess links per sentence, and keys from another
 // lens are dropped while valid links are kept. Duplicate keys are deduped (keeping stronger
-// strength), then sorted direct-first, then capped at 3. Keywords out of range are dropped,
-// and more than 8 are truncated.
+// strength), multiple reply entries with the same n are merged, then results are sorted
+// direct-first, then capped at 3. Keywords out of range are dropped, and more than 8 are
+// truncated.
 func TestResolveSourcesValidatesLinks(t *testing.T) {
 	s := newStore(t)
-	// Seed multiple default facets so we have valid keys to work with.
+	// Seed 5 default facets (4 active after archiving one) so we can test the 3-cap with 4+ keys.
 	if err := s.WriteFacets([]store.Facet{
 		{Lens: "default", Dimension: "traits", Key: "satisfices",
 			Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9}}},
@@ -325,6 +326,8 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 			Versions: []store.FacetVersion{{Value: "values clarity", Confidence: 0.88}}},
 		{Lens: "default", Dimension: "thinking", Key: "lazy",
 			Versions: []store.FacetVersion{{Value: "efficient not careless", Confidence: 0.92}}},
+		{Lens: "default", Dimension: "thinking", Key: "concrete",
+			Versions: []store.FacetVersion{{Value: "prefers examples", Confidence: 0.86}}},
 		{Lens: "math", Dimension: "resilience", Key: "trip_wire",
 			Versions: []store.FacetVersion{{Value: "recovers with arithmetic", Confidence: 0.87}}},
 	}); err != nil {
@@ -348,15 +351,21 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 		t.Fatalf("WriteProfile: %v", err)
 	}
 
-	// Resolver returns:
+	// Resolver returns TWO separate "links" entries for n:1 (they must be merged):
+	// Entry 1 has: pragmatic(D), pragmatic(P), direct(P)
+	// Entry 2 has: lazy(strong→P), concrete(D)
+	// After merge + dedupe: pragmatic(D), direct(P), lazy(P), concrete(D) = 4 distinct keys.
+	// After sort direct-first: pragmatic(D), concrete(D), direct(P), lazy(P).
+	// After cap at 3: pragmatic(D), concrete(D), direct(P).
+	// A truncate-then-sort bug would give: pragmatic(D), direct(P), lazy(P) (dropping concrete).
+	//
+	// Also tests:
 	// - unknown key "nonexistent/key" (dropped)
 	// - archived key "traits/satisfices" (dropped)
 	// - another lens's key "resilience/trip_wire" (dropped)
 	// - n:0 (dropped)
 	// - n:99 (dropped)
 	// - strength "strong" (becomes partial)
-	// - duplicates of "traits/pragmatic" with different strengths (deduped, keeping direct)
-	// - 4 distinct valid keys on sentence 1 (only 3 kept after sort+cap, direct first)
 	// - keyword with index 99 FIRST (dropped, not just masked by the 8-cap)
 	// - keyword with mixed n:[1,99] (stores [0], dropping the 99)
 	// - 10 more keywords (truncated to 8 total)
@@ -374,8 +383,14 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 					{"key": "resilience/trip_wire", "strength": "direct"},
 					{"key": "traits/pragmatic", "strength": "direct"},
 					{"key": "traits/pragmatic", "strength": "partial"},
-					{"key": "traits/direct", "strength": "partial"},
-					{"key": "thinking/lazy", "strength": "strong"}
+					{"key": "traits/direct", "strength": "partial"}
+				]
+			},
+			{
+				"n": 1,
+				"keys": [
+					{"key": "thinking/lazy", "strength": "strong"},
+					{"key": "thinking/concrete", "strength": "direct"}
 				]
 			},
 			{
@@ -424,10 +439,10 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 		t.Fatal("no sources row")
 	}
 
-	// Sentence 0 (n:1 in reply) should have 3 links: 2 direct (pragmatic, dedupe of pragmatic
-	// dropped), then 1 partial (direct, lazy coerced from "strong"). After dedup there are 3
-	// distinct keys (pragmatic, direct, lazy), so all 3 are kept. They sort direct-first:
-	// pragmatic (direct), then direct (partial) and lazy (partial coerced).
+	// Sentence 0 (n:1 in reply) should have exactly 3 links after merge + dedupe + sort + cap.
+	// The two reply entries for n:1 are merged; after filtering and deduplication, 4 distinct
+	// keys remain (pragmatic, direct, lazy, concrete). After sort direct-first: [pragmatic(D),
+	// concrete(D), direct(P), lazy(P)]. After cap at 3: [pragmatic(D), concrete(D), direct(P)].
 	if len(src.Sentences) < 1 {
 		t.Fatal("no sentences")
 	}
@@ -435,16 +450,40 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 	if len(links) != 3 {
 		t.Fatalf("sentence 0 links: got %d, want 3", len(links))
 	}
-	// First link is pragmatic (direct, deduped).
-	if links[0].Dimension != "traits" || links[0].Key != "pragmatic" || links[0].Strength != store.LinkDirect {
-		t.Fatalf("first link: got %+v, want {traits pragmatic direct}", links[0])
+
+	// Assert deduplication: pragmatic appears exactly once (was direct+partial, kept direct).
+	pragmaticCount := 0
+	for _, link := range links {
+		if link.Dimension == "traits" && link.Key == "pragmatic" {
+			pragmaticCount++
+			if link.Strength != store.LinkDirect {
+				t.Fatalf("pragmatic link strength: got %s, want direct (upgraded from partial)", link.Strength)
+			}
+		}
 	}
-	// Second and third are partial (either order is fine, but both should be partial).
-	if links[1].Strength != store.LinkPartial {
-		t.Fatalf("second link strength: got %s, want partial", links[1].Strength)
+	if pragmaticCount != 1 {
+		t.Fatalf("pragmatic appears %d times, want exactly 1 (deduped)", pragmaticCount)
 	}
-	if links[2].Strength != store.LinkPartial {
-		t.Fatalf("third link strength: got %s, want partial", links[2].Strength)
+
+	// Assert same-n merge: concrete (from the second n:1 entry) is present.
+	concreteFound := false
+	for _, link := range links {
+		if link.Dimension == "thinking" && link.Key == "concrete" {
+			concreteFound = true
+			if link.Strength != store.LinkDirect {
+				t.Fatalf("concrete link strength: got %s, want direct", link.Strength)
+			}
+		}
+	}
+	if !concreteFound {
+		t.Fatal("concrete link not found; same-n entries were not merged")
+	}
+
+	// Assert direct-first cap: the first link is direct, and concrete (a direct from the 4th
+	// distinct key) is present. A truncate-then-sort bug would cap at [pragmatic(D), direct(P),
+	// lazy(P)] and drop concrete.
+	if links[0].Strength != store.LinkDirect {
+		t.Fatalf("first link strength: got %s, want direct (direct-first sort)", links[0].Strength)
 	}
 
 	// Keywords: "out" (n:[99] only) is dropped; "mixed" (n:[1,99]) stores [0]; then w1-w8
