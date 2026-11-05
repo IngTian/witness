@@ -365,6 +365,20 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc *mergeSide, re
 	if err := writeFacetsTx(tx, merged); err != nil {
 		return fmt.Errorf("write facets: %w", err)
 	}
+	// Rename confidence_log rows to follow renamed facets. The log is keyed by name (lens, dimension,
+	// key), so a rename that left the rows behind would hand our history to the incoming facet now
+	// holding the key. When a same-key collision is resolved by renaming our facet to <key>__mN,
+	// our log must move to the new key.
+	for _, sk := range rep.Facets.SameKey {
+		if !sk.IncomingWon {
+			continue // our facet kept the key; nothing to rename
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE confidence_log SET key = ? WHERE lens = ? AND dimension = ? AND key = ?`,
+			sk.LoserKey, sk.Lens, sk.Dimension, sk.Key)
+		if err != nil {
+			return fmt.Errorf("rename confidence log for %s/%s/%s: %w", sk.Lens, sk.Dimension, sk.Key, err)
+		}
+	}
 	if !apply {
 		return nil // the deferred rollback discards everything, temp tables included; the report stands
 	}
