@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -22,9 +23,9 @@ func TestWriteFacetsLoggedWritesBothAtomically(t *testing.T) {
 
 	events := []ConfidenceEvent{
 		{
-			Lens:      "test",
-			Dimension: "thinking",
-			Key:       "trait1",
+			Lens:      "lensA",
+			Dimension: "dimA",
+			Key:       "keyA",
 			At:        time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
 			ClockSeq:  100,
 			From:      0.0,
@@ -32,13 +33,13 @@ func TestWriteFacetsLoggedWritesBothAtomically(t *testing.T) {
 			Kind:      EventNew,
 		},
 		{
-			Lens:      "test",
-			Dimension: "thinking",
-			Key:       "trait2",
-			At:        time.Date(2026, 11, 5, 12, 1, 0, 0, time.UTC).Format(time.RFC3339),
-			ClockSeq:  50,
+			Lens:      "lensB",
+			Dimension: "dimB",
+			Key:       "keyB",
+			At:        time.Date(2026, 11, 5, 13, 30, 45, 0, time.UTC).Format(time.RFC3339),
+			ClockSeq:  250,
 			From:      0.7,
-			To:        0.9,
+			To:        0.92,
 			Kind:      EventReinforce,
 		},
 	}
@@ -56,19 +57,13 @@ func TestWriteFacetsLoggedWritesBothAtomically(t *testing.T) {
 		t.Fatalf("facets count = %d, want 1", len(readFacets))
 	}
 
-	// Verify events were written
+	// Verify events were written and round-trip correctly with all distinct values
 	readEvents, err := s.ReadConfidenceLog()
 	if err != nil {
 		t.Fatalf("ReadConfidenceLog: %v", err)
 	}
-	if len(readEvents) != 2 {
-		t.Fatalf("events count = %d, want 2", len(readEvents))
-	}
-	if readEvents[0].Kind != EventNew {
-		t.Errorf("events[0].Kind = %q, want %q", readEvents[0].Kind, EventNew)
-	}
-	if readEvents[1].Kind != EventReinforce {
-		t.Errorf("events[1].Kind = %q, want %q", readEvents[1].Kind, EventReinforce)
+	if !reflect.DeepEqual(readEvents, events) {
+		t.Errorf("events round-trip mismatch:\nwrote: %+v\nread:  %+v", events, readEvents)
 	}
 }
 
@@ -150,6 +145,96 @@ func TestWriteFacetsLoggedRollsBackTogether(t *testing.T) {
 	}
 }
 
+func TestWriteFacetsLoggedRollsBackOnEventInsertFailure(t *testing.T) {
+	s := tempStore(t)
+
+	// Establish a baseline
+	baseline := []Facet{
+		{
+			Lens:      "test",
+			Dimension: "thinking",
+			Key:       "existing",
+			Versions: []FacetVersion{
+				{Value: "existing value", Confidence: 0.5, ConfidenceSeq: 10},
+			},
+		},
+	}
+	if err := s.WriteFacets(baseline); err != nil {
+		t.Fatalf("baseline WriteFacets: %v", err)
+	}
+
+	// Install a trigger that forces event insert to fail
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_log BEFORE INSERT ON confidence_log BEGIN SELECT RAISE(ABORT,'forced'); END`); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+	defer s.db.Exec(`DROP TRIGGER IF EXISTS reject_log`)
+
+	// Try to write facets with events — the event insert must fail
+	newFacets := []Facet{
+		{
+			Lens:      "test",
+			Dimension: "thinking",
+			Key:       "new",
+			Versions: []FacetVersion{
+				{Value: "new value", Confidence: 0.8, ConfidenceSeq: 100},
+			},
+		},
+	}
+	events := []ConfidenceEvent{
+		{
+			Lens:      "test",
+			Dimension: "thinking",
+			Key:       "new",
+			At:        time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+			ClockSeq:  100,
+			From:      0.0,
+			To:        0.8,
+			Kind:      EventNew,
+		},
+	}
+
+	// The write must fail
+	err := s.WriteFacetsLogged(newFacets, events)
+	if err == nil {
+		t.Fatal("WriteFacetsLogged with trigger: expected error, got nil")
+	}
+
+	// Verify the baseline facets are unchanged (rollback succeeded)
+	readFacets, err := s.ReadFacets()
+	if err != nil {
+		t.Fatalf("ReadFacets after failed write: %v", err)
+	}
+	if len(readFacets) != 1 {
+		t.Fatalf("after rollback: facets count = %d, want 1", len(readFacets))
+	}
+	if readFacets[0].Key != "existing" {
+		t.Errorf("after rollback: facet key = %q, want %q", readFacets[0].Key, "existing")
+	}
+
+	// Verify the store is still usable (not blocked by an open tx)
+	type result struct {
+		facets []Facet
+		err    error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		fs, err := s.ReadFacets()
+		ch <- result{fs, err}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("ReadFacets after rollback: %v", res.err)
+		}
+		if len(res.facets) != 1 {
+			t.Errorf("store still usable: facets count = %d, want 1", len(res.facets))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadFacets blocked for >2s — tx was left open")
+	}
+}
+
 func TestWriteFacetsLoggedLeavesFacetsIdentical(t *testing.T) {
 	s1 := tempStore(t)
 	s2 := tempStore(t)
@@ -160,15 +245,20 @@ func TestWriteFacetsLoggedLeavesFacetsIdentical(t *testing.T) {
 			Dimension: "thinking",
 			Key:       "trait1",
 			Versions: []FacetVersion{
-				{Value: "test value", Confidence: 0.8, ConfidenceSeq: 100},
+				{Value: "test value", Confidence: 0.8, ConfidenceSeq: 100,
+					ValidFrom: "2026-01-01T00:00:00Z", RecordedAt: "2026-01-01T00:00:00Z"},
 			},
 		},
 		{
 			Lens:      "test",
 			Dimension: "meta",
 			Key:       "trait2",
+			// Facet with both a closed version and an open version
 			Versions: []FacetVersion{
-				{Value: "another value", Confidence: 0.9, ConfidenceSeq: 50},
+				{Value: "old version", Confidence: 0.7, ConfidenceSeq: 30,
+					ValidFrom: "2026-01-01T00:00:00Z", ValidTo: "2026-06-01T00:00:00Z", RecordedAt: "2026-01-01T00:00:00Z"},
+				{Value: "current version", Confidence: 0.9, ConfidenceSeq: 50,
+					ValidFrom: "2026-06-01T00:00:00Z", RecordedAt: "2026-06-01T00:00:00Z"},
 			},
 		},
 	}
@@ -196,7 +286,7 @@ func TestWriteFacetsLoggedLeavesFacetsIdentical(t *testing.T) {
 		t.Fatalf("s2.WriteFacetsLogged: %v", err)
 	}
 
-	// Read both and compare
+	// Read both and compare with reflect.DeepEqual
 	f1, err := s1.ReadFacets()
 	if err != nil {
 		t.Fatalf("s1.ReadFacets: %v", err)
@@ -206,16 +296,8 @@ func TestWriteFacetsLoggedLeavesFacetsIdentical(t *testing.T) {
 		t.Fatalf("s2.ReadFacets: %v", err)
 	}
 
-	if len(f1) != len(f2) {
-		t.Fatalf("facets length mismatch: %d vs %d", len(f1), len(f2))
-	}
-	for i := range f1 {
-		if f1[i].Lens != f2[i].Lens || f1[i].Dimension != f2[i].Dimension || f1[i].Key != f2[i].Key {
-			t.Errorf("facet %d mismatch: %+v vs %+v", i, f1[i], f2[i])
-		}
-		if len(f1[i].Versions) != len(f2[i].Versions) {
-			t.Errorf("facet %d version count mismatch: %d vs %d", i, len(f1[i].Versions), len(f2[i].Versions))
-		}
+	if !reflect.DeepEqual(f1, f2) {
+		t.Errorf("WriteFacets and WriteFacetsLogged produced different facets:\nf1: %+v\nf2: %+v", f1, f2)
 	}
 }
 

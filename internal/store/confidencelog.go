@@ -1,5 +1,7 @@
 package store
 
+import "database/sql"
+
 // Event kinds for confidence log entries.
 const (
 	EventNew        = "new"
@@ -23,20 +25,19 @@ type ConfidenceEvent struct {
 }
 
 // WriteFacetsLogged writes facets and confidence events in ONE transaction. It is the
-// logged variant of WriteFacets: the facets table is replaced just as in WriteFacets,
-// and the events are appended to confidence_log. If events is nil or empty, no log
-// rows are written. The transaction rolls back on any error, so either both succeed
-// or neither is persisted.
+// same full-table facets REPLACE as WriteFacets, followed by appending events to
+// confidence_log. If events is nil or empty, no log rows are written. The transaction
+// rolls back on any error, so either both succeed or neither is persisted. Call
+// WriteFacets(fs) to write facets without events — it delegates to WriteFacetsLogged(fs, nil).
 func (f *facetIO) WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error {
 	tx, err := f.db.Begin()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
+	// Unconditional rollback: a no-op after Commit, but avoids leaving the tx open on
+	// a Prepare or Exec failure that would otherwise shadow `err` and skip the deferred
+	// rollback. With MaxOpenConns(1), an unclosed tx blocks every future call.
+	defer tx.Rollback()
 
 	// Write facets (same full-table replace as WriteFacets)
 	if err = writeFacetsTx(tx, facets); err != nil {
@@ -45,7 +46,8 @@ func (f *facetIO) WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) er
 
 	// Write confidence events if any
 	if len(events) > 0 {
-		stmt, err := tx.Prepare(
+		var stmt *sql.Stmt
+		stmt, err = tx.Prepare(
 			`INSERT INTO confidence_log(lens, dimension, key, at, clock_seq, from_conf, to_conf, kind)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
@@ -54,7 +56,8 @@ func (f *facetIO) WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) er
 		defer stmt.Close()
 
 		for _, ev := range events {
-			if _, err := stmt.Exec(ev.Lens, ev.Dimension, ev.Key, ev.At, ev.ClockSeq, ev.From, ev.To, ev.Kind); err != nil {
+			_, err = stmt.Exec(ev.Lens, ev.Dimension, ev.Key, ev.At, ev.ClockSeq, ev.From, ev.To, ev.Kind)
+			if err != nil {
 				return err
 			}
 		}
