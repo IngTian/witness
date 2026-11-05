@@ -1213,3 +1213,53 @@ func TestResolveUnifiedSkipsWhenAllNotebookResolversFail(t *testing.T) {
 		t.Fatal("unified row has Inherits; expected empty")
 	}
 }
+
+// TestSummarizeNeverCallsResolver verifies that Summarize, even with both resolve
+// prompts set, makes zero calls with those prompts. This guarantees that the read
+// path (ensureProfileFresh → Summarize) has exactly today's latency: source resolution
+// is wired only into the background worker, never into the read-time regeneration.
+func TestSummarizeNeverCallsResolver(t *testing.T) {
+	s := newStore(t)
+	// Seed a facet and write a profile so Summarize has work to do.
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "k",
+			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteProfile("default", "Summary."); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []string
+	fake := func(_ context.Context, _, prompt, _ string) (string, error) {
+		calls = append(calls, prompt)
+		return "OUTPUT", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		LensPrompt:           "LENS",
+		UnifiedPrompt:        "UNIFIED",
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  fake,
+	}
+
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+
+	// Assert: only LENS and UNIFIED were called, never RESOLVE or RESOLVE_UNIFIED.
+	for _, p := range calls {
+		if p == "RESOLVE" || p == "RESOLVE_UNIFIED" {
+			t.Fatalf("Summarize called the resolver with prompt %q; must never call resolve prompts", p)
+		}
+	}
+	// Ensure we actually called the fake (else the test is vacuous).
+	if len(calls) == 0 {
+		t.Fatal("no calls made; test is vacuous")
+	}
+}

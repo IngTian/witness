@@ -357,6 +357,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		drainPass(func(o distill.DrainOpts) int { return w.Drain(ctx, o) }, opts, stopRequested, progress, progressWhere)
 	}
 
+	reviewRan := false
 	runDistillLoop(distillLoopDeps{
 		stopRequested: stopRequested,
 		pending:       pending,
@@ -389,11 +390,30 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 				}
 				_ = regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
 				sp.Stop()
+				_ = resolvePortraitSources(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
+				reviewRan = true
 			}
 		},
 		ensureMiner:    func() bool { return getMiner() != nil },
 		hasUnattempted: func(p []string) bool { return miner.HasUnattempted(p, attempted) },
 	})
+
+	// End-of-run self-heal: if no review ran this worker run but portraits have stale sources,
+	// resolve them. This catches portraits that became stale after the last review (facet edits,
+	// portrait regeneration from a prompt change) without forcing a review. Only opens runners
+	// when StaleSources returns work; an idle worker with everything current never pays the cost.
+	if !reviewRan {
+		lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
+		if err == nil {
+			sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
+			if needsSourceResolve(sm) {
+				if ensureRunners() {
+					_ = resolvePortraitSources(ctx, st, cfg, lenses, runFn, runForLens)
+				}
+			}
+		}
+	}
+
 	return true, nil
 }
 
@@ -505,4 +525,41 @@ func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, l
 	}
 	slog.Info("profile regenerated")
 	return nil
+}
+
+// resolvePortraitSources links portrait sentences to their source facets. Reads the resolver
+// prompts, builds a Summarizer with ResolvePrompt/ResolveUnifiedPrompt, and calls
+// ResolveSources(), which resolves every stale portrait and writes the links to disk.
+// Failures are logged but never propagated: source resolution is auxiliary metadata that must
+// never break the review or worker run. Returns error only for logging; callers must not
+// propagate it into the review's or worker's exit status.
+func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc) error {
+	lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
+	if err != nil {
+		slog.Warn("profile: resolver prompts unavailable; skipping source linking", "err", err)
+		return err
+	}
+	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
+	stale, err := sm.StaleSources()
+	if err != nil {
+		slog.Warn("profile: failed to check stale sources", "err", err)
+		return err
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	if err := sm.ResolveSources(ctx); err != nil {
+		slog.Warn("profile: source resolution failed", "err", err)
+		return err
+	}
+	slog.Info("profile: sources linked", "portraits", len(stale))
+	return nil
+}
+
+// needsSourceResolve returns true when the Summarizer has stale portraits to resolve. Used by
+// the worker's end-of-run self-heal to gate opening runners: an idle worker with everything
+// current never pays the runner-open cost. sm must have ResolvePrompt/ResolveUnifiedPrompt set.
+func needsSourceResolve(sm *distill.Summarizer) bool {
+	stale, err := sm.StaleSources()
+	return err == nil && len(stale) > 0
 }

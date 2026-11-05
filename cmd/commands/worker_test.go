@@ -1,12 +1,15 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -491,5 +494,52 @@ func TestAutoWorkerRunHonorsDisabledConfig(t *testing.T) {
 	defer st.Close()
 	if got := st.MetaString("worker_pid"); got != "" {
 		t.Fatalf("disabled automatic worker stamped pid %q", got)
+	}
+}
+
+// TestWorkerSelfHealSkipsRunnersWhenFresh verifies that the end-of-run source-resolution
+// self-heal opens runners ONLY when there is stale work (StaleSources returns a non-empty
+// list). An idle worker run with every portrait current must never open a runner.
+func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// Write a facet and profile, then write portrait sources so StaleSources returns empty.
+	if err := st.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "k",
+			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	md := "Summary."
+	if err := st.WriteProfile("default", md); err != nil {
+		t.Fatal(err)
+	}
+	// Write current sources (hash matches, so it's not stale).
+	src := store.PortraitSources{Sentences: []store.SourcedSentence{{Text: "Summary."}}}
+	if err := st.WritePortraitSources("default", store.PortraitHash(md), src, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := func(_ context.Context, _, _, _ string) (string, error) {
+		return "OUTPUT", nil
+	}
+
+	sm := &distill.Summarizer{
+		Store:                st,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  fake,
+	}
+
+	// With portrait sources current, needsSourceResolve returns false.
+	if needsSourceResolve(sm) {
+		t.Fatal("needsSourceResolve returned true when portrait sources are current")
 	}
 }

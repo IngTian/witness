@@ -164,6 +164,24 @@ func loadSummarizePrompt(root, name string) (string, error) {
 	return string(b), nil
 }
 
+// LoadResolvePrompts loads the portrait-source resolver prompts from the bundled files
+// only, with no archive-local override lookup. Returns resolve.md (per-lens notebook
+// resolver) and resolve_unified.md (unified portrait resolver). Missing files are an
+// error; callers log it and skip source resolution. No override lookup guarantees that
+// every install uses the same resolver prompt, so user-edited overrides can't fork the
+// linking behavior from the population.
+func LoadResolvePrompts() (lensPrompt, unifiedPrompt string, err error) {
+	l, err := os.ReadFile(filepath.Join(promptsDir(), "summarize", "resolve.md"))
+	if err != nil {
+		return "", "", err
+	}
+	u, err := os.ReadFile(filepath.Join(promptsDir(), "summarize", "resolve_unified.md"))
+	if err != nil {
+		return "", "", err
+	}
+	return string(l), string(u), nil
+}
+
 // DefaultDimensions is the person-growth dimension scaffold for the "default" lens.
 // Since #44 slice 1a the default lens is an ordinary registered lens whose dimensions
 // live in its seeded prompts/default/lens.json (this slice must be kept in sync with

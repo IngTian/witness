@@ -129,6 +129,9 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	sp := startSpinner("distilling the profile from the latest facets…")
 	profErr = regenerateProfile(ctx, st, cfg, lenses, runFn, runFor)
 	sp.Stop()
+	sp = startSpinner("linking the profile to its sources…")
+	_ = resolvePortraitSources(ctx, st, cfg, lenses, runFn, runFor) // best-effort: logged
+	sp.Stop()
 	return true, profErr, nil
 }
 
