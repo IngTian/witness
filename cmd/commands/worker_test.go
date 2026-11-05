@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
@@ -510,6 +511,21 @@ func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
 		platform.Register(selfHealFakePlatform{})
 	})
 
+	// Set up resolve prompts in a fake bundle dir so LoadResolvePrompts succeeds.
+	// Without this, the self-heal block is never entered (prompts fail to load) and
+	// the test passes vacuously.
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "summarize"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve.md"), []byte("RESOLVE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve_unified.md"), []byte("RESOLVE_UNIFIED"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_PROMPTS", bundleDir)
+
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
 	if err != nil {
@@ -557,6 +573,16 @@ func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
 	}
 	if !ran {
 		t.Fatal("worker should have run")
+	}
+
+	// Assert LoadResolvePrompts succeeded (non-empty prompts) so we know the self-heal
+	// block was entered. Without this, the test can pass vacuously if prompts fail to load.
+	lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
+	if err != nil {
+		t.Fatalf("LoadResolvePrompts failed; test cannot verify the gate: %v", err)
+	}
+	if lensPrompt == "" || unifiedPrompt == "" {
+		t.Fatal("LoadResolvePrompts returned empty prompts; test cannot verify the gate")
 	}
 
 	if got := atomic.LoadInt32(&selfHealFakeOpens); got != 0 {
