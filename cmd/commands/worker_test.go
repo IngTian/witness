@@ -691,61 +691,67 @@ func setupTestLens(t *testing.T, root string) string {
 	return lensDir
 }
 
-// TestWorkerSelfHealRespectsStopRequest verifies that the end-of-run self-heal respects
-// the stop request: after `witness distill stop`, it must not start new model calls.
-func TestWorkerSelfHealRespectsStopRequest(t *testing.T) {
-	registerSelfHealOnce.Do(func() { platform.Register(selfHealFakePlatform{}) })
+// TestSelfHealAllowed unit-tests the selfHealAllowed gate that guards the end-of-run
+// self-heal. This is the load-bearing stop-request check that prevents fresh model calls
+// after `witness distill stop`. Cannot be tested via runWorker because auto mode exits
+// before reaching the gate and manual mode clears the flag.
+func TestSelfHealAllowed(t *testing.T) {
+	tests := []struct {
+		name          string
+		reviewRan     bool
+		stopRequested func() bool
+		ctxErr        error
+		want          bool
+	}{
+		{
+			name:          "allowed when none of the guards trigger",
+			reviewRan:     false,
+			stopRequested: func() bool { return false },
+			ctxErr:        nil,
+			want:          true,
+		},
+		{
+			name:          "blocked when review already ran",
+			reviewRan:     true,
+			stopRequested: func() bool { return false },
+			ctxErr:        nil,
+			want:          false,
+		},
+		{
+			name:          "blocked when stop requested",
+			reviewRan:     false,
+			stopRequested: func() bool { return true },
+			ctxErr:        nil,
+			want:          false,
+		},
+		{
+			name:          "blocked when context cancelled",
+			reviewRan:     false,
+			stopRequested: func() bool { return false },
+			ctxErr:        context.Canceled,
+			want:          false,
+		},
+		{
+			name:          "blocked when all guards trigger",
+			reviewRan:     true,
+			stopRequested: func() bool { return true },
+			ctxErr:        context.Canceled,
+			want:          false,
+		},
+	}
 
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	if err := st.SetConfigString("runner", "selfheal"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.RegisterLens("test", setupTestLens(t, st.Root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.EnableLens("test"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a facet and profile, but NO sources → stale. Self-heal would resolve it.
-	if err := st.WriteFacets([]store.Facet{
-		{Lens: "test", Dimension: "traits", Key: "k",
-			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.WriteProfile("test", "Stale."); err != nil {
-		t.Fatal(err)
-	}
-	// Request a stop BEFORE the worker runs.
-	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
-		t.Fatal(err)
-	}
-	st.Close()
-
-	atomic.StoreInt32(&selfHealFakeOpens, 0)
-	atomic.StoreInt32(&selfHealFakeRuns, 0)
-
-	// Auto worker respects stop and exits before self-heal.
-	ran, err := runWorker(true)
-	if err != nil {
-		t.Fatalf("runWorker: %v", err)
-	}
-	if !ran {
-		t.Fatal("worker should have run (it clears the stop flag)")
-	}
-
-	// Assert: even with stale portraits, the self-heal never ran because stop was requested.
-	if got := atomic.LoadInt32(&selfHealFakeOpens); got != 0 {
-		t.Errorf("self-heal opened runner %d times with stop requested; want 0", got)
-	}
-	if got := atomic.LoadInt32(&selfHealFakeRuns); got != 0 {
-		t.Errorf("self-heal ran %d times with stop requested; want 0", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.ctxErr != nil {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel() // cancel immediately
+			}
+			got := selfHealAllowed(tt.reviewRan, tt.stopRequested, ctx)
+			if got != tt.want {
+				t.Errorf("selfHealAllowed() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

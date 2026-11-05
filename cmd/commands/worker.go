@@ -409,7 +409,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// portrait regeneration from a prompt change) without forcing a review. Only opens runners
 	// when StaleSources returns work; an idle worker with everything current never pays the cost.
 	// Respects stop request and context cancellation: after a stop, do not start new model calls.
-	if !reviewRan && !stopRequested() && ctx.Err() == nil {
+	if selfHealAllowed(reviewRan, stopRequested, ctx) {
 		lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
 		if err != nil {
 			slog.Warn("profile: source resolver prompts unavailable; self-heal skipped this run", "err", err)
@@ -573,10 +573,10 @@ func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Conf
 	return nil
 }
 
-// needsSourceResolve returns true when the Summarizer has stale portraits to resolve. Used by
-// the worker's end-of-run self-heal to gate opening runners: an idle worker with everything
-// current never pays the runner-open cost. sm must have ResolvePrompt/ResolveUnifiedPrompt set.
-func needsSourceResolve(sm *distill.Summarizer) bool {
-	stale, err := sm.StaleSources()
-	return err == nil && len(stale) > 0
+// selfHealAllowed returns true when the end-of-run self-heal should run. It checks:
+// - reviewRan: if a review already ran this worker run, skip (review already resolved)
+// - stopRequested: if a stop was requested, skip (no fresh model calls after stop)
+// - ctx.Err(): if context is cancelled, skip (worker is shutting down)
+func selfHealAllowed(reviewRan bool, stopRequested func() bool, ctx context.Context) bool {
+	return !reviewRan && !stopRequested() && ctx.Err() == nil
 }
