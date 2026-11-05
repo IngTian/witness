@@ -305,11 +305,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 // and To/ClockSeq are what that version now holds, so a seq-0 caller logs the clock knownClock
 // kept rather than the 0 it passed.
 func (r *Reviewer) logEvent(f *store.Facet, kind string, from float64, nowStr string) {
-	v := f.Current()
-	r.events = append(r.events, store.ConfidenceEvent{
-		Lens: f.Lens, Dimension: f.Dimension, Key: f.Key, At: nowStr,
-		ClockSeq: v.ConfidenceSeq, From: from, To: v.Confidence, Kind: kind,
-	})
+	r.events = append(r.events, confidenceEvent(f, kind, from, nowStr))
 }
 
 // knownClock is the decay clock a version should carry after an assertion at seq, given the
@@ -582,6 +578,24 @@ func clampConf(c float64) float64 {
 		return 1
 	}
 	return math.Round(c*100) / 100
+}
+
+// confidenceEvent builds a ConfidenceEvent for a facet f whose current version was just written.
+// To and ClockSeq are read from f.Current() (the version as written), while from is the pre-change
+// confidence the caller computed before mutating f. nowStr is the run's timestamp (RFC3339 UTC).
+// Used by both Apply (compaction) and Reviewer.logEvent (review fold).
+func confidenceEvent(f *store.Facet, kind string, from float64, nowStr string) store.ConfidenceEvent {
+	v := f.Current()
+	return store.ConfidenceEvent{
+		Lens:      f.Lens,
+		Dimension: f.Dimension,
+		Key:       f.Key,
+		At:        nowStr,
+		ClockSeq:  v.ConfidenceSeq,
+		From:      from,
+		To:        v.Confidence,
+		Kind:      kind,
+	}
 }
 
 // maxF and sameValue used to live here. maxF predated Go 1.21's builtin `max` (go.mod is 1.25.1) and

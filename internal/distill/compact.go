@@ -673,6 +673,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 				f, ok := byKey[id]
 				if !ok {
 					// A new abstraction node: the survivor key did not exist.
+					fromConf := 0.0
 					conf := clampConf(a.Confidence)
 					byKey[id] = &store.Facet{
 						Lens: plan.Lens, Dimension: a.Dimension, Key: a.Key, LastSeen: nowStr,
@@ -682,16 +683,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 							ConfidenceSeq: freshest,
 						}},
 					}
-					events = append(events, store.ConfidenceEvent{
-						Lens:      plan.Lens,
-						Dimension: a.Dimension,
-						Key:       a.Key,
-						At:        nowStr,
-						ClockSeq:  freshest,
-						From:      0,
-						To:        conf,
-						Kind:      store.EventCompaction,
-					})
+					events = append(events, confidenceEvent(byKey[id], store.EventCompaction, fromConf, nowStr))
 					applied++
 					continue
 				}
@@ -713,16 +705,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 							BecauseOf: because, Confidence: toConf,
 							ConfidenceSeq: freshest,
 						})
-						events = append(events, store.ConfidenceEvent{
-							Lens:      plan.Lens,
-							Dimension: a.Dimension,
-							Key:       a.Key,
-							At:        nowStr,
-							ClockSeq:  freshest,
-							From:      fromConf,
-							To:        toConf,
-							Kind:      store.EventCompaction,
-						})
+						events = append(events, confidenceEvent(f, store.EventCompaction, fromConf, nowStr))
 					} else {
 						// Same value: capture decayed confidence BEFORE refreshing the clock.
 						// From is decayed because that is what the reader saw before this
@@ -736,16 +719,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 						if strings.TrimSpace(cur.Claim) == "" {
 							cur.Claim = a.Claim
 						}
-						events = append(events, store.ConfidenceEvent{
-							Lens:      plan.Lens,
-							Dimension: a.Dimension,
-							Key:       a.Key,
-							At:        nowStr,
-							ClockSeq:  freshest,
-							From:      fromConf,
-							To:        cur.Confidence,
-							Kind:      store.EventCompaction,
-						})
+						events = append(events, confidenceEvent(f, store.EventCompaction, fromConf, nowStr))
 					}
 				} else {
 					// Reopen: the facet is archived, and we're appending a new version.
@@ -760,16 +734,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 						BecauseOf: because, Confidence: toConf,
 						ConfidenceSeq: freshest,
 					})
-					events = append(events, store.ConfidenceEvent{
-						Lens:      plan.Lens,
-						Dimension: a.Dimension,
-						Key:       a.Key,
-						At:        nowStr,
-						ClockSeq:  freshest,
-						From:      fromConf,
-						To:        toConf,
-						Kind:      store.EventCompaction,
-					})
+					events = append(events, confidenceEvent(f, store.EventCompaction, fromConf, nowStr))
 				}
 				f.LastSeen = nowStr
 				f.ArchivedAt = "" // a survivor is active by definition

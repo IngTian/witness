@@ -16,7 +16,8 @@ import (
 // confidence is not set, they are archived.
 
 func TestCompactLogsSurvivorCases(t *testing.T) {
-	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	// Non-UTC time to pin that Apply formats with .UTC()
+	now := time.Date(2026, 11, 5, 7, 0, 0, 0, time.FixedZone("EST", -5*3600))
 	nowStr := now.UTC().Format(time.RFC3339)
 
 	cases := []struct {
@@ -34,7 +35,7 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 				cfSeq("thinking", "b", "value b", 0.8, 3500),
 				cfSeq("thinking", "c", "value c", 0.6, 1000),
 			},
-			plan:     `[{"action":"merge","dimension":"thinking","key":"node","value":"merged","absorb":["a","b","c"],"confidence":0.85,"claim":"short","why":"same"}]`,
+			plan:     `[{"action":"merge","dimension":"thinking","key":"node","value":"merged","absorb":["a","b","c"],"confidence":0.856,"claim":"short","why":"same"}]`,
 			decaySeq: 3500,
 			wantEvents: []store.ConfidenceEvent{
 				{
@@ -44,11 +45,11 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 					At:        nowStr,
 					ClockSeq:  3500,
 					From:      0,
-					To:        0.85,
+					To:        0.86, // clampConf(0.856) = 0.86
 					Kind:      store.EventCompaction,
 				},
 			},
-			description: "new abstraction: survivor did not exist, From=0",
+			description: "new abstraction: survivor did not exist, From=0, To is clamped",
 		},
 		{
 			name: "rewritten",
@@ -57,7 +58,7 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 				cfSeq("thinking", "a", "value a", 0.7, 3500),
 				cfSeq("thinking", "b", "value b", 0.8, 2000),
 			},
-			plan:     `[{"action":"merge","dimension":"thinking","key":"survivor","value":"new value","absorb":["a","b"],"confidence":0.8,"claim":"short","why":"same"}]`,
+			plan:     `[{"action":"merge","dimension":"thinking","key":"survivor","value":"new value","absorb":["a","b"],"confidence":1.3,"claim":"short","why":"same"}]`,
 			decaySeq: 3500,
 			wantEvents: []store.ConfidenceEvent{
 				{
@@ -67,11 +68,11 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 					At:        nowStr,
 					ClockSeq:  3500,
 					From:      0.45, // 0.9 decayed from seq 500 to 3500 = 3000 obs elapsed = 1 half-life
-					To:        0.8,
+					To:        1.0,  // clampConf(1.3) = 1.0
 					Kind:      store.EventCompaction,
 				},
 			},
-			description: "rewritten: old version closed, From is decayed confidence",
+			description: "rewritten: old version closed, From is decayed, To is clamped",
 		},
 		{
 			name: "same value",
@@ -80,7 +81,7 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 				cfSeq("thinking", "a", "value a", 0.7, 3500),
 				cfSeq("thinking", "b", "value b", 0.8, 2000),
 			},
-			plan:     `[{"action":"merge","dimension":"thinking","key":"survivor","value":"` + mergedValue + `","absorb":["a","b"],"confidence":0.9,"claim":"short","why":"same"}]`,
+			plan:     `[{"action":"merge","dimension":"thinking","key":"survivor","value":"` + mergedValue + `","absorb":["a","b"],"confidence":0.6,"claim":"short","why":"same"}]`,
 			decaySeq: 3500,
 			wantEvents: []store.ConfidenceEvent{
 				{
@@ -90,11 +91,11 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 					At:        nowStr,
 					ClockSeq:  3500,
 					From:      0.45, // 0.9 decayed from seq 500 to 3500
-					To:        0.9,
+					To:        0.9,  // same value IGNORES a.Confidence, keeps stored 0.9
 					Kind:      store.EventCompaction,
 				},
 			},
-			description: "same value: clock refreshed, From is pre-refresh decayed confidence",
+			description: "same value: clock refreshed, To is stored (ignores plan's 0.6)",
 		},
 		{
 			name: "reopen",
@@ -118,7 +119,7 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 				cfSeq("thinking", "a", "value a", 0.7, 3500),
 				cfSeq("thinking", "b", "value b", 0.8, 2000),
 			},
-			plan:     `[{"action":"merge","dimension":"thinking","key":"survivor","value":"reopened value","absorb":["a","b"],"confidence":0.75,"claim":"short","why":"same"}]`,
+			plan:     `[{"action":"merge","dimension":"thinking","key":"survivor","value":"reopened value","absorb":["a","b"],"confidence":0.754,"claim":"short","why":"same"}]`,
 			decaySeq: 3500,
 			wantEvents: []store.ConfidenceEvent{
 				{
@@ -128,11 +129,11 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 					At:        nowStr,
 					ClockSeq:  3500,
 					From:      0.45, // LAST version (v2: 0.9@500) decayed to 3500; v1 would be 0.14
-					To:        0.75,
+					To:        0.75, // clampConf(0.754) = 0.75
 					Kind:      store.EventCompaction,
 				},
 			},
-			description: "reopen: archived facet re-enters, From is last version decayed",
+			description: "reopen: archived facet re-enters, From is last version decayed, To is clamped",
 		},
 	}
 
@@ -159,7 +160,7 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 }
 
 func TestCompactLogsNothingForRetiredOrAbsorbed(t *testing.T) {
-	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 5, 7, 0, 0, 0, time.FixedZone("EST", -5*3600))
 
 	cases := []struct {
 		name   string
@@ -215,7 +216,7 @@ func TestCompactLogsNothingForRetiredOrAbsorbed(t *testing.T) {
 }
 
 func TestCompactSkippedGroupLogsNothing(t *testing.T) {
-	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 11, 5, 7, 0, 0, 0, time.FixedZone("EST", -5*3600))
 
 	// The skip at compact.go:663 (`absorbed < compactMinAbsorb` → continue) is Apply's guard
 	// for facets that vanished between Plan and Apply. A test that goes through Plan never
