@@ -16,6 +16,9 @@ import (
 // registered platform can reach it; the test name-spaces the runtime as "fakeleak").
 var leakFakeCloses int32
 
+// leakFakeOpens and leakFakeRuns count Open() and Run() calls for testing the self-heal wiring.
+var leakFakeOpens, leakFakeRuns int32
+
 // leakFakePlatform is a minimal registered platform whose runner Opens successfully and
 // counts its Closes — used to prove newRunnerSet closes an already-opened non-default
 // runner when the default runner is the one that fails (the 61d00fc leak fix).
@@ -34,9 +37,17 @@ func (leakFakePlatform) NewRunner(store.Config) platform.Runner { return leakFak
 
 type leakFakeRunner struct{}
 
-func (leakFakeRunner) Open(context.Context) error { return nil }
-func (leakFakeRunner) Close() error               { atomic.AddInt32(&leakFakeCloses, 1); return nil }
-func (leakFakeRunner) Run(context.Context, string, string, string) (string, error) {
+func (leakFakeRunner) Open(context.Context) error {
+	atomic.AddInt32(&leakFakeOpens, 1)
+	return nil
+}
+func (leakFakeRunner) Close() error { atomic.AddInt32(&leakFakeCloses, 1); return nil }
+func (leakFakeRunner) Run(_ context.Context, _, prompt, _ string) (string, error) {
+	atomic.AddInt32(&leakFakeRuns, 1)
+	// Return a minimal valid reply. If the prompt contains "RESOLVE", return valid JSON.
+	if strings.Contains(prompt, "RESOLVE") {
+		return `{"links":[],"keywords":[]}`, nil
+	}
 	return "[]", nil
 }
 func (leakFakeRunner) ValidateModels(context.Context, ...string) error { return nil }

@@ -175,6 +175,7 @@ func TestLoadResolvePromptsIgnoresOverrides(t *testing.T) {
 	t.Setenv("WITNESS_PROMPTS", bundleDir)
 
 	archiveRoot := filepath.Join(base, "archive")
+	t.Setenv("WITNESS_HOME", archiveRoot)
 	// Write an override that must NOT be picked up.
 	write(t, filepath.Join(archiveRoot, SummarizeOverrideDir, "resolve.md"), "OVERRIDE RESOLVE")
 	write(t, filepath.Join(archiveRoot, SummarizeOverrideDir, "resolve_unified.md"), "OVERRIDE RESOLVE UNIFIED")

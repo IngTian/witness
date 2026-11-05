@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/IngTian/witness/internal/distill"
-	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
+
+var registerSelfHealOnce sync.Once
 
 // The status sub-state is DERIVED, not stored (issue #75): no worker holding the lock
 // → "idle"; a live worker (lock held) → "running", or "stopping" if a graceful stop was
@@ -501,6 +505,11 @@ func TestAutoWorkerRunHonorsDisabledConfig(t *testing.T) {
 // self-heal opens runners ONLY when there is stale work (StaleSources returns a non-empty
 // list). An idle worker run with every portrait current must never open a runner.
 func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
+	// Register the fake platform once per process.
+	registerSelfHealOnce.Do(func() {
+		platform.Register(selfHealFakePlatform{})
+	})
+
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
 	if err != nil {
@@ -508,38 +517,235 @@ func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
 	}
 	defer st.Close()
 
+	// Point config at the fake runner and set up a minimal test lens.
+	if err := st.SetConfigString("runner", "selfheal"); err != nil {
+		t.Fatal(err)
+	}
+	lensDir := setupTestLens(t, st.Root)
+	if err := st.RegisterLens("test", lensDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnableLens("test"); err != nil {
+		t.Fatal(err)
+	}
+
 	// Write a facet and profile, then write portrait sources so StaleSources returns empty.
 	if err := st.WriteFacets([]store.Facet{
-		{Lens: "default", Dimension: "traits", Key: "k",
+		{Lens: "test", Dimension: "traits", Key: "k",
 			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	md := "Summary."
-	if err := st.WriteProfile("default", md); err != nil {
+	if err := st.WriteProfile("test", md); err != nil {
 		t.Fatal(err)
 	}
 	// Write current sources (hash matches, so it's not stale).
 	src := store.PortraitSources{Sentences: []store.SourcedSentence{{Text: "Summary."}}}
-	if err := st.WritePortraitSources("default", store.PortraitHash(md), src, time.Now()); err != nil {
+	if err := st.WritePortraitSources("test", store.PortraitHash(md), src, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	// Reset counters and run the worker. With sources fresh, it must NOT open the runner.
+	atomic.StoreInt32(&selfHealFakeOpens, 0)
+	atomic.StoreInt32(&selfHealFakeRuns, 0)
+
+	ran, err := runWorker(false)
+	if err != nil {
+		t.Fatalf("runWorker: %v", err)
+	}
+	if !ran {
+		t.Fatal("worker should have run")
+	}
+
+	if got := atomic.LoadInt32(&selfHealFakeOpens); got != 0 {
+		t.Errorf("self-heal opened runner %d times with fresh sources; want 0", got)
+	}
+	if got := atomic.LoadInt32(&selfHealFakeRuns); got != 0 {
+		t.Errorf("self-heal ran %d times with fresh sources; want 0", got)
+	}
+}
+
+// TestWorkerSelfHealResolvesStalePortraits verifies that the end-of-run self-heal DOES
+// open the runner and call ResolveSources when there are stale portraits (portrait exists
+// but no sources row, or hash mismatch).
+func TestWorkerSelfHealResolvesStalePortraits(t *testing.T) {
+	registerSelfHealOnce.Do(func() { platform.Register(selfHealFakePlatform{}) })
+
+	// Set up resolve prompts in a fake bundle dir.
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "summarize"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve.md"), []byte("RESOLVE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve_unified.md"), []byte("RESOLVE_UNIFIED"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_PROMPTS", bundleDir)
+
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.SetConfigString("runner", "selfheal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RegisterLens("test", setupTestLens(t, st.Root)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnableLens("test"); err != nil {
 		t.Fatal(err)
 	}
 
-	fake := func(_ context.Context, _, _, _ string) (string, error) {
-		return "OUTPUT", nil
+	// Write a facet and profile, but NO sources row → stale.
+	if err := st.WriteFacets([]store.Facet{
+		{Lens: "test", Dimension: "traits", Key: "k",
+			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteProfile("test", "Stale summary."); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	atomic.StoreInt32(&selfHealFakeOpens, 0)
+	atomic.StoreInt32(&selfHealFakeRuns, 0)
+
+	ran, err := runWorker(false)
+	if err != nil {
+		t.Fatalf("runWorker: %v", err)
+	}
+	if !ran {
+		t.Fatal("worker should have run")
 	}
 
-	sm := &distill.Summarizer{
-		Store:                st,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  fake,
+	if got := atomic.LoadInt32(&selfHealFakeOpens); got != 1 {
+		t.Errorf("self-heal opened runner %d times with stale portrait; want exactly 1", got)
+	}
+	if got := atomic.LoadInt32(&selfHealFakeRuns); got < 1 {
+		t.Errorf("self-heal ran %d times with stale portrait; want at least 1 (the resolve call)", got)
+	}
+}
+
+// selfHealFakePlatform is a minimal registered platform for testing the self-heal wiring.
+var selfHealFakeOpens, selfHealFakeRuns int32
+
+type selfHealFakePlatform struct{}
+
+func (selfHealFakePlatform) Name() string          { return "selfheal" }
+func (selfHealFakePlatform) SessionPrefix() string { return "selfheal:" }
+func (selfHealFakePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
+	return []string{""}
+}
+func (selfHealFakePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
+func (selfHealFakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
+	return platform.ImportStats{}, nil
+}
+func (selfHealFakePlatform) NewRunner(store.Config) platform.Runner { return selfHealFakeRunner{} }
+
+type selfHealFakeRunner struct{}
+
+func (selfHealFakeRunner) Open(context.Context) error {
+	atomic.AddInt32(&selfHealFakeOpens, 1)
+	return nil
+}
+func (selfHealFakeRunner) Close() error { return nil }
+func (selfHealFakeRunner) Run(_ context.Context, _, prompt, _ string) (string, error) {
+	atomic.AddInt32(&selfHealFakeRuns, 1)
+	if strings.Contains(prompt, "RESOLVE") {
+		return `{"links":[],"keywords":[]}`, nil
+	}
+	return "[]", nil
+}
+func (selfHealFakeRunner) ValidateModels(context.Context, ...string) error { return nil }
+func (selfHealFakeRunner) InvocationHint() string                          { return "selfheal" }
+func (selfHealFakeRunner) ConcurrentRunSafe() bool                         { return true }
+
+// setupTestLens creates a minimal lens directory for testing.
+func setupTestLens(t *testing.T, root string) string {
+	t.Helper()
+	lensDir := filepath.Join(t.TempDir(), "testlens")
+	if err := os.MkdirAll(lensDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Write minimal lens.json
+	lensJSON := `{"name":"test","dimensions":["traits"]}`
+	if err := os.WriteFile(filepath.Join(lensDir, "lens.json"), []byte(lensJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Write minimal extract.md
+	if err := os.WriteFile(filepath.Join(lensDir, "extract.md"), []byte("Extract prompt."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Write minimal review.md
+	if err := os.WriteFile(filepath.Join(lensDir, "review.md"), []byte("Review prompt."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return lensDir
+}
+
+// TestWorkerSelfHealRespectsStopRequest verifies that the end-of-run self-heal respects
+// the stop request: after `witness distill stop`, it must not start new model calls.
+func TestWorkerSelfHealRespectsStopRequest(t *testing.T) {
+	registerSelfHealOnce.Do(func() { platform.Register(selfHealFakePlatform{}) })
+
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.SetConfigString("runner", "selfheal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RegisterLens("test", setupTestLens(t, st.Root)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnableLens("test"); err != nil {
+		t.Fatal(err)
 	}
 
-	// With portrait sources current, needsSourceResolve returns false.
-	if needsSourceResolve(sm) {
-		t.Fatal("needsSourceResolve returned true when portrait sources are current")
+	// Write a facet and profile, but NO sources → stale. Self-heal would resolve it.
+	if err := st.WriteFacets([]store.Facet{
+		{Lens: "test", Dimension: "traits", Key: "k",
+			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteProfile("test", "Stale."); err != nil {
+		t.Fatal(err)
+	}
+	// Request a stop BEFORE the worker runs.
+	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	atomic.StoreInt32(&selfHealFakeOpens, 0)
+	atomic.StoreInt32(&selfHealFakeRuns, 0)
+
+	// Auto worker respects stop and exits before self-heal.
+	ran, err := runWorker(true)
+	if err != nil {
+		t.Fatalf("runWorker: %v", err)
+	}
+	if !ran {
+		t.Fatal("worker should have run (it clears the stop flag)")
+	}
+
+	// Assert: even with stale portraits, the self-heal never ran because stop was requested.
+	if got := atomic.LoadInt32(&selfHealFakeOpens); got != 0 {
+		t.Errorf("self-heal opened runner %d times with stop requested; want 0", got)
+	}
+	if got := atomic.LoadInt32(&selfHealFakeRuns); got != 0 {
+		t.Errorf("self-heal ran %d times with stop requested; want 0", got)
 	}
 }

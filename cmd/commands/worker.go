@@ -229,12 +229,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// pass and as the Worker's default Run; per-lens routing goes through rs.RunFor. It is
 	// only reached after ensureRunners() opened the set (the drain/review gates below), so
 	// rs is non-nil here; the guard is a belt-and-suspenders against a misroute.
-	runFn := tap.wrap(func(ctx context.Context, model, prompt, input string) (string, error) {
+	untappedRunFn := func(ctx context.Context, model, prompt, input string) (string, error) {
 		if rs == nil {
 			return "", &runnerDownError{name: cfg.Runner}
 		}
 		return rs.RunFor(nil)(ctx, model, prompt, input)
-	})
+	}
+	runFn := tap.wrap(untappedRunFn)
 
 	// Drain pending sessions. The embedder is heavy (~448MB) and loaded once per
 	// short-lived worker process ONLY when there is mining to do; it is shared
@@ -273,12 +274,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// slice 2): a lens declaring its own runtime mines/reviews against that runner. Only
 	// reached after ensureRunners() (getMiner/runReview gate on it), so rs is non-nil; the
 	// runFn fallback is a belt-and-suspenders that would back off rather than nil-deref.
-	runForLens := tap.wrapFor(func(ln *lens.Lens) distill.MineFunc {
+	untappedRunForLens := func(ln *lens.Lens) distill.MineFunc {
 		if rs == nil {
-			return runFn
+			return untappedRunFn
 		}
 		return rs.RunFor(ln)
-	})
+	}
+	runForLens := tap.wrapFor(untappedRunForLens)
 	// getMiner performs the worker's one-time heavy startup: opening the runner set (which for
 	// OpenCode spawns a private `opencode serve` and validates models) and loading the ~448MB
 	// embedding model through GoMLX.
@@ -390,7 +392,11 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 				}
 				_ = regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
 				sp.Stop()
-				_ = resolvePortraitSources(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
+				if progressWhere != "" {
+					sp = startSpinner("linking the profile to its sources…")
+				}
+				_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens) // best-effort: logged
+				sp.Stop()
 				reviewRan = true
 			}
 		},
@@ -402,13 +408,24 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// resolve them. This catches portraits that became stale after the last review (facet edits,
 	// portrait regeneration from a prompt change) without forcing a review. Only opens runners
 	// when StaleSources returns work; an idle worker with everything current never pays the cost.
-	if !reviewRan {
+	// Respects stop request and context cancellation: after a stop, do not start new model calls.
+	if !reviewRan && !stopRequested() && ctx.Err() == nil {
 		lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
-		if err == nil {
+		if err != nil {
+			slog.Warn("profile: source resolver prompts unavailable; self-heal skipped this run", "err", err)
+		} else {
 			sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
-			if needsSourceResolve(sm) {
+			stale, err := sm.StaleSources()
+			if err != nil {
+				slog.Warn("profile: failed to check stale sources; self-heal skipped this run", "err", err)
+			} else if len(stale) > 0 {
 				if ensureRunners() {
-					_ = resolvePortraitSources(ctx, st, cfg, lenses, runFn, runForLens)
+					var sp *spinner
+					if progressWhere != "" {
+						sp = startSpinner("linking the profile to its sources…")
+					}
+					_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens)
+					sp.Stop()
 				}
 			}
 		}
