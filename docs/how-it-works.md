@@ -18,6 +18,8 @@ injects anything into a session. Nothing is pushed — you (or an agent) read th
 raw/observations/facets live in a single embedded SQLite database (`witness.db`); the profile is
 plain markdown under `profile/`.
 
+After a portrait is written, witness links each sentence in the background to the traits it rests on. Each link is marked **direct** (the sentence states exactly what the trait says) or **partial** (the sentence draws on it but also on other traits), and a small set of keywords summarizes the portrait's themes. The links are stored with the archive and tied to the exact text via hash, so they refresh themselves when the portrait changes. The portrait itself is never modified by this — the linking happens after the portrait is saved, and any failure leaves the portrait file exactly as it would be without the feature.
+
 ### Confidence, and why it moves on its own
 
 Every facet carries a confidence between 0 and 1. It is not a score of you — it is how sure the
