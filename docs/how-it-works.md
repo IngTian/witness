@@ -18,7 +18,7 @@ injects anything into a session. Nothing is pushed — you (or an agent) read th
 raw/observations/facets live in a single embedded SQLite database (`witness.db`); the profile is
 plain markdown under `profile/`.
 
-After a portrait is written, witness links each sentence in the background to the traits it rests on. Each link is marked **direct** (the sentence states exactly what the trait says) or **partial** (the sentence draws on it but also on other traits), and a small set of keywords summarizes the portrait's themes. The links are stored with the archive and tied to the exact text via hash, so they refresh themselves when the portrait changes. The portrait itself is never modified by this — the linking happens after the portrait is saved, and any failure leaves the portrait file exactly as it would be without the feature.
+After a portrait is written, a background step links each of its sentences to the traits it rests on. Each link is marked **direct** (the trait fully states the sentence, or one of its claims) or **partial** (it covers only part of a claim, or is related). The step also records a few keywords for the portrait. The links are stored with the archive, tied to the exact portrait text, and refresh on the next worker run when the portrait changes. The portrait itself is never changed by this.
 
 ### Confidence, and why it moves on its own
 
