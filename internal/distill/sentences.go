@@ -12,34 +12,87 @@ import (
 // single definition of "a sentence" that every reader shares.
 //
 // Headings are skipped. Emphasis markers (**) are stripped. List item markers
-// (-, *, 1.) are removed. Sentences break after [.!?] (optionally followed by
-// a closing quote or paren), then whitespace, then an uppercase letter, digit,
-// quote, or open paren — UNLESS the period is part of a known abbreviation
-// (e.g., i.e., vs., etc.) or sits between digits (97.7%). Chinese punctuation
-// (。！？) also ends a sentence. Only sentences with len(trim(s)) > 1 are
-// returned, and all returned sentences are trimmed.
+// (-, *, 1.) are removed. Block boundaries (blank line, list item, heading) are
+// sentence boundaries. Sentences break after [.!?] (optionally followed by
+// a closing quote/paren/curly quote), then whitespace, then an uppercase letter,
+// digit, quote, open paren, Han character, or opening curly quote — UNLESS the
+// period is part of a known abbreviation (e.g., i.e., vs., etc.) or sits between
+// digits (97.7%). Chinese punctuation (。！？) also ends a sentence. Only sentences
+// with len(trim(s)) > 1 are returned, and all returned sentences are trimmed.
 func SplitSentences(md string) []string {
-	// Strip headings, list markers, then join into a single block.
+	// Split into blocks: blank lines, headings, and list items are block boundaries.
 	lines := strings.Split(strings.ReplaceAll(md, "\r\n", "\n"), "\n")
-	var kept []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		// Skip headings.
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		// Strip list markers at the start: "- ", "* ", or digit+". ".
-		line = stripListMarker(line)
-		if line != "" {
-			kept = append(kept, line)
+	var blocks []string
+	var currentBlock []string
+
+	flushBlock := func() {
+		if len(currentBlock) > 0 {
+			text := strings.Join(currentBlock, " ")
+			if text != "" {
+				blocks = append(blocks, text)
+			}
+			currentBlock = nil
 		}
 	}
-	text := strings.Join(kept, " ")
 
-	// Strip emphasis markers.
-	text = strings.ReplaceAll(text, "**", "")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Blank line or heading: flush current block.
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			flushBlock()
+			continue
+		}
+		// List item: flush current block, start new block with this item.
+		if isListItem(trimmed) {
+			flushBlock()
+			line = stripListMarker(trimmed)
+			if line != "" {
+				currentBlock = []string{line}
+				flushBlock() // list item is its own block
+			}
+			continue
+		}
+		// Regular line: add to current block.
+		currentBlock = append(currentBlock, trimmed)
+	}
+	flushBlock()
 
-	// Split into sentences. Walk the text looking for sentence-ending punctuation.
+	// Strip emphasis markers from each block.
+	for i, block := range blocks {
+		blocks[i] = strings.ReplaceAll(block, "**", "")
+	}
+
+	// Split each block into sentences.
+	allSentences := []string{} // Return empty slice (not nil) if there are no sentences
+	for _, block := range blocks {
+		sentences := splitBlockIntoSentences(block)
+		allSentences = append(allSentences, sentences...)
+	}
+	return allSentences
+}
+
+// isListItem checks if a line starts with a list marker.
+func isListItem(line string) bool {
+	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+		return true
+	}
+	// Check for numbered list: digit(s) followed by ". ".
+	if len(line) > 0 && unicode.IsDigit(rune(line[0])) {
+		for i := 1; i < len(line); i++ {
+			if line[i] == '.' && i+1 < len(line) && line[i+1] == ' ' {
+				return true
+			}
+			if !unicode.IsDigit(rune(line[i])) {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// splitBlockIntoSentences splits a block of text into sentences using punctuation rules.
+func splitBlockIntoSentences(text string) []string {
+	// Walk the text looking for sentence-ending punctuation.
 	var sentences []string
 	start := 0
 	runes := []rune(text)
@@ -58,9 +111,9 @@ func SplitSentences(md string) []string {
 			continue
 		}
 
-		// English punctuation: check for optional closing quote or paren.
+		// English punctuation: check for optional closing quote, paren, or curly quotes.
 		j := i + 1
-		for j < len(runes) && (runes[j] == '"' || runes[j] == ')') {
+		for j < len(runes) && isClosingPunct(runes[j]) {
 			j++
 		}
 
@@ -90,8 +143,8 @@ func SplitSentences(md string) []string {
 		}
 
 		nextChar := runes[k]
-		// Check if next char starts a new sentence: uppercase, digit, quote, or '('.
-		if !(unicode.IsUpper(nextChar) || unicode.IsDigit(nextChar) || nextChar == '"' || nextChar == '(' || nextChar == '\'') {
+		// Check if next char starts a new sentence: uppercase, digit, quote, '(', Han, or opening curly quote.
+		if !isValidSentenceStart(nextChar) {
 			continue
 		}
 
@@ -206,4 +259,26 @@ func isBetweenDigits(runes []rune, i int) bool {
 		return unicode.IsDigit(runes[i-1]) && unicode.IsDigit(runes[i+1])
 	}
 	return false
+}
+
+// isClosingPunct checks if r is a closing punctuation mark (quote, paren, curly quotes).
+func isClosingPunct(r rune) bool {
+	return r == '"' || r == ')' ||
+		r == 0x201D || // right double curly quote (U+201D)
+		r == 0x201C || // left double curly quote (U+201C)
+		r == 0x2019 || // right single curly quote (U+2019)
+		r == 0x2018 // left single curly quote (U+2018)
+}
+
+// isValidSentenceStart checks if r can start a sentence.
+// Valid starts: uppercase, digit, quote, '(', Han character, or opening curly quote.
+func isValidSentenceStart(r rune) bool {
+	return unicode.IsUpper(r) ||
+		unicode.IsDigit(r) ||
+		r == '"' || r == '(' || r == '\'' ||
+		unicode.Is(unicode.Han, r) ||
+		r == 0x201C || // left double curly quote (U+201C)
+		r == 0x201D || // right double curly quote (U+201D) - also valid start
+		r == 0x2018 || // left single curly quote (U+2018)
+		r == 0x2019 // right single curly quote (U+2019) - also valid start
 }

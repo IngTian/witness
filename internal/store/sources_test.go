@@ -486,6 +486,40 @@ func TestCurrentPortraitSourcesFollowsMergeChain(t *testing.T) {
 	}
 }
 
+func TestCurrentPortraitSourcesRejectsEmptyRow(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	portrait := "unified"
+	text := "# Unified portrait\n"
+	textHash := PortraitHash(text)
+
+	// Write profile
+	if err := s.WriteProfile(portrait, text); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write empty sources row (zero sentences) - this happens when unified is written
+	// but no notebooks have sources yet.
+	src := PortraitSources{
+		Sentences: []SourcedSentence{},
+		Keywords:  []Keyword{},
+		Inherits:  map[string]string{},
+	}
+	if err := s.WritePortraitSources(portrait, textHash, src, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// CurrentPortraitSources should return ok=false for empty row.
+	_, ok, err := s.CurrentPortraitSources(portrait)
+	if err != nil {
+		t.Fatalf("CurrentPortraitSources: %v", err)
+	}
+	if ok {
+		t.Error("CurrentPortraitSources with zero sentences: expected ok=false, got true")
+	}
+}
+
 func TestCurrentPortraitSourcesDedupeAfterRemap(t *testing.T) {
 	s := tempStore(t)
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)

@@ -68,6 +68,41 @@ func TestSplitSentences(t *testing.T) {
 			"A. B.",
 			[]string{}, // Both are ≤1 char after trim
 		},
+		{
+			"list items are block boundaries",
+			"**How he decides**\n- Prefers Go over Python\n- Avoids frameworks",
+			[]string{"How he decides", "Prefers Go over Python", "Avoids frameworks"},
+		},
+		{
+			"blank line is block boundary",
+			"He builds alone\n\nHe reviews with agents.",
+			[]string{"He builds alone", "He reviews with agents."},
+		},
+		{
+			"han character starts sentence",
+			"First sentence. 第二句。",
+			[]string{"First sentence.", "第二句。"},
+		},
+		{
+			"opening curly double quote starts sentence",
+			"Done. “Next sentence” here.",
+			[]string{"Done.", "“Next sentence” here."},
+		},
+		{
+			"closing curly double quotes count as closers",
+			"He said “stop.” Then left.",
+			[]string{"He said “stop.”", "Then left."},
+		},
+		{
+			"opening curly single quote starts sentence",
+			"Done. ‘Next sentence’ here.",
+			[]string{"Done.", "‘Next sentence’ here."},
+		},
+		{
+			"closing curly single quote counts as closer",
+			"He said ‘stop.’ Then left.",
+			[]string{"He said ‘stop.’", "Then left."},
+		},
 	}
 
 	for _, tc := range cases {

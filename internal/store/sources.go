@@ -142,6 +142,11 @@ func (s *Store) CurrentPortraitSources(portrait string) (PortraitSources, bool, 
 		return PortraitSources{}, false, nil
 	}
 
+	// Empty row (zero sentences) reads as "not recorded yet".
+	if len(src.Sentences) == 0 {
+		return PortraitSources{}, false, nil
+	}
+
 	// Read current profile text
 	text, exists, err := s.ReadProfile(portrait)
 	if err != nil {

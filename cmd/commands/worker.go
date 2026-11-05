@@ -395,7 +395,11 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 				if progressWhere != "" {
 					sp = startSpinner("linking the profile to its sources…")
 				}
-				_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens) // best-effort: logged
+				err := resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens) // best-effort: logged
+				if err == nil {
+					// Success: clear retry_after (post-review path ignores the gate but clears on success).
+					_ = st.SetMetaString("sources_retry_after", "")
+				}
 				sp.Stop()
 				reviewRan = true
 			}
@@ -409,23 +413,46 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// portrait regeneration from a prompt change) without forcing a review. Only opens runners
 	// when StaleSources returns work; an idle worker with everything current never pays the cost.
 	// Respects stop request and context cancellation: after a stop, do not start new model calls.
+	// Bounded retries: if sources_retry_after is set and not yet expired, skip the self-heal.
 	if selfHealAllowed(reviewRan, stopRequested, ctx) {
-		lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
-		if err != nil {
-			slog.Warn("profile: source resolver prompts unavailable; self-heal skipped this run", "err", err)
-		} else {
-			sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
-			stale, err := sm.StaleSources()
+		// Check retry-after gate (only honored by self-heal path).
+		retryAfter := st.MetaString("sources_retry_after")
+		if retryAfter != "" {
+			if t, err := time.Parse(time.RFC3339, retryAfter); err == nil && time.Now().Before(t) {
+				slog.Info("profile: skipping source resolution self-heal until retry window expires", "retry_after", retryAfter)
+				// Skip the entire self-heal block below.
+			} else {
+				// Window expired or parse failed: proceed with self-heal.
+				retryAfter = "" // mark as expired
+			}
+		}
+
+		if retryAfter == "" {
+			lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
 			if err != nil {
-				slog.Warn("profile: failed to check stale sources; self-heal skipped this run", "err", err)
-			} else if len(stale) > 0 {
-				if ensureRunners() {
-					var sp *spinner
-					if progressWhere != "" {
-						sp = startSpinner("linking the profile to its sources…")
+				slog.Warn("profile: source resolver prompts unavailable; self-heal skipped this run", "err", err)
+			} else {
+				sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
+				stale, err := sm.StaleSources()
+				if err != nil {
+					slog.Warn("profile: failed to check stale sources; self-heal skipped this run", "err", err)
+				} else if len(stale) > 0 {
+					if ensureRunners() {
+						var sp *spinner
+						if progressWhere != "" {
+							sp = startSpinner("linking the profile to its sources…")
+						}
+						err := resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens)
+						if err != nil {
+							// Self-heal failed: set retry_after = now + 6h.
+							retryAt := time.Now().Add(6 * time.Hour).UTC().Format(time.RFC3339)
+							_ = st.SetMetaString("sources_retry_after", retryAt)
+						} else {
+							// Success: clear retry_after.
+							_ = st.SetMetaString("sources_retry_after", "")
+						}
+						sp.Stop()
 					}
-					_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens)
-					sp.Stop()
 				}
 			}
 		}
