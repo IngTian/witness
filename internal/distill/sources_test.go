@@ -1083,3 +1083,133 @@ func TestResolveUnifiedLoopGuard(t *testing.T) {
 		t.Fatalf("pass 3: unified calls = %d, want 1 (no re-call when nothing changed)", unifiedCalls)
 	}
 }
+
+// TestResolveUnifiedSkipsWhenNoNotebookHasSources verifies that when no notebook
+// has a sources row, the unified resolver is never called (ZERO calls with RESOLVE_UNIFIED
+// prompt), but an empty unified row IS written. This pins the "skip the unified call when
+// there are no current notebook rows" guard.
+func TestResolveUnifiedSkipsWhenNoNotebookHasSources(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+
+	// Write a unified profile but no notebook profiles (so there are no notebook sources rows).
+	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
+		t.Fatalf("WriteProfile unified: %v", err)
+	}
+
+	unifiedCalls := 0
+	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE_UNIFIED" {
+			unifiedCalls++
+			return `{"links":[],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  fakeResolve,
+	}
+
+	// Run ResolveSources: no notebook profiles exist, so no notebook sources rows exist.
+	// Unified should NOT call the model (no current notebook rows), but should write an empty row.
+	if err := sm.ResolveSources(context.Background()); err != nil {
+		t.Fatalf("ResolveSources: %v", err)
+	}
+
+	if unifiedCalls != 0 {
+		t.Fatalf("unified calls = %d, want 0 (no notebooks have sources; guard skips model call)", unifiedCalls)
+	}
+
+	// An empty unified sources row IS written (the guard writes it without calling the model).
+	src, _, ok, err := s.ReadPortraitSources(store.ProfileUnified)
+	if err != nil {
+		t.Fatalf("ReadPortraitSources unified: %v", err)
+	}
+	if !ok {
+		t.Fatal("unified sources row was not written (expected an empty row from the guard)")
+	}
+
+	// The row is empty (no sentences with links, no keywords, no Inherits).
+	if len(src.Sentences) > 0 && len(src.Sentences[0].Links) > 0 {
+		t.Fatal("unified row has links; expected empty")
+	}
+	if len(src.Keywords) > 0 {
+		t.Fatal("unified row has keywords; expected empty")
+	}
+	if len(src.Inherits) > 0 {
+		t.Fatal("unified row has Inherits; expected empty")
+	}
+}
+
+// TestResolveUnifiedSkipsWhenAllNotebookResolversFail verifies that when all notebook
+// resolvers fail, the unified resolver is never called (there are no current notebook rows).
+func TestResolveUnifiedSkipsWhenAllNotebookResolversFail(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+
+	// Write notebook and unified profiles.
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
+		t.Fatalf("WriteProfile default: %v", err)
+	}
+	if err := s.WriteProfile("math", "Recovers with arithmetic."); err != nil {
+		t.Fatalf("WriteProfile math: %v", err)
+	}
+	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
+		t.Fatalf("WriteProfile unified: %v", err)
+	}
+
+	unifiedCalls := 0
+	failingResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			// All notebook resolvers fail.
+			return "", context.DeadlineExceeded
+		}
+		if prompt == "RESOLVE_UNIFIED" {
+			unifiedCalls++
+			return `{"links":[],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  failingResolve,
+	}
+
+	// Run ResolveSources: both notebook resolvers fail, so no notebook sources rows exist.
+	// Unified should NOT be called (no current notebook rows).
+	_ = sm.ResolveSources(context.Background()) // Ignore error (notebooks fail).
+
+	if unifiedCalls != 0 {
+		t.Fatalf("unified calls = %d, want 0 (all notebook resolvers failed)", unifiedCalls)
+	}
+
+	// An empty unified sources row IS written (the guard writes it without calling the model).
+	src, _, ok, err := s.ReadPortraitSources(store.ProfileUnified)
+	if err != nil {
+		t.Fatalf("ReadPortraitSources unified: %v", err)
+	}
+	if !ok {
+		t.Fatal("unified sources row was not written (expected an empty row from the guard)")
+	}
+
+	// The row is empty (no sentences with links, no keywords, no Inherits).
+	if len(src.Sentences) > 0 && len(src.Sentences[0].Links) > 0 {
+		t.Fatal("unified row has links; expected empty")
+	}
+	if len(src.Keywords) > 0 {
+		t.Fatal("unified row has keywords; expected empty")
+	}
+	if len(src.Inherits) > 0 {
+		t.Fatal("unified row has Inherits; expected empty")
+	}
+}
