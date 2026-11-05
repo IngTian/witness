@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -227,24 +226,14 @@ func resolveLink(link TraitLink, facetMap map[facetKey]*Facet) *TraitLink {
 			return nil
 		}
 
-		// Follow merge. MergedInto format is "dimension/key"
-		parts := splitMergeTarget(f.MergedInto)
-		if parts == nil {
+		// Follow merge. MergedInto stores a FacetRef ("dimension/key")
+		dim, key, ok := ParseFacetRef(f.MergedInto)
+		if !ok {
 			// Malformed merged_into — drop
 			return nil
 		}
-		fk = facetKey{fk.lens, parts[0], parts[1]}
+		fk = facetKey{fk.lens, dim, key}
 	}
-}
-
-// splitMergeTarget parses "dimension/key" into [dimension, key], or returns
-// nil if the format is invalid.
-func splitMergeTarget(merged string) []string {
-	idx := strings.Index(merged, "/")
-	if idx == -1 || idx == 0 || idx == len(merged)-1 {
-		return nil
-	}
-	return []string{merged[:idx], merged[idx+1:]}
 }
 
 // dedupLinks keeps one link per (lens, dimension, key), preferring direct
