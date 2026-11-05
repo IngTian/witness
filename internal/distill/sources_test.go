@@ -2,6 +2,7 @@ package distill
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,12 +11,21 @@ import (
 )
 
 // TestResolveSourcesWritesLinks verifies that ResolveSources calls the resolver,
-// parses its reply, and stores the result with the correct hash. Links and keywords
-// must match the resolver's output, with sentence numbers 1-based in the reply but
-// 0-based in keyword storage.
+// parses its reply, and stores the result with the correct hash. Also tests R5 (facet's
+// full Value is sent, not its Claim) and lens scoping (another lens's key is absent from
+// the input). Links and keywords must match the resolver's output, with sentence numbers
+// 1-based in the reply but 0-based in keyword storage. Sentence Text must be set.
 func TestResolveSourcesWritesLinks(t *testing.T) {
 	s := newStore(t)
-	seedFacets(t, s)
+	// Seed default facets with a distinct claim to test R5.
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "satisfices",
+			Versions: []store.FacetVersion{{Value: "stops at good enough, rarely gold-plates", Claim: "satisfices", Confidence: 0.9}}},
+		{Lens: "math", Dimension: "resilience", Key: "trip_wire",
+			Versions: []store.FacetVersion{{Value: "recovers with arithmetic", Confidence: 0.87}}},
+	}); err != nil {
+		t.Fatalf("seed facets: %v", err)
+	}
 
 	// Write a profile so there's something to resolve.
 	md := "Stops at good enough. Recovers with arithmetic."
@@ -23,8 +33,10 @@ func TestResolveSourcesWritesLinks(t *testing.T) {
 		t.Fatalf("WriteProfile: %v", err)
 	}
 
-	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+	var capturedInput string
+	fakeResolve := func(_ context.Context, _, prompt, input string) (string, error) {
 		if prompt == "RESOLVE" {
+			capturedInput = input
 			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}],"keywords":[{"k":"good enough","n":[1,2]}]}`, nil
 		}
 		return "", nil
@@ -42,6 +54,21 @@ func TestResolveSourcesWritesLinks(t *testing.T) {
 		t.Fatalf("ResolveSources: %v", err)
 	}
 
+	// R5: the facet's FULL value is present in the input.
+	if !strings.Contains(capturedInput, "stops at good enough, rarely gold-plates") {
+		t.Fatalf("input missing facet's full Value; got:\n%s", capturedInput)
+	}
+	// R5: the claim is NOT used as the facet text.
+	if strings.Count(capturedInput, "satisfices") > 1 {
+		// The key "satisfices" appears once as "traits/satisfices:". If the claim were used
+		// as text, it would appear twice (in the key and as the text). Count > 1 means it did.
+		t.Fatalf("input used the claim as facet text; got:\n%s", capturedInput)
+	}
+	// Lens scoping: another lens's key (math's trip_wire) is absent.
+	if strings.Contains(capturedInput, "trip_wire") {
+		t.Fatalf("input contained another lens's key; got:\n%s", capturedInput)
+	}
+
 	// Assert: the row exists.
 	src, hash, ok, err := s.ReadPortraitSources("default")
 	if err != nil {
@@ -57,16 +84,21 @@ func TestResolveSourcesWritesLinks(t *testing.T) {
 		t.Fatalf("hash mismatch: got %s, want %s", hash, want)
 	}
 
-	// Sentence 1's first link is {default traits satisfices direct}.
-	if len(src.Sentences) < 1 {
-		t.Fatal("no sentences stored")
+	// Sentence text is set.
+	if len(src.Sentences) < 2 {
+		t.Fatalf("sentences: got %d, want 2", len(src.Sentences))
 	}
+	if src.Sentences[0].Text != "Stops at good enough." {
+		t.Fatalf("sentence 0 text: got %q, want %q", src.Sentences[0].Text, "Stops at good enough.")
+	}
+
+	// Sentence 0's first link is {default traits satisfices direct}.
 	if len(src.Sentences[0].Links) < 1 {
-		t.Fatal("sentence 1 has no links")
+		t.Fatal("sentence 0 has no links")
 	}
 	link := src.Sentences[0].Links[0]
 	if link.Lens != "default" || link.Dimension != "traits" || link.Key != "satisfices" || link.Strength != store.LinkDirect {
-		t.Fatalf("sentence 1 link: got %+v, want {default traits satisfices direct}", link)
+		t.Fatalf("sentence 0 link: got %+v, want {default traits satisfices direct}", link)
 	}
 
 	// Keywords are stored with 0-based indexes.
@@ -174,7 +206,7 @@ func TestResolveSourcesFailureIsIsolated(t *testing.T) {
 	seedFacets(t, s)
 
 	// Write a profile.
-	md := "stops at good enough."
+	md := "Stops at good enough."
 	if err := s.WriteProfile("default", md); err != nil {
 		t.Fatalf("WriteProfile: %v", err)
 	}
@@ -277,13 +309,29 @@ func TestResolveSourcesIgnoresUnparseableReply(t *testing.T) {
 }
 
 // TestResolveSourcesValidatesLinks verifies that unknown/archived keys, out-of-range
-// sentence numbers, invalid strengths, and excess links per sentence are dropped while
-// valid links are kept. Keywords out of range are dropped, and more than 8 are truncated.
+// sentence numbers, invalid strengths, excess links per sentence, and keys from another
+// lens are dropped while valid links are kept. Duplicate keys are deduped (keeping stronger
+// strength), then sorted direct-first, then capped at 3. Keywords out of range are dropped,
+// and more than 8 are truncated.
 func TestResolveSourcesValidatesLinks(t *testing.T) {
 	s := newStore(t)
-	seedFacets(t, s)
+	// Seed multiple default facets so we have valid keys to work with.
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "satisfices",
+			Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9}}},
+		{Lens: "default", Dimension: "traits", Key: "pragmatic",
+			Versions: []store.FacetVersion{{Value: "prefers working code", Confidence: 0.85}}},
+		{Lens: "default", Dimension: "traits", Key: "direct",
+			Versions: []store.FacetVersion{{Value: "values clarity", Confidence: 0.88}}},
+		{Lens: "default", Dimension: "thinking", Key: "lazy",
+			Versions: []store.FacetVersion{{Value: "efficient not careless", Confidence: 0.92}}},
+		{Lens: "math", Dimension: "resilience", Key: "trip_wire",
+			Versions: []store.FacetVersion{{Value: "recovers with arithmetic", Confidence: 0.87}}},
+	}); err != nil {
+		t.Fatalf("seed facets: %v", err)
+	}
 
-	// Archive one facet to test that it's dropped.
+	// Archive one default facet to test that it's dropped.
 	facets, _ := s.ReadActiveFacets()
 	for i, f := range facets {
 		if f.Lens == "default" && f.Key == "satisfices" {
@@ -303,17 +351,20 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 	// Resolver returns:
 	// - unknown key "nonexistent/key" (dropped)
 	// - archived key "traits/satisfices" (dropped)
+	// - another lens's key "resilience/trip_wire" (dropped)
 	// - n:0 (dropped)
 	// - n:99 (dropped)
 	// - strength "strong" (becomes partial)
-	// - 4 links on sentence 1 (only 3 kept, direct first)
-	// - keyword with index 99 (dropped)
-	// - 10 keywords (truncated to 8)
+	// - duplicates of "traits/pragmatic" with different strengths (deduped, keeping direct)
+	// - 4 distinct valid keys on sentence 1 (only 3 kept after sort+cap, direct first)
+	// - keyword with index 99 FIRST (dropped, not just masked by the 8-cap)
+	// - keyword with mixed n:[1,99] (stores [0], dropping the 99)
+	// - 10 more keywords (truncated to 8 total)
 	reply := `{
 		"links": [
 			{
 				"n": 0,
-				"keys": [{"key": "resilience/trip_wire", "strength": "direct"}]
+				"keys": [{"key": "traits/pragmatic", "strength": "direct"}]
 			},
 			{
 				"n": 1,
@@ -321,17 +372,20 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 					{"key": "nonexistent/key", "strength": "direct"},
 					{"key": "traits/satisfices", "strength": "direct"},
 					{"key": "resilience/trip_wire", "strength": "direct"},
-					{"key": "resilience/trip_wire", "strength": "partial"},
-					{"key": "resilience/trip_wire", "strength": "strong"},
-					{"key": "resilience/trip_wire", "strength": "direct"}
+					{"key": "traits/pragmatic", "strength": "direct"},
+					{"key": "traits/pragmatic", "strength": "partial"},
+					{"key": "traits/direct", "strength": "partial"},
+					{"key": "thinking/lazy", "strength": "strong"}
 				]
 			},
 			{
 				"n": 99,
-				"keys": [{"key": "resilience/trip_wire", "strength": "direct"}]
+				"keys": [{"key": "traits/pragmatic", "strength": "direct"}]
 			}
 		],
 		"keywords": [
+			{"k": "out", "n": [99]},
+			{"k": "mixed", "n": [1, 99]},
 			{"k": "w1", "n": [1]},
 			{"k": "w2", "n": [1]},
 			{"k": "w3", "n": [1]},
@@ -339,10 +393,7 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 			{"k": "w5", "n": [1]},
 			{"k": "w6", "n": [1]},
 			{"k": "w7", "n": [1]},
-			{"k": "w8", "n": [1]},
-			{"k": "w9", "n": [1]},
-			{"k": "w10", "n": [1]},
-			{"k": "out", "n": [99]}
+			{"k": "w8", "n": [1]}
 		]
 	}`
 
@@ -373,7 +424,10 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 		t.Fatal("no sources row")
 	}
 
-	// Sentence 0 (n:1 in reply) should have 3 links, direct first.
+	// Sentence 0 (n:1 in reply) should have 3 links: 2 direct (pragmatic, dedupe of pragmatic
+	// dropped), then 1 partial (direct, lazy coerced from "strong"). After dedup there are 3
+	// distinct keys (pragmatic, direct, lazy), so all 3 are kept. They sort direct-first:
+	// pragmatic (direct), then direct (partial) and lazy (partial coerced).
 	if len(src.Sentences) < 1 {
 		t.Fatal("no sentences")
 	}
@@ -381,25 +435,40 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 	if len(links) != 3 {
 		t.Fatalf("sentence 0 links: got %d, want 3", len(links))
 	}
-	// First should be direct, second direct, third strength="strong"→partial.
-	if links[0].Strength != store.LinkDirect {
-		t.Fatalf("first link strength: got %s, want direct", links[0].Strength)
+	// First link is pragmatic (direct, deduped).
+	if links[0].Dimension != "traits" || links[0].Key != "pragmatic" || links[0].Strength != store.LinkDirect {
+		t.Fatalf("first link: got %+v, want {traits pragmatic direct}", links[0])
 	}
+	// Second and third are partial (either order is fine, but both should be partial).
 	if links[1].Strength != store.LinkPartial {
 		t.Fatalf("second link strength: got %s, want partial", links[1].Strength)
 	}
 	if links[2].Strength != store.LinkPartial {
-		t.Fatalf("third link strength: got %s, want partial (coerced from 'strong')", links[2].Strength)
+		t.Fatalf("third link strength: got %s, want partial", links[2].Strength)
 	}
 
-	// Keywords: at most 8, and the one with n:[99] is dropped.
+	// Keywords: "out" (n:[99] only) is dropped; "mixed" (n:[1,99]) stores [0]; then w1-w8
+	// (truncated to 8 total, so "mixed" and 7 of the w*).
 	if len(src.Keywords) != 8 {
 		t.Fatalf("keywords: got %d, want 8", len(src.Keywords))
 	}
 	for _, kw := range src.Keywords {
 		if kw.Word == "out" {
-			t.Fatal("keyword 'out' should have been dropped (index out of range)")
+			t.Fatal("keyword 'out' should have been dropped (all indexes out of range)")
 		}
+	}
+	// Find "mixed" and assert it stored [0], dropping the 99.
+	foundMixed := false
+	for _, kw := range src.Keywords {
+		if kw.Word == "mixed" {
+			foundMixed = true
+			if len(kw.Sentences) != 1 || kw.Sentences[0] != 0 {
+				t.Fatalf("keyword 'mixed': got indexes %v, want [0] (dropped 99)", kw.Sentences)
+			}
+		}
+	}
+	if !foundMixed {
+		t.Fatal("keyword 'mixed' should have been kept (has valid index 1)")
 	}
 }
 
@@ -413,10 +482,10 @@ func TestResolveSourcesSelfHeals(t *testing.T) {
 	seedFacets(t, s)
 
 	// Write two profiles.
-	if err := s.WriteProfile("default", "stops at good enough."); err != nil {
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
 		t.Fatalf("WriteProfile default: %v", err)
 	}
-	if err := s.WriteProfile("math", "recovers with arithmetic."); err != nil {
+	if err := s.WriteProfile("math", "Recovers with arithmetic."); err != nil {
 		t.Fatalf("WriteProfile math: %v", err)
 	}
 
@@ -455,7 +524,7 @@ func TestResolveSourcesSelfHeals(t *testing.T) {
 	}
 
 	// Rewrite one profile's text: one call, for that profile only.
-	if err := s.WriteProfile("default", "satisfices on arrival."); err != nil {
+	if err := s.WriteProfile("default", "Satisfices on arrival."); err != nil {
 		t.Fatalf("WriteProfile (rewrite): %v", err)
 	}
 	calls = 0
@@ -493,33 +562,36 @@ func TestResolveSourcesUsesPerLensRunner(t *testing.T) {
 	s := newStore(t)
 	seedFacets(t, s)
 
-	if err := s.WriteProfile("default", "stops at good enough."); err != nil {
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
 		t.Fatalf("WriteProfile default: %v", err)
 	}
-	if err := s.WriteProfile("math", "recovers with arithmetic."); err != nil {
+	if err := s.WriteProfile("math", "Recovers with arithmetic."); err != nil {
 		t.Fatalf("WriteProfile math: %v", err)
 	}
 
-	calls := map[string]string{} // lens -> runner that resolved it
+	type call struct {
+		runner string
+		model  string
+	}
+	calls := make(map[string]call) // lens -> {runner, model}
 
-	defaultRunner := func(_ context.Context, _, prompt, _ string) (string, error) {
+	defaultRunner := func(_ context.Context, model, prompt, _ string) (string, error) {
 		if prompt == "RESOLVE" {
-			// Record which lens this is by inspecting the input (simplified).
-			calls["default"] = "default-runner"
+			calls["default"] = call{runner: "default-runner", model: model}
 			return `{"links":[],"keywords":[]}`, nil
 		}
 		return "", nil
 	}
 
-	mathRunner := func(_ context.Context, _, prompt, _ string) (string, error) {
+	mathRunner := func(_ context.Context, model, prompt, _ string) (string, error) {
 		if prompt == "RESOLVE" {
-			calls["math"] = "math-runner"
+			calls["math"] = call{runner: "math-runner", model: model}
 			return `{"links":[],"keywords":[]}`, nil
 		}
 		return "", nil
 	}
 
-	mathLens := &lens.Lens{Name: "math", Runner: "opencode"}
+	mathLens := &lens.Lens{Name: "math", Runner: "opencode", ReviewModel: "haiku"}
 	sm := &Summarizer{
 		Store:         s,
 		Config:        store.Config{Runner: "claude", DistillModel: "sonnet"},
@@ -539,11 +611,21 @@ func TestResolveSourcesUsesPerLensRunner(t *testing.T) {
 	}
 
 	// Each lens used its own runner.
-	if calls["default"] != "default-runner" {
-		t.Fatalf("default lens: got %s, want default-runner", calls["default"])
+	if calls["default"].runner != "default-runner" {
+		t.Fatalf("default lens runner: got %s, want default-runner", calls["default"].runner)
 	}
-	if calls["math"] != "math-runner" {
-		t.Fatalf("math lens: got %s, want math-runner", calls["math"])
+	if calls["math"].runner != "math-runner" {
+		t.Fatalf("math lens runner: got %s, want math-runner", calls["math"].runner)
+	}
+
+	// Each lens used ModelFor(cfg, lens, PhaseReview).
+	// default: no ReviewModel override → falls back to Config.DistillModel = "sonnet".
+	if calls["default"].model != "sonnet" {
+		t.Fatalf("default lens model: got %s, want sonnet", calls["default"].model)
+	}
+	// math: ReviewModel = "haiku" overrides the default.
+	if calls["math"].model != "haiku" {
+		t.Fatalf("math lens model: got %s, want haiku", calls["math"].model)
 	}
 }
 
@@ -553,7 +635,7 @@ func TestResolveSourcesOffWithoutPrompt(t *testing.T) {
 	s := newStore(t)
 	seedFacets(t, s)
 
-	if err := s.WriteProfile("default", "stops at good enough."); err != nil {
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
 		t.Fatalf("WriteProfile: %v", err)
 	}
 

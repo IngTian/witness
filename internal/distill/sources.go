@@ -121,24 +121,25 @@ func (sm *Summarizer) resolveOneNotebook(ctx context.Context, portrait string, l
 		return sm.Store.WritePortraitSources(portrait, store.PortraitHash(md), store.PortraitSources{}, time.Now())
 	}
 
-	// Read the active facets: same-lens ones for the resolver input, all active
-	// ones for validation (cross-lens links are allowed).
+	// Read the active facets for this lens only — the resolver is shown only this
+	// lens's facets and may cite only those (a default portrait cannot cite a math
+	// facet the resolver never saw).
 	allFacets, err := sm.Store.ReadActiveFacets()
 	if err != nil {
 		return fmt.Errorf("read facets: %w", err)
 	}
 	var lensFacets []store.Facet
-	validKeys := make(map[string]bool)
 	for _, f := range allFacets {
-		if f.Current() != nil {
-			// Build the valid-key set from ALL active facets (cross-lens links allowed).
-			key := f.Dimension + "/" + f.Key
-			validKeys[key] = true
-			// But only same-lens facets are shown to the resolver.
-			if f.Lens == portrait {
-				lensFacets = append(lensFacets, f)
-			}
+		if f.Lens == portrait && f.Current() != nil {
+			lensFacets = append(lensFacets, f)
 		}
+	}
+
+	// Build the valid-key set from the same facets shown to the resolver.
+	validKeys := make(map[string]bool)
+	for _, f := range lensFacets {
+		key := f.Dimension + "/" + f.Key
+		validKeys[key] = true
 	}
 
 	input := renderResolveInput(sentences, lensFacets)
@@ -148,7 +149,7 @@ func (sm *Summarizer) resolveOneNotebook(ctx context.Context, portrait string, l
 		return fmt.Errorf("resolver call: %w", err)
 	}
 
-	src, err := parseLensLinks(reply, len(sentences), validKeys, portrait)
+	src, err := parseLensLinks(reply, sentences, len(sentences), validKeys, portrait)
 	if err != nil {
 		return fmt.Errorf("parse reply: %w", err)
 	}
@@ -198,11 +199,14 @@ type resolverKeyword struct {
 }
 
 // parseLensLinks extracts and validates the resolver's JSON reply. It returns an error
-// when there is no parseable JSON object. Validation drops unknown/archived keys, out-of-
-// range sentence numbers, invalid strengths (coerced to partial), and excess links per
-// sentence (max 3, direct first). Keyword indexes out of range are dropped, and more than
-// 8 keywords are truncated. lensName is the notebook portrait's lens (filled into each link).
-func parseLensLinks(reply string, nSentences int, validKeys map[string]bool, lensName string) (store.PortraitSources, error) {
+// when there is no parseable JSON object. Validation: unknown/archived keys are dropped;
+// out-of-range sentence numbers are dropped; invalid strengths are coerced to partial;
+// duplicate keys within a sentence keep the stronger strength (direct > partial); links
+// are stable-sorted direct-first then capped at 3 per sentence. Keyword indexes out of
+// range are dropped, and more than 8 keywords are truncated. lensName is the notebook
+// portrait's lens (filled into each link). sentenceTexts are the split sentences (for
+// setting SourcedSentence.Text).
+func parseLensLinks(reply string, sentenceTexts []string, nSentences int, validKeys map[string]bool, lensName string) (store.PortraitSources, error) {
 	// Extract the substring from the first { to the last }.
 	start := strings.Index(reply, "{")
 	end := strings.LastIndex(reply, "}")
@@ -216,16 +220,22 @@ func parseLensLinks(reply string, nSentences int, validKeys map[string]bool, len
 		return store.PortraitSources{}, fmt.Errorf("unmarshal: %w", err)
 	}
 
-	// Build sentences with validated links.
+	// Build sentences with validated links. Multiple reply entries with the same n are
+	// merged (the resolver may send two link blocks for one sentence).
 	sentences := make([]store.SourcedSentence, nSentences)
+	for i, txt := range sentenceTexts {
+		sentences[i].Text = txt
+	}
+
+	// Group links by sentence number, then process each sentence.
+	bySentence := make(map[int][]store.TraitLink)
 	for _, rl := range rr.Links {
 		// Validate n is in range (1-based in reply, 0-based in storage).
 		if rl.N < 1 || rl.N > nSentences {
 			continue
 		}
 		idx := rl.N - 1
-		// Collect and validate all links, take first 3, then sort by strength (direct first).
-		var links []store.TraitLink
+		// Filter and validate all keys in this entry.
 		for _, k := range rl.Keys {
 			// Unknown or archived key: drop.
 			if !validKeys[k.Key] {
@@ -241,27 +251,54 @@ func parseLensLinks(reply string, nSentences int, validKeys map[string]bool, len
 			if len(parts) != 2 {
 				continue
 			}
-			links = append(links, store.TraitLink{
+			bySentence[idx] = append(bySentence[idx], store.TraitLink{
 				Lens:      lensName,
 				Dimension: parts[0],
 				Key:       parts[1],
 				Strength:  strength,
 			})
 		}
-		// Keep max 3 links, then sort them with direct first.
-		if len(links) > 3 {
-			links = links[:3]
-		}
-		// Sort: direct before partial (stable, so original order within each strength).
-		var direct, partial []store.TraitLink
+	}
+
+	// For each sentence: dedupe by key (keeping stronger strength), stable sort direct-first, cap at 3.
+	for idx, links := range bySentence {
+		// Dedupe: for each key, keep the stronger strength (direct > partial).
+		seen := make(map[string]string) // "dimension/key" -> strength
+		var deduped []store.TraitLink
 		for _, link := range links {
+			key := link.Dimension + "/" + link.Key
+			existing, ok := seen[key]
+			if !ok {
+				// First occurrence: keep it.
+				seen[key] = link.Strength
+				deduped = append(deduped, link)
+			} else if link.Strength == store.LinkDirect && existing == store.LinkPartial {
+				// Upgrade: replace partial with direct.
+				seen[key] = store.LinkDirect
+				for i := range deduped {
+					if deduped[i].Dimension == link.Dimension && deduped[i].Key == link.Key {
+						deduped[i].Strength = store.LinkDirect
+						break
+					}
+				}
+			}
+			// else: already seen with same or stronger strength, skip.
+		}
+		// Stable sort: direct before partial (preserves original order within each strength).
+		var direct, partial []store.TraitLink
+		for _, link := range deduped {
 			if link.Strength == store.LinkDirect {
 				direct = append(direct, link)
 			} else {
 				partial = append(partial, link)
 			}
 		}
-		sentences[idx].Links = append(direct, partial...)
+		sorted := append(direct, partial...)
+		// Cap at 3.
+		if len(sorted) > 3 {
+			sorted = sorted[:3]
+		}
+		sentences[idx].Links = sorted
 	}
 
 	// Validate keywords: drop out-of-range indexes, truncate to 8.
