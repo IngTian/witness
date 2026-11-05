@@ -220,6 +220,53 @@ func TestReviewLogsNothingFromAFailedWrite(t *testing.T) {
 	})
 }
 
+// Each window is its own write, and its events go with IT. Here window 1 commits and window 2's
+// review call fails, so window 1's row must already be in the log. Events handed only to a later
+// write — the last window's, say — would vanish with a window that never wrote, while the facet
+// they describe was kept: an all-success run cannot tell the two apart, a failing one can.
+func TestReviewLogsEachWindowWithItsOwnWrite(t *testing.T) {
+	s := newStore(t)
+	seq1 := stageObs(t, s, "default", "window one")
+	stageObs(t, s, "default", "window two")
+	calls := 0
+	r := &Reviewer{
+		Store: s, Lenses: defaultLens(),
+		Config: store.Config{ReviewMaxChars: 1}, // every observation overflows it → one window each
+		Runner: func(context.Context, string, string, string) (string, error) {
+			if calls++; calls == 2 {
+				return "", errors.New("review timed out")
+			}
+			return mustJSON([]reviewedFacet{{Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.5}}), nil
+		},
+	}
+	now := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+	if err := r.Run(context.Background(), now); err == nil {
+		t.Fatal("window 2's failure must surface")
+	}
+	if calls != 2 {
+		t.Fatalf("the fold made %d review calls, want 2 — this test needs two windows", calls)
+	}
+	facets, err := s.ReadFacets()
+	if err != nil || len(facets) != 1 || facets[0].Key != "k" {
+		t.Fatalf("window 1's facet must be stored: %+v (err %v)", facets, err)
+	}
+	assertLog(t, s, []store.ConfidenceEvent{
+		{Lens: "default", Dimension: "d", Key: "k", At: now.Format(time.RFC3339), ClockSeq: seq1, From: 0, To: 0.5, Kind: store.EventNew},
+	})
+}
+
+// twoClosedVersions is clockedFacet(true) with an OLDER, lower closed version before it, so a
+// reopen that read the wrong version could not match the expected From by coincidence.
+func twoClosedVersions() store.Facet {
+	f := clockedFacet(true)
+	older := store.FacetVersion{
+		Value: "prefers Python", ValidFrom: "2025-06-01T00:00:00Z", ValidTo: "2026-01-01T00:00:00Z",
+		RecordedAt: "2025-06-01T00:00:00Z", Confidence: 0.3, ConfidenceSeq: 100,
+	}
+	f.Versions = append([]store.FacetVersion{older}, f.Versions...)
+	return f
+}
+
 // From is the DECAYED confidence — what the model was shown and what the step started from —
 // on every branch. With the stored value instead, a facet that decayed 0.9→0.45 and was then
 // re-judged at 0.5 would be charted as a downgrade 0.9→0.5 when it was a reinforcement.
@@ -238,6 +285,11 @@ func TestApplyFacetLogsFromTheDecayedConfidence(t *testing.T) {
 			reviewedFacet{Dimension: "d", Key: "k", Value: "prefers Rust now", Confidence: 0.7, Contradicts: true},
 			store.ConfidenceEvent{Lens: "L", Dimension: "d", Key: "k", At: applyNow, ClockSeq: later, From: 0.45, To: 0.7, Kind: store.EventRewrite}},
 		{"reopen", clockedFacet(true),
+			reviewedFacet{Dimension: "d", Key: "k", Value: "prefers Go again", Confidence: 0.7},
+			store.ConfidenceEvent{Lens: "L", Dimension: "d", Key: "k", At: applyNow, ClockSeq: later, From: 0.45, To: 0.7, Kind: store.EventReopen}},
+		// The reopen starts from the LAST closed version (0.9@500 → 0.45), not the first
+		// (0.3@100, which would read 0.14 at this seq).
+		{"reopen after two closed versions", twoClosedVersions(),
 			reviewedFacet{Dimension: "d", Key: "k", Value: "prefers Go again", Confidence: 0.7},
 			store.ConfidenceEvent{Lens: "L", Dimension: "d", Key: "k", At: applyNow, ClockSeq: later, From: 0.45, To: 0.7, Kind: store.EventReopen}},
 	}
