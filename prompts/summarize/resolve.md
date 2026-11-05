@@ -19,8 +19,6 @@ Rules:
 Also give 5-8 short keywords (2-4 words each) that sum up the profile, each with the numbers of the sentences it sums up.
 
 Output ONLY one JSON object, no prose, no code fence:
-```
 {"links": [{"n": 1, "keys": [{"key": "dimension/key", "strength": "direct"}]}], "keywords": [{"k": "...", "n": [1, 2]}]}
-```
 
 Write every key exactly as it appears in FACETS. Valid strengths are "direct" and "partial" only.

@@ -15,8 +15,6 @@ Rules:
 Also give 5-8 short keywords (2-4 words each) that sum up the portrait, each with the numbers of the portrait sentences it sums up.
 
 Output ONLY one JSON object, no prose, no code fence:
-```
 {"links": [{"n": 1, "refs": [{"ref": "default#3", "strength": "direct"}]}], "keywords": [{"k": "...", "n": [1, 2]}]}
-```
 
 Write every ref exactly as it appears in NOTEBOOK SENTENCES. Valid strengths are "direct" and "partial" only.
