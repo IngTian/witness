@@ -835,8 +835,11 @@ func TestResolveUnifiedWeakensPartialRefs(t *testing.T) {
 	}
 }
 
-// TestResolveUnifiedReResolvesWhenANotebookChanges verifies that re-resolving
-// default with new text makes unified stale, even though the unified text is unchanged.
+// TestResolveUnifiedReResolvesWhenANotebookChanges verifies that when default's
+// profile changes, unified becomes stale BECAUSE Inherits["default"] no longer equals
+// default's stored text_hash. This test resolves all; rewrites default's profile;
+// re-resolves ONLY default (by making the unified resolver fail in pass 2); then
+// asserts unified is stale because the Inherits comparison detects the change.
 func TestResolveUnifiedReResolvesWhenANotebookChanges(t *testing.T) {
 	s := newStore(t)
 	seedFacets(t, s)
@@ -848,12 +851,19 @@ func TestResolveUnifiedReResolvesWhenANotebookChanges(t *testing.T) {
 		t.Fatalf("WriteProfile unified: %v", err)
 	}
 
+	pass := 0
 	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
 		if prompt == "RESOLVE" {
 			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}],"keywords":[]}`, nil
 		}
 		if prompt == "RESOLVE_UNIFIED" {
-			return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"direct"}]}],"keywords":[]}`, nil
+			pass++
+			if pass == 1 {
+				// Pass 1: succeed.
+				return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"direct"}]}],"keywords":[]}`, nil
+			}
+			// Pass 2: fail (so only the notebook path runs).
+			return "", context.DeadlineExceeded
 		}
 		return "", nil
 	}
@@ -867,41 +877,44 @@ func TestResolveUnifiedReResolvesWhenANotebookChanges(t *testing.T) {
 		Run:                  fakeResolve,
 	}
 
-	// First pass: resolve both.
+	// Pass 1: resolve all (default + unified).
 	if err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources (pass 1): %v", err)
 	}
 
-	// Check that unified is not stale.
-	stale, err := sm.StaleSources()
-	if err != nil {
-		t.Fatalf("StaleSources (after pass 1): %v", err)
+	// Capture the unified Inherits["default"] from pass 1.
+	unifiedSrc1, _, ok, err := s.ReadPortraitSources(store.ProfileUnified)
+	if err != nil || !ok {
+		t.Fatalf("ReadPortraitSources unified (pass 1): ok=%v err=%v", ok, err)
 	}
-	for _, p := range stale {
-		if p == store.ProfileUnified {
-			t.Fatal("unified is stale after first pass; should be fresh")
-		}
-	}
+	inheritedHash1 := unifiedSrc1.Inherits["default"]
 
 	// Rewrite default's text.
 	if err := s.WriteProfile("default", "Satisfices on arrival."); err != nil {
 		t.Fatalf("WriteProfile default (rewrite): %v", err)
 	}
 
-	// Unified is now stale (its Inherits[default] differs from default's new hash).
-	stale, err = sm.StaleSources()
-	if err != nil {
-		t.Fatalf("StaleSources (after rewrite): %v", err)
+	// Pass 2: re-resolve ONLY default (unified resolver will fail).
+	_ = sm.ResolveSources(context.Background()) // Ignore error (unified fails by design).
+
+	// Read default's new stored text_hash.
+	_, defaultHash2, ok, err := s.ReadPortraitSources("default")
+	if err != nil || !ok {
+		t.Fatalf("ReadPortraitSources default (pass 2): ok=%v err=%v", ok, err)
 	}
-	found := false
-	for _, p := range stale {
-		if p == store.ProfileUnified {
-			found = true
-			break
-		}
+
+	// Unified is now stale because Inherits["default"] (still inheritedHash1) differs
+	// from default's new stored hash (defaultHash2).
+	if !sm.isUnifiedStale() {
+		t.Fatal("unified is not stale after default changed; expected stale due to Inherits mismatch")
 	}
-	if !found {
-		t.Fatal("unified is not stale after default changed; expected stale")
+
+	// Assert the test would fail if the Inherits comparison were deleted:
+	// If isUnifiedStale didn't check Inherits, it would return false (unified's own hash
+	// didn't change, and default is no longer in sm.Lenses after the loop). This test
+	// pins that the Inherits loop detects the change.
+	if inheritedHash1 == defaultHash2 {
+		t.Fatal("test precondition failed: default's hash didn't change after rewrite")
 	}
 }
 
@@ -961,11 +974,10 @@ func TestResolveUnifiedSkipsMissingNotebooks(t *testing.T) {
 		},
 	}
 
-	// ResolveSources should succeed despite math failing.
+	// ResolveSources should return an error for math's failure.
 	err := sm.ResolveSources(context.Background())
-	// The error should mention math's failure, but unified should still be written.
 	if err == nil {
-		t.Log("ResolveSources returned nil; expected a joined error for math's failure")
+		t.Fatal("ResolveSources returned nil; expected a joined error for math's failure")
 	}
 
 	// Unified sources should exist.
@@ -994,5 +1006,80 @@ func TestResolveUnifiedSkipsMissingNotebooks(t *testing.T) {
 	// Inherits["default"] is present.
 	if _, hasDefault := src.Inherits["default"]; !hasDefault {
 		t.Fatal("Inherits missing default entry")
+	}
+}
+
+// TestResolveUnifiedLoopGuard verifies that when a notebook's resolver always fails,
+// unified is called only once in the first pass and then never again (ruling R9 prevents
+// it from being stale when nothing changes).
+func TestResolveUnifiedLoopGuard(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+
+	// Write profiles.
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
+		t.Fatalf("WriteProfile default: %v", err)
+	}
+	if err := s.WriteProfile("math", "Recovers with arithmetic."); err != nil {
+		t.Fatalf("WriteProfile math: %v", err)
+	}
+	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
+		t.Fatalf("WriteProfile unified: %v", err)
+	}
+
+	unifiedCalls := 0
+	successfulResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		if prompt == "RESOLVE_UNIFIED" {
+			unifiedCalls++
+			return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	mathFailsResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			// Math always fails.
+			return "", context.DeadlineExceeded
+		}
+		return "", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  successfulResolve,
+		RunFor: func(ln *lens.Lens) SummarizeFunc {
+			if ln != nil && ln.Name == "math" {
+				return mathFailsResolve
+			}
+			return successfulResolve
+		},
+	}
+
+	// Pass 1: resolve default + unified (math fails).
+	_ = sm.ResolveSources(context.Background()) // Ignore error (math fails).
+
+	if unifiedCalls != 1 {
+		t.Fatalf("pass 1: unified calls = %d, want 1", unifiedCalls)
+	}
+
+	// Pass 2: nothing changed, math still fails. Unified should NOT be called.
+	_ = sm.ResolveSources(context.Background())
+
+	if unifiedCalls != 1 {
+		t.Fatalf("pass 2: unified calls = %d, want 1 (no re-call when nothing changed)", unifiedCalls)
+	}
+
+	// Pass 3: still nothing changed. Unified should still NOT be called.
+	_ = sm.ResolveSources(context.Background())
+
+	if unifiedCalls != 1 {
+		t.Fatalf("pass 3: unified calls = %d, want 1 (no re-call when nothing changed)", unifiedCalls)
 	}
 }

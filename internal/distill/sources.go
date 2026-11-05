@@ -80,10 +80,13 @@ type notebookData struct {
 	hash string
 }
 
-// isUnifiedStale returns true when the unified portrait is stale: no row exists, its
-// own hash differs from the current profile, OR any Inherits[lens] differs from that
-// notebook's current stored text_hash. Also stale when a notebook that now HAS a current
-// row is absent from Inherits (a late-resolved notebook needs to be picked up).
+// isUnifiedStale returns true when the unified portrait is stale (ruling R9):
+//   - No row exists, OR
+//   - Own hash differs, OR
+//   - For each (lens, h) in src.Inherits, the stored text_hash of that lens's row != h
+//     (a missing row counts as different), OR
+//   - A lens that has a CURRENT row (row hash == PortraitHash of its profile now) is
+//     absent from Inherits.
 func (sm *Summarizer) isUnifiedStale() bool {
 	if sm.ResolveUnifiedPrompt == "" {
 		return false // feature is off
@@ -103,34 +106,34 @@ func (sm *Summarizer) isUnifiedStale() bool {
 		return true // own hash differs
 	}
 
-	// Check each notebook's Inherits entry against its current stored text_hash.
-	// Also check if the notebook itself is stale (its profile changed).
-	for _, ln := range sm.Lenses {
-		_, notebookHash, notebookOK, err := sm.Store.ReadPortraitSources(ln.Name)
-		if err != nil {
-			continue // read failure: skip this notebook
+	// For each (lens, h) in Inherits, check that lens's stored text_hash == h.
+	for lens, inheritedHash := range src.Inherits {
+		_, storedHash, ok, err := sm.Store.ReadPortraitSources(lens)
+		if err != nil || !ok {
+			return true // missing row or read failure: different
 		}
+		if storedHash != inheritedHash {
+			return true // notebook changed
+		}
+	}
 
-		// Read the notebook's current profile to check if it's stale.
+	// Check if any lens has a CURRENT row (hash matches its profile) that's absent from Inherits.
+	for _, ln := range sm.Lenses {
+		if _, alreadyInherited := src.Inherits[ln.Name]; alreadyInherited {
+			continue // already checked above
+		}
+		// Check if this lens has a current row.
+		_, storedHash, ok, err := sm.Store.ReadPortraitSources(ln.Name)
+		if err != nil || !ok {
+			continue // no row or read failure: skip
+		}
+		// Read the lens's profile to check if the row is current.
 		nbMd, nbOK, nbErr := sm.Store.ReadProfile(ln.Name)
 		if nbErr != nil || !nbOK {
-			continue // read failure or no profile: skip
+			continue // no profile or read failure: skip
 		}
-		currentNbHash := store.PortraitHash(nbMd)
-
-		if notebookOK {
-			// Notebook has a current row: check both conditions.
-			// 1. The notebook's stored hash must match Inherits[lens].
-			if src.Inherits[ln.Name] != notebookHash {
-				return true // notebook changed or was late-resolved
-			}
-			// 2. The notebook's stored hash must match its current profile hash.
-			if notebookHash != currentNbHash {
-				return true // notebook's profile changed (notebook is stale)
-			}
-		} else {
-			// Notebook has no row but has a profile: unified is stale if it should inherit from this notebook.
-			// This is the "late-resolved notebook" case.
+		if store.PortraitHash(nbMd) == storedHash {
+			// This lens has a current row but is absent from Inherits: stale.
 			return true
 		}
 	}
@@ -172,13 +175,12 @@ func (sm *Summarizer) ResolveSources(ctx context.Context) error {
 	}
 
 	// Resolve unified after all notebooks (it inherits from them).
-	for _, portrait := range stale {
-		if portrait == store.ProfileUnified {
-			if err := sm.resolveUnified(ctx); err != nil {
-				slog.Warn("sources: failed to resolve unified portrait", "err", err)
-				failures = append(failures, fmt.Errorf("resolve unified: %w", err))
-			}
-			break
+	// Check staleness AFTER the notebook loop so a notebook resolved in this same call
+	// triggers unified in the same call.
+	if sm.ResolveUnifiedPrompt != "" && sm.isUnifiedStale() {
+		if err := sm.resolveUnified(ctx); err != nil {
+			slog.Warn("sources: failed to resolve unified portrait", "err", err)
+			failures = append(failures, fmt.Errorf("resolve unified: %w", err))
 		}
 	}
 
@@ -280,6 +282,85 @@ type resolverKeyword struct {
 	N []int  `json:"n"` // 1-based sentence numbers
 }
 
+// extractJSONObject extracts the substring from the first { to the last } in reply.
+func extractJSONObject(reply string) (string, error) {
+	start := strings.Index(reply, "{")
+	end := strings.LastIndex(reply, "}")
+	if start == -1 || end == -1 || start >= end {
+		return "", fmt.Errorf("no JSON object found")
+	}
+	return reply[start : end+1], nil
+}
+
+// finalizeLinks deduplicates links by lens/dimension/key (keeping stronger strength),
+// stable-sorts direct-first, and caps at 3.
+func finalizeLinks(links []store.TraitLink) []store.TraitLink {
+	// Dedupe: for each key, keep the stronger strength (direct > partial).
+	seen := make(map[string]string) // "lens/dimension/key" -> strength
+	var deduped []store.TraitLink
+	for _, link := range links {
+		key := link.Lens + "/" + link.Dimension + "/" + link.Key
+		existing, ok := seen[key]
+		if !ok {
+			// First occurrence: keep it.
+			seen[key] = link.Strength
+			deduped = append(deduped, link)
+		} else if link.Strength == store.LinkDirect && existing == store.LinkPartial {
+			// Upgrade: replace partial with direct.
+			seen[key] = store.LinkDirect
+			for i := range deduped {
+				if deduped[i].Lens == link.Lens && deduped[i].Dimension == link.Dimension && deduped[i].Key == link.Key {
+					deduped[i].Strength = store.LinkDirect
+					break
+				}
+			}
+		}
+		// else: already seen with same or stronger strength, skip.
+	}
+	// Stable sort: direct before partial (preserves original order within each strength).
+	var direct, partial []store.TraitLink
+	for _, link := range deduped {
+		if link.Strength == store.LinkDirect {
+			direct = append(direct, link)
+		} else {
+			partial = append(partial, link)
+		}
+	}
+	sorted := append(direct, partial...)
+	// Cap at 3.
+	if len(sorted) > 3 {
+		sorted = sorted[:3]
+	}
+	return sorted
+}
+
+// parseKeywords validates keyword sentence indexes (1-based in input, 0-based in output),
+// drops out-of-range indexes, and truncates to 8 keywords.
+func parseKeywords(keywords []resolverKeyword, nSentences int) []store.Keyword {
+	var result []store.Keyword
+	for _, kw := range keywords {
+		var idxs []int
+		for _, n := range kw.N {
+			// Convert 1-based to 0-based and check range.
+			if n < 1 || n > nSentences {
+				continue
+			}
+			idxs = append(idxs, n-1)
+		}
+		// Only keep keywords that have at least one valid index.
+		if len(idxs) > 0 {
+			result = append(result, store.Keyword{
+				Word:      kw.K,
+				Sentences: idxs,
+			})
+		}
+	}
+	if len(result) > 8 {
+		result = result[:8]
+	}
+	return result
+}
+
 // parseLensLinks extracts and validates the resolver's JSON reply. It returns an error
 // when there is no parseable JSON object. Validation: unknown/archived keys are dropped;
 // out-of-range sentence numbers are dropped; invalid strengths are coerced to partial;
@@ -289,13 +370,10 @@ type resolverKeyword struct {
 // portrait's lens (filled into each link). sentenceTexts are the split sentences (for
 // setting SourcedSentence.Text).
 func parseLensLinks(reply string, sentenceTexts []string, nSentences int, validKeys map[string]bool, lensName string) (store.PortraitSources, error) {
-	// Extract the substring from the first { to the last }.
-	start := strings.Index(reply, "{")
-	end := strings.LastIndex(reply, "}")
-	if start == -1 || end == -1 || start >= end {
-		return store.PortraitSources{}, fmt.Errorf("no JSON object found")
+	jsonText, err := extractJSONObject(reply)
+	if err != nil {
+		return store.PortraitSources{}, err
 	}
-	jsonText := reply[start : end+1]
 
 	var rr resolverReply
 	if err := json.Unmarshal([]byte(jsonText), &rr); err != nil {
@@ -344,67 +422,10 @@ func parseLensLinks(reply string, sentenceTexts []string, nSentences int, validK
 
 	// For each sentence: dedupe by key (keeping stronger strength), stable sort direct-first, cap at 3.
 	for idx, links := range bySentence {
-		// Dedupe: for each key, keep the stronger strength (direct > partial).
-		seen := make(map[string]string) // "dimension/key" -> strength
-		var deduped []store.TraitLink
-		for _, link := range links {
-			key := link.Dimension + "/" + link.Key
-			existing, ok := seen[key]
-			if !ok {
-				// First occurrence: keep it.
-				seen[key] = link.Strength
-				deduped = append(deduped, link)
-			} else if link.Strength == store.LinkDirect && existing == store.LinkPartial {
-				// Upgrade: replace partial with direct.
-				seen[key] = store.LinkDirect
-				for i := range deduped {
-					if deduped[i].Dimension == link.Dimension && deduped[i].Key == link.Key {
-						deduped[i].Strength = store.LinkDirect
-						break
-					}
-				}
-			}
-			// else: already seen with same or stronger strength, skip.
-		}
-		// Stable sort: direct before partial (preserves original order within each strength).
-		var direct, partial []store.TraitLink
-		for _, link := range deduped {
-			if link.Strength == store.LinkDirect {
-				direct = append(direct, link)
-			} else {
-				partial = append(partial, link)
-			}
-		}
-		sorted := append(direct, partial...)
-		// Cap at 3.
-		if len(sorted) > 3 {
-			sorted = sorted[:3]
-		}
-		sentences[idx].Links = sorted
+		sentences[idx].Links = finalizeLinks(links)
 	}
 
-	// Validate keywords: drop out-of-range indexes, truncate to 8.
-	var keywords []store.Keyword
-	for _, kw := range rr.Keywords {
-		var idxs []int
-		for _, n := range kw.N {
-			// Convert 1-based to 0-based and check range.
-			if n < 1 || n > nSentences {
-				continue
-			}
-			idxs = append(idxs, n-1)
-		}
-		// Only keep keywords that have at least one valid index.
-		if len(idxs) > 0 {
-			keywords = append(keywords, store.Keyword{
-				Word:      kw.K,
-				Sentences: idxs,
-			})
-		}
-	}
-	if len(keywords) > 8 {
-		keywords = keywords[:8]
-	}
+	keywords := parseKeywords(rr.Keywords, nSentences)
 
 	return store.PortraitSources{
 		Sentences: sentences,
@@ -448,6 +469,11 @@ func (sm *Summarizer) resolveUnified(ctx context.Context) error {
 			continue // stale row: skip it
 		}
 		notebooks[ln.Name] = notebookData{src: src, hash: hash}
+	}
+
+	// Skip the model call when there are no current notebook rows.
+	if len(notebooks) == 0 {
+		return sm.Store.WritePortraitSources(store.ProfileUnified, store.PortraitHash(md), store.PortraitSources{}, time.Now())
 	}
 
 	// Build the input for the unified resolver.
@@ -507,13 +533,10 @@ type unifiedRef struct {
 // row, or n out of range, are dropped. Inherits[lens] records the notebook row's text_hash used.
 // sentenceTexts are the split unified sentences (for setting SourcedSentence.Text).
 func parseUnifiedLinks(reply string, sentenceTexts []string, nSentences int, notebooks map[string]notebookData) (store.PortraitSources, error) {
-	// Extract the substring from the first { to the last }.
-	start := strings.Index(reply, "{")
-	end := strings.LastIndex(reply, "}")
-	if start == -1 || end == -1 || start >= end {
-		return store.PortraitSources{}, fmt.Errorf("no JSON object found")
+	jsonText, err := extractJSONObject(reply)
+	if err != nil {
+		return store.PortraitSources{}, err
 	}
-	jsonText := reply[start : end+1]
 
 	var ur unifiedReply
 	if err := json.Unmarshal([]byte(jsonText), &ur); err != nil {
@@ -583,67 +606,10 @@ func parseUnifiedLinks(reply string, sentenceTexts []string, nSentences int, not
 
 	// For each sentence: dedupe by key (keeping stronger strength), stable sort direct-first, cap at 3.
 	for idx, links := range bySentence {
-		// Dedupe: for each key, keep the stronger strength (direct > partial).
-		seen := make(map[string]string) // "lens/dimension/key" -> strength
-		var deduped []store.TraitLink
-		for _, link := range links {
-			key := link.Lens + "/" + link.Dimension + "/" + link.Key
-			existing, ok := seen[key]
-			if !ok {
-				// First occurrence: keep it.
-				seen[key] = link.Strength
-				deduped = append(deduped, link)
-			} else if link.Strength == store.LinkDirect && existing == store.LinkPartial {
-				// Upgrade: replace partial with direct.
-				seen[key] = store.LinkDirect
-				for i := range deduped {
-					if deduped[i].Lens == link.Lens && deduped[i].Dimension == link.Dimension && deduped[i].Key == link.Key {
-						deduped[i].Strength = store.LinkDirect
-						break
-					}
-				}
-			}
-			// else: already seen with same or stronger strength, skip.
-		}
-		// Stable sort: direct before partial (preserves original order within each strength).
-		var direct, partial []store.TraitLink
-		for _, link := range deduped {
-			if link.Strength == store.LinkDirect {
-				direct = append(direct, link)
-			} else {
-				partial = append(partial, link)
-			}
-		}
-		sorted := append(direct, partial...)
-		// Cap at 3.
-		if len(sorted) > 3 {
-			sorted = sorted[:3]
-		}
-		sentences[idx].Links = sorted
+		sentences[idx].Links = finalizeLinks(links)
 	}
 
-	// Validate keywords: drop out-of-range indexes, truncate to 8.
-	var keywords []store.Keyword
-	for _, kw := range ur.Keywords {
-		var idxs []int
-		for _, n := range kw.N {
-			// Convert 1-based to 0-based and check range.
-			if n < 1 || n > nSentences {
-				continue
-			}
-			idxs = append(idxs, n-1)
-		}
-		// Only keep keywords that have at least one valid index.
-		if len(idxs) > 0 {
-			keywords = append(keywords, store.Keyword{
-				Word:      kw.K,
-				Sentences: idxs,
-			})
-		}
-	}
-	if len(keywords) > 8 {
-		keywords = keywords[:8]
-	}
+	keywords := parseKeywords(ur.Keywords, nSentences)
 
 	// Build Inherits map: record the text_hash of each notebook used.
 	inherits := make(map[string]string)
