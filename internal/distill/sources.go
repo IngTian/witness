@@ -49,7 +49,10 @@ func (sm *Summarizer) StaleSources() ([]string, error) {
 	var stale []string
 	for _, p := range onDisk {
 		if p == store.ProfileUnified {
-			// Task 5 adds unified; skip it here.
+			// Check unified staleness separately.
+			if sm.isUnifiedStale() {
+				stale = append(stale, p)
+			}
 			continue
 		}
 		md, ok, err := sm.Store.ReadProfile(p)
@@ -69,6 +72,70 @@ func (sm *Summarizer) StaleSources() ([]string, error) {
 		}
 	}
 	return stale, nil
+}
+
+// notebookData holds a notebook's PortraitSources and its text_hash.
+type notebookData struct {
+	src  store.PortraitSources
+	hash string
+}
+
+// isUnifiedStale returns true when the unified portrait is stale: no row exists, its
+// own hash differs from the current profile, OR any Inherits[lens] differs from that
+// notebook's current stored text_hash. Also stale when a notebook that now HAS a current
+// row is absent from Inherits (a late-resolved notebook needs to be picked up).
+func (sm *Summarizer) isUnifiedStale() bool {
+	if sm.ResolveUnifiedPrompt == "" {
+		return false // feature is off
+	}
+
+	md, ok, err := sm.Store.ReadProfile(store.ProfileUnified)
+	if err != nil || !ok {
+		return false // no unified portrait on disk
+	}
+
+	wantHash := store.PortraitHash(md)
+	src, gotHash, ok, err := sm.Store.ReadPortraitSources(store.ProfileUnified)
+	if err != nil || !ok {
+		return true // no row or read failure: stale
+	}
+	if gotHash != wantHash {
+		return true // own hash differs
+	}
+
+	// Check each notebook's Inherits entry against its current stored text_hash.
+	// Also check if the notebook itself is stale (its profile changed).
+	for _, ln := range sm.Lenses {
+		_, notebookHash, notebookOK, err := sm.Store.ReadPortraitSources(ln.Name)
+		if err != nil {
+			continue // read failure: skip this notebook
+		}
+
+		// Read the notebook's current profile to check if it's stale.
+		nbMd, nbOK, nbErr := sm.Store.ReadProfile(ln.Name)
+		if nbErr != nil || !nbOK {
+			continue // read failure or no profile: skip
+		}
+		currentNbHash := store.PortraitHash(nbMd)
+
+		if notebookOK {
+			// Notebook has a current row: check both conditions.
+			// 1. The notebook's stored hash must match Inherits[lens].
+			if src.Inherits[ln.Name] != notebookHash {
+				return true // notebook changed or was late-resolved
+			}
+			// 2. The notebook's stored hash must match its current profile hash.
+			if notebookHash != currentNbHash {
+				return true // notebook's profile changed (notebook is stale)
+			}
+		} else {
+			// Notebook has no row but has a profile: unified is stale if it should inherit from this notebook.
+			// This is the "late-resolved notebook" case.
+			return true
+		}
+	}
+
+	return false
 }
 
 // ResolveSources resolves every stale portrait (links each sentence to the traits it
@@ -94,12 +161,27 @@ func (sm *Summarizer) ResolveSources(ctx context.Context) error {
 
 	var failures []error
 	for _, portrait := range stale {
+		if portrait == store.ProfileUnified {
+			continue // resolve unified after all notebooks
+		}
 		ln := byName[portrait]
 		if err := sm.resolveOneNotebook(ctx, portrait, ln); err != nil {
 			slog.Warn("sources: failed to resolve portrait", "portrait", portrait, "err", err)
 			failures = append(failures, fmt.Errorf("resolve %s: %w", portrait, err))
 		}
 	}
+
+	// Resolve unified after all notebooks (it inherits from them).
+	for _, portrait := range stale {
+		if portrait == store.ProfileUnified {
+			if err := sm.resolveUnified(ctx); err != nil {
+				slog.Warn("sources: failed to resolve unified portrait", "err", err)
+				failures = append(failures, fmt.Errorf("resolve unified: %w", err))
+			}
+			break
+		}
+	}
+
 	return errors.Join(failures...)
 }
 
@@ -327,5 +409,251 @@ func parseLensLinks(reply string, sentenceTexts []string, nSentences int, validK
 	return store.PortraitSources{
 		Sentences: sentences,
 		Keywords:  keywords,
+	}, nil
+}
+
+// resolveUnified resolves the unified portrait by inheriting links from notebook sentences.
+func (sm *Summarizer) resolveUnified(ctx context.Context) error {
+	if sm.ResolveUnifiedPrompt == "" {
+		return nil // feature is off
+	}
+
+	md, ok, err := sm.Store.ReadProfile(store.ProfileUnified)
+	if err != nil {
+		return fmt.Errorf("read profile: %w", err)
+	}
+	if !ok || strings.TrimSpace(md) == "" {
+		return nil // no unified portrait or empty
+	}
+
+	sentences := SplitSentences(md)
+	if len(sentences) == 0 {
+		// No sentences: write an empty result so it's no longer stale.
+		return sm.Store.WritePortraitSources(store.ProfileUnified, store.PortraitHash(md), store.PortraitSources{}, time.Now())
+	}
+
+	// Collect all notebook sources rows that have current data.
+	notebooks := make(map[string]notebookData)
+	for _, ln := range sm.Lenses {
+		src, hash, ok, err := sm.Store.ReadPortraitSources(ln.Name)
+		if err != nil || !ok {
+			continue // notebook has no row or read failure: skip it
+		}
+		// Verify the notebook's row is current (its hash matches the profile on disk).
+		nbMd, nbOK, nbErr := sm.Store.ReadProfile(ln.Name)
+		if nbErr != nil || !nbOK {
+			continue
+		}
+		if store.PortraitHash(nbMd) != hash {
+			continue // stale row: skip it
+		}
+		notebooks[ln.Name] = notebookData{src: src, hash: hash}
+	}
+
+	// Build the input for the unified resolver.
+	input := renderUnifiedInput(sentences, notebooks)
+	model := ModelFor(sm.Config, nil, PhaseReview)
+	reply, err := sm.Run(ctx, model, sm.ResolveUnifiedPrompt, input)
+	if err != nil {
+		return fmt.Errorf("resolver call: %w", err)
+	}
+
+	src, err := parseUnifiedLinks(reply, sentences, len(sentences), notebooks)
+	if err != nil {
+		return fmt.Errorf("parse reply: %w", err)
+	}
+
+	return sm.Store.WritePortraitSources(store.ProfileUnified, store.PortraitHash(md), src, time.Now())
+}
+
+// renderUnifiedInput formats the unified sentences and notebook sentences as the
+// unified resolver expects.
+func renderUnifiedInput(sentences []string, notebooks map[string]notebookData) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "PORTRAIT SENTENCES:")
+	for i, s := range sentences {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, s)
+	}
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "NOTEBOOK SENTENCES:")
+	for lens, nb := range notebooks {
+		for i, sent := range nb.src.Sentences {
+			fmt.Fprintf(&b, "%s#%d: %s\n", lens, i+1, sent.Text)
+		}
+	}
+	return b.String()
+}
+
+// unifiedReply is the JSON structure the unified resolver returns.
+type unifiedReply struct {
+	Links    []unifiedLink     `json:"links"`
+	Keywords []resolverKeyword `json:"keywords"`
+}
+
+type unifiedLink struct {
+	N    int          `json:"n"`    // 1-based unified sentence number
+	Refs []unifiedRef `json:"refs"` // notebook sentence references
+}
+
+type unifiedRef struct {
+	Ref      string `json:"ref"`      // "lens#n" (1-based)
+	Strength string `json:"strength"` // "direct" or "partial"
+}
+
+// parseUnifiedLinks extracts and validates the unified resolver's JSON reply. It inherits
+// links from the referenced notebook sentences. The strength is partial if either the ref
+// or the notebook link is partial. Duplicates are removed by key (keeping stronger strength),
+// then sorted direct-first, then capped at 3 per sentence. Refs to a notebook with no current
+// row, or n out of range, are dropped. Inherits[lens] records the notebook row's text_hash used.
+// sentenceTexts are the split unified sentences (for setting SourcedSentence.Text).
+func parseUnifiedLinks(reply string, sentenceTexts []string, nSentences int, notebooks map[string]notebookData) (store.PortraitSources, error) {
+	// Extract the substring from the first { to the last }.
+	start := strings.Index(reply, "{")
+	end := strings.LastIndex(reply, "}")
+	if start == -1 || end == -1 || start >= end {
+		return store.PortraitSources{}, fmt.Errorf("no JSON object found")
+	}
+	jsonText := reply[start : end+1]
+
+	var ur unifiedReply
+	if err := json.Unmarshal([]byte(jsonText), &ur); err != nil {
+		return store.PortraitSources{}, fmt.Errorf("unmarshal: %w", err)
+	}
+
+	// Build sentences with inherited links.
+	sentences := make([]store.SourcedSentence, nSentences)
+	for i, txt := range sentenceTexts {
+		sentences[i].Text = txt
+	}
+
+	// Group refs by sentence number, then process each sentence.
+	bySentence := make(map[int][]store.TraitLink)
+	for _, ul := range ur.Links {
+		// Validate n is in range (1-based in reply, 0-based in storage).
+		if ul.N < 1 || ul.N > nSentences {
+			continue
+		}
+		idx := ul.N - 1
+		// Process each ref.
+		for _, ref := range ul.Refs {
+			// Parse "lens#n" format.
+			parts := strings.Split(ref.Ref, "#")
+			if len(parts) != 2 {
+				continue // malformed ref
+			}
+			lensName := parts[0]
+			var sentNum int
+			if _, err := fmt.Sscanf(parts[1], "%d", &sentNum); err != nil {
+				continue // malformed n
+			}
+
+			// Lookup the notebook.
+			nbData, ok := notebooks[lensName]
+			if !ok {
+				continue // notebook has no current row
+			}
+			// Validate sentNum is in range (1-based in ref, 0-based in storage).
+			if sentNum < 1 || sentNum > len(nbData.src.Sentences) {
+				continue // out of range
+			}
+			nbSentIdx := sentNum - 1
+
+			// Validate ref strength: direct or partial, else coerce to partial.
+			refStrength := ref.Strength
+			if refStrength != store.LinkDirect && refStrength != store.LinkPartial {
+				refStrength = store.LinkPartial
+			}
+
+			// Inherit the notebook sentence's links, weakening if the ref is partial.
+			for _, nbLink := range nbData.src.Sentences[nbSentIdx].Links {
+				strength := nbLink.Strength
+				// Weaken to partial if either the ref or the link is partial.
+				if refStrength == store.LinkPartial || nbLink.Strength == store.LinkPartial {
+					strength = store.LinkPartial
+				}
+				bySentence[idx] = append(bySentence[idx], store.TraitLink{
+					Lens:      nbLink.Lens,
+					Dimension: nbLink.Dimension,
+					Key:       nbLink.Key,
+					Strength:  strength,
+				})
+			}
+		}
+	}
+
+	// For each sentence: dedupe by key (keeping stronger strength), stable sort direct-first, cap at 3.
+	for idx, links := range bySentence {
+		// Dedupe: for each key, keep the stronger strength (direct > partial).
+		seen := make(map[string]string) // "lens/dimension/key" -> strength
+		var deduped []store.TraitLink
+		for _, link := range links {
+			key := link.Lens + "/" + link.Dimension + "/" + link.Key
+			existing, ok := seen[key]
+			if !ok {
+				// First occurrence: keep it.
+				seen[key] = link.Strength
+				deduped = append(deduped, link)
+			} else if link.Strength == store.LinkDirect && existing == store.LinkPartial {
+				// Upgrade: replace partial with direct.
+				seen[key] = store.LinkDirect
+				for i := range deduped {
+					if deduped[i].Lens == link.Lens && deduped[i].Dimension == link.Dimension && deduped[i].Key == link.Key {
+						deduped[i].Strength = store.LinkDirect
+						break
+					}
+				}
+			}
+			// else: already seen with same or stronger strength, skip.
+		}
+		// Stable sort: direct before partial (preserves original order within each strength).
+		var direct, partial []store.TraitLink
+		for _, link := range deduped {
+			if link.Strength == store.LinkDirect {
+				direct = append(direct, link)
+			} else {
+				partial = append(partial, link)
+			}
+		}
+		sorted := append(direct, partial...)
+		// Cap at 3.
+		if len(sorted) > 3 {
+			sorted = sorted[:3]
+		}
+		sentences[idx].Links = sorted
+	}
+
+	// Validate keywords: drop out-of-range indexes, truncate to 8.
+	var keywords []store.Keyword
+	for _, kw := range ur.Keywords {
+		var idxs []int
+		for _, n := range kw.N {
+			// Convert 1-based to 0-based and check range.
+			if n < 1 || n > nSentences {
+				continue
+			}
+			idxs = append(idxs, n-1)
+		}
+		// Only keep keywords that have at least one valid index.
+		if len(idxs) > 0 {
+			keywords = append(keywords, store.Keyword{
+				Word:      kw.K,
+				Sentences: idxs,
+			})
+		}
+	}
+	if len(keywords) > 8 {
+		keywords = keywords[:8]
+	}
+
+	// Build Inherits map: record the text_hash of each notebook used.
+	inherits := make(map[string]string)
+	for lens, nbData := range notebooks {
+		inherits[lens] = nbData.hash
+	}
+
+	return store.PortraitSources{
+		Sentences: sentences,
+		Keywords:  keywords,
+		Inherits:  inherits,
 	}, nil
 }

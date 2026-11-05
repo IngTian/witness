@@ -708,3 +708,291 @@ func TestResolveSourcesOffWithoutPrompt(t *testing.T) {
 		t.Fatal("sources row was written despite ResolvePrompt == \"\"")
 	}
 }
+
+// TestResolveUnifiedInheritsNotebookLinks verifies that the unified portrait inherits
+// links from the notebook sentences it references. The unified fake reply refs "default#1"
+// as direct. The unified sentence then carries default sentence 1's direct link, and
+// Inherits["default"] equals default's text_hash.
+func TestResolveUnifiedInheritsNotebookLinks(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+
+	// Write notebook portraits and resolve them first.
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
+		t.Fatalf("WriteProfile default: %v", err)
+	}
+	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
+		t.Fatalf("WriteProfile unified: %v", err)
+	}
+
+	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		if prompt == "RESOLVE_UNIFIED" {
+			return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  fakeResolve,
+	}
+
+	if err := sm.ResolveSources(context.Background()); err != nil {
+		t.Fatalf("ResolveSources: %v", err)
+	}
+
+	// Read the unified portrait's sources.
+	src, hash, ok, err := s.ReadPortraitSources(store.ProfileUnified)
+	if err != nil {
+		t.Fatalf("ReadPortraitSources unified: %v", err)
+	}
+	if !ok {
+		t.Fatal("no unified sources row")
+	}
+
+	// The hash equals PortraitHash of the unified profile.
+	wantHash := store.PortraitHash("First unified sentence.")
+	if hash != wantHash {
+		t.Fatalf("unified hash: got %s, want %s", hash, wantHash)
+	}
+
+	// The unified sentence inherits default sentence 1's link.
+	if len(src.Sentences) < 1 || len(src.Sentences[0].Links) < 1 {
+		t.Fatal("unified sentence 0 has no links")
+	}
+	link := src.Sentences[0].Links[0]
+	if link.Lens != "default" || link.Dimension != "traits" || link.Key != "satisfices" || link.Strength != store.LinkDirect {
+		t.Fatalf("unified sentence 0 link: got %+v, want {default traits satisfices direct}", link)
+	}
+
+	// Inherits["default"] equals default's text_hash.
+	_, defaultHash, ok, err := s.ReadPortraitSources("default")
+	if err != nil || !ok {
+		t.Fatalf("ReadPortraitSources default: ok=%v err=%v", ok, err)
+	}
+	if src.Inherits == nil || src.Inherits["default"] != defaultHash {
+		t.Fatalf("Inherits[default]: got %v, want %s", src.Inherits, defaultHash)
+	}
+}
+
+// TestResolveUnifiedWeakensPartialRefs verifies that a partial ref turns a direct
+// notebook link into partial.
+func TestResolveUnifiedWeakensPartialRefs(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
+		t.Fatalf("WriteProfile default: %v", err)
+	}
+	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
+		t.Fatalf("WriteProfile unified: %v", err)
+	}
+
+	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			// Notebook has a direct link.
+			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		if prompt == "RESOLVE_UNIFIED" {
+			// Unified refs it as partial.
+			return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"partial"}]}],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  fakeResolve,
+	}
+
+	if err := sm.ResolveSources(context.Background()); err != nil {
+		t.Fatalf("ResolveSources: %v", err)
+	}
+
+	src, _, ok, err := s.ReadPortraitSources(store.ProfileUnified)
+	if err != nil || !ok {
+		t.Fatalf("ReadPortraitSources unified: ok=%v err=%v", ok, err)
+	}
+
+	// The inherited link is weakened to partial.
+	if len(src.Sentences) < 1 || len(src.Sentences[0].Links) < 1 {
+		t.Fatal("unified sentence 0 has no links")
+	}
+	link := src.Sentences[0].Links[0]
+	if link.Strength != store.LinkPartial {
+		t.Fatalf("unified link strength: got %s, want partial (weakened by partial ref)", link.Strength)
+	}
+}
+
+// TestResolveUnifiedReResolvesWhenANotebookChanges verifies that re-resolving
+// default with new text makes unified stale, even though the unified text is unchanged.
+func TestResolveUnifiedReResolvesWhenANotebookChanges(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
+		t.Fatalf("WriteProfile default: %v", err)
+	}
+	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
+		t.Fatalf("WriteProfile unified: %v", err)
+	}
+
+	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		if prompt == "RESOLVE_UNIFIED" {
+			return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  fakeResolve,
+	}
+
+	// First pass: resolve both.
+	if err := sm.ResolveSources(context.Background()); err != nil {
+		t.Fatalf("ResolveSources (pass 1): %v", err)
+	}
+
+	// Check that unified is not stale.
+	stale, err := sm.StaleSources()
+	if err != nil {
+		t.Fatalf("StaleSources (after pass 1): %v", err)
+	}
+	for _, p := range stale {
+		if p == store.ProfileUnified {
+			t.Fatal("unified is stale after first pass; should be fresh")
+		}
+	}
+
+	// Rewrite default's text.
+	if err := s.WriteProfile("default", "Satisfices on arrival."); err != nil {
+		t.Fatalf("WriteProfile default (rewrite): %v", err)
+	}
+
+	// Unified is now stale (its Inherits[default] differs from default's new hash).
+	stale, err = sm.StaleSources()
+	if err != nil {
+		t.Fatalf("StaleSources (after rewrite): %v", err)
+	}
+	found := false
+	for _, p := range stale {
+		if p == store.ProfileUnified {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("unified is not stale after default changed; expected stale")
+	}
+}
+
+// TestResolveUnifiedSkipsMissingNotebooks verifies that when math has no row
+// (its resolver failed), unified still resolves. Refs to math#… are dropped,
+// and Inherits has no math entry.
+func TestResolveUnifiedSkipsMissingNotebooks(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+
+	// Write default and math profiles, but only default will be resolved successfully.
+	if err := s.WriteProfile("default", "Stops at good enough."); err != nil {
+		t.Fatalf("WriteProfile default: %v", err)
+	}
+	if err := s.WriteProfile("math", "Recovers with arithmetic."); err != nil {
+		t.Fatalf("WriteProfile math: %v", err)
+	}
+	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
+		t.Fatalf("WriteProfile unified: %v", err)
+	}
+
+	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			// Fail for math (return error).
+			return "", context.DeadlineExceeded
+		}
+		if prompt == "RESOLVE_UNIFIED" {
+			// Unified refs both default#1 and math#1.
+			return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"direct"},{"ref":"math#1","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	// Override Run to succeed for default only.
+	successfulResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
+		if prompt == "RESOLVE" {
+			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		if prompt == "RESOLVE_UNIFIED" {
+			return `{"links":[{"n":1,"refs":[{"ref":"default#1","strength":"direct"},{"ref":"math#1","strength":"direct"}]}],"keywords":[]}`, nil
+		}
+		return "", nil
+	}
+
+	sm := &Summarizer{
+		Store:                s,
+		Config:               store.Config{},
+		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		ResolvePrompt:        "RESOLVE",
+		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:                  successfulResolve,
+		RunFor: func(ln *lens.Lens) SummarizeFunc {
+			if ln != nil && ln.Name == "math" {
+				return fakeResolve // Fails for math.
+			}
+			return successfulResolve
+		},
+	}
+
+	// ResolveSources should succeed despite math failing.
+	err := sm.ResolveSources(context.Background())
+	// The error should mention math's failure, but unified should still be written.
+	if err == nil {
+		t.Log("ResolveSources returned nil; expected a joined error for math's failure")
+	}
+
+	// Unified sources should exist.
+	src, _, ok, err := s.ReadPortraitSources(store.ProfileUnified)
+	if err != nil {
+		t.Fatalf("ReadPortraitSources unified: %v", err)
+	}
+	if !ok {
+		t.Fatal("unified sources row was not written despite default succeeding")
+	}
+
+	// The unified sentence has only default's link (math#1 was dropped).
+	if len(src.Sentences) < 1 || len(src.Sentences[0].Links) < 1 {
+		t.Fatal("unified sentence 0 has no links")
+	}
+	for _, link := range src.Sentences[0].Links {
+		if link.Lens == "math" {
+			t.Fatal("unified sentence has a math link; should have been dropped (no math row)")
+		}
+	}
+
+	// Inherits has no math entry.
+	if _, hasMath := src.Inherits["math"]; hasMath {
+		t.Fatal("Inherits has a math entry; should be absent (no math row)")
+	}
+	// Inherits["default"] is present.
+	if _, hasDefault := src.Inherits["default"]; !hasDefault {
+		t.Fatal("Inherits missing default entry")
+	}
+}
