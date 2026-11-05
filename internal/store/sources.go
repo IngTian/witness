@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// Link strength constants: direct = the sentence restates the facet's wording
-// verbatim; partial = the sentence rests on the facet but is not a direct copy.
+// Link strength constants: direct = the trait fully states what the sentence asserts,
+// or one of its claims; partial = covers only part of a claim, or is related.
 const (
 	LinkDirect  = "direct"
 	LinkPartial = "partial"
@@ -18,23 +18,23 @@ const (
 
 // TraitLink is one facet a portrait sentence rests on.
 type TraitLink struct {
-	Lens      string
-	Dimension string
-	Key       string
-	Strength  string // LinkDirect or LinkPartial
+	Lens      string `json:"lens"`
+	Dimension string `json:"dimension"`
+	Key       string `json:"key"`
+	Strength  string `json:"strength"` // LinkDirect or LinkPartial
 }
 
 // SourcedSentence is one sentence of the portrait, plus the traits it cites.
 type SourcedSentence struct {
-	Text  string
-	Links []TraitLink
+	Text  string      `json:"text"`
+	Links []TraitLink `json:"links"`
 }
 
 // Keyword is a salient word appearing in the portrait, with 0-based indexes
 // into the Sentences array.
 type Keyword struct {
-	Word      string
-	Sentences []int
+	Word      string `json:"word"`
+	Sentences []int  `json:"sentences"`
 }
 
 // PortraitSources records which facets each sentence of a portrait rests on,
@@ -42,9 +42,9 @@ type Keyword struct {
 // from. Derived data: the self-heal rebuilds these after a merge, so merge does
 // not copy them.
 type PortraitSources struct {
-	Sentences []SourcedSentence
-	Keywords  []Keyword
-	Inherits  map[string]string // unified only: notebook -> that notebook's source text_hash
+	Sentences []SourcedSentence `json:"sentences"`
+	Keywords  []Keyword         `json:"keywords"`
+	Inherits  map[string]string `json:"inherits"` // unified only: notebook -> that notebook's source text_hash
 }
 
 // PortraitHash returns the lowercase hex SHA256 of the exact markdown bytes.
@@ -184,11 +184,8 @@ func (s *Store) CurrentPortraitSources(portrait string) (PortraitSources, bool, 
 				remapped = append(remapped, *resolved)
 			}
 		}
-		// Dedupe by (lens, dimension, key), keep stronger strength
-		remapped = dedupLinks(remapped)
-		// Sort direct first (stable)
-		remapped = sortLinksDirectFirst(remapped)
-		src.Sentences[i].Links = remapped
+		// Dedupe by (lens, dimension, key), keep stronger, sort direct first (stable).
+		src.Sentences[i].Links = DedupeLinks(remapped)
 	}
 
 	return src, true, nil
@@ -241,31 +238,47 @@ func resolveLink(link TraitLink, facetMap map[facetKey]*Facet) *TraitLink {
 	}
 }
 
-// dedupLinks keeps one link per (lens, dimension, key), preferring direct
-// over partial strength.
-func dedupLinks(links []TraitLink) []TraitLink {
+// DedupeLinks deduplicates links by (lens, dimension, key), keeping the stronger strength
+// (direct > partial), and returns them with direct first, then partial, preserving insertion
+// order within each strength. Exported for use by both store and distill packages.
+func DedupeLinks(links []TraitLink) []TraitLink {
 	type lk struct{ lens, dimension, key string }
-	seen := make(map[lk]TraitLink)
+	seen := make(map[lk]int) // key -> index in deduped slice
+	var deduped []TraitLink
+
 	for _, link := range links {
 		k := lk{link.Lens, link.Dimension, link.Key}
-		existing, exists := seen[k]
+		idx, exists := seen[k]
 		if !exists {
-			seen[k] = link
-			continue
-		}
-		// Keep stronger: direct > partial
-		if link.Strength == LinkDirect && existing.Strength != LinkDirect {
-			seen[k] = link
+			// First occurrence: append and record index.
+			seen[k] = len(deduped)
+			deduped = append(deduped, link)
+		} else {
+			// Duplicate: keep stronger strength (direct > partial).
+			if link.Strength == LinkDirect && deduped[idx].Strength == LinkPartial {
+				deduped[idx].Strength = LinkDirect
+			}
 		}
 	}
-	var out []TraitLink
-	for _, link := range seen {
-		out = append(out, link)
+
+	// Stable sort: direct first, then partial, preserving insertion order within each group.
+	var direct, partial []TraitLink
+	for _, link := range deduped {
+		if link.Strength == LinkDirect {
+			direct = append(direct, link)
+		} else {
+			partial = append(partial, link)
+		}
 	}
-	return out
+	return append(direct, partial...)
 }
 
-// sortLinksDirectFirst returns links with direct first, then partial, stable.
+// dedupLinks is deprecated: use DedupeLinks.
+func dedupLinks(links []TraitLink) []TraitLink {
+	return DedupeLinks(links)
+}
+
+// sortLinksDirectFirst is deprecated: DedupeLinks now handles sorting.
 func sortLinksDirectFirst(links []TraitLink) []TraitLink {
 	var direct, partial []TraitLink
 	for _, link := range links {

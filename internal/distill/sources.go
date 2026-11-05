@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -117,23 +118,32 @@ func (sm *Summarizer) isUnifiedStale() bool {
 		}
 	}
 
-	// Check if any lens has a CURRENT row (hash matches its profile) that's absent from Inherits.
-	for _, ln := range sm.Lenses {
-		if _, alreadyInherited := src.Inherits[ln.Name]; alreadyInherited {
+	// Check if any notebook has a CURRENT row (hash matches its profile) that's absent from Inherits.
+	// M3: check all on-disk notebooks (ListProfiles minus unified), not only sm.Lenses — a disabled
+	// lens still has a portrait the unified writer used.
+	allNotebooks, err := sm.Store.ListProfiles()
+	if err != nil {
+		return true // list failure: assume stale
+	}
+	for _, name := range allNotebooks {
+		if name == store.ProfileUnified {
+			continue // skip unified itself
+		}
+		if _, alreadyInherited := src.Inherits[name]; alreadyInherited {
 			continue // already checked above
 		}
-		// Check if this lens has a current row.
-		_, storedHash, ok, err := sm.Store.ReadPortraitSources(ln.Name)
+		// Check if this notebook has a current row.
+		_, storedHash, ok, err := sm.Store.ReadPortraitSources(name)
 		if err != nil || !ok {
 			continue // no row or read failure: skip
 		}
-		// Read the lens's profile to check if the row is current.
-		nbMd, nbOK, nbErr := sm.Store.ReadProfile(ln.Name)
+		// Read the notebook's profile to check if the row is current.
+		nbMd, nbOK, nbErr := sm.Store.ReadProfile(name)
 		if nbErr != nil || !nbOK {
 			continue // no profile or read failure: skip
 		}
 		if store.PortraitHash(nbMd) == storedHash {
-			// This lens has a current row but is absent from Inherits: stale.
+			// This notebook has a current row but is absent from Inherits: stale.
 			return true
 		}
 	}
@@ -295,43 +305,14 @@ func extractJSONObject(reply string) (string, error) {
 // finalizeLinks deduplicates links by lens/dimension/key (keeping stronger strength),
 // stable-sorts direct-first, and caps at 3.
 func finalizeLinks(links []store.TraitLink) []store.TraitLink {
-	// Dedupe: for each key, keep the stronger strength (direct > partial).
-	seen := make(map[string]string) // "lens/dimension/key" -> strength
-	var deduped []store.TraitLink
-	for _, link := range links {
-		key := link.Lens + "/" + link.Dimension + "/" + link.Key
-		existing, ok := seen[key]
-		if !ok {
-			// First occurrence: keep it.
-			seen[key] = link.Strength
-			deduped = append(deduped, link)
-		} else if link.Strength == store.LinkDirect && existing == store.LinkPartial {
-			// Upgrade: replace partial with direct.
-			seen[key] = store.LinkDirect
-			for i := range deduped {
-				if deduped[i].Lens == link.Lens && deduped[i].Dimension == link.Dimension && deduped[i].Key == link.Key {
-					deduped[i].Strength = store.LinkDirect
-					break
-				}
-			}
-		}
-		// else: already seen with same or stronger strength, skip.
-	}
-	// Stable sort: direct before partial (preserves original order within each strength).
-	var direct, partial []store.TraitLink
-	for _, link := range deduped {
-		if link.Strength == store.LinkDirect {
-			direct = append(direct, link)
-		} else {
-			partial = append(partial, link)
-		}
-	}
-	sorted := append(direct, partial...)
+	// Dedupe: for each key, keep the stronger strength (direct > partial), and sort
+	// direct first, stable. Uses the same helper as CurrentPortraitSources for consistency.
+	deduped := store.DedupeLinks(links)
 	// Cap at 3.
-	if len(sorted) > 3 {
-		sorted = sorted[:3]
+	if len(deduped) > 3 {
+		deduped = deduped[:3]
 	}
-	return sorted
+	return deduped
 }
 
 // parseKeywords validates keyword sentence indexes (1-based in input, 0-based in output),
@@ -349,10 +330,17 @@ func parseKeywords(keywords []resolverKeyword, nSentences int) []store.Keyword {
 		}
 		// Only keep keywords that have at least one valid index.
 		if len(idxs) > 0 {
-			result = append(result, store.Keyword{
-				Word:      kw.K,
-				Sentences: idxs,
-			})
+			// M5: cap keyword text at 64 runes (trim, drop empty).
+			word := strings.TrimSpace(kw.K)
+			if len([]rune(word)) > 64 {
+				word = string([]rune(word)[:64])
+			}
+			if word != "" {
+				result = append(result, store.Keyword{
+					Word:      word,
+					Sentences: idxs,
+				})
+			}
 		}
 	}
 	if len(result) > 8 {
@@ -453,22 +441,30 @@ func (sm *Summarizer) resolveUnified(ctx context.Context) error {
 		return sm.Store.WritePortraitSources(store.ProfileUnified, store.PortraitHash(md), store.PortraitSources{}, time.Now())
 	}
 
-	// Collect all notebook sources rows that have current data.
+	// Collect all notebook sources rows that have current data (M3: use all on-disk notebooks,
+	// not only sm.Lenses — a disabled lens still has a portrait the unified writer used).
+	allNotebooks, err := sm.Store.ListProfiles()
+	if err != nil {
+		return fmt.Errorf("list profiles: %w", err)
+	}
 	notebooks := make(map[string]notebookData)
-	for _, ln := range sm.Lenses {
-		src, hash, ok, err := sm.Store.ReadPortraitSources(ln.Name)
+	for _, name := range allNotebooks {
+		if name == store.ProfileUnified {
+			continue // skip unified itself
+		}
+		src, hash, ok, err := sm.Store.ReadPortraitSources(name)
 		if err != nil || !ok {
 			continue // notebook has no row or read failure: skip it
 		}
 		// Verify the notebook's row is current (its hash matches the profile on disk).
-		nbMd, nbOK, nbErr := sm.Store.ReadProfile(ln.Name)
+		nbMd, nbOK, nbErr := sm.Store.ReadProfile(name)
 		if nbErr != nil || !nbOK {
 			continue
 		}
 		if store.PortraitHash(nbMd) != hash {
 			continue // stale row: skip it
 		}
-		notebooks[ln.Name] = notebookData{src: src, hash: hash}
+		notebooks[name] = notebookData{src: src, hash: hash}
 	}
 
 	// Skip the model call when there are no current notebook rows.
@@ -477,7 +473,7 @@ func (sm *Summarizer) resolveUnified(ctx context.Context) error {
 	}
 
 	// Build the input for the unified resolver.
-	input := renderUnifiedInput(sentences, notebooks)
+	input := renderUnifiedInput(sentences, notebooks, sm.Lenses)
 	model := ModelFor(sm.Config, nil, PhaseReview)
 	reply, err := sm.Run(ctx, model, sm.ResolveUnifiedPrompt, input)
 	if err != nil {
@@ -493,8 +489,9 @@ func (sm *Summarizer) resolveUnified(ctx context.Context) error {
 }
 
 // renderUnifiedInput formats the unified sentences and notebook sentences as the
-// unified resolver expects.
-func renderUnifiedInput(sentences []string, notebooks map[string]notebookData) string {
+// unified resolver expects. M2: notebooks are rendered in stable order (order of sm.Lenses,
+// then any remaining notebooks sorted by name).
+func renderUnifiedInput(sentences []string, notebooks map[string]notebookData, lensOrder []*lens.Lens) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "PORTRAIT SENTENCES:")
 	for i, s := range sentences {
@@ -502,9 +499,31 @@ func renderUnifiedInput(sentences []string, notebooks map[string]notebookData) s
 	}
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "NOTEBOOK SENTENCES:")
-	for lens, nb := range notebooks {
+
+	// Build stable order: sm.Lenses first, then remaining notebooks sorted.
+	var order []string
+	seen := make(map[string]bool)
+	for _, ln := range lensOrder {
+		if _, ok := notebooks[ln.Name]; ok {
+			order = append(order, ln.Name)
+			seen[ln.Name] = true
+		}
+	}
+	// Add any remaining notebooks (not in lensOrder) in sorted order.
+	var remaining []string
+	for name := range notebooks {
+		if !seen[name] {
+			remaining = append(remaining, name)
+		}
+	}
+	sort.Strings(remaining)
+	order = append(order, remaining...)
+
+	// Render notebooks in stable order.
+	for _, name := range order {
+		nb := notebooks[name]
 		for i, sent := range nb.src.Sentences {
-			fmt.Fprintf(&b, "%s#%d: %s\n", lens, i+1, sent.Text)
+			fmt.Fprintf(&b, "%s#%d: %s\n", name, i+1, sent.Text)
 		}
 	}
 	return b.String()

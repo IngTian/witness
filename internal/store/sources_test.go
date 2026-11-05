@@ -520,6 +520,76 @@ func TestCurrentPortraitSourcesRejectsEmptyRow(t *testing.T) {
 	}
 }
 
+func TestDedupeLinksStableOrder(t *testing.T) {
+	// Two partial links should produce a deterministic order.
+	links := []TraitLink{
+		{Lens: "default", Dimension: "skills", Key: "go", Strength: LinkPartial},
+		{Lens: "default", Dimension: "skills", Key: "python", Strength: LinkPartial},
+		{Lens: "default", Dimension: "habits", Key: "reviews", Strength: LinkPartial},
+	}
+	got := DedupeLinks(links)
+	// All partial, so order should be preserved.
+	if len(got) != 3 {
+		t.Fatalf("DedupeLinks returned %d links, want 3", len(got))
+	}
+	if got[0].Key != "go" {
+		t.Errorf("got[0].Key = %q, want go", got[0].Key)
+	}
+	if got[1].Key != "python" {
+		t.Errorf("got[1].Key = %q, want python", got[1].Key)
+	}
+	if got[2].Key != "reviews" {
+		t.Errorf("got[2].Key = %q, want reviews", got[2].Key)
+	}
+
+	// Run multiple times to verify determinism.
+	for i := 0; i < 10; i++ {
+		got := DedupeLinks(links)
+		if len(got) != 3 || got[0].Key != "go" || got[1].Key != "python" || got[2].Key != "reviews" {
+			t.Errorf("run %d: DedupeLinks order changed", i)
+		}
+	}
+}
+
+func TestDedupeLinksDirectFirst(t *testing.T) {
+	// Mix of direct and partial.
+	links := []TraitLink{
+		{Lens: "default", Dimension: "skills", Key: "go", Strength: LinkPartial},
+		{Lens: "default", Dimension: "skills", Key: "python", Strength: LinkDirect},
+		{Lens: "default", Dimension: "habits", Key: "reviews", Strength: LinkPartial},
+	}
+	got := DedupeLinks(links)
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	// Direct should come first.
+	if got[0].Strength != LinkDirect {
+		t.Errorf("got[0].Strength = %q, want direct", got[0].Strength)
+	}
+	if got[0].Key != "python" {
+		t.Errorf("got[0].Key = %q, want python", got[0].Key)
+	}
+	// Partials follow in order.
+	if got[1].Key != "go" || got[2].Key != "reviews" {
+		t.Errorf("partial link order wrong: %q, %q", got[1].Key, got[2].Key)
+	}
+}
+
+func TestDedupeLinksKeepsStronger(t *testing.T) {
+	// Duplicate key with different strengths.
+	links := []TraitLink{
+		{Lens: "default", Dimension: "skills", Key: "go", Strength: LinkPartial},
+		{Lens: "default", Dimension: "skills", Key: "go", Strength: LinkDirect},
+	}
+	got := DedupeLinks(links)
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (deduped)", len(got))
+	}
+	if got[0].Strength != LinkDirect {
+		t.Errorf("Strength = %q, want direct (kept stronger)", got[0].Strength)
+	}
+}
+
 func TestCurrentPortraitSourcesDedupeAfterRemap(t *testing.T) {
 	s := tempStore(t)
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
