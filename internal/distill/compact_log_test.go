@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -101,11 +102,18 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 				{
 					Lens: "default", Dimension: "thinking", Key: "survivor", LastSeen: "2026-10-01T00:00:00Z",
 					ArchivedAt: "2026-10-01T00:00:00Z",
-					Versions: []store.FacetVersion{{
-						Value: "old value", Confidence: 0.9, ConfidenceSeq: 500,
-						RecordedAt: "2026-10-01T00:00:00Z", ValidFrom: "2026-10-01T00:00:00Z",
-						ValidTo: "2026-10-01T00:00:00Z", BecauseOf: []string{"obs-1"},
-					}},
+					Versions: []store.FacetVersion{
+						{
+							Value: "first value", Confidence: 0.3, ConfidenceSeq: 100,
+							RecordedAt: "2026-10-01T00:00:00Z", ValidFrom: "2026-10-01T00:00:00Z",
+							ValidTo: "2026-10-01T00:00:00Z", BecauseOf: []string{"obs-1"},
+						},
+						{
+							Value: "second value", Confidence: 0.9, ConfidenceSeq: 500,
+							RecordedAt: "2026-10-01T00:00:00Z", ValidFrom: "2026-10-01T00:00:00Z",
+							ValidTo: "2026-10-01T00:00:00Z", BecauseOf: []string{"obs-2"},
+						},
+					},
 				},
 				cfSeq("thinking", "a", "value a", 0.7, 3500),
 				cfSeq("thinking", "b", "value b", 0.8, 2000),
@@ -119,7 +127,7 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 					Key:       "survivor",
 					At:        nowStr,
 					ClockSeq:  3500,
-					From:      0.45, // last version (0.9) decayed from seq 500 to 3500
+					From:      0.45, // LAST version (v2: 0.9@500) decayed to 3500; v1 would be 0.14
 					To:        0.75,
 					Kind:      store.EventCompaction,
 				},
@@ -209,30 +217,45 @@ func TestCompactLogsNothingForRetiredOrAbsorbed(t *testing.T) {
 func TestCompactSkippedGroupLogsNothing(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 
-	// A merge that absorbs < compactMinAbsorb facets is skipped (the absorbed facets
-	// vanished between plan and apply). No event for the survivor: it was not written.
+	// The skip at compact.go:663 (`absorbed < compactMinAbsorb` → continue) is Apply's guard
+	// for facets that vanished between Plan and Apply. A test that goes through Plan never
+	// reaches it (Plan rejects the action). Call Apply directly with a hand-built plan.
 	st := &fakeCompactStore{
 		facets: []store.Facet{
 			cfSeq("thinking", "survivor", mergedValue, 0.9, 500),
-			// The plan says absorb ["a","b"], but only "a" exists in the store — so
-			// absorbed count = 1, below compactMinAbsorb (2), and the merge is skipped.
+			// Plan says absorb ["a","b"], but only "a" exists in the store — so absorbed
+			// count = 1, below compactMinAbsorb (2), and the merge is skipped at Apply time.
 			cfSeq("thinking", "a", "value a", 0.7, 500),
 		},
 		highWater: 3500,
 	}
 
-	// Plan says absorb both "a" and "b", but "b" is missing from the store
-	plan := `[{"action":"merge","dimension":"thinking","key":"survivor","value":"` + mergedValue + `","absorb":["a","b"],"confidence":0.9,"claim":"short","why":"same"}]`
-	c := compactor(st, plan)
-	plans, err := c.Plan(context.Background())
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
+	// Hand-built plan: the action absorbs ["a","b"], but "b" vanished after Plan.
+	plans := []CompactPlan{{
+		Lens: "default",
+		Actions: []compactAction{{
+			Action:     "merge",
+			Dimension:  "thinking",
+			Key:        "survivor",
+			Value:      mergedValue,
+			Claim:      "short",
+			Absorb:     []string{"a", "b"}, // "b" does not exist in the store
+			Confidence: 0.9,
+			Why:        "same",
+		}},
+	}}
+
+	c := &Compactor{Store: st, Lenses: []*lens.Lens{{Name: "default"}}}
 	if err := c.Apply(context.Background(), plans, now); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	if len(st.events) != 0 {
-		t.Errorf("skipped group (absorbed < compactMinAbsorb) must log nothing; got %d events: %+v", len(st.events), st.events)
+	// The merge was skipped (absorbed=1 < compactMinAbsorb=2), so no event was logged.
+	if st.events == nil {
+		st.events = []store.ConfidenceEvent{} // normalize nil to empty for DeepEqual
+	}
+	want := []store.ConfidenceEvent{} // empty: no events
+	if !reflect.DeepEqual(st.events, want) {
+		t.Errorf("skipped group (absorbed < compactMinAbsorb) must log nothing:\nwant: %+v\ngot:  %+v", want, st.events)
 	}
 }
