@@ -228,3 +228,340 @@ func TestMergeDoesNotCopyPortraitSources(t *testing.T) {
 		t.Error("inc-portrait should not exist in base after merge")
 	}
 }
+
+func TestCurrentPortraitSourcesRejectsStaleHash(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	portrait := "default"
+	originalText := "# Original portrait text\n"
+	originalHash := PortraitHash(originalText)
+
+	// Write profile and sources
+	if err := s.WriteProfile(portrait, originalText); err != nil {
+		t.Fatal(err)
+	}
+	src := PortraitSources{
+		Sentences: []SourcedSentence{{Text: "Zeying loves Go.", Links: []TraitLink{}}},
+		Keywords:  []Keyword{},
+		Inherits:  map[string]string{},
+	}
+	if err := s.WritePortraitSources(portrait, originalHash, src, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before change: sources are current
+	_, ok, err := s.CurrentPortraitSources(portrait)
+	if err != nil {
+		t.Fatalf("CurrentPortraitSources before change: %v", err)
+	}
+	if !ok {
+		t.Fatal("CurrentPortraitSources before change: expected ok=true")
+	}
+
+	// Change the portrait text
+	newText := "# Different portrait text\n"
+	if err := s.WriteProfile(portrait, newText); err != nil {
+		t.Fatal(err)
+	}
+
+	// After change: sources are stale, ok=false
+	_, ok, err = s.CurrentPortraitSources(portrait)
+	if err != nil {
+		t.Fatalf("CurrentPortraitSources after change: %v", err)
+	}
+	if ok {
+		t.Error("CurrentPortraitSources after text change: expected ok=false for stale hash")
+	}
+}
+
+func TestCurrentPortraitSourcesFollowsMerges(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	portrait := "default"
+	text := "# Portrait text\n"
+	textHash := PortraitHash(text)
+
+	// Write profile
+	if err := s.WriteProfile(portrait, text); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write facets: one archived with merged_into, one archived without, one active
+	facets := []Facet{
+		{
+			Lens:       "default",
+			Dimension:  "skills",
+			Key:        "old-key",
+			LastSeen:   "2026-11-01T00:00:00Z",
+			ArchivedAt: "2026-11-02T00:00:00Z",
+			MergedInto: "skills/survivor",
+			Versions: []FacetVersion{
+				{Value: "Old skill", Claim: "Had old skill.", Confidence: 0.8, ValidFrom: "2026-11-01T00:00:00Z"},
+			},
+		},
+		{
+			Lens:       "default",
+			Dimension:  "habits",
+			Key:        "retired-key",
+			LastSeen:   "2026-11-01T00:00:00Z",
+			ArchivedAt: "2026-11-02T00:00:00Z",
+			MergedInto: "", // retired, not merged
+			Versions: []FacetVersion{
+				{Value: "Retired habit", Claim: "Had habit.", Confidence: 0.7, ValidFrom: "2026-11-01T00:00:00Z"},
+			},
+		},
+		{
+			Lens:      "default",
+			Dimension: "skills",
+			Key:       "survivor",
+			LastSeen:  "2026-11-03T00:00:00Z",
+			Versions: []FacetVersion{
+				{Value: "Merged skill", Claim: "Has skill.", Confidence: 0.9, ValidFrom: "2026-11-02T00:00:00Z"},
+			},
+		},
+	}
+	if err := s.WriteFacets(facets); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write portrait sources with links to archived keys
+	src := PortraitSources{
+		Sentences: []SourcedSentence{
+			{
+				Text: "Sentence one.",
+				Links: []TraitLink{
+					{Lens: "default", Dimension: "skills", Key: "old-key", Strength: LinkDirect},
+					{Lens: "default", Dimension: "habits", Key: "retired-key", Strength: LinkPartial},
+				},
+			},
+		},
+		Keywords: []Keyword{},
+		Inherits: map[string]string{},
+	}
+	if err := s.WritePortraitSources(portrait, textHash, src, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read current sources
+	got, ok, err := s.CurrentPortraitSources(portrait)
+	if err != nil {
+		t.Fatalf("CurrentPortraitSources: %v", err)
+	}
+	if !ok {
+		t.Fatal("CurrentPortraitSources: expected ok=true")
+	}
+
+	// Verify the merged link was rewritten, retired link dropped
+	if len(got.Sentences) != 1 {
+		t.Fatalf("len(Sentences) = %d, want 1", len(got.Sentences))
+	}
+	links := got.Sentences[0].Links
+	if len(links) != 1 {
+		t.Fatalf("len(Links) = %d, want 1 (merged link only)", len(links))
+	}
+	if links[0].Key != "survivor" {
+		t.Errorf("Links[0].Key = %q, want %q (followed merge)", links[0].Key, "survivor")
+	}
+	if links[0].Dimension != "skills" {
+		t.Errorf("Links[0].Dimension = %q, want skills", links[0].Dimension)
+	}
+	if links[0].Strength != LinkDirect {
+		t.Errorf("Links[0].Strength = %q, want %q", links[0].Strength, LinkDirect)
+	}
+}
+
+func TestCurrentPortraitSourcesMissingPortrait(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	portrait := "default"
+	text := "# Portrait text\n"
+	textHash := PortraitHash(text)
+
+	// Write profile
+	if err := s.WriteProfile(portrait, text); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write sources
+	src := PortraitSources{
+		Sentences: []SourcedSentence{{Text: "Sentence.", Links: []TraitLink{}}},
+		Keywords:  []Keyword{},
+		Inherits:  map[string]string{},
+	}
+	if err := s.WritePortraitSources(portrait, textHash, src, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete the profile file
+	if err := s.DeleteProfile(portrait); err != nil {
+		t.Fatal(err)
+	}
+
+	// CurrentPortraitSources returns ok=false
+	_, ok, err := s.CurrentPortraitSources(portrait)
+	if err != nil {
+		t.Fatalf("CurrentPortraitSources after profile delete: %v", err)
+	}
+	if ok {
+		t.Error("CurrentPortraitSources with missing profile: expected ok=false")
+	}
+}
+
+func TestCurrentPortraitSourcesFollowsMergeChain(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	portrait := "default"
+	text := "# Portrait\n"
+	textHash := PortraitHash(text)
+
+	if err := s.WriteProfile(portrait, text); err != nil {
+		t.Fatal(err)
+	}
+
+	// Chain: A -> B -> C (C is active)
+	facets := []Facet{
+		{
+			Lens:       "default",
+			Dimension:  "skills",
+			Key:        "A",
+			LastSeen:   "2026-11-01T00:00:00Z",
+			ArchivedAt: "2026-11-02T00:00:00Z",
+			MergedInto: "skills/B",
+			Versions:   []FacetVersion{{Value: "A", Claim: "A", Confidence: 0.8, ValidFrom: "2026-11-01T00:00:00Z"}},
+		},
+		{
+			Lens:       "default",
+			Dimension:  "skills",
+			Key:        "B",
+			LastSeen:   "2026-11-02T00:00:00Z",
+			ArchivedAt: "2026-11-03T00:00:00Z",
+			MergedInto: "skills/C",
+			Versions:   []FacetVersion{{Value: "B", Claim: "B", Confidence: 0.8, ValidFrom: "2026-11-02T00:00:00Z"}},
+		},
+		{
+			Lens:      "default",
+			Dimension: "skills",
+			Key:       "C",
+			LastSeen:  "2026-11-03T00:00:00Z",
+			Versions:  []FacetVersion{{Value: "C", Claim: "C", Confidence: 0.9, ValidFrom: "2026-11-03T00:00:00Z"}},
+		},
+	}
+	if err := s.WriteFacets(facets); err != nil {
+		t.Fatal(err)
+	}
+
+	// Link to A
+	src := PortraitSources{
+		Sentences: []SourcedSentence{
+			{Text: "Sentence.", Links: []TraitLink{
+				{Lens: "default", Dimension: "skills", Key: "A", Strength: LinkDirect},
+			}},
+		},
+		Keywords: []Keyword{},
+		Inherits: map[string]string{},
+	}
+	if err := s.WritePortraitSources(portrait, textHash, src, now); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := s.CurrentPortraitSources(portrait)
+	if err != nil {
+		t.Fatalf("CurrentPortraitSources: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+
+	// Should follow chain to C
+	links := got.Sentences[0].Links
+	if len(links) != 1 {
+		t.Fatalf("len(Links) = %d, want 1", len(links))
+	}
+	if links[0].Key != "C" {
+		t.Errorf("Key = %q, want C (followed A->B->C)", links[0].Key)
+	}
+}
+
+func TestCurrentPortraitSourcesDedupeAfterRemap(t *testing.T) {
+	s := tempStore(t)
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+
+	portrait := "default"
+	text := "# Portrait\n"
+	textHash := PortraitHash(text)
+
+	if err := s.WriteProfile(portrait, text); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two archived keys both merge to the same survivor
+	facets := []Facet{
+		{
+			Lens:       "default",
+			Dimension:  "skills",
+			Key:        "old1",
+			ArchivedAt: "2026-11-02T00:00:00Z",
+			MergedInto: "skills/survivor",
+			LastSeen:   "2026-11-01T00:00:00Z",
+			Versions:   []FacetVersion{{Value: "Old1", Claim: "1", Confidence: 0.7, ValidFrom: "2026-11-01T00:00:00Z"}},
+		},
+		{
+			Lens:       "default",
+			Dimension:  "skills",
+			Key:        "old2",
+			ArchivedAt: "2026-11-02T00:00:00Z",
+			MergedInto: "skills/survivor",
+			LastSeen:   "2026-11-01T00:00:00Z",
+			Versions:   []FacetVersion{{Value: "Old2", Claim: "2", Confidence: 0.6, ValidFrom: "2026-11-01T00:00:00Z"}},
+		},
+		{
+			Lens:      "default",
+			Dimension: "skills",
+			Key:       "survivor",
+			LastSeen:  "2026-11-03T00:00:00Z",
+			Versions:  []FacetVersion{{Value: "Survivor", Claim: "S", Confidence: 0.9, ValidFrom: "2026-11-02T00:00:00Z"}},
+		},
+	}
+	if err := s.WriteFacets(facets); err != nil {
+		t.Fatal(err)
+	}
+
+	// Links to both old1 (direct) and old2 (partial)
+	src := PortraitSources{
+		Sentences: []SourcedSentence{
+			{Text: "Sentence.", Links: []TraitLink{
+				{Lens: "default", Dimension: "skills", Key: "old1", Strength: LinkDirect},
+				{Lens: "default", Dimension: "skills", Key: "old2", Strength: LinkPartial},
+			}},
+		},
+		Keywords: []Keyword{},
+		Inherits: map[string]string{},
+	}
+	if err := s.WritePortraitSources(portrait, textHash, src, now); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := s.CurrentPortraitSources(portrait)
+	if err != nil {
+		t.Fatalf("CurrentPortraitSources: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+
+	// Should dedupe to one link to survivor, keeping the stronger strength (direct)
+	links := got.Sentences[0].Links
+	if len(links) != 1 {
+		t.Fatalf("len(Links) = %d, want 1 (deduped)", len(links))
+	}
+	if links[0].Key != "survivor" {
+		t.Errorf("Key = %q, want survivor", links[0].Key)
+	}
+	if links[0].Strength != LinkDirect {
+		t.Errorf("Strength = %q, want %q (kept stronger)", links[0].Strength, LinkDirect)
+	}
+}
