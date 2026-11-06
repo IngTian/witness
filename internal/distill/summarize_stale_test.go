@@ -66,13 +66,25 @@ func TestSummarizeRemovesTheProfileOfALensThatLostItsFacets(t *testing.T) {
 	if md, ok, _ := s.ReadProfile("math"); !ok || md != "MATH SUMMARY" {
 		t.Fatalf("precondition: math profile should exist, got ok=%v md=%q", ok, md)
 	}
-	// Under the key the store's DeleteLensData clears, or the check below passes vacuously.
 	if s.MetaString(store.ProfileSigKey("math")) == "" {
-		t.Fatal("precondition: Summarize did not stamp profile_sig under store.ProfileSigKey")
+		t.Fatal("precondition: Summarize did not stamp math's profile_sig")
 	}
 
-	// Drop ONLY math's derived data, exactly as `lens backfill --fresh` does.
-	if _, _, err := s.DeleteLensData("math"); err != nil {
+	// math loses every current facet: all its versions are closed. Not DeleteLensData, which
+	// clears profile_sig itself and so would make the signature assertion below pass whatever
+	// Summarize does.
+	all, err := s.ReadFacets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range all {
+		if all[i].Lens == "math" {
+			for j := range all[i].Versions {
+				all[i].Versions[j].ValidTo = "2026-02-01T00:00:00Z"
+			}
+		}
+	}
+	if err := s.WriteFacets(all); err != nil {
 		t.Fatal(err)
 	}
 	if err := sm.Summarize(context.Background()); err != nil {

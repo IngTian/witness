@@ -95,11 +95,15 @@ func TestStageTwoIsToldWhatItsSiblingsCover(t *testing.T) {
 			self = "second_trait"
 			other, otherWhy = "first_trait", "shared mechanism one"
 		}
-		if !strings.Contains(in, "OTHER TRAITS IN THIS DIMENSION") {
+		_, siblings, ok := strings.Cut(in, "OTHER TRAITS IN THIS DIMENSION")
+		if !ok {
 			t.Errorf("%s was written with no sibling boundaries at all", self)
 		}
-		if !strings.Contains(in, other) || !strings.Contains(in, otherWhy) {
+		if !strings.Contains(siblings, other) || !strings.Contains(siblings, otherWhy) {
 			t.Errorf("%s should be told that %s covers %q", self, other, otherWhy)
+		}
+		if strings.Contains(siblings, self+" — ") {
+			t.Errorf("%s is listed among its own siblings, so it is told to leave its own ground alone", self)
 		}
 	}
 }
