@@ -661,35 +661,6 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 	fmt.Println(hint("inspect one", "witness lens show <name>"))
 }
 
-// lensDataName maps the name a lens is registered under (the one every command takes) to the name
-// the worker tags its observations, facets and profile with — the lens.json `name`, which may
-// differ: corpus-example mines as "regime". A name that is not registered, or does not load, is
-// returned as given, so data that outlived its lens's registration stays readable by its own name.
-func lensDataName(st *store.Store, name string) string {
-	if !slices.Contains(st.RegisteredLenses(), name) {
-		return name
-	}
-	if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil {
-		return l.Name
-	}
-	return name
-}
-
-// lensRegisteredName is lensDataName in reverse, for display: the registered name of the lens that
-// mines under `mined`, or `mined` itself when no registered lens does.
-func lensRegisteredName(st *store.Store, mined string) string {
-	reg := st.RegisteredLenses()
-	if slices.Contains(reg, mined) && lensDataName(st, mined) == mined {
-		return mined
-	}
-	for _, name := range reg {
-		if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil && l.Name == mined {
-			return name
-		}
-	}
-	return mined
-}
-
 // renderLensPrompts is the `--prompts` view: the two prompts verbatim, under plain
 // section rules, so the output stays copyable as a STARTING POINT for a new lens
 // directory. A settings line precedes them for context.

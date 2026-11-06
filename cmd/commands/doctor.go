@@ -10,6 +10,7 @@ import (
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -200,7 +201,7 @@ func cmdDoctor(asJSON bool) error {
 	}
 	fix := func(label, command string) { fmt.Println("  " + hint(label, command)) }
 	// Lenses are named by what the user registered them as; the stats key on the mined name.
-	shown := func(mined string) string { return lensRegisteredName(st, mined) }
+	shown := func(mined string) string { return lens.RegisteredName(st, mined) }
 
 	// Runner block. This is the DEFAULT runner: one process distills every session
 	// regardless of source (Claude Code and OpenCode both feed the same L0), and it
