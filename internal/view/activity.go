@@ -3,9 +3,9 @@ package view
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -17,7 +17,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 	// Parse and bucket turns by local date
 	dayMap := make(map[string]*dayBuilder)
 	for _, t := range in.Turns {
-		if strings.HasPrefix(t.Session, "file:") {
+		if platform.IsCorpusSession(t.Session) {
 			continue
 		}
 		ts, ok := parseTS(t.TS)
@@ -39,7 +39,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 
 	// Parse and bucket notes by local date
 	for _, n := range in.Notes {
-		if strings.HasPrefix(n.Session, "file:") {
+		if platform.IsCorpusSession(n.Session) {
 			continue
 		}
 		ts, ok := parseTS(n.TS)

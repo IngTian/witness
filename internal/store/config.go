@@ -553,11 +553,11 @@ func (c *configFile) StampReview() error {
 	}
 	upsert := `INSERT INTO meta(key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-	if _, err := tx.Exec(upsert, "review_obs_rowid", strconv.FormatInt(maxRow, 10)); err != nil {
+	if _, err := tx.Exec(upsert, reviewObsRowidKey, strconv.FormatInt(maxRow, 10)); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if _, err := tx.Exec(upsert, "review_ts", now); err != nil {
+	if _, err := tx.Exec(upsert, reviewTSKey, now); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -605,7 +605,7 @@ func (c *configFile) ReviewRowid(lens string) int64 {
 // Progress is per-(session,lens), so COUNT DISTINCT session — else a session mined
 // by N lenses would count N times and trip the review cadence N× too early.
 func (c *configFile) SessionsSinceReview() int {
-	last := metaGet(c.db, "review_ts")
+	last := metaGet(c.db, reviewTSKey)
 	var n int
 	_ = c.db.QueryRow(
 		`SELECT COUNT(DISTINCT session) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
@@ -616,7 +616,7 @@ func (c *configFile) SessionsSinceReview() int {
 // review. This is the salience signal: a few high-poignancy sessions can trigger
 // a review sooner than the plain session-count cap would.
 func (c *configFile) PoignancySinceReview() int {
-	off := metaGetInt(c.db, "review_obs_rowid")
+	off := metaGetInt(c.db, reviewObsRowidKey)
 	var sum int
 	_ = c.db.QueryRow(
 		`SELECT COALESCE(SUM(poignancy), 0) FROM observations WHERE seq > ?`, off).Scan(&sum)

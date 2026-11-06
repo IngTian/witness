@@ -324,7 +324,10 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 // distills and a hard-killed worker leaves a longer-lived orphan. The correct lever for a
 // rate-limited provider is the model choice (config triage_model/distill_model) or waiting,
 // not the liveness bound.
-const generateTimeout = 10 * time.Minute
+//
+// A var, not a const, for the same reason queueWaitBudget is: a test must shrink it to prove the
+// generation phase is ENFORCED, and measured from when generation STARTED (the #143 fix).
+var generateTimeout = 10 * time.Minute
 
 // queueWaitBudget bounds how long a request may sit UNSTARTED at the provider before witness
 // gives up on it. It is deliberately generous — several times generateTimeout — because a
@@ -484,8 +487,7 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 }
 
 func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, messageID string) (string, error) {
-	path := fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
-	data, err := s.doJSON(ctx, http.MethodGet, path, nil, http.StatusOK)
+	data, err := s.doJSON(ctx, http.MethodGet, messagesPath(sessionID), nil, http.StatusOK)
 	if err != nil {
 		return "", err
 	}
@@ -502,6 +504,12 @@ func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, message
 // being a tail is what makes this safe, and requestMissingStreak below is the guard for it
 // being wrong: rather than trust the assumption for the full generateTimeout, we surface it.
 const asyncReplyWindow = 50
+
+// messagesPath is the ONE spelling of the poll URL, so both poll sites (waitForAsyncReply,
+// replyForMessage) fetch the same asyncReplyWindow-sized tail.
+func messagesPath(sessionID string) string {
+	return fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
+}
 
 // requestMissingLimit is how many consecutive polls may come back WITHOUT our request message
 // before we stop waiting. The server echoes a prompt_async request into the message list
@@ -525,7 +533,7 @@ func (s *OpenCodeServer) waitForAsyncReply(ctx context.Context, sessionID, reque
 	defer ticker.Stop()
 	var lastErr error
 	requestMissingStreak := 0
-	path := fmt.Sprintf("/session/%s/message?limit=%d", sessionID, asyncReplyWindow)
+	path := messagesPath(sessionID)
 
 	// TWO-PHASE BUDGET: queue-wait and generation are bounded SEPARATELY.
 	//

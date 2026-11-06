@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # view-e2e.sh: headless-Chrome check for witness view. Writes four synthetic fixture pages
 # (TestWriteE2EFixtures, which `make test` compiles but skips without -out), loads each in
-# headless Chrome once, and greps the dumped DOM: no Uncaught error, every expected marker,
-# the right page visible, and hostile text rendered escaped. Needs Chrome, so it is NOT part of
-# `make test`; with no Chrome it prints "skipped" and exits 0.
+# headless Chrome once, and greps the dumped DOM: no Uncaught error, every expected marker, no
+# NaN/undefined rendered from a Model key the page misread, the right page visible, and hostile
+# text rendered escaped. Needs Chrome, so it is NOT part of `make test` (with no Chrome it prints
+# "skipped" and exits 0); TestEveryModelKeyIsReadByThePage is the in-suite guard for renamed keys.
 #
 # Env: CHROME=<path> picks the browser; ONLY="empty.html hostile.html" checks just those files;
 # SHOTS=<dir> also writes full/full-changed screenshots there.
@@ -97,6 +98,14 @@ check_file() {
       exit 1
     fi
   done
+
+  # A Model key page.js misreads renders as "NaN% sure" or "undefined" rather than failing. Neither
+  # token appears in page.js, its CSS, or any fixture, so any hit came from rendering.
+  if grep -qwE 'NaN|undefined' "$dom"; then
+    echo "FAIL: $file renders NaN or undefined:"
+    grep -oE '.{0,40}(NaN|undefined).{0,40}' "$dom" | head -5
+    exit 1
+  fi
 
   # For hostile.html, verify escaping using the unique <witness-probe> tag. The whole DOM must
   # NOT contain a real <witness-probe element (JSON holds escaped <, so no literal can appear),

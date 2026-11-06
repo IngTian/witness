@@ -46,17 +46,23 @@ type dimObs struct {
 	Dimension string `json:"dimension"`
 }
 
-// #3: a top-level result array must win over an array nested inside an earlier
-// object (e.g. a "schema example"). Counting items isn't enough — both are length
-// 1 — so this asserts which array was chosen.
+// #3: a top-level result array must win over an array nested inside an object (e.g. a
+// "schema example"). Counting items isn't enough — both are length 1 — so this asserts
+// which array was chosen. Both orders: since parsing became last-wins, a nested array that
+// comes FIRST loses by position alone, so only the reversed order (nested object AFTER the
+// result) exercises the nesting filter at all.
 func TestParseJSONArrayPrefersTopLevelOverNested(t *testing.T) {
-	reply := `Schema: {"examples":[{"dimension":"x"}]}` + "\n" + `[{"dimension":"a"}]`
-	got, err := ParseJSONArray[dimObs](reply)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Dimension != "a" {
-		t.Fatalf("want the top-level array [a], got %+v", got)
+	for name, reply := range map[string]string{
+		"nested first": `Schema: {"examples":[{"dimension":"x"}]}` + "\n" + `[{"dimension":"a"}]`,
+		"nested after": `[{"dimension":"a"}]` + "\n" + `Schema: {"examples":[{"dimension":"x"}]}`,
+	} {
+		got, err := ParseJSONArray[dimObs](reply)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(got) != 1 || got[0].Dimension != "a" {
+			t.Errorf("%s: want the top-level array [a], got %+v", name, got)
+		}
 	}
 }
 
