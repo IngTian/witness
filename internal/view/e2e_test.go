@@ -44,7 +44,7 @@ func TestWriteE2EFixtures(t *testing.T) {
 			{ID: "n1", TS: "2026-10-01T10:00:00Z", Session: "s1", Lens: "default", Dimension: "habits", Observation: "Observation one.", Evidence: "Evidence one.", Poignancy: 8},
 			{ID: "n2", TS: "2026-10-01T10:05:00Z", Session: "s1", Lens: "default", Dimension: "habits", Observation: "Observation two.", Evidence: "Evidence two.", Poignancy: 6},
 			{ID: "n3", TS: "2026-10-15T14:00:00Z", Session: "s2", Lens: "default", Dimension: "habits", Observation: "Observation three.", Evidence: "Evidence three.", Poignancy: 7},
-			{ID: "n4", TS: "2026-10-15T14:10:00Z", Session: "s2", Lens: "corpus", Dimension: "themes", Observation: "Corpus observation.", Evidence: "Corpus evidence.", Poignancy: 5},
+			{ID: "n4", TS: "2026-10-15T14:10:00Z", Session: "file:ingested-2", Lens: "corpus", Dimension: "themes", Observation: "Corpus observation.", Evidence: "Corpus evidence.", Poignancy: 5},
 			{ID: "n5", TS: "2026-11-01T09:00:00Z", Session: "s3", Lens: "default", Dimension: "biases", Observation: "Observation five.", Evidence: "Evidence five.", Poignancy: 9},
 			{ID: "n6", TS: "2026-11-01T09:05:00Z", Session: "file:ingested", Lens: "corpus", Dimension: "themes", Observation: "File observation.", Evidence: "File evidence.", Poignancy: 4},
 		},
@@ -95,7 +95,9 @@ func TestWriteE2EFixtures(t *testing.T) {
 		HighWater: 3000,
 	}
 
-	// Two notebooks (default + corpus), one corpus notebook with all notes from file: sessions.
+	// Three portraits: the overall one, `default` (sources not recorded) and `corpus`. Every
+	// note of the corpus lens (n4, n6) comes from a file: session, so its portrait is kind
+	// "other" and the page lists it under "Other notebooks", never as "who you are".
 	fullPortraits := []PortraitFile{
 		{
 			ID:       store.ProfileUnified,

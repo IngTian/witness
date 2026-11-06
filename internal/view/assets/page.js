@@ -206,7 +206,9 @@
         class: 'cell', 'data-day': s, x: 34 + wk * (S + G), y: 22 + (k % 7) * (S + G), width: S, height: S,
         rx: Math.min(4, S / 4), fill: before || after ? NODATA : RAMP[shade(d ? d.turns : 0)],
       });
-      if (animate) c.style.animationDelay = wk * (wide ? 8 : 25) + 'ms';
+      // The whole sweep starts within 420 ms (25 ms a week at most), so with the 450 ms fade every
+      // window, a 54-week year included, finishes inside the ~900 ms motion budget.
+      if (animate) c.style.animationDelay = Math.round(wk * Math.min(25, 420 / cols)) + 'ms';
       kids.push(c);
     }
     cal.replaceChildren(...kids);
