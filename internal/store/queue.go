@@ -662,7 +662,7 @@ type Stats struct {
 	Sessions     int    // distinct sessions captured
 	RawRecords   int    // raw turn-halves
 	Observations int    // L1
-	Facets       int    // L2
+	Facets       int    // L2, active only — archived (merged/compacted) facets are history, not the profile
 	Pending      int    // sessions with undistilled turns, eligible now
 	BackedOff    int    // sessions waiting out a retry backoff (mining is failing)
 	Drifted      int    // distinct sessions with a lens currently sitting at a prose-drift (#69 Part 2)
@@ -680,7 +680,7 @@ func (q *queue) Stats(lenses []string) Stats {
 	_ = q.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM raw`).Scan(&st.Sessions)
 	_ = q.db.QueryRow(`SELECT COUNT(*) FROM raw`).Scan(&st.RawRecords)
 	_ = q.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&st.Observations)
-	_ = q.db.QueryRow(`SELECT COUNT(*) FROM facets`).Scan(&st.Facets)
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM facets WHERE archived_at = ''`).Scan(&st.Facets)
 	// Pending + BackedOff cross-join against the active-lens set. With ZERO active
 	// lenses (default now an ordinary lens that can be absent, #44 slice 1a) there is
 	// nothing to distill, so both are trivially 0 — and we must NOT build the lens CTE
