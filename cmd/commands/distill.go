@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,6 +27,12 @@ func (r sessionTimeRange) empty() bool {
 }
 
 func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
+	return cmdDistillStartWith(quiet, sinceValue, untilValue, spawnDetachedOK)
+}
+
+// cmdDistillStartWith takes the spawner so a test can make it fail (spawnDetachedOK always
+// succeeds under `go test`).
+func cmdDistillStartWith(quiet bool, sinceValue, untilValue string, spawn func(...string) bool) error {
 	r, err := parseSessionTimeRange(sinceValue, untilValue, time.Now())
 	if err != nil {
 		return err
@@ -37,7 +44,9 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 	if !r.until.IsZero() {
 		args = append(args, "--until", r.until.UTC().Format(time.RFC3339Nano))
 	}
-	spawnDetached(args...)
+	if !spawn(args...) {
+		return errors.New("the background worker did not start")
+	}
 	if !quiet {
 		fmt.Println(bgGlyph() + " worker started in the background")
 		fmt.Println(hint("watch it", "witness status"))
@@ -52,9 +61,8 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 // still single-flight — if a background worker already holds the lock this no-ops
 // with a message rather than running a second concurrent drain.
 //
-// --all is deliberately incompatible with --since/--until: a bounded backfill is
-// just `distill start --since ...` (which the background path already supports);
-// "all" means all.
+// The foreground drain is deliberately incompatible with --since/--until: a bounded drain
+// is `worker run --detach --since ...`; the foreground means the whole backlog.
 //
 // Contract (issue #22 review #2): a foreground backfill MUST NOT report success
 // when the backlog was not actually drained. runWorkerInRange swallows an
@@ -66,7 +74,7 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 //
 // waitBackoffs (issue #56 B4) opts into self-healing transient mining failures: a
 // timed-out/rate-limited session backs off 5m, 10m, ... and drops out of the READY
-// queue, so a plain `--all` returns "backfill incomplete" the instant the queue is
+// queue, so a plain foreground drain returns "backfill incomplete" the instant the queue is
 // momentarily empty even though the session would succeed on retry. With the flag we
 // sleep to the soonest NextBackoffAttempt and re-drain, looping until the backlog is
 // clean OR the soonest retry is further out than backfillMaxWait (a session still
@@ -193,7 +201,7 @@ func backlogUnfinished(pending, backedOff int, waited bool, cause string) error 
 		errRow("cause", cause), retry, errHint("diagnose", "witness doctor"))
 }
 
-// backfillMaxWait bounds how far out a mining backoff the foreground `--all
+// backfillMaxWait bounds how far out a mining backoff the foreground `worker run
 // --wait-backoffs` loop will wait between re-drains. Mining backoff doubles (5m, 10m,
 // 20m, ... — backoffDelay in internal/distill), so 15m waits out the first two retries
 // (attempt 1 → 5m, attempt 2 → 10m: transient outages) but stops once the soonest
@@ -364,13 +372,13 @@ func cmdDistillStatus(asJSON bool) error {
 	var pid, mode, heartbeat, current string
 	if active {
 		status = "running"
-		if st.MetaString("worker_stop_requested") == "1" {
+		if st.MetaString(metaWorkerStopRequested) == "1" {
 			status = "stopping"
 		}
-		pid = st.MetaString("worker_pid")
-		mode = st.MetaString("worker_mode")
-		heartbeat = st.MetaString("worker_heartbeat")
-		current = st.MetaString("worker_current")
+		pid = st.MetaString(metaWorkerPID)
+		mode = st.MetaString(metaWorkerMode)
+		heartbeat = st.MetaString(metaWorkerHeartbeat)
+		current = st.MetaString(metaWorkerCurrent)
 	}
 	lastRaw := st.LastRawTS()
 	lastDistilled := st.LastDistilledRawTS()
@@ -436,7 +444,7 @@ func cmdDistillStatus(asJSON bool) error {
 	switch {
 	case stat.Sessions == 0:
 		fmt.Println(warnGlyph() + " nothing captured yet — connect an editor")
-		fmt.Println(hint("connect", "witness wire claude"))
+		fmt.Println(hint("connect", wireCommand()))
 	case stat.BackedOff > 0:
 		fmt.Println(warnGlyph() + " " + pluralize(stat.BackedOff, "session", "sessions") + " backing off — mining is failing")
 		fmt.Println(hint("diagnose", "witness doctor"))
@@ -515,14 +523,14 @@ func cmdDistillStop(autoOnly bool) error {
 	if !autoOnly {
 		_ = clearScheduledWakeup(st, "")
 	}
-	mode := st.MetaString("worker_mode")
-	if autoOnly && mode == "manual" {
+	mode := st.MetaString(metaWorkerMode)
+	if autoOnly && mode == workerModeManual {
 		return nil
 	}
-	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
+	if err := st.SetMetaString(metaWorkerStopRequested, "1"); err != nil {
 		return err
 	}
-	if autoOnly && mode != "auto" {
+	if autoOnly && mode != workerModeAuto {
 		return nil // cancels an auto worker that has been spawned but has not claimed the lock yet
 	}
 	// The flock is the liveness authority (issue #75): if no worker holds it, none is
@@ -541,7 +549,7 @@ func cmdDistillStop(autoOnly bool) error {
 	// worker_stop_requested=1 (set above) IS the "stopping" state now — cmdDistillStatus
 	// derives it from that flag while the worker is live, so there's no separate status
 	// key to update here.
-	pid := st.MetaString("worker_pid")
+	pid := st.MetaString(metaWorkerPID)
 	if err := terminateWorker(pid); err != nil {
 		fmt.Println(okGlyph() + " stop requested — the worker exits at its next checkpoint")
 		return nil

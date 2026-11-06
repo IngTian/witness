@@ -357,10 +357,7 @@ func TestViewFreshProfileIsNotStale(t *testing.T) {
 	}
 
 	cfg.Runner = st.ResolveRunner(cfg) // the worker's resolution
-	lenses, err := activeLenses(st)
-	if err != nil {
-		t.Fatal(err)
-	}
+	lenses := activeLenses(st)
 	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts(st.Root)
 	if err != nil {
 		t.Fatal(err)

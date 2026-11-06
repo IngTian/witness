@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	// Registers the "file:" corpus source these fixtures use. Without it platform.IsCorpusSession
+	// is false for every file: session and the view counts ingested documents as conversations.
+	_ "github.com/IngTian/witness/internal/platform/file"
 	"github.com/IngTian/witness/internal/store"
 )
 

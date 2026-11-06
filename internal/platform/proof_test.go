@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,12 +69,22 @@ func (fakePlatform) NewRunner(store.Config) platform.Runner { return fakeRunner{
 
 type fakeRunner struct{}
 
+// fakeRunInputs records every corpus the fake runner was handed, so the proof can assert the
+// engine shaped it with the fake's OWN RenderInputs rather than a default renderer.
+var (
+	fakeRunMu     sync.Mutex
+	fakeRunInputs []string
+)
+
 func (fakeRunner) Open(context.Context) error                      { return nil }
 func (fakeRunner) Close() error                                    { return nil }
 func (fakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (fakeRunner) InvocationHint() string                          { return "fake-run" }
 func (fakeRunner) ConcurrentRunSafe() bool                         { return true }
-func (fakeRunner) Run(_ context.Context, _, _, _ string) (string, error) {
+func (fakeRunner) Run(_ context.Context, _, _, input string) (string, error) {
+	fakeRunMu.Lock()
+	fakeRunInputs = append(fakeRunInputs, input)
+	fakeRunMu.Unlock()
 	return `[{"dimension":"thinking","observation":"the fake platform was mined by the real engine","evidence":"proof","poignancy":5}]`, nil
 }
 
@@ -152,8 +163,13 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 		t.Fatalf("real engine did not produce L1 for the fake platform: %+v", obs)
 	}
 
-	// 5. The fake's OWN RenderInputs shaping was used (not a Claude/OpenCode default):
-	// the observation came from a transcript the fake rendered. (Indirect: the mine
-	// succeeded end to end through the fake's renderer + runner.)
+	// 5. The fake's OWN RenderInputs shaping was used (not a Claude/OpenCode default): the
+	// runner must have been handed the transcript the fake rendered.
+	fakeRunMu.Lock()
+	inputs := append([]string(nil), fakeRunInputs...)
+	fakeRunMu.Unlock()
+	if len(inputs) == 0 || !strings.Contains(inputs[0], "FAKE-RENDER") {
+		t.Fatalf("the runner was not handed the fake platform's own rendering: %q", inputs)
+	}
 	t.Logf("proof complete: L0→L1 for platform %q with zero engine edits", "fake")
 }

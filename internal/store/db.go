@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -57,10 +58,76 @@ import (
 // archive opened with a query referencing a column that did not exist. A column can never be
 // added to a version number some binary has already written — it needs a new one, which is what
 // version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
-// them on the next open.); v14 adds portrait_sources (derived sentence→trait links, one JSON
-// row per portrait, keyed to a hash of the portrait text); v15 adds confidence_log (append-only
-// confidence-change history for facets, one row per reinforcement/downgrade/compaction/etc.).
+// them on the next open.)
+//
+// v11 adds facet_versions.claim (the short statement a review call reads instead of the full
+// prose; guarded ADD COLUMN, no backfill — empty falls back to the value); v12 adds
+// facet_versions.confidence_seq (the observation watermark decay-on-absence is measured from,
+// backfilled to the current watermark so existing facets do not decay to the floor at once); v13
+// is a one-time DATA repair, no shape change: it restarts the decay clock on the versions
+// compaction had written without one; v14 adds portrait_sources (derived sentence→trait links,
+// one JSON row per portrait, keyed to a hash of the portrait text); v15 adds confidence_log
+// (append-only confidence-change history for facets, one row per reinforcement/downgrade/
+// compaction/etc.).
+//
+// Bumping this means adding testdata/schema/v<N>.sql (see TestUpgradedSchemaMatchesFresh).
 const schemaVersion = 15
+
+// ErrArchiveNewer means the archive's user_version is above schemaVersion: a newer witness wrote
+// it. Open still succeeds — capture keeps working, since raw is append-only and every release
+// reads it — but this binary must not rewrite L2. writeFacetsTx is a DELETE + INSERT with THIS
+// release's column list, so it silently drops whatever a newer schema added (reproduced: a v0.8.0
+// fold over a v15 archive brought an archived facet back and blanked claim and confidence_seq,
+// with no error). Stale installed binaries are a recorded pattern, and the capture hooks spawn the
+// auto worker, so this is not hypothetical.
+//
+// Every distillation entry point checks ArchiveNewer BEFORE any model call, so the refusal costs
+// nothing; writeFacetsTx checks again as the last line of defence. A check only there would turn
+// the silent corruption into a paid retry loop: review pays for the model call before it writes.
+// This protects from the next schema bump onward; binaries already shipped without it cannot be
+// fixed retroactively.
+var ErrArchiveNewer = errors.New("this archive was written by a newer witness")
+
+// userVersion reads PRAGMA user_version through a *sql.DB or a *sql.Tx. It is read live rather
+// than captured at Open, so a long-running worker also notices a newer binary migrating the
+// archive under it.
+func userVersion(q interface {
+	QueryRow(string, ...any) *sql.Row
+}) (int, error) {
+	var v int
+	err := q.QueryRow("PRAGMA user_version").Scan(&v)
+	return v, err
+}
+
+// refuseNewer is nil for an archive at or below this binary's schema, else ErrArchiveNewer
+// wrapped with both versions — the one message every refusal prints.
+func refuseNewer(archive int) error {
+	if archive <= schemaVersion {
+		return nil
+	}
+	return fmt.Errorf("%w (schema v%d; this binary writes up to v%d) — upgrade witness before distilling; capture keeps working",
+		ErrArchiveNewer, archive, schemaVersion)
+}
+
+// ArchiveNewer returns ErrArchiveNewer (wrapped with both versions) when a newer witness wrote
+// this archive, else nil. An unreadable version is returned as an error too: fail closed.
+func (s *Store) ArchiveNewer() error {
+	v, err := userVersion(s.db)
+	if err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	return refuseNewer(v)
+}
+
+// SchemaVersions reports the archive's on-disk schema and the one this binary writes (doctor).
+// archive is -1 when it cannot be read.
+func (s *Store) SchemaVersions() (archive, binary int) {
+	v, err := userVersion(s.db)
+	if err != nil {
+		return -1, schemaVersion
+	}
+	return v, schemaVersion
+}
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -152,26 +219,6 @@ func (s *Store) Export(dst string, force bool) error {
 	return nil
 }
 
-// migrate brings the schema from the database's current user_version up to
-// schemaVersion: a guarded legacy rename (if needed) followed by the full current
-// schema applied idempotently.
-//
-// The whole thing plus the version bump runs in ONE transaction (PRAGMA
-// user_version is transactional in SQLite), so a crash mid-migration rolls back
-// cleanly: the DB is either fully at the new version or fully at the old one,
-// never half-applied. The schema is all CREATE ... IF NOT EXISTS and is applied
-// unconditionally, so re-runs and any starting version converge harmlessly.
-//
-// The transaction is BEGIN IMMEDIATE, not the default DEFERRED. Every step below reads
-// (pragma_table_info / sqlite_master) before it writes, and under WAL a DEFERRED tx that
-// takes a read snapshot and THEN tries to write fails with SQLITE_BUSY_SNAPSHOT (517) if
-// any other connection committed in between — a conflict busy_timeout does NOT retry,
-// because there is no lock to wait for, the snapshot is simply stale. witness is
-// multi-process by design (a capture hook fires per user turn while a worker may be
-// draining), so on the very first Open after an upgrade a single concurrent capture
-// could abort the migration and fail store.Open in the migrating process. IMMEDIATE
-// takes the write lock up front, so a concurrent writer makes us WAIT (busy_timeout)
-// instead of aborting.
 // beginImmediate starts a transaction that already holds the WRITE lock, so a later
 // write cannot fail the un-retryable SQLITE_BUSY_SNAPSHOT upgrade that a DEFERRED
 // read-then-write transaction hits when another process commits mid-transaction.
@@ -220,6 +267,45 @@ func beginImmediateOn(ctx context.Context, b txBeginner) (*sql.Tx, error) {
 	return tx, nil
 }
 
+// migrate brings the schema from the database's current user_version up to
+// schemaVersion: a guarded legacy rename (if needed), the full current schema applied
+// idempotently, then one guarded step per change schemaV1's CREATE ... IF NOT EXISTS
+// cannot make to an EXISTING table (added columns, rebuilt tables, indexes on added
+// columns, data repairs).
+//
+// The whole thing plus the version bump runs in ONE transaction (PRAGMA
+// user_version is transactional in SQLite), so a crash mid-migration rolls back
+// cleanly: the DB is either fully at the new version or fully at the old one,
+// never half-applied. Every step but the v13 repair is guarded on the SHAPE it
+// creates (pragma_table_info / sqlite_master), not on the version number, so re-runs
+// and any starting version converge harmlessly.
+//
+// The steps run in code order, which is NOT version order. Only these rules constrain it:
+//
+//  1. The legacy l0 -> raw rename runs before schemaV1, or schemaV1 creates an empty
+//     `raw` beside the real one.
+//  2. schemaV1 runs before every other step, and must never reference a column a
+//     later step adds: on an old archive its CREATE TABLE IF NOT EXISTS is a no-op, so
+//     an index there on such a column fails the whole migration (#171/#174). Those
+//     indexes live in the step that adds their column.
+//  3. A table REBUILD precedes every step that alters the same table, or its DROP
+//     TABLE discards their work: the progress rebuild (v5) before its indexes (v6) and
+//     drift_at (v7).
+//  4. A step precedes every step that reads what it creates: the observations rebuild
+//     (v8, which creates seq) before the confidence_seq backfill (v12) and the
+//     decay-clock repair (v13), which both read MAX(seq); v12 before v13, which writes
+//     the column v12 adds.
+//
+// The transaction is BEGIN IMMEDIATE, not the default DEFERRED. Every step below reads
+// (pragma_table_info / sqlite_master) before it writes, and under WAL a DEFERRED tx that
+// takes a read snapshot and THEN tries to write fails with SQLITE_BUSY_SNAPSHOT (517) if
+// any other connection committed in between — a conflict busy_timeout does NOT retry,
+// because there is no lock to wait for, the snapshot is simply stale. witness is
+// multi-process by design (a capture hook fires per user turn while a worker may be
+// draining), so on the very first Open after an upgrade a single concurrent capture
+// could abort the migration and fail store.Open in the migrating process. IMMEDIATE
+// takes the write lock up front, so a concurrent writer makes us WAIT (busy_timeout)
+// instead of aborting.
 func migrate(db *sql.DB) error {
 	var v int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
@@ -233,9 +319,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
-	// 1. Legacy rename FIRST. A pre-rename DB has the raw layer under its old name
-	// `l0` and no `raw`; rename it in place (preserving the data) before step 2 would
-	// otherwise create an empty `raw` beside it. Guarded on `l0` present AND `raw`
+	// v2 -> v3: legacy rename FIRST (rule 1). A pre-rename DB has the raw layer under its
+	// old name `l0` and no `raw`; rename it in place (preserving the data) before schemaV1
+	// would otherwise create an empty `raw` beside it. Guarded on `l0` present AND `raw`
 	// absent, so it's a no-op on fresh DBs and on any re-run. ALTER TABLE RENAME has
 	// no IF EXISTS form, hence the explicit existence checks.
 	var hasL0, hasRaw int
@@ -254,19 +340,20 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
-	// 2. Apply the full current schema UNCONDITIONALLY. Every statement is
+	// The full current schema, UNCONDITIONALLY (rule 2). Every statement is
 	// CREATE ... IF NOT EXISTS, so it creates everything on a fresh DB and is a
 	// harmless no-op on an existing one. Applying it regardless of the stored
 	// version means a DB at ANY prior version converges to the current schema —
 	// there is no "version landed between steps, so a CREATE got skipped" trap.
-	// Future additive changes extend schemaV1; future ALTER/data migrations go
-	// above this as their own guarded, idempotent step (like the rename).
+	// Future additive changes extend schemaV1 (a new table, a column on a new
+	// table); a change to an existing table goes BELOW this as its own guarded,
+	// idempotent step. Only the legacy rename runs before it.
 	if _, err := tx.Exec(schemaV1); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("apply schema: %w", err)
 	}
 
-	// 3. v3 -> v4: session_meta.platform (the per-session owning-platform axis).
+	// v3 -> v4: session_meta.platform (the per-session owning-platform axis).
 	// A pre-v4 DB has session_meta WITHOUT this column; schemaV1's CREATE ... IF
 	// NOT EXISTS won't alter an existing table, so add it explicitly (SQLite has no
 	// ADD COLUMN IF NOT EXISTS — guard on pragma_table_info), then BACKFILL from the
@@ -280,7 +367,7 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v4 add session_meta.platform: %w", err)
 	}
 
-	// 4. v4 -> v5: re-key progress from PK(session) to PK(session, lens) so a lens can
+	// v4 -> v5: re-key progress from PK(session) to PK(session, lens) so a lens can
 	// be backfilled independently (issue #55). schemaV1's CREATE ... IF NOT EXISTS
 	// won't reshape an existing table, so rebuild explicitly when the running DB's
 	// progress predates the lens column. Idempotent: the guard skips once `lens`
@@ -290,17 +377,17 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v5 per-lens progress: %w", err)
 	}
 
-	// 5. v5 -> v6: hot-path indexes on the (session, lens)-keyed progress table
-	// (issue #73-S3). MUST come AFTER step 4: they reference the `lens` column, which
-	// on a pre-v5 DB only exists once migrateProgressPerLens has rebuilt the table
-	// (and that rebuild's DROP TABLE would drop indexes created earlier anyway).
+	// v5 -> v6: hot-path indexes on the (session, lens)-keyed progress table
+	// (issue #73-S3). MUST come after the v5 rebuild (rules 2, 3): they reference the
+	// `lens` column, which on a pre-v5 DB only exists once migrateProgressPerLens has
+	// rebuilt the table (and that rebuild's DROP TABLE would drop indexes created earlier).
 	// Idempotent CREATE INDEX IF NOT EXISTS, so it's a no-op once they exist.
 	if err := addProgressIndexes(tx); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("v6 progress indexes: %w", err)
 	}
 
-	// 6. v6 -> v7: progress.drift_at (issue #69 Part 2) — persist the last
+	// v6 -> v7: progress.drift_at (issue #69 Part 2) — persist the last
 	// per-(session,lens) prose-drift stamp so it survives worker restarts instead of
 	// living only in the in-memory LensMining.Drifted flag. schemaV1's CREATE ... IF
 	// NOT EXISTS won't alter an existing progress table, so add the column explicitly
@@ -314,25 +401,20 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v7 add progress.drift_at: %w", err)
 	}
 
-	// 7. v7 -> v8: rebuild observations with a monotonic AUTOINCREMENT surrogate key
+	// v7 -> v8: rebuild observations with a monotonic AUTOINCREMENT surrogate key
 	// (issue #125). A pre-v8 DB has observations keyed by obs_id (no seq column), whose
 	// implicit rowid SQLite reuses after a delete-of-newest; schemaV1's CREATE ... IF
 	// NOT EXISTS won't reshape the existing table (PK change is not an ALTER), so rebuild
 	// explicitly, copying each old rowid INTO the new seq so review watermarks stay valid.
 	// Guarded on the seq column's absence, so it's a no-op on fresh DBs (schemaV1 shape)
-	// and on any re-run. MUST come last: it references only its own table.
+	// and on any re-run. MUST precede the v12 and v13 steps (rule 4): their MAX(seq) reads
+	// the column this rebuild creates.
 	if err := migrateObservationsSeq(tx); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("v8 observations seq: %w", err)
 	}
 
-	// 8. v8 -> v9: facets.archived_at + facets.merged_into — the structural half of facet
-	// history, so compaction can take a facet out of the active profile without destroying
-	// it. schemaV1's CREATE ... IF NOT EXISTS won't alter an existing facets table, so add
-	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps). No backfill:
-	// the empty-string column DEFAULT is exactly right for every pre-existing facet — all of
-	// them are active, because nothing could archive one before this version.
-	// 10. v11 -> v12: facet_versions.confidence_seq — the observation watermark at which this
+	// v11 -> v12: facet_versions.confidence_seq — the observation watermark at which this
 	// version's confidence was last set, so decay-on-absence can be DERIVED on read instead of
 	// swept into the data (issue #173). Guarded ADD COLUMN, and then BACKFILLED to the current
 	// watermark rather than left at 0: a zero would read as "last confirmed at the beginning of
@@ -345,14 +427,14 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v12 add facet_versions.confidence_seq: %w", err)
 	}
 
-	// 11. v12 -> v13: restart the decay clock on facet versions COMPACTION wrote without one.
-	// Must follow step 10, which creates the column. See repairCompactionDecayClock.
+	// v12 -> v13: restart the decay clock on facet versions COMPACTION wrote without one.
+	// Must follow v12, which creates the column (rule 4). See repairCompactionDecayClock.
 	if err := repairCompactionDecayClock(tx, v); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("v13 repair compaction decay clock: %w", err)
 	}
 
-	// 9. v10 -> v11: facet_versions.claim — the short statement of what a facet asserts,
+	// v10 -> v11: facet_versions.claim — the short statement of what a facet asserts,
 	// separate from the full prose. Guarded ADD COLUMN; no backfill, because an empty claim
 	// correctly means "this version has none yet" and every consumer falls back to the value.
 	if err := addFacetClaimColumn(tx); err != nil {
@@ -360,6 +442,14 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v11 add facet_versions.claim: %w", err)
 	}
 
+	// v8 -> v9: facets.archived_at + facets.merged_into — the structural half of facet
+	// history, so compaction can take a facet out of the active profile without destroying
+	// it. schemaV1's CREATE ... IF NOT EXISTS won't alter an existing facets table, so add
+	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps), and the
+	// idx_facets_active index after them (rule 2). No backfill: the empty-string column
+	// DEFAULT is exactly right for every pre-existing facet — all of them are active,
+	// because nothing could archive one before this version.
+	//
 	// Also the v9 -> v10 step: the same function adds archive_reason. It is per-column guarded
 	// (pragma_table_info), so one call converges a DB from v8, from a pre-release v9, or from
 	// v10 — which is precisely why the columns are added here rather than assumed from the
@@ -723,10 +813,10 @@ func addFacetConfidenceSeqColumn(tx *sql.Tx) error {
 // a later review happened to reconfirm it, and the facets that never recur are exactly the ones
 // decay exists for. The write path is fixed; this repairs the rows already written.
 //
-// After step 10's backfill, the reviewer stamps a real seq on every version it writes, so a 0 left
+// After the v12 backfill, the reviewer stamps a real seq on every version it writes, so a 0 left
 // in a v12 database came from compaction (or from an archive with no observations at all, where
 // MAX(seq) is 0 and this is a no-op). Restarting those clocks at the current watermark is the same
-// honest reading step 10 used: we do not know when they were really confirmed. It can only make a
+// honest reading the v12 backfill used: we do not know when they were really confirmed. It can only make a
 // facet decay LATER than it should — never earlier — and the error is bounded by how long the
 // archive ran a compacting v0.9.x/v0.10.0 binary.
 //

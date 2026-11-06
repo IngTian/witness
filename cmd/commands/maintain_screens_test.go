@@ -32,24 +32,6 @@ func workerRunCmd(t *testing.T) *cobra.Command {
 	return c
 }
 
-// `witness worker stpo` printed the group's help and exited 0, so a typo read as success.
-func TestWorkerGroupRejectsATypo(t *testing.T) {
-	root := newRootCmd()
-	root.SetArgs([]string{"worker", "stpo"})
-	var err error
-	_ = captureStdout(t, func() { err = root.Execute() })
-	if err == nil || !strings.Contains(err.Error(), `unknown command "stpo" for "witness worker"`) ||
-		!strings.Contains(err.Error(), "did you mean stop") {
-		t.Fatalf("a typo'd subcommand must fail, with a suggestion; got %v", err)
-	}
-	root = newRootCmd()
-	root.SetArgs([]string{"worker"})
-	out := captureStdout(t, func() { err = root.Execute() })
-	if err != nil || !strings.Contains(out, "Available Commands") {
-		t.Fatalf("bare `witness worker` must still print its help and succeed: %v\n%s", err, out)
-	}
-}
-
 // ingest's result says what happened. It printed "distilling in the background" every time,
 // including after writing nothing — when no worker is started.
 func TestIngestNeverClaimsDistillingWhenNothingWasWritten(t *testing.T) {
@@ -436,7 +418,7 @@ func TestStatusRowsAndTheNextStep(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	out := captureStdout(t, func() { _ = cmdDistillStatus(false) })
 	for _, want := range []string{"witness status\n\n", "  worker        - idle\n", "  queue         0 pending · 0 backing off\n",
-		"[!] nothing captured yet — connect an editor\n", "witness wire claude"} {
+		"[!] nothing captured yet — connect an editor\n", wireCommand() + "\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}

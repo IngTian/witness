@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # view-e2e.sh: headless-Chrome check for witness view. Builds fixtures, runs Chrome on each,
-# checks for DOM markers and escaped text. NOT part of `make test` — the JS stub is expected to
-# fail on missing markers until Tasks 9–10.
+# checks for DOM markers, escaped text, and no NaN/undefined rendered from a Model key the page
+# misread. NOT part of `make test` (it needs Chrome); TestEveryModelKeyIsReadByThePage is the
+# in-suite guard for renamed keys.
 
 set -eu
 
-# DOM markers the client must emit (Tasks 9–10 own them):
+# DOM markers the client must emit:
 #
 # | Marker                    | File(s)                      |
 # |---------------------------|------------------------------|
@@ -91,6 +92,14 @@ check_file() {
       exit 1
     fi
   done
+
+  # A Model key page.js misreads renders as "NaN% sure" or "undefined" rather than failing. Neither
+  # token appears in page.js, its CSS, or any fixture, so any hit came from rendering.
+  if echo "$dom" | grep -qwE 'NaN|undefined'; then
+    echo "FAIL: $file renders NaN or undefined:"
+    echo "$dom" | grep -oE '.{0,40}(NaN|undefined).{0,40}' | head -5
+    exit 1
+  fi
 
   # For hostile.html, verify escaping using the unique <witness-probe> tag. The whole DOM must
   # NOT contain a real <witness-probe element (JSON holds escaped <, so no literal can appear),

@@ -18,7 +18,7 @@ fi
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}"
 
 # When run from a working copy (not an installed plugin) CLAUDE_PLUGIN_ROOT is
-# unset, but the binary resolves prompts/, lenses/, and assets/ relative to it.
+# unset, but the binary resolves prompts/ and assets/ relative to it.
 # Export it so a checkout "just works" without per-path WITNESS_* overrides.
 export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 
@@ -33,11 +33,20 @@ esac
 
 BIN="${PLUGIN_ROOT}/bin/witness-${OS}-${ARCH}"
 if [ ! -x "$BIN" ]; then
-  if command -v witness >/dev/null 2>&1; then
+  # The PATH `witness` may be install.sh's ~/.local/bin launcher, which execs THIS shim:
+  # with no bin/ build (make clean, git clean, an unmapped arch) the two re-exec each other
+  # forever. WITNESS_VIA_SHIM marks the second entry, which falls through instead.
+  if [ -z "${WITNESS_VIA_SHIM:-}" ] && command -v witness >/dev/null 2>&1; then
     BIN="$(command -v witness)"
+    export WITNESS_VIA_SHIM=1
   elif command -v go >/dev/null 2>&1 && [ -f "${PLUGIN_ROOT}/go.mod" ]; then
     # Dev fallback. GOMLX_BACKEND=go keeps it pure-Go (no XLA/CGo).
     exec env GOMLX_BACKEND=go go -C "$PLUGIN_ROOT" run ./cmd/witness "$@"
+  elif [ -t 0 ]; then
+    # A person typed this (hooks always pipe stdin): say why nothing happened rather than
+    # block on `cat` waiting for a terminal EOF.
+    echo "witness: no witness binary: run make build in ${PLUGIN_ROOT}" >&2
+    exit 1
   else
     # No binary and no way to build one. Capture must never break the session:
     # swallow stdin and exit success so the hook is a no-op.

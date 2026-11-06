@@ -151,3 +151,30 @@ func TestDisabledRunnerSpawnsNothing(t *testing.T) {
 		t.Error("the disable switch was checked AFTER building the child; it must short-circuit first")
 	}
 }
+
+// A failing `claude -p` prints its error on STDOUT, so a failure must carry stdout too.
+//
+// Run captured stdout but read it only on success, and every error branch reported stderr alone.
+// The default-lens stall logged the same window 322 times as `claude -p failed: exit status 1
+// (stderr: )` — the cause was in the discarded stdout, and finding it took a GUI prototype. The
+// child here is a stand-in shell; `claude` itself is never spawned.
+func TestClaudeRunFailureKeepsStdout(t *testing.T) {
+	unsetDisableSwitch(t)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no `sh` to stand in for a failing CLI: %v", err)
+	}
+	prev := buildRunCmdFn
+	buildRunCmdFn = func(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
+		return exec.CommandContext(ctx, sh, "-c", "echo 'API Error: prompt is too long'; exit 1")
+	}
+	t.Cleanup(func() { buildRunCmdFn = prev })
+
+	_, err = runner{}.Run(context.Background(), "", "sys", "corpus")
+	if err == nil {
+		t.Fatal("a child that exits 1 must fail")
+	}
+	if !strings.Contains(err.Error(), "prompt is too long") {
+		t.Errorf("the error drops the child's stdout, where `claude -p` prints its error: %v", err)
+	}
+}

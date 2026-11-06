@@ -10,6 +10,7 @@ import (
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -31,6 +32,18 @@ func newDoctorCmd() *cobra.Command {
 	return c
 }
 
+// newDoctorEmbedder is the seam that lets a test drive doctor's SUCCESS path: the model is
+// gitignored and CI never fetches it, so the real-model test always skips there and nothing
+// else guarded that a healthy archive exits 0 (#136). It returns a nil INTERFACE on error, never
+// a typed-nil *embed.Embedder.
+var newDoctorEmbedder = func() (distill.Embedder, error) {
+	e, err := embed.New()
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
 func cmdDoctor(asJSON bool) error {
 	st, err := store.Open()
 	if err != nil {
@@ -48,6 +61,10 @@ func cmdDoctor(asJSON bool) error {
 	// when/lens so the count reads as dated rather than "broken forever".
 	driftTotal := st.DriftTotal()
 	driftLastTS, driftLastLens := st.DriftLast()
+	// Both schema versions: every distillation entry point refuses an archive a newer witness
+	// wrote (store.ErrArchiveNewer), and this is where a stale binary shows itself.
+	archiveSchema, binarySchema := st.SchemaVersions()
+	newerErr := st.ArchiveNewer()
 
 	// Resolve the runner once; doctor asks IT how it runs and whether its models are
 	// valid — no branching on the runner name. runnerCmd is the runner's own
@@ -88,7 +105,7 @@ func cmdDoctor(asJSON bool) error {
 	embedderStatus := "OK"
 	var enZh, enUnrelated float64
 	var embedDim int
-	emb, embErr := embed.New()
+	emb, embErr := newDoctorEmbedder()
 	if embErr != nil {
 		embedderStatus = "UNAVAILABLE: " + embErr.Error()
 		deferredErr = embErr
@@ -105,6 +122,11 @@ func cmdDoctor(asJSON bool) error {
 		embedDim = len(en)
 		enZh = embed.Cosine(en, zh)
 		enUnrelated = embed.Cosine(en, un)
+	}
+
+	// A newer archive wins the exit error: whatever else is wrong, this binary will not distill it.
+	if newerErr != nil {
+		deferredErr = newerErr
 	}
 
 	lastReview := stat.LastReview
@@ -139,6 +161,8 @@ func cmdDoctor(asJSON bool) error {
 				DriftLast:       driftLastTS,
 				DriftLastLens:   driftLastLens,
 				LastReview:      lastReview,
+				Schema:          archiveSchema,
+				BinarySchema:    binarySchema,
 			},
 			Embedder: doctorEmbedderJSON{
 				Status:      embedderStatus,
@@ -189,7 +213,7 @@ func cmdDoctor(asJSON bool) error {
 	}
 	fix := func(label, command string) { fmt.Println("  " + hint(label, command)) }
 	// Lenses are named by what the user registered them as; the stats key on the mined name.
-	shown := func(mined string) string { return lensRegisteredName(st, mined) }
+	shown := func(mined string) string { return lens.RegisteredName(st, mined) }
 
 	// Runner block. This is the DEFAULT runner: one process distills every session
 	// regardless of source (Claude Code and OpenCode both feed the same L0), and it
@@ -256,6 +280,12 @@ func cmdDoctor(asJSON bool) error {
 	row("layers", fmt.Sprintf("%s · %s raw messages · %s · %s",
 		countOf(stat.Sessions, "session", "sessions"), humanCount(stat.RawRecords),
 		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")), "")
+	row("schema", fmt.Sprintf("v%d", archiveSchema), fmt.Sprintf("this binary writes v%d", binarySchema))
+	if newerErr != nil {
+		warn("written by a newer witness — distillation is refused")
+		because("capture keeps working; worker, review, compact and backfill refuse until witness is upgraded, " +
+			"so this binary cannot rewrite what the newer schema added")
+	}
 	if stat.Sessions == 0 {
 		warn("nothing captured yet — no editor is feeding this archive")
 		fix("wire editor", wireCommand())
@@ -405,6 +435,8 @@ type doctorArchiveJSON struct {
 	DriftLast       string `json:"drift_last,omitempty"`
 	DriftLastLens   string `json:"drift_last_lens,omitempty"`
 	LastReview      string `json:"last_review"`
+	Schema          int    `json:"schema_version"`        // the archive's PRAGMA user_version (-1 = unreadable)
+	BinarySchema    int    `json:"binary_schema_version"` // the schema this binary writes
 }
 
 type doctorEmbedderJSON struct {
@@ -439,12 +471,10 @@ func validateRuntimeModels(ctx context.Context, st *store.Store, cfg store.Confi
 	add(defaultRunner, cfg.TriageModel)
 	add(defaultRunner, cfg.DistillModel)
 	// Each lens's per-lens models belong to the runtime the lens routes to.
-	if lenses, err := activeLenses(st); err == nil {
-		for _, l := range lenses {
-			rt := distill.RunnerFor(cfg, l)
-			add(rt, l.ExtractModel)
-			add(rt, l.ReviewModel)
-		}
+	for _, l := range activeLenses(st) {
+		rt := distill.RunnerFor(cfg, l)
+		add(rt, l.ExtractModel)
+		add(rt, l.ReviewModel)
 	}
 	// Ensure the default runner is validated even with no models (it mints + is the report's
 	// InvocationHint source; an unknown default-runner name is a real config error).

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -79,19 +80,18 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil {
-		return err
-	}
+	lenses := activeLenses(st)
 	if len(lenses) == 0 {
 		fmt.Println(skipGlyph() + " no enabled lenses — nothing to compact")
 		fmt.Println(hint("enable one", "witness lens enable <name>"))
 		return nil
 	}
 	if lensOnly != "" {
+		// Loaded lenses carry their MINED name; the flag takes the registered one.
+		mined := lens.DataName(st, lensOnly)
 		filtered := lenses[:0]
 		for _, ln := range lenses {
-			if ln.Name == lensOnly {
+			if ln.Name == mined {
 				filtered = append(filtered, ln)
 			}
 		}
