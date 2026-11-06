@@ -73,7 +73,18 @@ func buildPortrait(f PortraitFile, kind string, ids map[facetID]int, loc *time.L
 	// The hash in CurrentPortraitSources proves the sources describe THIS text; the count
 	// proves they were numbered by THIS splitter. A splitter change between the resolver run
 	// and now would shift every link onto the wrong sentence, which is worse than none.
+	// Also compare each sentence text: a count match with differing text means the splitter
+	// changed its ordering or a merge shifted everything.
 	p.Sources = f.SourcesOK && len(f.Sources.Sentences) == n
+	if p.Sources {
+		sentences := distill.SplitSentences(f.Markdown)
+		for i, stored := range f.Sources.Sentences {
+			if i >= len(sentences) || stored.Text != sentences[i] {
+				p.Sources = false
+				break
+			}
+		}
+	}
 	for i := range p.Links {
 		p.Links[i] = []int{}
 		if p.Sources {

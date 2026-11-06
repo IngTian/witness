@@ -1,7 +1,6 @@
 package view
 
 import (
-	"cmp"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,7 +98,13 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 	// Windows run from First's to Last's. An archive with nothing dated yet gets one window per
 	// kind, all containing now: the same path started at Last, so there is no second window
 	// builder to forget an input (the old empty-archive one was handed no notes).
-	windows := generateWindows(cmp.Or(first, last), last, days, dayMap, in.Notes, loc, tally)
+	// Clamp first to at most last: if all records are after now, first > last, and we must
+	// generate at least one window per kind (all containing last).
+	start := first
+	if start == "" || start > last {
+		start = last
+	}
+	windows := generateWindows(start, last, days, dayMap, in.Notes, loc, tally)
 
 	return Activity{
 		First:       first,

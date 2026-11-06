@@ -532,3 +532,71 @@ func TestActivityNotesWithoutTurns(t *testing.T) {
 		t.Errorf("Mar: Notes %d SpanDays %d, want 1 and 4 (Mar 2–5)", mar.Notes, mar.SpanDays)
 	}
 }
+
+func TestActivityClockSkewAllRecordsAfterNow(t *testing.T) {
+	loc := time.FixedZone("EST", -5*3600)
+	now := time.Date(2026, 3, 5, 0, 0, 0, 0, loc)
+
+	// All records are after now (April turns, May note)
+	in := &store.ViewInput{
+		Turns: []store.ViewTurn{
+			{Session: "s1", TS: "2026-04-10T10:00:00-05:00"},
+			{Session: "s1", TS: "2026-04-15T10:00:00-05:00"},
+		},
+		Notes: []store.ViewNote{
+			{ID: "n1", Session: "s1", TS: "2026-05-01T10:00:00-05:00"},
+		},
+	}
+
+	m := Build(in, nil, now, loc)
+
+	// First is clamped to Last (today, 2026-03-05), not April
+	if m.Activity.First != "2026-04-10" {
+		t.Errorf("First: got %q, want 2026-04-10 (earliest record)", m.Activity.First)
+	}
+	if m.Activity.Last != "2026-03-05" {
+		t.Errorf("Last: got %q, want 2026-03-05 (now)", m.Activity.Last)
+	}
+
+	// Every kind must have at least one window containing last (2026-03-05)
+	var months, quarters, halves, years []Window
+	for _, w := range m.Activity.Windows {
+		switch w.Kind {
+		case "month":
+			months = append(months, w)
+		case "quarter":
+			quarters = append(quarters, w)
+		case "half":
+			halves = append(halves, w)
+		case "year":
+			years = append(years, w)
+		}
+	}
+
+	if len(months) == 0 {
+		t.Errorf("months: got 0, want at least 1 (containing last)")
+	}
+	if len(quarters) == 0 {
+		t.Errorf("quarters: got 0, want at least 1 (containing last)")
+	}
+	if len(halves) == 0 {
+		t.Errorf("halves: got 0, want at least 1 (containing last)")
+	}
+	if len(years) == 0 {
+		t.Errorf("years: got 0, want at least 1 (containing last)")
+	}
+
+	// March window (containing last) must exist and be first for each kind
+	if len(months) > 0 && months[0].Label != "Mar 2026" {
+		t.Errorf("first month: got %s, want Mar 2026 (containing last)", months[0].Label)
+	}
+	if len(quarters) > 0 && quarters[0].Label != "Q1 2026" {
+		t.Errorf("first quarter: got %s, want Q1 2026 (containing last)", quarters[0].Label)
+	}
+	if len(halves) > 0 && halves[0].Label != "H1 2026" {
+		t.Errorf("first half: got %s, want H1 2026 (containing last)", halves[0].Label)
+	}
+	if len(years) > 0 && years[0].Label != "2026" {
+		t.Errorf("first year: got %s, want 2026 (containing last)", years[0].Label)
+	}
+}

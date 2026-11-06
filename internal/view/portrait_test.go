@@ -308,6 +308,25 @@ func TestPortraitKeywords(t *testing.T) {
 	}
 }
 
+func TestPortraitSourcesTextMismatch(t *testing.T) {
+	md := "First sentence here. Second sentence here."
+	// Count matches (2 sentences), but the stored text differs from the view's split
+	p := onePortrait(t, portraitInput(), PortraitFile{
+		ID: "default", Markdown: md, SourcesOK: true,
+		Sources: store.PortraitSources{
+			Sentences: []store.SourcedSentence{
+				{Text: "First sentence here.", Links: []store.TraitLink{link("a", store.LinkDirect)}},
+				{Text: "Different text here.", Links: []store.TraitLink{link("b", store.LinkDirect)}}, // mismatch
+			},
+		}})
+	if p.Sources {
+		t.Errorf("Sources: got true, want false (text mismatch)")
+	}
+	if want := [][]int{{}, {}}; !reflect.DeepEqual(p.Links, want) {
+		t.Errorf("links: got %v, want %v (no links when Sources false)", p.Links, want)
+	}
+}
+
 func TestPortraitKinds(t *testing.T) {
 	in := &store.ViewInput{
 		Notes: []store.ViewNote{
