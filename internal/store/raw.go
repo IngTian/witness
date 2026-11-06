@@ -220,8 +220,7 @@ func (r *rawIO) RawChars(session string) int64 {
 // LastDistilledRawTS is the timestamp of the latest raw turn any lens has distilled
 // past — a cosmetic "how fresh is distillation" indicator for status/profile.
 // Progress is now per-(session,lens), so collapse it to one watermark per session
-// (MAX(distilled) = the furthest any lens reached, which the always-on default lens
-// usually leads) before the JOIN, so multiple lens rows don't multiply the raw join.
+// (MAX(distilled) = the furthest any lens reached) before the JOIN, so multiple lens rows don't multiply the raw join.
 func (r *rawIO) LastDistilledRawTS() string {
 	var ts string
 	_ = r.db.QueryRow(`

@@ -7,8 +7,9 @@ import (
 )
 
 // facetIO is the L2 facet concern: the bi-temporal profile stored relationally in
-// facets + facet_versions. The reviewer is the sole writer (WriteFacets); everything
-// else reads (ReadFacets). A DB leaf — holds only the shared *sql.DB.
+// facets + facet_versions. The distill passes (review, long-arc, compaction, claims) write
+// through WriteFacets/WriteFacetsLogged and merge writes in its own transaction; everything
+// else reads. A DB leaf — holds only the shared *sql.DB.
 type facetIO struct{ db *sql.DB }
 
 // ReadFacets loads the L2 profile (all facets across all lenses, archived ones INCLUDED), in
@@ -95,8 +96,8 @@ func readFacetsFrom(ctx context.Context, q rowQuerier, activeOnly bool) ([]Facet
 	return out, rows.Err()
 }
 
-// WriteFacets atomically replaces the L2 profile. The reviewer and the compaction pass are
-// its only callers. The whole rewrite runs in one transaction; foreign_keys=ON cascades the old
+// WriteFacets atomically replaces the L2 profile. The claim pass is its only caller; the
+// reviewer, long-arc and compaction passes use WriteFacetsLogged. The whole rewrite runs in one transaction; foreign_keys=ON cascades the old
 // versions when their facets are deleted.
 //
 // It is a REPLACE, so the slice must be the complete profile — every lens, archived facets
@@ -186,7 +187,7 @@ func (f *facetIO) FacetTrajectory(lens, dimension, key string) ([]Facet, error) 
 	for len(queue) > 0 {
 		ref := queue[0]
 		queue = queue[1:]
-		if seen[ref] { // a cycle would otherwise spin forever; see mergeCycles in distill
+		if seen[ref] { // a cycle would otherwise spin forever; see resolveArchived in distill
 			continue
 		}
 		seen[ref] = true

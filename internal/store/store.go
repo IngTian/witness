@@ -32,15 +32,13 @@ var dataDirNames = []string{"witness", "claude-witness"}
 // stay as plain files, since they are meant to be read (and, for config, lenses and
 // summarize, edited) directly. export.go's exportInclude must list every one of them.
 //
-// Internally Store is a thin facade over a set of focused, independently-testable
-// concern types (issue #73-C1) — metaKV, and the others added alongside it — each
-// holding only the shared *sql.DB (and, for the filesystem concerns, Root). Store
-// EMBEDS them, so all of the original methods stay promoted onto *Store and every
-// existing caller keeps compiling unchanged; the split is pure reorganization over
-// one connection (MaxOpenConns(1)+WAL is unchanged — see openDB). Callers that only
-// need a slice of the API can, at the decoupling seam, depend on a narrow interface
-// instead of the whole Store. Root and db remain fields because Close/Export and the
-// path helpers (ConfigPath/LogPath/dbPath) live directly on Store.
+// Internally Store embeds a set of concern types (issue #73-C1), each holding only the
+// shared *sql.DB (and, for the filesystem concerns, Root). The split is organizational:
+// every method stays promoted onto *Store, the tests exercise them through a real Store,
+// and it all runs over one connection (MaxOpenConns(1)+WAL — see openDB). The seam that
+// does decouple consumers is interfaces.go: a consumer depends on the narrow interface it
+// needs, which a fake can implement. Root and db remain fields because Close/Export and
+// the path helpers (ConfigPath/LogPath/dbPath) live directly on Store.
 type Store struct {
 	Root string
 	db   *sql.DB
@@ -49,7 +47,7 @@ type Store struct {
 	profileFS  // L4 narrative profile files under <root>/profile/ (issue #73-C1)
 	procLocks  // cross-process advisory flocks (worker/import) (issue #73-C1)
 	lensReg    // on-disk lens registry under <root>/lenses/ (issue #73-C1)
-	facetIO    // L2 bi-temporal facets (reviewer is sole writer) (issue #73-C1)
+	facetIO    // L2 bi-temporal facets (written by the distill passes + merge) (issue #73-C1)
 	rawIO      // L0 append-only transcript + size/sample/prune helpers (issue #73-C1)
 	obsIO      // L1 observations + in-session staged buffer (issue #73-C1)
 	queue      // distillation queue: per-(session,lens) watermark/backoff (issue #73-C1)
@@ -184,8 +182,6 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// --- file paths for user-authored, non-DB state ------------------------------
-
 // UnreviewedDelta reports how many observations for a lens sit past its review
 // watermark — the per-lens backlog `witness doctor` surfaces so a frozen fold (#123)
 // is visible rather than silent. Combines the obsIO count with the configFile watermark.
@@ -227,6 +223,8 @@ func (s *Store) WhyEmpty(lens string) EmptyReason {
 	}
 	return NoFacets
 }
+
+// --- file paths for user-authored, non-DB state ------------------------------
 
 func (s *Store) ConfigPath() string { return configTomlPath(s.Root) }
 func (s *Store) LogPath() string    { return filepath.Join(s.Root, "witness.log") }

@@ -12,7 +12,7 @@ import (
 //
 // The watermark is per-(session, lens) (issue #55): each lens tracks how far it has
 // mined a session independently, so enabling a NEW lens backfills only that lens
-// over history without re-mining the always-on `default` (or any other) lens. Every
+// over history without re-mining `default` (or any other) lens. Every
 // queue op takes a lens; the #49-C2 raw-generation CAS is preserved, now also
 // matching on lens. Stats.LastReview reads the `meta` review stamp via the shared
 // metaGet primitive rather than the metaKV type, keeping this concern a leaf.
@@ -418,7 +418,7 @@ func (q *queue) ConfidenceLogCount(lens string) int {
 // row's ts is unparseable (or empty), and a NULL fails both range comparisons. That is the
 // intended reading — a session with no known time cannot claim to fall inside a window —
 // and the DEFAULT drain (no range) still picks these up, so nothing is stranded outright.
-// What was wrong is that the skip was SILENT: `witness distill start --since ...` reported
+// What was wrong is that the skip was SILENT: `witness worker run --since ...` reported
 // "nothing pending" while sessions sat there excluded for a reason the user could not see.
 // MAX ignores NULLs, so a session with even one usable ts is NOT counted here. Read-only.
 func (q *queue) SessionsWithNoUsableTimestamp() int {
@@ -540,11 +540,11 @@ func (q *queue) NextBackoffAttempt(lenses []string, now time.Time) (time.Time, b
 // drained. Keying on the watermark (not a mere marker) means a RESUMED session
 // whose log gains new turns is picked up again — and a newly-enabled lens makes
 // every historical session pending FOR THAT LENS without disturbing lenses already
-// caught up. `lenses` is the active-lens name set (default + enabled); it is passed
+// caught up. `lenses` is the active-lens name set (the enabled lenses); it is passed
 // in rather than derived here so the store stays out of lens/config loading and a
 // config-enabled-but-unloadable lens can be excluded by the caller (else the query
 // would keep offering a session no worker can actually mine — a no-progress cycle).
-// An empty list falls back to `["default"]` (the always-on lens).
+// An empty list means no active lens, so nothing is pending.
 func (q *queue) PendingSessions(lenses []string) ([]string, error) {
 	return q.PendingSessionsUpdatedBetween(lenses, time.Time{}, time.Time{})
 }
@@ -708,7 +708,7 @@ func (q *queue) Stats(lenses []string) Stats {
 			      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, args...).Scan(&st.Pending)
 		// BackedOff counts distinct sessions with an ACTIVE lens currently sleeping on a
 		// retry. Filter to active lenses (like Pending): a backoff row left on a disabled
-		// lens is inert (never mined), so counting it would make `distill start --all` and
+		// lens is inert (never mined), so counting it would make `worker run` and
 		// `lens backfill` falsely report "incomplete" when every active lens is caught up.
 		backoffValues, backoffArgs := lensValuesClause(activeLensList(lenses))
 		bargs := append([]any{}, backoffArgs...)

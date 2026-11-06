@@ -1,18 +1,20 @@
-// Package store defines the on-disk data model and IO for the witness layers,
-// plus the filesystem-as-queue used by the detached worker.
+// Package store defines the on-disk data model and IO for the witness layers. The
+// database doubles as the detached worker's queue (the per-(session, lens) `progress`
+// watermark), so there is no separate queue on disk.
 //
 // Layering (raw -> observations -> facets -> profile; L0/L1/L2 are shorthand):
 //
 //	raw          — GROUND TRUTH transcript, append-only, never LLM-touched   (L0)
 //	observations — derived, append-only; written ONLY by the worker          (L1)
-//	facets       — derived, bi-temporal; written ONLY by the reviewer        (L2)
+//	facets       — derived, bi-temporal; written by the distill passes + merge (L2)
 //	profile      — narrative summary distilled from facets; human-readable   (L4)
 //
 // (The Lx tags are shorthand; L3 is intentionally unused — the profile is a prose
 // rendering that sits directly on top of the facets.)
 //
-// Every observation and facet carries a `lens` tag. The "default" lens is
-// global (runs on every session); repo lenses are scoped (opt-in per repo).
+// Every observation and facet carries a `lens` tag. Lenses are global: registered
+// centrally under <root>/lenses/, enabled for every session, and never read from a repo
+// (so a cloned repo cannot inject a prompt). "default" is the one witness seeds.
 package store
 
 import (
@@ -61,9 +63,9 @@ type RawRecord struct {
 	Text   string `json:"text"`             // verbatim content
 }
 
-// SessionMeta records non-content facts about a session that the worker needs —
-// chiefly the cwd, so it can resolve which repo (and thus which opted-in lens)
-// a session belongs to. Written once, on first capture of a session.
+// SessionMeta records non-content facts about a session — its cwd and start time.
+// Written once, on first import of a session. The cwd was meant to pick a repo's lens;
+// lenses became global instead, so nothing reads it today (see RecordMeta).
 type SessionMeta struct {
 	Session string `json:"session"`
 	Cwd     string `json:"cwd"`
@@ -78,7 +80,7 @@ type Observation struct {
 	ID          string    `json:"id"`                  // stable id, e.g. "obs_<hash>"
 	TS          string    `json:"ts"`                  // when the underlying moment occurred
 	Session     string    `json:"session"`             // originating session_id
-	Lens        string    `json:"lens"`                // "default" | repo lens name
+	Lens        string    `json:"lens"`                // the registered lens that mined it
 	Dimension   string    `json:"dimension"`           // lens-defined axis (e.g. "thinking")
 	Observation string    `json:"observation"`         // the noticed thing, one sentence
 	Evidence    string    `json:"evidence"`            // short verbatim/paraphrase anchor into L0
