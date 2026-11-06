@@ -151,7 +151,7 @@ type PortraitFile struct {
 }
 
 // Portrait is one portrait as the reading column draws it. Sentence numbers (Sentence.N, the
-// index into Links, Keyword.Sentences) are distill.SplitSentences' numbering of the whole
+// index into Links, Keyword.Sentences) are sentence.SplitSentences' numbering of the whole
 // file — the numbering the stored links were written against.
 type Portrait struct {
 	ID       string    `json:"id"`

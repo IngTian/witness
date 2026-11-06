@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/sentence"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -77,7 +77,7 @@ func buildPortrait(f PortraitFile, kind string, ids map[facetID]int, loc *time.L
 	// changed its ordering or a merge shifted everything.
 	p.Sources = f.SourcesOK && len(f.Sources.Sentences) == n
 	if p.Sources {
-		sentences := distill.SplitSentences(f.Markdown)
+		sentences := sentence.SplitSentences(f.Markdown)
 		for i, stored := range f.Sources.Sentences {
 			if i >= len(sentences) || stored.Text != sentences[i] {
 				p.Sources = false
@@ -128,25 +128,25 @@ func linkIDs(links []store.TraitLink, ids map[facetID]int) []int {
 	return append([]int{}, direct[:min(3, len(direct))]...)
 }
 
-// portraitBlocks rebuilds the headings, paragraphs and list items that SplitSentences reads,
-// keeping what it throws away (headings, bold), and returns them with the sentence count.
-// The line loop mirrors SplitSentences' block pass exactly; TestPortraitSentencesMatchSplitter
-// pins that the sentences come out identical, in order, since stored links index them.
+// portraitBlocks turns the splitter's own blocks into page blocks, keeping what it throws away
+// (headings, bold), and returns them with the sentence count. It walks sentence.PortraitBlocks
+// rather than re-reading the markdown, so the numbering cannot drift from the resolver's;
+// TestPortraitSentencesMatchSplitter pins that, since stored links index these sentences.
 func portraitBlocks(md string) ([]Block, int) {
 	blocks := []Block{}
 	n := 0
-	var para []string
-	emit := func(kind, raw string) {
-		// SplitSentences picks block kinds from the text, so a block passed in bare could be
-		// re-read as something else: "**#1** first" is a heading once its ** is gone, "- x" a
-		// nested list item. "- "+raw is always ONE list item whose text is exactly raw, which
-		// is precisely the split SplitSentences(md) made of this block.
-		sents := distill.SplitSentences("- " + raw)
-		if len(sents) == 0 {
-			return // every sentence too short to keep: nothing to number or click
+	for _, sb := range sentence.PortraitBlocks(md) {
+		if sb.Kind == "h" {
+			text := strings.TrimSpace(strings.ReplaceAll(strings.TrimLeft(sb.Text, "#"), "**", ""))
+			blocks = append(blocks, Block{Kind: "h", Text: text, Sentences: []Sentence{}})
+			continue
 		}
-		plain, bold := unbold(raw)
-		b := Block{Kind: kind, Sentences: make([]Sentence, 0, len(sents))}
+		sents := sentence.BlockSentences(sb)
+		if len(sents) == 0 {
+			continue // every sentence too short to keep: nothing to number or click
+		}
+		plain, bold := unbold(sb.Text)
+		b := Block{Kind: sb.Kind, Sentences: make([]Sentence, 0, len(sents))}
 		at := 0
 		for _, s := range sents {
 			b.Sentences = append(b.Sentences, Sentence{N: n, Runs: runs(plain, bold, s, &at)})
@@ -154,29 +154,6 @@ func portraitBlocks(md string) ([]Block, int) {
 		}
 		blocks = append(blocks, b)
 	}
-	flush := func() {
-		if len(para) > 0 {
-			emit("p", strings.Join(para, " "))
-			para = nil
-		}
-	}
-	for _, line := range strings.Split(strings.ReplaceAll(md, "\r\n", "\n"), "\n") {
-		t := strings.TrimSpace(line)
-		switch {
-		case t == "":
-			flush()
-		case strings.HasPrefix(t, "#"):
-			flush()
-			text := strings.TrimSpace(strings.ReplaceAll(strings.TrimLeft(t, "#"), "**", ""))
-			blocks = append(blocks, Block{Kind: "h", Text: text, Sentences: []Sentence{}})
-		case distill.IsListItem(t):
-			flush()
-			emit("li", distill.StripListMarker(t))
-		default:
-			para = append(para, t)
-		}
-	}
-	flush()
 	return blocks, n
 }
 

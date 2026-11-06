@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/sentence"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -209,7 +210,7 @@ func (sm *Summarizer) resolveOneNotebook(ctx context.Context, portrait string, l
 		return nil
 	}
 
-	sentences := SplitSentences(md)
+	sentences := sentence.SplitSentences(md)
 	if len(sentences) == 0 {
 		// No sentences: write an empty result so it's no longer stale.
 		return sm.Store.WritePortraitSources(portrait, store.PortraitHash(md), store.PortraitSources{}, time.Now())
@@ -435,7 +436,7 @@ func (sm *Summarizer) resolveUnified(ctx context.Context) error {
 		return nil // no unified portrait or empty
 	}
 
-	sentences := SplitSentences(md)
+	sentences := sentence.SplitSentences(md)
 	if len(sentences) == 0 {
 		// No sentences: write an empty result so it's no longer stale.
 		return sm.Store.WritePortraitSources(store.ProfileUnified, store.PortraitHash(md), store.PortraitSources{}, time.Now())

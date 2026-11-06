@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/sentence"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -223,9 +223,9 @@ func TestWriteE2EFixtures(t *testing.T) {
 		t.Fatalf("write hostile.html: %v", err)
 	}
 
-	// Verify distill.SplitSentences works the same way the test helpers expect.
+	// Verify sentence.SplitSentences works the same way the test helpers expect.
 	// This is defensive: if the sentence splitter changes, the e2e fixture must too.
-	overallSentences := distill.SplitSentences(fullPortraits[0].Markdown)
+	overallSentences := sentence.SplitSentences(fullPortraits[0].Markdown)
 	if len(overallSentences) != 4 {
 		t.Errorf("overall portrait split into %d sentences, want 4", len(overallSentences))
 	}
