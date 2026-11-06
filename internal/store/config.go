@@ -131,16 +131,10 @@ func (c *configFile) LoadConfig() Config {
 		return cfg
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
+		k, v, ok := parseConfigLine(line)
 		if !ok {
 			continue
 		}
-		k = strings.TrimSpace(k)
-		v = strings.Trim(strings.TrimSpace(v), `"`)
 		switch k {
 		case "runner":
 			if v != "" {
@@ -285,7 +279,7 @@ func (c *configFile) adoptRunnerBound() {
 		return
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		if isConfigKeyLine(line, "runner") {
+		if k, _, ok := parseConfigLine(line); ok && k == "runner" {
 			_ = metaSet(c.db, runnerBoundKey, "1")
 			return
 		}
@@ -303,12 +297,6 @@ func parseBool(v string) (bool, bool) {
 	}
 }
 
-// SetRunner writes `runner = "<runner>"` into config.toml, creating or replacing
-// the existing line. Used by `install` to bind the distillation runtime to the
-// integration that was just wired (Claude Code → claude, OpenCode → opencode) so
-// the user does not have to hand-edit config. Other lines (comments, lenses,
-// other keys) are preserved verbatim. The value is quoted to match the format
-// EnsureConfigFile writes and to stay consistent with other string fields.
 // UnsetRunner makes the runner genuinely UNBOUND: it REMOVES the `runner` line from
 // config.toml and clears the runner-bound flag, so resolution falls back to WITNESS_RUNNER and
 // then the built-in default.
@@ -331,15 +319,13 @@ func (c *configFile) UnsetRunner() error {
 	return metaSet(c.db, runnerBoundKey, "")
 }
 
-func (c *configFile) SetRunner(runner string) error {
-	if err := c.setConfigKey("runner", runner); err != nil {
-		return err
-	}
-	// Mark that a runner was explicitly chosen via install, so ResolveRunner lets
-	// this persisted value win over any WITNESS_RUNNER env fallback (a dual
-	// CC+OpenCode user who ran `install` is never hijacked by the plugin env).
-	return metaSet(c.db, runnerBoundKey, "1")
-}
+// SetRunner writes `runner = "<runner>"` into config.toml, creating or replacing
+// the existing line, and marks the runner bound so this persisted value wins over any
+// WITNESS_RUNNER env fallback (a dual CC+OpenCode user who ran `install` is never
+// hijacked by the plugin env). Used by `install` to bind the distillation runtime to the
+// integration that was just wired (Claude Code → claude, OpenCode → opencode) so the user
+// does not have to hand-edit config.
+func (c *configFile) SetRunner(runner string) error { return c.SetConfigString("runner", runner) }
 
 // SetConfigString sets a string-valued config.toml key (creating or replacing its
 // line, preserving everything else), the CLI-facing counterpart to hand-editing the
@@ -367,21 +353,12 @@ func (c *configFile) SetConfigString(key, value string) error {
 // perturb which runner resolves. (Previously this had to special-case a marker
 // comment to avoid exactly that coupling.)
 func (c *configFile) setConfigKey(key, value string) error {
-	// Same read-modify-write hazard as rewriteEnabledLens: unserialized, a concurrent
-	// process's `runner =` binding or lens line is silently discarded.
-	if unlock, ok := c.configMutationLock(); ok {
-		defer unlock()
-	}
-	data, err := os.ReadFile(c.configPath())
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
 	newLine := fmt.Sprintf("%s = %q", key, value)
-	var kept []string
-	set := false
-	if len(data) > 0 {
-		for _, line := range strings.Split(string(data), "\n") {
-			if isConfigKeyLine(line, key) {
+	return c.editConfigLines(func(lines []string) []string {
+		var kept []string
+		set := false
+		for _, line := range lines {
+			if k, _, ok := parseConfigLine(line); ok && k == key {
 				if !set {
 					kept = append(kept, newLine)
 					set = true
@@ -390,15 +367,11 @@ func (c *configFile) setConfigKey(key, value string) error {
 			}
 			kept = append(kept, line)
 		}
-	}
-	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
-		kept = kept[:len(kept)-1]
-	}
-	if !set {
-		kept = append(kept, newLine)
-	}
-	out := strings.Join(kept, "\n") + "\n"
-	return writeAtomic(c.configPath(), []byte(out))
+		if !set {
+			kept = append(kept, newLine)
+		}
+		return kept
+	})
 }
 
 // removeConfigKey DELETES a key's line(s) from config.toml, preserving everything else.
@@ -406,38 +379,52 @@ func (c *configFile) setConfigKey(key, value string) error {
 // The counterpart to setConfigKey, for the case where "absent" and "present but empty" mean
 // different things. That distinction is load-bearing for `runner`: adoptRunnerBound re-stamps
 // the bound flag whenever ANY `runner` line exists, so blanking the value would silently
-// re-bind on the next Open (see UnsetRunner). Takes the same configMutationLock and writes
-// through the same writeAtomic staging, so it cannot lose a concurrent process's edit.
-//
-// A missing file is not an error: there is nothing to remove.
+// re-bind on the next Open (see UnsetRunner). An absent key (or a missing file) leaves the
+// file untouched: editConfigLines never rewrites, or creates, a file for nothing.
 func (c *configFile) removeConfigKey(key string) error {
+	return c.editConfigLines(func(lines []string) []string {
+		var kept []string
+		for _, line := range lines {
+			if k, _, ok := parseConfigLine(line); ok && k == key {
+				continue // drop every line for this key, including duplicates
+			}
+			kept = append(kept, line)
+		}
+		return kept
+	})
+}
+
+// editConfigLines is THE read-modify-write of config.toml; every writer goes through it, so
+// none can forget the two things a writer must do: hold configMutationLock across the read
+// and the write (unserialized, a concurrent process's edit is silently lost — #133 measured
+// 22 lost updates in 20 trials), and write through writeAtomic. edit gets the current lines
+// (none for a missing file) with trailing blank lines trimmed, and returns the new ones.
+// When nothing changed the file is neither rewritten nor created.
+func (c *configFile) editConfigLines(edit func(lines []string) []string) error {
 	if unlock, ok := c.configMutationLock(); ok {
 		defer unlock()
 	}
 	data, err := os.ReadFile(c.configPath())
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	var kept []string
-	removed := false
-	for _, line := range strings.Split(string(data), "\n") {
-		if isConfigKeyLine(line, key) {
-			removed = true
-			continue // drop every line for this key, including duplicates
-		}
-		kept = append(kept, line)
+	lines := trimTrailingBlank(strings.Split(string(data), "\n"))
+	out := trimTrailingBlank(edit(slices.Clone(lines)))
+	if slices.Equal(out, lines) {
+		return nil
 	}
-	if !removed {
-		return nil // already absent; don't rewrite the file for nothing
+	text := strings.Join(out, "\n")
+	if text != "" {
+		text += "\n"
 	}
-	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
-		kept = kept[:len(kept)-1]
+	return writeAtomic(c.configPath(), []byte(text))
+}
+
+func trimTrailingBlank(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
 	}
-	out := strings.Join(kept, "\n") + "\n"
-	return writeAtomic(c.configPath(), []byte(out))
+	return lines
 }
 
 // EnsureConfigFile creates config.toml with a full commented template if it does
@@ -516,15 +503,19 @@ review_max_chars = 16000
 	return writeAtomic(c.configPath(), []byte(tpl))
 }
 
-// isConfigKeyLine reports whether a config line is a `<key> = ...` assignment for the
-// given key (a real assignment, not a comment or blank line).
-func isConfigKeyLine(line, key string) bool {
+// parseConfigLine is the one tokenizer for a config.toml line: `<key> = <value>` with the
+// value's surrounding quotes dropped. ok is false for a blank line, a comment, or anything
+// that is not an assignment.
+func parseConfigLine(line string) (key, value string, ok bool) {
 	t := strings.TrimSpace(line)
 	if t == "" || strings.HasPrefix(t, "#") {
-		return false
+		return "", "", false
 	}
-	k, _, ok := strings.Cut(t, "=")
-	return ok && strings.TrimSpace(k) == key
+	k, v, ok := strings.Cut(t, "=")
+	if !ok {
+		return "", "", false
+	}
+	return strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"`), true
 }
 
 // --- review cadence ----------------------------------------------------------
@@ -680,48 +671,19 @@ func (c *configFile) configMutationLock() (unlock func(), ok bool) {
 }
 
 // rewriteEnabledLens drops any existing `lens = <name>` line for name, then (if
-// enabling) appends one. Read-modify-write of the whole file under
-// configMutationLock, atomic on rename. Comments and other settings are preserved verbatim.
+// enabling) appends one. Comments and other settings are preserved verbatim.
 func (c *configFile) rewriteEnabledLens(name string, enable bool) error {
-	if unlock, ok := c.configMutationLock(); ok {
-		defer unlock()
-	}
-	data, err := os.ReadFile(c.configPath())
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	var kept []string
-	if len(data) > 0 {
-		for _, line := range strings.Split(string(data), "\n") {
-			if n, ok := lensLineName(line); ok && n == name {
+	return c.editConfigLines(func(lines []string) []string {
+		var kept []string
+		for _, line := range lines {
+			if k, v, ok := parseConfigLine(line); ok && k == "lens" && v == name {
 				continue // drop the existing entry for this name
 			}
 			kept = append(kept, line)
 		}
-	}
-	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
-		kept = kept[:len(kept)-1]
-	}
-	if enable {
-		kept = append(kept, fmt.Sprintf("lens = %s", name))
-	}
-	out := strings.Join(kept, "\n")
-	if out != "" {
-		out += "\n"
-	}
-	return writeAtomic(c.configPath(), []byte(out))
-}
-
-// lensLineName returns the lens name in a `lens = <name>` config line, or
-// ok=false for any other (or commented) line.
-func lensLineName(line string) (string, bool) {
-	t := strings.TrimSpace(line)
-	if t == "" || strings.HasPrefix(t, "#") {
-		return "", false
-	}
-	k, v, ok := strings.Cut(t, "=")
-	if !ok || strings.TrimSpace(k) != "lens" {
-		return "", false
-	}
-	return strings.Trim(strings.TrimSpace(v), `"`), true
+		if enable {
+			kept = append(trimTrailingBlank(kept), fmt.Sprintf("lens = %s", name))
+		}
+		return kept
+	})
 }
