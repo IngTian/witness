@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/IngTian/witness/internal/platform"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 )
 
@@ -668,7 +667,7 @@ func TestWireUnwireInstallShapes(t *testing.T) {
 	// nothing — and it checked the WRONG thing: what matters is that the help names
 	// every target wire can actually dispatch to, so a user is never told to type a
 	// venue that is not registered (or left unaware of one that is).
-	targets := platform.InstallTargets()
+	targets := editorNames()
 	if len(targets) < 2 {
 		t.Fatalf("expected at least two install targets, got %v", targets)
 	}

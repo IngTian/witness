@@ -268,7 +268,7 @@ func TestImportSaysWhatItDidAndWhy(t *testing.T) {
 		t.Errorf("an empty codex import:\n%s (%v)", out, err)
 	}
 
-	agents := strings.Join(platform.InstallTargets(), ", ")
+	agents := strings.Join(editorNames(), ", ")
 	for _, agent := range []string{"vscode", "file"} { // file is pushed in by `witness ingest`, never imported
 		if err := cmdImport([]string{"--agent", agent}); err == nil || err.Error() != `unknown agent "`+agent+`" — want one of: `+agents {
 			t.Errorf("unknown agent %s: %v", agent, err)
@@ -285,7 +285,7 @@ func TestImportSaysWhatItDidAndWhy(t *testing.T) {
 }
 
 func TestWireNamesTheEditorChoices(t *testing.T) {
-	want := strings.Join(platform.InstallTargets(), "|")
+	want := strings.Join(editorNames(), "|")
 	for _, c := range []*cobra.Command{newWireCmd(), newUnwireCmd()} {
 		err := c.Args(c, nil)
 		if err == nil || err.Error() != "which editor? witness "+c.Name()+" <"+want+">" {
@@ -294,7 +294,7 @@ func TestWireNamesTheEditorChoices(t *testing.T) {
 	}
 	for _, run := range []func([]string) error{cmdInstall, cmdUninstall} {
 		err := run([]string{"vscode"})
-		if err == nil || err.Error() != `unknown editor "vscode" — want one of: `+strings.Join(platform.InstallTargets(), ", ") {
+		if err == nil || err.Error() != `unknown editor "vscode" — want one of: `+strings.Join(editorNames(), ", ") {
 			t.Errorf("unknown editor: %v", err)
 		}
 	}
@@ -305,7 +305,7 @@ func TestWireNamesTheEditorChoices(t *testing.T) {
 func TestWiringACaptureOnlyVenueNamesTheEffectiveRunner(t *testing.T) {
 	const venue = "fakecaptureonly2"
 	called := false
-	registerCaptureOnly2.Do(func() { platform.RegisterInstaller(venue, fakeCaptureOnlyInstaller{&called}) })
+	registerFakeCaptureOnlyEditor(t, venue, &called)
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	t.Setenv(noDefaultLensEnv, "1")
 	t.Setenv("WITNESS_RUNNER", "opencode") // unbound archive: the env decides, as for an npm OpenCode user
@@ -317,8 +317,6 @@ func TestWiringACaptureOnlyVenueNamesTheEffectiveRunner(t *testing.T) {
 		t.Errorf("the screen opens with its title:\n%s", out)
 	}
 }
-
-var registerCaptureOnly2 sync.Once
 
 // unwire said "removed (if it was present)" on every run. It now says what it removed.
 func TestUnwireSaysWhetherAnythingWasRemoved(t *testing.T) {

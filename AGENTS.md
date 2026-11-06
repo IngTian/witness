@@ -51,7 +51,8 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - `internal/platform/{claude,opencode,codex,file}/` — the per-source adapters.
   `registry.go` composes identity, rendering and import with optional capture/runner
   capabilities; `cmd/commands/root.go` imports the adapters. Installers register
-  separately through `installer.go` and have cmd-side implementations.
+  separately: a cmd-local wire-target map (`cmd/commands/installers.go`) with cmd-side
+  implementations.
   `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
 - `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding
   model) relative to the binary via `os.Executable()` when no env var points at

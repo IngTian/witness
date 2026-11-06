@@ -5,7 +5,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -307,5 +306,5 @@ func renderCurrentFacets(name, dataName string, facets []store.Facet, decaySeq i
 
 // wireCommand is the copyable "connect an editor" step, naming the editors wire really accepts.
 func wireCommand() string {
-	return "witness wire <" + strings.Join(platform.InstallTargets(), "|") + ">"
+	return "witness wire <" + strings.Join(editorNames(), "|") + ">"
 }

@@ -114,9 +114,9 @@ func cmdImport(args []string) error {
 }
 
 // importAgents lists the agents import takes — the editors, in the one order wire uses
-// (platform.InstallTargets). The "file" source is pushed in by `witness ingest`; its import was a
+// (editorNames). The "file" source is pushed in by `witness ingest`; its import was a
 // silent no-op that reported "imported 0 raw record(s)" although the usage never offered it.
-func importAgents(sep string) string { return strings.Join(platform.InstallTargets(), sep) }
+func importAgents(sep string) string { return strings.Join(editorNames(), sep) }
 
 func printImportResult(stats platform.ImportStats, kicked, noKick bool) {
 	name := bold(stats.Agent)
@@ -181,7 +181,7 @@ func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorke
 	defer setupLogging(st)()
 
 	p, ok := platform.ByName(agent)
-	if _, editor := platform.InstallerFor(agent); !ok || !editor {
+	if _, isEditor := editors[agent]; !ok || !isEditor {
 		return platform.ImportStats{}, false, fmt.Errorf("unknown agent %q — want one of: %s", agent, importAgents(", "))
 	}
 	// The Importer owns its own reconcile mechanics (OpenCode takes the sync lock
