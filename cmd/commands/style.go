@@ -88,8 +88,8 @@ func yellow(s string) string { return styled(ansiYellow, s) }
 func red(s string) string    { return styled(ansiRed, s) }
 func cyan(s string) string   { return styled(ansiCyan, s) }
 
-// okGlyph / warnGlyph / badGlyph are the status marks used down the left margin
-// of doctor's report. They degrade to ASCII when color is off so a non-UTF8 or
+// okGlyph / warnGlyph / badGlyph are the status marks result rows lead with, on every
+// command's screen. They degrade to ASCII when color is off so a non-UTF8 or
 // piped terminal still reads cleanly.
 func okGlyph() string   { return outPen().mark(ansiGreen, "✓", "[ok]") }
 func warnGlyph() string { return outPen().mark(ansiYellow, "!", "[!]") }

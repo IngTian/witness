@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// A minimal spinner for the one place a witness command blocks on a model: read-time L4
-// regeneration (issue #100), measured at ~13s. Without it `witness profile` prints nothing for
-// twelve seconds and looks hung, which is indistinguishable from a wedged runner.
+// A minimal spinner for where a witness command blocks on a model call it cannot count: L4
+// regeneration (read-time in `witness profile`, issue #100, measured at ~13s; and after a review)
+// and linking the profile to its sources. Without it `witness profile` prints nothing for twelve
+// seconds and looks hung, which is indistinguishable from a wedged runner.
 //
 // It follows the same contract as style.go: decorative only, and silent unless stdout is a real
 // TTY with NO_COLOR unset. That is what keeps `witness profile > file`, `| head`, `--json`, and
