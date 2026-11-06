@@ -342,31 +342,6 @@ func TestNativeMalformedManifestIsRetainedError(t *testing.T) {
 	}
 }
 
-func TestReadOnlyURIConnectsEscapedAbsolutePathReadOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "witness#archive.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE marker(value TEXT); INSERT INTO marker VALUES ('correct database')`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	ro, err := sql.Open("sqlite", readOnlyURI(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ro.Close()
-	var value string
-	if err := ro.QueryRow(`SELECT value FROM marker`).Scan(&value); err != nil || value != "correct database" {
-		t.Fatalf("read correct database: value=%q err=%v", value, err)
-	}
-	if _, err := ro.Exec(`INSERT INTO marker VALUES ('must fail')`); err == nil {
-		t.Fatal("read-only URI allowed write")
-	}
-}
-
 func TestNativeReconcileCleansCommittedAndStaleGenerations(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "runtime")
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {

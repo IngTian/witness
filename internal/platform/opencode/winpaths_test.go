@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -106,20 +107,20 @@ func TestParseOpenCodeVersionShapes(t *testing.T) {
 		{"not found at all", "opencode: command not found", false, 0, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// The REAL gate, fed this output, so the version→decision mapping is pinned on
+			// ValidateOpenCodeCapability itself rather than on a copy of its condition.
+			prev := openCodeVersionCommand
+			t.Cleanup(func() { openCodeVersionCommand = prev })
+			openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte(tc.in), nil }
+			if gate := ValidateOpenCodeCapability(context.Background()) == nil; gate != tc.expectGatePassing {
+				t.Errorf("1.18 gate = %v, want %v for %q", gate, tc.expectGatePassing, tc.in)
+			}
 			major, minor, _, ok := parseOpenCodeVersion(tc.in)
 			if ok != tc.ok {
 				t.Fatalf("ok = %v, want %v (in=%q)", ok, tc.ok, tc.in)
 			}
-			if !ok {
-				return
-			}
-			if major != tc.major || minor != tc.minor {
+			if ok && (major != tc.major || minor != tc.minor) {
 				t.Errorf("parsed %d.%d, want %d.%d", major, minor, tc.major, tc.minor)
-			}
-			// Mirror ValidateOpenCodeCapability's gate so the version→decision mapping is pinned.
-			gate := !(major < 1 || (major == 1 && minor < 18))
-			if gate != tc.expectGatePassing {
-				t.Errorf("1.18 gate = %v, want %v for %q", gate, tc.expectGatePassing, tc.in)
 			}
 		})
 	}

@@ -353,9 +353,8 @@ func TestLoadOpenCodeModelsUsesTheCacheWithoutSpawning(t *testing.T) {
 	}
 }
 
-// The source must keep every `opencode` spawn on a context, and the probe deadline must
-// derive from the caller's ctx. A bare exec.Command here is the unreapable-orphan shape that
-// leaked 366 `claude` children elsewhere in this repo.
+// The probe deadline must derive from the caller's ctx. (That every `opencode` spawn goes through
+// the context-bound openCodeCommand is TestEveryOpenCodeSpawnGoesThroughTheOneHelper's scan.)
 func TestEveryOpenCodeSpawnIsContextBound(t *testing.T) {
 	src, err := os.ReadFile("server.go")
 	if err != nil {
@@ -365,15 +364,6 @@ func TestEveryOpenCodeSpawnIsContextBound(t *testing.T) {
 	// miss, and the slice that follows then panics on a negative bound. Seen on a real
 	// Windows run. .gitattributes pins *.go to LF too; this keeps the test honest regardless.
 	src = []byte(normalizeOpenCodeNewlines(string(src)))
-	for n, line := range strings.Split(string(src), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//") {
-			continue
-		}
-		if strings.Contains(line, `exec.Command("opencode"`) {
-			t.Errorf("server.go:%d spawns opencode WITHOUT a context: %s", n+1, trimmed)
-		}
-	}
 	// loadOpenCodeModels must apply the probe bound (it builds its command inline).
 	i := strings.Index(string(src), "func loadOpenCodeModels(")
 	if i < 0 {
