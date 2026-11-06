@@ -92,6 +92,12 @@ func TestIsStrayServeLine(t *testing.T) {
 		{"not opencode at all", "claude -p --model haiku", false},
 		{"empty line", "", false},
 		{"opencode substring in another binary is fine (still needs serve+flags)", "/opt/my-opencode-helper/tool run", false},
+		// Windows quotes an argv[0] containing a space (syscall.makeCmdLine), so a profile such as
+		// `C:\Users\John Smith` puts the executable inside quotes. Splitting on whitespace alone made
+		// the executable `"C:\Users\John`, and the reaper matched nothing for that user.
+		{"windows quoted executable with a space", `"C:\Users\John Smith\.opencode\bin\opencode.exe" serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR`, true},
+		{"windows quoted executable that is not opencode", `"C:\Program Files\nodejs\node.exe" opencode serve --pure --hostname 127.0.0.1`, false},
+		{"unterminated quote", `"C:\Users\John Smith\opencode.exe serve --pure --hostname 127.0.0.1`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

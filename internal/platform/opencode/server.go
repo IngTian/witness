@@ -1044,7 +1044,18 @@ func isStrayServeLine(cmdline string) bool {
 	if len(fields) == 0 {
 		return false
 	}
-	if !isOpenCodeExe(fields[0]) {
+	exe := fields[0]
+	// Windows quotes an argv[0] that contains a space (syscall.makeCmdLine), so a profile such as
+	// `C:\Users\John Smith` arrives as `"C:\Users\John Smith\...\opencode.exe" serve ...`, which
+	// strings.Fields cuts inside the path. Take the quoted span as the executable.
+	if s := strings.TrimSpace(cmdline); strings.HasPrefix(s, `"`) {
+		end := strings.IndexByte(s[1:], '"')
+		if end < 0 {
+			return false
+		}
+		exe = s[1 : 1+end]
+	}
+	if !isOpenCodeExe(exe) {
 		return false
 	}
 	// Require the full private-serve shape so a user's own `opencode serve` (or any
