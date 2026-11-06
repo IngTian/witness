@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,15 +70,12 @@ type OpenCodeServer struct {
 
 	mu      sync.Mutex
 	closed  bool
-	pidFile string // where this serve's pid is recorded; "" = no tracking (no runtimeRoot)
+	pidFile string // where this serve's pid is recorded; "" only for a test-built server
 }
 
 // servePIDPath is where a private serve records its pid, inside the witness-owned OpenCode
-// runtime root. Empty runtimeRoot (the legacy shared-DB path) means no tracking.
+// runtime root.
 func servePIDPath(runtimeRoot string) string {
-	if runtimeRoot == "" {
-		return ""
-	}
 	return filepath.Join(runtimeRoot, ".witness-serve.pid")
 }
 
@@ -130,9 +129,6 @@ type serveRecord struct {
 // costs the user their work.
 func reapPriorServe(runtimeRoot string) {
 	pidFile := servePIDPath(runtimeRoot)
-	if pidFile == "" {
-		return
-	}
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return // no record: nothing to reap
@@ -221,12 +217,10 @@ func serveAnswersOurPassword(rec serveRecord) bool {
 // callers pass the root explicitly.
 func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...string) (*OpenCodeServer, error) {
 	if err := ValidateOpenCodeModelsIn(ctx, runtimeRoot, models...); err != nil {
-		return nil, err
+		return nil, err // also refuses an empty runtimeRoot
 	}
-	if runtimeRoot != "" {
-		if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
-			return nil, fmt.Errorf("mkdir opencode runtime: %w", err)
-		}
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir opencode runtime: %w", err)
 	}
 	// Best-effort reap of any orphaned serve from a previous worker that was
 	// SIGKILL'd/OOM-killed before its Go cleanup (Close/ctx-cancel) could run
@@ -246,10 +240,7 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 	if err != nil {
 		return nil, err
 	}
-	password, err := randomHex(24)
-	if err != nil {
-		return nil, err
-	}
+	password := randomHex(24)
 	logs := &safeBuffer{}
 	cmd := buildOpenCodeServeCmdIn(ctx, runtimeRoot, port, password)
 	cmd.Stdout = logs
@@ -432,7 +423,7 @@ func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input str
 // runSession prompts a retained scratch session. Unlike Run, it never creates or
 // deletes the session: native manifests own that lifecycle until L1 commits.
 func (s *OpenCodeServer) runSession(ctx context.Context, sessionID, model, systemPrompt, input string) (string, error) {
-	return s.runSessionWithMessage(ctx, sessionID, "msg_"+mustRandomHex(12), model, systemPrompt, input)
+	return s.runSessionWithMessage(ctx, sessionID, "msg_"+randomHex(12), model, systemPrompt, input)
 }
 
 func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, messageID, model, systemPrompt, input string) (string, error) {
@@ -846,14 +837,15 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 // ValidateOpenCodeModelsIn ensures configured OpenCode model names are available from
 // `opencode models`, running the probe against the witness-owned runtime root rather than the user's
 // database (the probe opens its OPENCODE_DB read-write). Empty model strings are valid and mean "use
-// OpenCode's default". runtimeRoot "" keeps the ambient env, for callers that have no runtime root
-// yet.
+// OpenCode's default".
 //
-// Its own doc used to say "prefer ValidateOpenCodeModelsIn" — advice printed on the very wrapper it
-// was steering people away from. That wrapper (ValidateOpenCodeModels, which passed "") had no
-// callers and is removed; a doc comment recommending against itself is a sign the shape was already
-// understood to be wrong.
+// runtimeRoot is MANDATORY. "" used to keep the ambient env — the user's own opencode.db — which
+// #152 called a trap when it deleted the wrappers that passed it; this refuses it instead, and
+// StartOpenCodeServerIn calls this first, so serve inherits the refusal.
 func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ...string) error {
+	if runtimeRoot == "" {
+		return fmt.Errorf("opencode isolated runtime root is unavailable")
+	}
 	if err := ValidateOpenCodeCapability(ctx); err != nil {
 		return err
 	}
@@ -945,14 +937,10 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	defer cancel()
 	cmd := openCodeCommand(ctx, "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
-	// Isolated env when we have a runtime root: `opencode models` opens its OPENCODE_DB
-	// read-WRITE (and applies schema migrations), so inheriting the ambient env would
-	// reach into the USER's database from the hot Open/doctor paths — the one thing this
-	// package must never do.
-	cmd.Env = append(os.Environ(), "WITNESS_WORKER=1")
-	if runtimeRoot != "" {
-		cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
-	}
+	// Isolated env: `opencode models` opens its OPENCODE_DB read-WRITE (and applies schema
+	// migrations), so inheriting the ambient env would reach into the USER's database from
+	// the hot Open/doctor paths — the one thing this package must never do.
+	cmd.Env = replaceEnv(append(os.Environ(), "WITNESS_WORKER=1"), isolatedEnv(runtimeRoot))
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -1014,9 +1002,7 @@ func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, 
 		"OPENCODE_SERVER_PASSWORD=" + password,
 		"OPENCODE_CONFIG_CONTENT=" + openCodeConfigContent(),
 	})
-	if runtimeRoot != "" {
-		cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
-	}
+	cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
 	// Bind the serve child's lifetime to the worker (issue #54 I2) through the
 	// process-control port: on Linux proc.BindToParent sets Pdeathsig=SIGKILL so the
 	// kernel kills this serve child the instant the worker dies, even on a SIGKILL/OOM
@@ -1057,20 +1043,11 @@ func isStrayServeLine(cmdline string) bool {
 	// other opencode subcommand) is never matched.
 	want := []string{"serve", "--pure", "--hostname", "127.0.0.1"}
 	for _, tok := range want {
-		if !containsField(fields, tok) {
+		if !slices.Contains(fields, tok) {
 			return false
 		}
 	}
 	return true
-}
-
-func containsField(fields []string, want string) bool {
-	for _, f := range fields {
-		if f == want {
-			return true
-		}
-	}
-	return false
 }
 
 // (The ps-column parser and the orphan-gate scan that used isStrayServeLine now
@@ -1464,46 +1441,14 @@ func freeTCPPort() (int, error) {
 }
 
 func basicAuthToken(user, password string) string {
-	return base64Encode([]byte(user + ":" + password))
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + password))
 }
 
-func randomHex(n int) (string, error) {
+// randomHex is infallible: since Go 1.24 crypto/rand.Read never returns an error.
+func randomHex(n int) string {
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-func mustRandomHex(n int) string {
-	s, err := randomHex(n)
-	if err == nil {
-		return s
-	}
-	return fmt.Sprintf("%d", time.Now().UnixNano())
-}
-
-func base64Encode(b []byte) string {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	var out strings.Builder
-	for i := 0; i < len(b); i += 3 {
-		var chunk [3]byte
-		n := copy(chunk[:], b[i:])
-		v := uint(chunk[0])<<16 | uint(chunk[1])<<8 | uint(chunk[2])
-		out.WriteByte(alphabet[(v>>18)&0x3f])
-		out.WriteByte(alphabet[(v>>12)&0x3f])
-		if n > 1 {
-			out.WriteByte(alphabet[(v>>6)&0x3f])
-		} else {
-			out.WriteByte('=')
-		}
-		if n > 2 {
-			out.WriteByte(alphabet[v&0x3f])
-		} else {
-			out.WriteByte('=')
-		}
-	}
-	return out.String()
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 type safeBuffer struct {

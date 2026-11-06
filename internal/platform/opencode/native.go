@@ -209,11 +209,10 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
-		n.server.deleteSessionBestEffort(strings.TrimPrefix(w.Session, SessionPrefix))
 	}
 	newRequest := m.MessageID == ""
 	if newRequest {
-		m.MessageID = "msg_" + mustRandomHex(12)
+		m.MessageID = "msg_" + randomHex(12)
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
@@ -235,7 +234,7 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		// message id and reads only messages after it, so a prior attempt's output can never be
 		// mistaken for this one's.
 		if !newRequest {
-			m.MessageID = "msg_" + mustRandomHex(12)
+			m.MessageID = "msg_" + randomHex(12)
 			n.mu.Lock()
 			locked = true
 			if err = n.save(p, m); err != nil {
@@ -311,7 +310,7 @@ func (n *nativeRuntime) export(ctx context.Context, w *platform.NativeSession, s
 	}
 	// A per-call name so concurrent lenses/sessions can never share (or delete) one
 	// another's copy; sweepable by reconcile via the sourceCopyPrefix.
-	copyPath := filepath.Join(n.dir(), sourceCopyPrefix+mustRandomHex(8)+".db")
+	copyPath := filepath.Join(n.dir(), sourceCopyPrefix+randomHex(8)+".db")
 	if err = snapshotSourceDB(src, copyPath); err != nil {
 		return err
 	}
@@ -427,7 +426,8 @@ func exportedTranscriptDigest(data []byte) (string, error) {
 // single probe was always sufficient there — which is exactly why a Windows gap could go unnoticed
 // for this long. A Windows install can place per-user state under %APPDATA%/%LOCALAPPDATA% instead
 // (the desktop build's own crash reporter writes under AppData\Roaming), so those are checked too.
-// XDG_CONFIG_HOME is honoured for the same reason DefaultDBPath honours XDG_DATA_HOME.
+// OpenCode's config dir (ConfigDir: XDG_CONFIG_HOME-aware) is probed for the same reason DefaultDBPath
+// honours XDG_DATA_HOME.
 //
 // Returning the searched list is deliberate: the caller reports it, so a miss tells the user WHERE
 // witness looked rather than only that something was missing.
@@ -443,9 +443,7 @@ func findOpenCodeAuth() (path string, searched []string) {
 	if db, err := DefaultDBPath(); err == nil {
 		add(filepath.Dir(db))
 	}
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		add(filepath.Join(dir, "opencode"))
-	}
+	add(ConfigDir())
 	if home, err := os.UserHomeDir(); err == nil {
 		add(filepath.Join(home, ".local", "share", "opencode"))
 		add(filepath.Join(home, ".config", "opencode"))
@@ -667,89 +665,13 @@ func (n *nativeRuntime) generationStatus(m nativeManifest) (current, committed b
 	return currentValue != 0, committedValue != 0, nil
 }
 
-// readOnlyURI builds the SQLite `file:` URI witness uses to read a database WITHOUT being
-// able to write it — the guarantee that keeps distillation off the user's own opencode.db.
-//
-// It must NOT be built with url.URL{Scheme:"file", Path: p}. On Windows that produced
-// `file://C:%5CUsers%5C...`: the drive letter is parsed as the URI AUTHORITY and every
-// backslash is percent-encoded, so SQLite rejects it outright. Reported from a real Windows
-// run (issue #10):
-//
-//	witness.exe import --agent opencode
-//	witness: SQL logic error: invalid uri authority:
-//	  C:%5CUsers%5Ctzy20%5C.local%5Cshare%5Copencode%5Copencode.db?cache=shared&mode=ro (1)
-//
-// A SQLite file: URI wants FORWARD slashes and a leading `/` before the drive letter
-// (`file:/C:/Users/...`), and the path must not be percent-escaped. So compose it directly
-// rather than through url.URL, whose escaping rules are for HTTP-shaped URLs.
-//
-// Note filepath.ToSlash is NOT usable here: it is a no-op on non-Windows, so a Windows path
-// handled on any other GOOS (or in a cross-platform test) would keep its backslashes. The
-// replacement is unconditional on purpose, which also makes this testable off Windows.
+// readOnlyURI is the SQLite `file:` URI witness uses to read a database WITHOUT being able to
+// write it — the guarantee that keeps distillation off the user's own opencode.db. Composed by
+// platform.SQLiteFileURI, never url.URL (issue #10 — see there).
 func readOnlyURI(path string) string {
-	return sqliteFileURI(path, "mode=ro")
+	return platform.SQLiteFileURI(path, "mode=ro")
 }
 
-// sqliteFileURI is the one place a SQLite file: URI is composed, so the Windows escaping rule
-// above cannot be re-broken in one caller and not the other (it previously existed as two
-// identical copies here and in import.go, and both were wrong the same way).
-//
-// query is appended verbatim (already-encoded k=v&k=v), because these are fixed internal
-// values — no user input reaches it, so there is nothing to escape.
-//
-// The path needs SELECTIVE escaping, which is the subtlety that makes hand-rolling this
-// dangerous in both directions:
-//   - '?' and '#' MUST be escaped. They terminate the path (query / fragment), so a real data
-//     dir like `witness#archive.db` would silently open a DIFFERENT, empty database — reading
-//     the wrong file rather than failing. (A regression test covers exactly that path.)
-//   - '%' MUST be escaped first, or an existing percent in a filename would be re-read as an
-//     escape sequence.
-//   - ':' and '/' must NOT be escaped: the drive colon in `C:/…` and the separators are
-//     structural. This is precisely where url.URL got it wrong — it percent-encoded the
-//     backslashes and promoted `C:` to an authority.
-func sqliteFileURI(path, query string) string {
-	// Only resolve a RELATIVE path. filepath.Abs is GOOS-dependent: on non-Windows it does not
-	// recognize `C:\dir\file` as absolute and prepends the current directory, producing
-	// `file:/<cwd>/C:/dir/file`. That matters for more than tests — it is why this rule must be
-	// explicit rather than delegated — and it keeps the function verifiable off Windows.
-	if !isAbsolutePath(path) {
-		if abs, err := filepath.Abs(path); err == nil {
-			path = abs
-		}
-	}
-	p := strings.ReplaceAll(path, `\`, "/")
-	// Order matters: '%' first, so the escapes introduced below are not double-escaped.
-	p = strings.ReplaceAll(p, "%", "%25")
-	p = strings.ReplaceAll(p, "?", "%3F")
-	p = strings.ReplaceAll(p, "#", "%23")
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p // a Windows path starts at the drive letter: C:/... -> /C:/...
-	}
-	uri := "file:" + p
-	if query != "" {
-		uri += "?" + query
-	}
-	return uri
-}
-
-// isAbsolutePath recognizes an absolute path in EITHER convention, regardless of the running
-// GOOS: a leading separator (`/foo`, `\\server\share`) or a drive letter (`C:\foo`, `c:/foo`).
-// filepath.IsAbs only understands the host's own convention, which is not enough here — the
-// same composition must behave identically wherever it runs.
-func isAbsolutePath(p string) bool {
-	if p == "" {
-		return false
-	}
-	if p[0] == '/' || p[0] == '\\' {
-		return true
-	}
-	// Drive-letter form: exactly one ASCII letter, a colon, then a separator.
-	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
-		c := p[0] | 0x20 // lowercase
-		return c >= 'a' && c <= 'z'
-	}
-	return false
-}
 func commandOutput(ctx context.Context, env []string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing opencode command")

@@ -1,7 +1,6 @@
 package platform_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -30,9 +29,8 @@ func TestClaudeCapturerWritesAndStampsPlatform(t *testing.T) {
 	capturer := p.(platform.Capturer)
 
 	payload := []byte(`{"session_id":"cc1","prompt":"hello"}`)
-	ok, err := capturer.Capture(st, payload, time.Now())
-	if err != nil || !ok {
-		t.Fatalf("Capture: ok=%v err=%v", ok, err)
+	if err := capturer.Capture(st, payload, time.Now()); err != nil {
+		t.Fatalf("Capture: %v", err)
 	}
 	if raw, _ := st.ReadRaw("cc1"); len(raw) != 1 || raw[0].Text != "hello" {
 		t.Fatalf("L0 not written: %+v", raw)
@@ -52,7 +50,7 @@ func TestClaudeCapturerMalformedPayload(t *testing.T) {
 	st := openStore(t)
 	p, _ := platform.ByName("claude")
 	capturer := p.(platform.Capturer)
-	if _, err := capturer.Capture(st, []byte("not json"), time.Now()); err == nil {
+	if err := capturer.Capture(st, []byte("not json"), time.Now()); err == nil {
 		t.Fatal("malformed payload should return an error (logged, non-fatal)")
 	}
 }
@@ -61,18 +59,5 @@ func TestOpenCodeDoesNotSupportEventCapture(t *testing.T) {
 	p, _ := platform.ByName("opencode")
 	if _, ok := p.(platform.Capturer); ok {
 		t.Fatal("OpenCode must reconcile from SQLite instead of partial event payloads")
-	}
-}
-
-// Claude's Importer is a no-op (hook-fed); it must return cleanly with zero work.
-func TestClaudeImporterIsNoOp(t *testing.T) {
-	st := openStore(t)
-	p, _ := platform.ByName("claude")
-	stats, err := p.Import(context.Background(), st, nil)
-	if err != nil {
-		t.Fatalf("Import: %v", err)
-	}
-	if stats.Sessions != 0 || stats.Records != 0 {
-		t.Fatalf("claude import should be a no-op, got %+v", stats)
 	}
 }

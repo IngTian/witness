@@ -4,30 +4,34 @@ The data model in one page. Four layers: one ground-truth, three derived and reg
 Everything lives in a single embedded SQLite database, `witness.db`, under the data root
 (`$WITNESS_HOME`, else `$XDG_DATA_HOME/witness`, else `~/.local/share/witness`).
 The one exception is the L4 profile, written as plain markdown files so you can read them directly.
+Columns are defined once, in the `schemaV1` block of [`internal/store/db.go`](../internal/store/db.go);
+this page says what the tables mean.
 
 Layer vocabulary: **raw → observations → facets → profile** (`L0/L1/L2` are shorthand; L3 is
 intentionally unused — the profile sits directly on the facets).
 
 ## raw — ground-truth transcript (L0)
 
-Table `raw`, append-only. One row per turn-half, captured verbatim from stable hook fields
-(`UserPromptSubmit.prompt` / `Stop.last_assistant_message`). Never LLM-touched. Columns:
-`id, session, seq, ts, role, effort, text`. Reclaim old rows with `witness cleanup` (there is no
-automatic retention — pruning is an explicit, confirmed action).
+Table `raw`, append-only. One row per captured turn-half or ingested record, verbatim; never
+LLM-touched. Reclaim old rows with `witness cleanup` (there is no automatic retention — pruning is
+an explicit, confirmed action).
 
 ## observations — derived, append-only (L1)
 
-Table `observations`. Atomic, evidence-anchored noticings, tagged by lens. Written ONLY by the
-worker (which combines active + mined and dedups on `obs_id`, a content hash). Each carries a
-384-d embedding (BLOB) for recall and dedup. Columns: `obs_id, ts, session, lens, dimension,
-observation, evidence, poignancy, source, embedding`. `source` is `mined` or `active`.
+Table `observations`. Atomic, evidence-anchored noticings, tagged by lens. Written by the worker
+(`source` is `mined`, or `active` for one an agent recorded mid-session) and by `witness merge`.
+`obs_id` hashes session + lens + text, so an identical re-mine is ignored; near-duplicates are
+kept. Each row carries a 384-d embedding for semantic search and the long-arc clustering.
 
 ## facets — derived, bi-temporal (L2)
 
-Tables `facets` + `facet_versions`. Evolving named attributes within a lens+dimension. Written
-ONLY by the reviewer. A facet's ordered `facet_versions` rows ARE its change history:
-`value, valid_from, valid_to, recorded_at, because_of (JSON obs-id array), confidence`.
-`valid_to == ''` means current. Old versions are kept, never deleted — they are the trajectory.
+Tables `facets` + `facet_versions`. Evolving named attributes within a lens+dimension, written by
+the review fold, the long-arc pass, compaction, the claim pass and `witness merge`. A facet's
+ordered `facet_versions` rows ARE its change history; the version with `valid_to == ''` is current.
+Old versions are kept, never deleted — they are the trajectory. A facet is in the live profile only
+while `archived_at == ''`: compaction and `merge` archive a facet into another (`merged_into`)
+rather than delete it. How confidence moves and decays is in
+[how it works](../docs/how-it-works.md#confidence-and-why-it-moves-on-its-own).
 
 ### The invalidation rule (why this stays honest)
 
@@ -41,30 +45,21 @@ it. This prevents the reviewer from fabricating "you stopped doing X" arcs out o
 ## profile — narrative summary (L4)
 
 Plain markdown under `<root>/profile/`: one file per lens (`<lens>.md`) plus a cross-lens
-`unified.md`. A short prose rendering distilled from the facets by the summarizer, regenerated in
-the background after each review. Read it with `witness profile [lens]` or the `get_profile` MCP
-tool. (`unified` is reserved and cannot be a lens name.)
+`unified.md`. A short prose rendering distilled from the live facets by the summarizer, regenerated
+after each review and on read when the facets changed. Read it with `witness profile [lens]` or the
+`get_profile` MCP tool. (`unified` is reserved and cannot be a lens name.)
 
 ## Lenses
 
-Every observation/facet carries a `lens` tag.
-
-- **`default`** — global, runs on every session, cross-domain. This is the thing no single-domain
-  tracker can be.
-- **registered lenses** (e.g. `math`) — registered centrally (`witness lens register <name> <dir>`)
-  and enabled globally (`witness lens enable <name>`); an enabled lens runs on every session.
-  Definitions live in the central registry (`<root>/lenses/<name>/`), shared across all sessions —
-  never read from a repo.
+Every observation/facet carries a `lens` tag. What the `default` and registered lenses are and how
+they run is in [how it works](../docs/how-it-works.md#lenses); definitions live in the central
+registry (`<root>/lenses/<name>/`), never in a repo.
 
 A lens is a **directory** of `lens.json` (settings: `name`, `dimensions`, optional per-lens models)
 plus `extract.md` and `review.md` (each whole file is the prompt for its pass). See
 `prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own by
 adding `extract_model` / `review_model` to its `lens.json` (verify with `witness lens show <name>`),
 so a rare heavy lens can run a stronger model without paying for it on every session.
-
-The profile is **collect-only / pull-only**: witness captures and distills everywhere, but never
-injects into a session. Agents read it on demand via the MCP tools (`get_facets`, `get_profile`,
-`search_observations`); humans read it via `witness profile`.
 
 One moment can produce several observations — one per lens that finds it salient — sharing a raw
 anchor but framed for each lens.

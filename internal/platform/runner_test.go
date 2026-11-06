@@ -9,18 +9,11 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// RunnerFor resolves the default runner by cfg (fail-closed on an unknown name) and
+// RunnerForName resolves a runner by name (fail-closed on an unknown name) and
 // tolerates Close on an unopened runner (no work this drain).
-func TestRunnerFor(t *testing.T) {
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st, err := store.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer st.Close()
-
+func TestRunnerForName(t *testing.T) {
 	for _, name := range []string{"", "claude", "opencode"} {
-		r, err := platform.RunnerFor(st, store.Config{Runner: name})
+		r, err := platform.RunnerForName(name, store.Config{})
 		if err != nil {
 			t.Fatalf("runner %q should resolve, got %v", name, err)
 		}
@@ -29,7 +22,7 @@ func TestRunnerFor(t *testing.T) {
 		}
 	}
 
-	if _, err := platform.RunnerFor(st, store.Config{Runner: "bogus"}); err == nil {
+	if _, err := platform.RunnerForName("bogus", store.Config{}); err == nil {
 		t.Fatal("unknown runner must fail closed")
 	}
 }
@@ -41,18 +34,11 @@ func TestRunnerFor(t *testing.T) {
 
 // InvocationHint distinguishes the two runners for doctor/diagnostics.
 func TestRunnerInvocationHint(t *testing.T) {
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st, err := store.Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer st.Close()
-
-	cc, _ := platform.RunnerFor(st, store.Config{Runner: "claude"})
+	cc, _ := platform.RunnerForName("claude", store.Config{})
 	if cc.InvocationHint() != "claude -p" {
 		t.Fatalf("claude hint = %q", cc.InvocationHint())
 	}
-	oc, _ := platform.RunnerFor(st, store.Config{Runner: "opencode"})
+	oc, _ := platform.RunnerForName("opencode", store.Config{})
 	if oc.InvocationHint() != "opencode serve" {
 		t.Fatalf("opencode hint = %q", oc.InvocationHint())
 	}

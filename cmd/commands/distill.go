@@ -163,7 +163,7 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 	defer st.Close()
 	stats := st.Stats(activeLensNames(st))
 	if stats.Pending+stats.BackedOff > 0 {
-		return backlogUnfinished(stats.Pending, stats.BackedOff, waitBackoffs, tap.cause())
+		return backlogUnfinished("", stats.Pending, stats.BackedOff, waitBackoffs, tap.cause())
 	}
 	if !quiet {
 		fmt.Println(okGlyph() + " backlog distilled")
@@ -182,7 +182,12 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 // backlogUnfinished is the failure a foreground drain reports when work remains: what is left, the
 // first error the drain hit, and only next steps that exist. It used to suggest `--all
 // --wait-backoffs`; `witness worker run` has no --all, so following the hint failed as well.
-func backlogUnfinished(pending, backedOff int, waited bool, cause string) error {
+//
+// backfill names the lens of an unfinished `lens backfill` ("" for the backlog). Its recovery is
+// two steps, never "re-run the backfill" (that resets the watermark and re-mines what already
+// finished): finish the drain, then review — the backfill returned before its review, and after
+// --fresh the lens has no facets at all.
+func backlogUnfinished(backfill string, pending, backedOff int, waited bool, cause string) error {
 	var parts []string
 	if backedOff > 0 {
 		parts = append(parts, pluralize(backedOff, "session", "sessions")+" backed off")
@@ -193,12 +198,17 @@ func backlogUnfinished(pending, backedOff int, waited bool, cause string) error 
 	if cause == "" {
 		cause = "see witness.log — usually a missing embedding model or a provider outage"
 	}
-	retry := ""
+	head, retry, review := "backlog not finished: ", "", ""
 	if backedOff > 0 && !waited {
 		retry = errHint("retry them", "witness worker run --wait-backoffs")
 	}
-	return errLines("backlog not finished: "+strings.Join(parts, ", "),
-		errRow("cause", cause), retry, errHint("diagnose", "witness doctor"))
+	if backfill != "" {
+		head = "backfill " + backfill + " not finished: "
+		retry = errHint("finish mining", "witness worker run --wait-backoffs")
+		review = errHint("then refresh", "witness worker review")
+	}
+	return errLines(head+strings.Join(parts, ", "),
+		errRow("cause", cause), retry, review, errHint("diagnose", "witness doctor"))
 }
 
 // backfillMaxWait bounds how far out a mining backoff the foreground `worker run

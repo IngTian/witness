@@ -32,7 +32,10 @@ opening CPTPP talks, and relocated supply chains persist even if tariffs do not.
 A known wrinkle: eight themes appear under two dimensions each (e.g. `average_tariff_burden` in
 both `trade_actions` and `market_reaction`). A tariff burden genuinely is both an action and a
 market effect, so this is lens ambiguity rather than a defect — but it means a few themes are
-read twice. `witness compact` is the tool for merging them.
+read twice. `witness compact` will not merge them: it only groups facets within one dimension and
+refuses a cross-dimension merge. The lever is the lens's dimension rules — tighten what each
+dimension in `extract.md` and `review.md` owns, re-register, then re-mine with
+`witness lens backfill trump-market --fresh`.
 
 ## Run it
 

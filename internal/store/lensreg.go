@@ -80,17 +80,6 @@ const (
 	lensEmergeFile = "emerge.md"
 )
 
-// RegisterLens copies a lens definition DIRECTORY into the registry under `name`,
-// creating/overwriting <root>/lenses/<name>/ with the source's lens.json (optional),
-// extract.md (required — the mining prompt), and review.md (optional). srcDir is the
-// user's authored directory (issue #75: a lens is a directory, not one parsed file);
-// only the three known files are copied, so stray files in the source dir are ignored.
-//
-// It is lossless under SELF-REGISTER (srcDir == the registry dir, i.e. the user edited
-// the registered copy in place and re-registered it): ALL source files are read into
-// memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
-// file. And it stages into a sibling .tmp dir then atomically renames into place, so a
-// concurrent worker read never sees a half-built lens directory.
 // ValidLensName is the lens-NAME rule, shared by RegisterLens and by `witness merge`, which
 // brings lens names in from another archive's data and must refuse the same names registration
 // would. A lens name ends up as a profile file name and a meta-key suffix, so an unchecked one
@@ -198,6 +187,17 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 	return nil
 }
 
+// RegisterLens copies a lens definition DIRECTORY into the registry under `name`,
+// creating/overwriting <root>/lenses/<name>/ with the source's extract.md (required — the
+// mining prompt) and the optional lens.json, review.md and emerge.md. srcDir is the
+// user's authored directory (issue #75: a lens is a directory, not one parsed file);
+// only those four known files are copied, so stray files in the source dir are ignored.
+//
+// It is lossless under SELF-REGISTER (srcDir == the registry dir, i.e. the user edited
+// the registered copy in place and re-registered it): ALL source files are read into
+// memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
+// file. And it stages into a sibling .tmp dir then atomically renames into place, so a
+// concurrent worker read never sees a half-built lens directory.
 func (r *lensReg) RegisterLens(name, srcDir string) error {
 	// Serialize registry mutations (this + SetLensModel) so two concurrent
 	// `witness lens register <same-name>` can't interleave through the shared staging
@@ -242,28 +242,13 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 			return err
 		}
 	}
-	// Move the OLD definition aside (not delete) so a swap fault can't leave the user with
-	// nothing: if the Rename below fails, we restore it. Only after the new dir is in place
-	// do we drop the backup. (A pre-swap failure here leaves the old lens untouched.)
+	// Swap with the OLD definition moved aside (not deleted) so a swap fault can't leave the
+	// user with nothing — see swapDir. On failure the staged copy is KEPT for manual recovery
+	// (the next register clears it), and the error says where the previous definition is.
 	_ = os.RemoveAll(bak)
-	hadOld := false
-	if _, statErr := os.Stat(dir); statErr == nil {
-		if err := os.Rename(dir, bak); err != nil {
-			_ = os.RemoveAll(tmp)
-			return err
-		}
-		hadOld = true
+	if err := swapDir(tmp, dir, bak); err != nil {
+		return fmt.Errorf("register lens %q: %w; new definition staged at %s", name, err, tmp)
 	}
-	if err := os.Rename(tmp, dir); err != nil {
-		// Swap failed: restore the previous definition and keep the staged copy for manual
-		// recovery, with a self-explanatory error (never silently leave the lens gone).
-		if hadOld {
-			_ = os.Rename(bak, dir)
-		}
-		return fmt.Errorf("register lens %q failed during swap; previous definition %s, new definition staged at %s: %w",
-			name, map[bool]string{true: "restored", false: "was absent"}[hadOld], tmp, err)
-	}
-	_ = os.RemoveAll(bak)
 	return nil
 }
 

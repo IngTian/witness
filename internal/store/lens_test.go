@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -226,6 +227,44 @@ func TestRegisterLensLeavesNoStagingTurds(t *testing.T) {
 	// And the staging dirs, even if present, never appear as registered lenses.
 	if got := s.RegisteredLenses(); len(got) != 1 || got[0] != "cr" {
 		t.Fatalf("want exactly [cr] registered, got %v", got)
+	}
+}
+
+// A failed swap restores the previous definition, and when the restore ALSO fails (Windows: a
+// rename can fail while a file is open) the error says where it was left — RegisteredLenses
+// hides <name>.bak, so "restored" there would send the user looking for a lens that is gone.
+func TestRegisterLensSwapFailureRestoresOrSaysWhereItIs(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("cr", writeLensSrcDir(t, "cr", "OLD", "rev")); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(s.LensesDir(), "cr")
+	orig := renameDir
+	t.Cleanup(func() { renameDir = orig })
+
+	renameDir = func(from, to string) error { // only the swap-into-place fails
+		if from == dir+".tmp" {
+			return fmt.Errorf("injected swap failure")
+		}
+		return orig(from, to)
+	}
+	err := s.RegisterLens("cr", writeLensSrcDir(t, "cr", "NEW", "rev"))
+	if err == nil || !strings.Contains(err.Error(), "restored") {
+		t.Fatalf("want a swap error saying the previous definition was restored, got %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "extract.md")); string(b) != "OLD" {
+		t.Fatalf("the previous definition was not put back: extract.md = %q", b)
+	}
+
+	renameDir = func(from, to string) error { // the swap AND the restore fail
+		if from == dir+".tmp" || from == dir+".bak" {
+			return fmt.Errorf("injected failure")
+		}
+		return orig(from, to)
+	}
+	err = s.RegisterLens("cr", writeLensSrcDir(t, "cr", "NEW", "rev"))
+	if err == nil || strings.Contains(err.Error(), "restored") || !strings.Contains(err.Error(), dir+".bak") {
+		t.Fatalf("a failed restore must name where the lens was left, not claim it was restored: %v", err)
 	}
 }
 

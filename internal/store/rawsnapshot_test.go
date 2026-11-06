@@ -61,14 +61,17 @@ func TestReadRawSnapshotContract(t *testing.T) {
 	}
 }
 
-// TestSplitReadTornPairWouldBlindAdvance documents issue #67-1 concretely and proves
-// the fix closes it. The OLD mine read count/content (ReadRaw) and the generation id
-// (MaxRawID) as TWO separate statements. MaxOpenConns(1) serializes each but releases
-// the connection between them, so a replace-import committing in that gap yields a
-// TORN pair — an old-generation count with the new generation's high id. The CAS
-// (MarkDistilledIfCurrent) then finds that new id live, PASSES its guard, and blind-
-// advances the watermark over never-mined turns. ReadRawSnapshot reads both in one
-// query, so the pair can never straddle a generation boundary.
+// TestSplitReadTornPairWouldBlindAdvance pins the HAZARD of issue #67-1, not the fix. The OLD
+// mine read count/content (ReadRaw) and the generation id (MaxRawID) as TWO separate
+// statements. MaxOpenConns(1) serializes each but releases the connection between them, so a
+// replace-import committing in that gap yields a TORN pair — an old-generation count with the
+// new generation's high id. The CAS (MarkDistilledIfCurrent) then finds that new id live,
+// PASSES its guard, and blind-advances the watermark over never-mined turns. That is why the
+// mine must read both in one statement (ReadRawSnapshot).
+//
+// It cannot prove ReadRawSnapshot is atomic: its last check runs after the replace has
+// committed, where any read — split or not — sees one generation.
+// TestReadRawSnapshotAtomicUnderConcurrentReplace is the atomicity guard.
 func TestSplitReadTornPairWouldBlindAdvance(t *testing.T) {
 	s := tempStore(t)
 	const session = "sess"

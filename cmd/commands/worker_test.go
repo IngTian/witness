@@ -666,6 +666,27 @@ func TestWorkerSelfHealRetriesAreBounded(t *testing.T) {
 	runsAfter("third run after window", 1)
 }
 
+// A failed self-heal stamps a 6h back-off; a later `witness worker review` that links the sources
+// must clear it, or the next portrait change waits up to 6h to be relinked. Only the worker's own
+// post-review path cleared it — the foreground review's copy of the same tail did not.
+func TestForegroundReviewClearsTheSourcesBackoff(t *testing.T) {
+	selfHealFixture(t, false, false) // stale portrait, resolver succeeds
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMetaString("sources_retry_after", time.Now().Add(6*time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+		t.Fatalf("review: ran=%v err=%v", ran, err)
+	}
+	if got := st.MetaString("sources_retry_after"); got != "" {
+		t.Errorf("a review that linked the sources left the self-heal back-off at %s", got)
+	}
+}
+
 // TestSelfHealAllowed unit-tests the selfHealAllowed gate that guards the end-of-run
 // self-heal. This is the load-bearing stop-request check that prevents fresh model calls
 // after `witness distill stop`. Cannot be tested via runWorker because auto mode exits

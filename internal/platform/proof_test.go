@@ -11,8 +11,8 @@ package platform_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -43,48 +43,38 @@ func (fakePlatform) RenderInputs(raw []store.RawRecord, _ platform.ChunkPolicy) 
 }
 
 // Capture: write one L0 row from a trivial {session,text} payload + stamp platform.
-func (fakePlatform) Capture(st store.CaptureStore, data []byte, now time.Time) (bool, error) {
+func (fakePlatform) Capture(st store.CaptureStore, data []byte, now time.Time) error {
 	var ev struct {
 		Session string `json:"session"`
 		Text    string `json:"text"`
 	}
 	if err := json.Unmarshal(data, &ev); err != nil {
-		return false, err
+		return err
 	}
 	sid := fakePrefix + ev.Session
 	if err := st.AppendRaw(store.RawRecord{Session: sid, Seq: st.NextSeq(sid), Role: "user", Text: ev.Text, TS: now.UTC().Format(time.RFC3339)}); err != nil {
-		return false, err
+		return err
 	}
 	st.SetSessionPlatform(sid, "fake")
-	return true, nil
-}
-
-func (fakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{Agent: "fake"}, nil
+	return nil
 }
 
 // NewRunner: the fake engine returns a canned observation array, proving RunnerFor
-// resolves a 3rd runner and the real Worker mines through it.
+// resolves a 3rd runner and the real Worker mines through it. It refuses any input the
+// fake's own RenderInputs did not shape, so the mine in step 4 succeeding proves
+// RenderInputsFor dispatched to the platform's InputRenderer, not the RenderChunks fallback.
 func (fakePlatform) NewRunner(store.Config) platform.Runner { return fakeRunner{} }
 
 type fakeRunner struct{}
-
-// fakeRunInputs records every corpus the fake runner was handed, so the proof can assert the
-// engine shaped it with the fake's OWN RenderInputs rather than a default renderer.
-var (
-	fakeRunMu     sync.Mutex
-	fakeRunInputs []string
-)
 
 func (fakeRunner) Open(context.Context) error                      { return nil }
 func (fakeRunner) Close() error                                    { return nil }
 func (fakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (fakeRunner) InvocationHint() string                          { return "fake-run" }
-func (fakeRunner) ConcurrentRunSafe() bool                         { return true }
 func (fakeRunner) Run(_ context.Context, _, _, input string) (string, error) {
-	fakeRunMu.Lock()
-	fakeRunInputs = append(fakeRunInputs, input)
-	fakeRunMu.Unlock()
+	if !strings.HasPrefix(input, "FAKE-RENDER\n") {
+		return "", fmt.Errorf("input was not shaped by the fake's RenderInputs: %q", input)
+	}
 	return `[{"dimension":"thinking","observation":"the fake platform was mined by the real engine","evidence":"proof","poignancy":5}]`, nil
 }
 
@@ -118,8 +108,8 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 	if !ok {
 		t.Fatal("fake platform should expose its optional capture capability")
 	}
-	if okCap, err := capturer.Capture(st, payload, time.Now()); err != nil || !okCap {
-		t.Fatalf("Capture: ok=%v err=%v", okCap, err)
+	if err := capturer.Capture(st, payload, time.Now()); err != nil {
+		t.Fatalf("Capture: %v", err)
 	}
 	session := fakePrefix + "s1"
 	if raw, _ := st.ReadRaw(session); len(raw) != 1 {
@@ -132,11 +122,11 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 		t.Fatalf("ForSession = %q, want fake", got)
 	}
 
-	// 3. RunnerFor resolves the fake ENGINE (global axis) — proves runner dispatch is
+	// 3. RunnerForName resolves the fake ENGINE (global axis) — proves runner dispatch is
 	// registry-driven, independent of the session's own platform.
-	runner, err := platform.RunnerFor(st, store.Config{Runner: "fake"})
+	runner, err := platform.RunnerForName("fake", store.Config{})
 	if err != nil {
-		t.Fatalf("RunnerFor(fake): %v", err)
+		t.Fatalf("RunnerForName(fake): %v", err)
 	}
 	if runner.InvocationHint() != "fake-run" {
 		t.Fatalf("resolved the wrong runner: %q", runner.InvocationHint())
@@ -148,7 +138,7 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 	w := &distill.Worker{
 		Store:    st,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{Runner: "fake"},
 		Run:      distill.RunnerMine(runner),
 	}
@@ -163,13 +153,8 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 		t.Fatalf("real engine did not produce L1 for the fake platform: %+v", obs)
 	}
 
-	// 5. The fake's OWN RenderInputs shaping was used (not a Claude/OpenCode default): the
-	// runner must have been handed the transcript the fake rendered.
-	fakeRunMu.Lock()
-	inputs := append([]string(nil), fakeRunInputs...)
-	fakeRunMu.Unlock()
-	if len(inputs) == 0 || !strings.Contains(inputs[0], "FAKE-RENDER") {
-		t.Fatalf("the runner was not handed the fake platform's own rendering: %q", inputs)
-	}
+	// 5. The fake's OWN RenderInputs shaping was used, not the RenderChunks fallback:
+	// fakeRunner.Run errors on any input without the FAKE-RENDER header, so step 4's
+	// L1 row exists only if RenderInputsFor took the InputRenderer branch.
 	t.Logf("proof complete: L0→L1 for platform %q with zero engine edits", "fake")
 }

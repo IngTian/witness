@@ -14,7 +14,7 @@ import (
 // load-time parser.
 //
 // This file is the ONE place the old format still lives — a frozen, one-shot converter
-// that runs at Open (like the DB's legacyL0Rename / schema migrations). It contains legacy
+// that runs at Open (like the DB's schema migrations). It contains legacy
 // handling instead of letting "is this an old lens?" checks leak across the codebase. The
 // old split-parser here is SAFE where the deleted one wasn't: it runs ONCE at startup, is
 // never on the live mine path, and is never mutated by the CLI (the #71/#57 hazards were

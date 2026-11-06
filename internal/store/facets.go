@@ -7,9 +7,8 @@ import (
 )
 
 // facetIO is the L2 facet concern: the bi-temporal profile stored relationally in
-// facets + facet_versions. The distill passes (review, long-arc, compaction, claims) write
-// through WriteFacets/WriteFacetsLogged and merge writes in its own transaction; everything
-// else reads. A DB leaf — holds only the shared *sql.DB.
+// facets + facet_versions. The distill passes write through WriteFacets (its doc lists
+// them); everything else reads (ReadFacets). A DB leaf — holds only the shared *sql.DB.
 type facetIO struct{ db *sql.DB }
 
 // ReadFacets loads the L2 profile (all facets across all lenses, archived ones INCLUDED), in
@@ -96,9 +95,10 @@ func readFacetsFrom(ctx context.Context, q rowQuerier, activeOnly bool) ([]Facet
 	return out, rows.Err()
 }
 
-// WriteFacets atomically replaces the L2 profile. The claim pass is its only caller; the
-// reviewer, long-arc and compaction passes use WriteFacetsLogged. The whole rewrite runs in one transaction; foreign_keys=ON cascades the old
-// versions when their facets are deleted.
+// WriteFacets atomically replaces the L2 profile. Its callers, directly or through
+// WriteFacetsLogged, are the reviewer, the long-arc pass, the claim pass and compaction; the
+// merge writes through writeFacetsTx. The whole rewrite runs in one transaction;
+// foreign_keys=ON cascades the old versions when their facets are deleted.
 //
 // It is a REPLACE, so the slice must be the complete profile — every lens, archived facets
 // included. Hand it the output of ReadActiveFacets and it will delete every archived facet and
@@ -107,6 +107,48 @@ func readFacetsFrom(ctx context.Context, q rowQuerier, activeOnly bool) ([]Facet
 // WriteFacets delegates to WriteFacetsLogged(facets, nil) so there is one transaction path.
 func (f *facetIO) WriteFacets(facets []Facet) error {
 	return f.WriteFacetsLogged(facets, nil)
+}
+
+// WriteFacetsLogged writes facets and confidence events in ONE transaction. It is the
+// same full-table facets REPLACE as WriteFacets, followed by appending events to
+// confidence_log. If events is nil or empty, no log rows are written. The transaction
+// rolls back on any error, so either both succeed or neither is persisted. Call
+// WriteFacets(fs) to write facets without events — it delegates to WriteFacetsLogged(fs, nil).
+func (f *facetIO) WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error {
+	tx, err := f.db.Begin()
+	if err != nil {
+		return err
+	}
+	// Unconditional rollback: a no-op after Commit, but avoids leaving the tx open on
+	// a Prepare or Exec failure that would otherwise shadow `err` and skip the deferred
+	// rollback. With MaxOpenConns(1), an unclosed tx blocks every future call.
+	defer tx.Rollback()
+
+	// Write facets (same full-table replace as WriteFacets)
+	if err = writeFacetsTx(tx, facets); err != nil {
+		return err
+	}
+
+	// Write confidence events if any
+	if len(events) > 0 {
+		var stmt *sql.Stmt
+		stmt, err = tx.Prepare(
+			`INSERT INTO confidence_log(lens, dimension, key, at, clock_seq, from_conf, to_conf, kind)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		for _, ev := range events {
+			_, err = stmt.Exec(ev.Lens, ev.Dimension, ev.Key, ev.At, ev.ClockSeq, ev.From, ev.To, ev.Kind)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 // writeFacetsTx is WriteFacets inside a caller's transaction: the same whole-table REPLACE, so the
