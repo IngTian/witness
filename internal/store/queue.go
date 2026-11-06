@@ -399,6 +399,18 @@ func (q *queue) OrphanedL0ObservationCount(lens string) int {
 	return n
 }
 
+// ConfidenceLogCount reports how many recorded confidence changes a lens has. These are
+// the third class of data a `lens backfill --fresh` destroys irrecoverably: a re-mine
+// re-creates observations and facets from L0, but earlier confidence changes (what review
+// or compaction set a facet's confidence to, when) cannot be backfilled. Counting them
+// lets the CLI warn before an irreversible delete. Read-only; errors read as 0 like its
+// neighbours.
+func (q *queue) ConfidenceLogCount(lens string) int {
+	var n int
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM confidence_log WHERE lens = ?`, lens).Scan(&n)
+	return n
+}
+
 // SessionsWithNoUsableTimestamp counts sessions whose raw rows carry NO timestamp
 // julianday() can read — so they are invisible to any --since/--until drain.
 //
@@ -463,6 +475,11 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 		return 0, 0, err
 	}
 	nf, _ := res.RowsAffected()
+	// Delete confidence_log rows for this lens — confidence history is lens-specific, not
+	// shared across lenses, and has no value after the facets are gone.
+	if _, err = tx.Exec(`DELETE FROM confidence_log WHERE lens = ?`, lens); err != nil {
+		return 0, 0, err
+	}
 	// Derived caches about the data just deleted. Exact key for profile_sig; prefix match
 	// for emerge_seen (one row per cluster signature). A sibling lens is untouched — the
 	// prefix ends with ':' so "emerge_seen:math:" can never match "emerge_seen:mathsy:".

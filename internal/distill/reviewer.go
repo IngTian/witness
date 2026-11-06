@@ -39,6 +39,21 @@ type Reviewer struct {
 	// Progress, when set, is called as each lens's fold windows complete; Where is the lens.
 	// nil is silent — the background drain leaves it nil.
 	Progress ProgressFunc
+
+	// events are the confidence changes applyFacet made since the last takeEvents — one per
+	// accepted assertion — waiting to be written in the same transaction as the facets they
+	// describe (store.WriteFacetsLogged).
+	events []store.ConfidenceEvent
+}
+
+// takeEvents returns the pending confidence events and clears them. Clearing on TAKE, not on a
+// successful write, is the point: a window whose write fails committed none of its facets, so
+// its events must go with them rather than ride into the next window's write as changes that
+// were never stored.
+func (r *Reviewer) takeEvents() []store.ConfidenceEvent {
+	ev := r.events
+	r.events = nil
+	return ev
 }
 
 // runnerFor returns the MineFunc for a lens's review: the per-lens runner via RunnerFor
@@ -153,7 +168,8 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 					"value_empty", strings.TrimSpace(rf.Value) == "", "contradicts_prior", rf.Contradicts)
 			}
 		}
-		if err := r.Store.WriteFacets(collectFacets(byKey)); err != nil {
+		// Facets and the confidence events that produced them commit together or not at all.
+		if err := r.Store.WriteFacetsLogged(collectFacets(byKey), r.takeEvents()); err != nil {
 			return fmt.Errorf("write L2: %w", err)
 		}
 		// Advance ONLY AFTER the write (crash-safety) and ONLY through this window's max
@@ -203,22 +219,30 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 	}
 	if !ok {
 		// Brand-new facet: open-ended first version.
-		byKey[id] = &store.Facet{
+		nf := &store.Facet{
 			Lens: lensName, Dimension: rf.Dimension, Key: rf.Key, LastSeen: nowStr,
 			Versions: []store.FacetVersion{{
 				Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
 				BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence), ConfidenceSeq: seq,
 			}},
 		}
+		byKey[id] = nf
+		r.logEvent(nf, store.EventNew, 0, nowStr)
 		return true
 	}
 
 	cur := f.Current()
 	f.LastSeen = nowStr
 
+	// from is what the step started from, for the confidence log: always the DECAYED value —
+	// what the model was shown (slimFacets) and what the step moves from — and always read
+	// before this branch overwrites the version it reads.
+	var from float64
+	kind := store.EventReinforce
 	switch {
 	case cur == nil:
 		// Facet existed but had no open version (all expired) — reopen.
+		from, kind = f.Versions[len(f.Versions)-1].DecayedConfidence(seq), store.EventReopen
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
 			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
@@ -227,6 +251,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 	case rf.Contradicts && cur.Value != rf.Value:
 		// Sustained contradiction => record a change arc: close the old, open the new.
 		// (The "sustained" judgment is the review prompt's job; code just applies it.)
+		from, kind = cur.DecayedConfidence(seq), store.EventRewrite
 		f.Versions[len(f.Versions)-1].ValidTo = nowStr
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
@@ -263,11 +288,24 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		// one. Stepping from the stored value would silently undo decay on every citation:
 		// the model would be shown 0.4, agree with 0.4, and the facet would snap back toward
 		// its pre-decay 0.9 because that is what the row still held.
-		cur.Confidence = clampConf(stepToward(cur.DecayedConfidence(seq), rf.Confidence, maxConfidenceStep))
+		from = cur.DecayedConfidence(seq)
+		cur.Confidence = clampConf(stepToward(from, rf.Confidence, maxConfidenceStep))
 		cur.ConfidenceSeq = knownClock(seq, cur.ConfidenceSeq) // confirmed now: the decay clock restarts
 		cur.BecauseOf = mergeIDs(cur.BecauseOf, rf.BecauseOf)
+		if cur.Confidence < from {
+			kind = store.EventDowngrade
+		}
 	}
+	r.logEvent(f, kind, from, nowStr)
 	return true
+}
+
+// logEvent records the confidence change just applied to f, read off the version as WRITTEN:
+// its identity is f's (after resolveArchived, the survivor's — never the name the model used),
+// and To/ClockSeq are what that version now holds, so a seq-0 caller logs the clock knownClock
+// kept rather than the 0 it passed.
+func (r *Reviewer) logEvent(f *store.Facet, kind string, from float64, nowStr string) {
+	r.events = append(r.events, confidenceEvent(f, kind, from, nowStr))
 }
 
 // knownClock is the decay clock a version should carry after an assertion at seq, given the
@@ -540,6 +578,24 @@ func clampConf(c float64) float64 {
 		return 1
 	}
 	return math.Round(c*100) / 100
+}
+
+// confidenceEvent builds a ConfidenceEvent for a facet f whose current version was just written.
+// To and ClockSeq are read from f.Current() (the version as written), while from is the pre-change
+// confidence the caller computed before mutating f. nowStr is the run's timestamp (RFC3339 UTC).
+// Used by both Apply (compaction) and Reviewer.logEvent (review fold).
+func confidenceEvent(f *store.Facet, kind string, from float64, nowStr string) store.ConfidenceEvent {
+	v := f.Current()
+	return store.ConfidenceEvent{
+		Lens:      f.Lens,
+		Dimension: f.Dimension,
+		Key:       f.Key,
+		At:        nowStr,
+		ClockSeq:  v.ConfidenceSeq,
+		From:      from,
+		To:        v.Confidence,
+		Kind:      kind,
+	}
 }
 
 // maxF and sameValue used to live here. maxF predated Go 1.21's builtin `max` (go.mod is 1.25.1) and

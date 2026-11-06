@@ -52,6 +52,36 @@ func TestOrphanedL0ObservationCount(t *testing.T) {
 	}
 }
 
+// ConfidenceLogCount reports how many recorded confidence changes a lens has. These cannot
+// be re-created by a re-mine, so `lens backfill --fresh` warns before deleting them. The
+// count is per-lens: a sibling lens's history is separate.
+func TestConfidenceLogCount(t *testing.T) {
+	s := tempStore(t)
+	facets := []Facet{
+		{Lens: LensDefault, Dimension: "d", Key: "k1", Versions: []FacetVersion{{Value: "v", ValidFrom: "2026-01-01T00:00:00Z", RecordedAt: "2026-01-01T00:00:00Z", Confidence: 0.8, ConfidenceSeq: 10}}},
+		{Lens: "sibling", Dimension: "d", Key: "k2", Versions: []FacetVersion{{Value: "w", ValidFrom: "2026-01-02T00:00:00Z", RecordedAt: "2026-01-02T00:00:00Z", Confidence: 0.7, ConfidenceSeq: 20}}},
+	}
+	events := []ConfidenceEvent{
+		{Lens: LensDefault, Dimension: "d", Key: "k1", At: "2026-01-01T00:00:00Z", Kind: "new", From: 0.0, To: 0.8, ClockSeq: 10},
+		{Lens: LensDefault, Dimension: "d", Key: "k1", At: "2026-01-03T00:00:00Z", Kind: "reinforce", From: 0.8, To: 0.9, ClockSeq: 30},
+		{Lens: "sibling", Dimension: "d", Key: "k2", At: "2026-01-02T00:00:00Z", Kind: "new", From: 0.0, To: 0.7, ClockSeq: 20},
+	}
+	if err := s.WriteFacetsLogged(facets, events); err != nil {
+		t.Fatal(err)
+	}
+
+	// Each lens counts only its own events.
+	if got := s.ConfidenceLogCount(LensDefault); got != 2 {
+		t.Errorf("want 2 events for %q, got %d", LensDefault, got)
+	}
+	if got := s.ConfidenceLogCount("sibling"); got != 1 {
+		t.Errorf("want 1 event for sibling, got %d", got)
+	}
+	if got := s.ConfidenceLogCount("nonexistent"); got != 0 {
+		t.Errorf("want 0 events for nonexistent lens, got %d", got)
+	}
+}
+
 // Every transaction that READS before it WRITES must hold the write lock up front. Under
 // WAL a DEFERRED tx that takes a read snapshot and then writes fails with
 // SQLITE_BUSY_SNAPSHOT (517) — a conflict busy_timeout CANNOT retry, because there is no

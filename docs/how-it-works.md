@@ -47,6 +47,13 @@ correctly. Every place that shows a confidence shows this current value: `witnes
 value as of the facet's last confirmation, because that is the record the decay is computed from.
 `witness facets <lens> --expand <dimension/key>` unfolds everything that was merged into a facet.
 
+Every change witness makes to a facet's confidence — a review that raised, lowered or rewrote
+it, the long-arc pass, or a compaction that merged it with other facets — is recorded with the
+date and what caused it. The history starts at the upgrade (earlier changes were overwritten in
+place and cannot be recovered), lives in the archive, and travels with `witness export <path>
+--all`. `witness merge` does not carry the other archive's history: facets that arrive from it
+start without one, and confidence it adopts from them is not recorded.
+
 ### Lenses
 
 Every observation/facet carries a **lens** tag:

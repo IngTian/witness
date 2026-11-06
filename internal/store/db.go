@@ -58,8 +58,9 @@ import (
 // added to a version number some binary has already written — it needs a new one, which is what
 // version numbers are for. (Only unreleased builds were affected; the guarded step then fixes
 // them on the next open.); v14 adds portrait_sources (derived sentence→trait links, one JSON
-// row per portrait, keyed to a hash of the portrait text).
-const schemaVersion = 14
+// row per portrait, keyed to a hash of the portrait text); v15 adds confidence_log (append-only
+// confidence-change history for facets, one row per reinforcement/downgrade/compaction/etc.).
+const schemaVersion = 15
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -891,6 +892,14 @@ CREATE TABLE IF NOT EXISTS portrait_sources (
   resolved_at TEXT NOT NULL,
   sources     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS confidence_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lens TEXT NOT NULL, dimension TEXT NOT NULL, key TEXT NOT NULL,
+  at TEXT NOT NULL, clock_seq INTEGER NOT NULL DEFAULT 0,
+  from_conf REAL NOT NULL DEFAULT 0, to_conf REAL NOT NULL, kind TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_confidence_log_facet ON confidence_log(lens, dimension, key, id);
 `
 
 // legacyL0Rename upgrades a pre-rename database (raw layer shipped as `l0`) to the

@@ -102,16 +102,10 @@ func readFacetsFrom(ctx context.Context, q rowQuerier, activeOnly bool) ([]Facet
 // It is a REPLACE, so the slice must be the complete profile — every lens, archived facets
 // included. Hand it the output of ReadActiveFacets and it will delete every archived facet and
 // every other lens.
+//
+// WriteFacets delegates to WriteFacetsLogged(facets, nil) so there is one transaction path.
 func (f *facetIO) WriteFacets(facets []Facet) error {
-	tx, err := f.db.Begin()
-	if err != nil {
-		return err
-	}
-	if err := writeFacetsTx(tx, facets); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return f.WriteFacetsLogged(facets, nil)
 }
 
 // writeFacetsTx is WriteFacets inside a caller's transaction: the same whole-table REPLACE, so the

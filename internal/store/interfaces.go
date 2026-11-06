@@ -162,7 +162,7 @@ type ReviewStore interface {
 	// ordered and carrying each obs's seq (in Observation.Rowid), so windows are
 	// contiguous seq ranges (seq is a monotonic AUTOINCREMENT, never reused — #125).
 	ReadObservationsSinceOrdered(lens string, sinceRowid int64) ([]Observation, error)
-	WriteFacets(facets []Facet) error
+	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
 	StampReview() error
 	// ReviewRowid / StampReviewLens are the per-lens fold watermark: what the next
 	// fold reads (seq > ReviewRowid). StampReviewLens advances it to throughRowid —
@@ -177,21 +177,22 @@ type ReviewStore interface {
 // path), and uses meta-KV for its OWN idempotency state (cluster signatures) — it does
 // NOT share the review watermark (ReviewStore), by design: the emergent pass must never
 // advance review_rowid (§5c). Composed from existing interfaces; *Store satisfies it by
-// promotion, so no new method is added anywhere.
+// promotion, so WriteFacetsLogged is the only write method.
 type EmergentStore interface {
 	ObservationReader // ReadObservations(lens) — embeddings decoded
 	MetaKV            // MetaString / SetMetaString — signature state
 	ReadFacets() ([]Facet, error)
-	WriteFacets(facets []Facet) error
+	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
 }
 
 // CompactStore is the surface the Compactor drives: read the WHOLE profile (archived facets
 // included — WriteFacets is a replace, so a writer that reads only the active set would delete
-// the history) and write it back. Deliberately the same two methods the Reviewer uses for L2:
-// compaction is a different judgment over the same data, not a new storage concern.
+// the history) and write it back. Includes the unlogged WriteFacets for the Claimer (the final
+// step after compaction), which must never write a history row — it only rebases clocks.
 type CompactStore interface {
 	ReadFacets() ([]Facet, error)
 	WriteFacets(facets []Facet) error
+	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
 	// ObservationHighWater lets the model be shown DECAYED confidence. Shown the stored value,
 	// it would merge a stale-but-high facet with a fresh one into a survivor that is both
 	// confident and fresh — a free refresh of exactly the kind decay exists to prevent.

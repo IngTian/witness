@@ -354,6 +354,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// `witness cleanup` (which keeps L1 on purpose). The re-mine enumerates candidates
 		// from `raw`, so those sessions are never offered and their obs never come back.
 		orphaned := st.OrphanedL0ObservationCount(minedName)
+		confLog := st.ConfidenceLogCount(minedName)
 		if !assumeYes {
 			// Headline + one short line per permanent loss; the prompt is the shared askYesNo, so
 			// it accepts y/yes like every other confirmation and says so when nobody can answer.
@@ -366,9 +367,12 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 			if orphaned > 0 {
 				fmt.Printf("  %s %s from sessions `witness cleanup` reclaimed — no transcript is left to re-mine\n", warnGlyph(), humanCount(orphaned))
 			}
+			if confLog > 0 {
+				fmt.Printf("  %s %s recorded confidence changes — that history starts over and cannot be re-created\n", warnGlyph(), humanCount(confLog))
+			}
 			// Only make the re-derivable promise when it actually holds for everything.
 			consequence := " Raw transcripts are kept; every observation is re-created from them."
-			if active > 0 || orphaned > 0 {
+			if active > 0 || orphaned > 0 || confLog > 0 {
 				consequence = " Raw transcripts are kept, but the losses listed above are permanent."
 			}
 			if !askYesNo(bold("Delete and re-mine?") + dim(consequence) + " [y/N]: ") {

@@ -542,7 +542,8 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 		}
 	}
 	if dirty {
-		if err := r.Store.WriteFacets(collectFacets(byKey)); err != nil {
+		// rv collected one confidence event per merged arc; they commit with the facets.
+		if err := r.Store.WriteFacetsLogged(collectFacets(byKey), rv.takeEvents()); err != nil {
 			// Leave every accepted signature UNSTAMPED so the next pass re-verifies and
 			// re-merges these arcs. Re-running verify costs model calls; losing the arc
 			// forever does not cost anything visible, which is exactly why it is worse.

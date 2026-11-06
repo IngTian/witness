@@ -616,6 +616,11 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 	}
 	byKey := indexFacets(all)
 
+	// Confidence events, collected as survivor versions are written, then logged atomically
+	// with the facet write. Retired and absorbed facets log nothing: their confidence is
+	// not set, they are archived.
+	var events []store.ConfidenceEvent
+
 	applied, archived := 0, 0
 	for _, plan := range plans {
 		for _, a := range plan.Actions {
@@ -668,14 +673,17 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 				f, ok := byKey[id]
 				if !ok {
 					// A new abstraction node: the survivor key did not exist.
+					fromConf := 0.0
+					conf := clampConf(a.Confidence)
 					byKey[id] = &store.Facet{
 						Lens: plan.Lens, Dimension: a.Dimension, Key: a.Key, LastSeen: nowStr,
 						Versions: []store.FacetVersion{{
 							Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
-							BecauseOf: because, Confidence: clampConf(a.Confidence),
+							BecauseOf: because, Confidence: conf,
 							ConfidenceSeq: freshest,
 						}},
 					}
+					events = append(events, confidenceEvent(byKey[id], store.EventCompaction, fromConf, nowStr))
 					applied++
 					continue
 				}
@@ -686,13 +694,23 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 					because = mergeIDs(because, cur.BecauseOf)
 					freshest = max(freshest, cur.ConfidenceSeq)
 					if cur.Value != a.Value {
+						// Rewritten: capture the decayed confidence BEFORE closing the version.
+						// From is decayed because that is the value the survivor actually had
+						// when compaction replaced it.
+						fromConf := cur.DecayedConfidence(c.decaySeq)
+						toConf := clampConf(a.Confidence)
 						f.Versions[len(f.Versions)-1].ValidTo = nowStr
 						f.Versions = append(f.Versions, store.FacetVersion{
 							Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
-							BecauseOf: because, Confidence: clampConf(a.Confidence),
+							BecauseOf: because, Confidence: toConf,
 							ConfidenceSeq: freshest,
 						})
+						events = append(events, confidenceEvent(f, store.EventCompaction, fromConf, nowStr))
 					} else {
+						// Same value: capture decayed confidence BEFORE refreshing the clock.
+						// From is decayed because that is what the reader saw before this
+						// compaction refreshed the clock.
+						fromConf := cur.DecayedConfidence(c.decaySeq)
 						cur.BecauseOf = because
 						cur.ConfidenceSeq = freshest
 						// Same value, but a claim may be NEW: an existing facet whose text
@@ -701,13 +719,22 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 						if strings.TrimSpace(cur.Claim) == "" {
 							cur.Claim = a.Claim
 						}
+						events = append(events, confidenceEvent(f, store.EventCompaction, fromConf, nowStr))
 					}
 				} else {
+					// Reopen: the facet is archived, and we're appending a new version.
+					// From is the last version's decayed confidence, captured BEFORE the append.
+					var fromConf float64
+					if len(f.Versions) > 0 {
+						fromConf = f.Versions[len(f.Versions)-1].DecayedConfidence(c.decaySeq)
+					}
+					toConf := clampConf(a.Confidence)
 					f.Versions = append(f.Versions, store.FacetVersion{
 						Value: a.Value, Claim: a.Claim, ValidFrom: nowStr, RecordedAt: nowStr,
-						BecauseOf: because, Confidence: clampConf(a.Confidence),
+						BecauseOf: because, Confidence: toConf,
 						ConfidenceSeq: freshest,
 					})
+					events = append(events, confidenceEvent(f, store.EventCompaction, fromConf, nowStr))
 				}
 				f.LastSeen = nowStr
 				f.ArchivedAt = "" // a survivor is active by definition
@@ -716,7 +743,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 			}
 		}
 	}
-	if err := c.Store.WriteFacets(collectFacets(byKey)); err != nil {
+	if err := c.Store.WriteFacetsLogged(collectFacets(byKey), events); err != nil {
 		return fmt.Errorf("write L2: %w", err)
 	}
 	slog.Info("compact: applied", "plans", len(plans), "merges_and_retires", applied, "archived", archived)

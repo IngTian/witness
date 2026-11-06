@@ -272,21 +272,3 @@ func DedupeLinks(links []TraitLink) []TraitLink {
 	}
 	return append(direct, partial...)
 }
-
-// dedupLinks is deprecated: use DedupeLinks.
-func dedupLinks(links []TraitLink) []TraitLink {
-	return DedupeLinks(links)
-}
-
-// sortLinksDirectFirst is deprecated: DedupeLinks now handles sorting.
-func sortLinksDirectFirst(links []TraitLink) []TraitLink {
-	var direct, partial []TraitLink
-	for _, link := range links {
-		if link.Strength == LinkDirect {
-			direct = append(direct, link)
-		} else {
-			partial = append(partial, link)
-		}
-	}
-	return append(direct, partial...)
-}
