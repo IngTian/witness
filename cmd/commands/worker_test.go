@@ -17,8 +17,6 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-var registerSelfHealOnce sync.Once
-
 // The status sub-state is DERIVED, not stored (issue #75): no worker holding the lock
 // → "idle"; a live worker (lock held) → "running", or "stopping" if a graceful stop was
 // requested. This drives cmdDistillStatus's JSON path across all three, holding
@@ -102,9 +100,7 @@ func TestRunDistillLoopReviewOnlyThenArrivalTerminatesAndDrains(t *testing.T) {
 	// pending() reports empty until the (single) review runs, then reports one
 	// session — modeling capture landing L0 while the worker was reviewing.
 	reviewed := false
-	pendingCalls := 0
 	pending := func() []string {
-		pendingCalls++
 		if reviewed {
 			return []string{"late-sess"}
 		}
@@ -151,7 +147,6 @@ func TestRunDistillLoopReviewOnlyThenArrivalTerminatesAndDrains(t *testing.T) {
 	if drained != 1 {
 		t.Fatalf("the session that arrived during review must be drained; drained=%d", drained)
 	}
-	_ = pendingCalls
 }
 
 // TestRunDistillLoopStopsWhenEmbedderUnavailable: if fresh work arrives but the
@@ -503,29 +498,65 @@ func TestAutoWorkerRunHonorsDisabledConfig(t *testing.T) {
 	}
 }
 
-// TestWorkerSelfHealSkipsRunnersWhenFresh verifies that the end-of-run source-resolution
-// self-heal opens runners ONLY when there is stale work (StaleSources returns a non-empty
-// list). An idle worker run with every portrait current must never open a runner.
-func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
-	// Register the fake platform once per process.
-	registerSelfHealOnce.Do(func() {
-		platform.Register(selfHealFakePlatform{})
-	})
+// selfHealFakePlatform is the ONE fake runtime the self-heal tests drive. It is registered once per
+// process — a second platform.Register panics, which is what made these tests die under -count=2 —
+// and configured per test through selfHealFail by selfHealFixture.
+type selfHealFakePlatform struct{ leakFakePlatform }
 
-	// Set up resolve prompts in a fake bundle dir so LoadResolvePrompts succeeds.
-	// Without this, the self-heal block is never entered (prompts fail to load) and
-	// the test passes vacuously.
+func (selfHealFakePlatform) Name() string                           { return "selfheal" }
+func (selfHealFakePlatform) SessionPrefix() string                  { return "selfheal:" }
+func (selfHealFakePlatform) NewRunner(store.Config) platform.Runner { return selfHealFakeRunner{} }
+
+var (
+	registerSelfHealOnce                sync.Once
+	selfHealFakeOpens, selfHealFakeRuns int32
+	selfHealFail                        atomic.Bool // every Run errors: a resolver that keeps failing
+)
+
+type selfHealFakeRunner struct{ leakFakeRunner }
+
+func (selfHealFakeRunner) Open(context.Context) error {
+	atomic.AddInt32(&selfHealFakeOpens, 1)
+	return nil
+}
+func (selfHealFakeRunner) Close() error { return nil }
+func (selfHealFakeRunner) Run(_ context.Context, _, prompt, _ string) (string, error) {
+	atomic.AddInt32(&selfHealFakeRuns, 1)
+	if selfHealFail.Load() {
+		return "", errors.New("resolver always fails for test")
+	}
+	if strings.Contains(prompt, "RESOLVE") {
+		return `{"links":[],"keywords":[]}`, nil
+	}
+	return "[]", nil
+}
+
+// selfHealFixture builds an archive whose one lens has a facet and a portrait, routed to the fake
+// runtime with zeroed counters. fresh writes a current sources row (nothing to self-heal); otherwise
+// the portrait has none, so it is stale. fail makes every model call error.
+func selfHealFixture(t *testing.T, fresh, fail bool) {
+	t.Helper()
+	registerSelfHealOnce.Do(func() { platform.Register(selfHealFakePlatform{}) })
+	selfHealFail.Store(fail)
+	t.Cleanup(func() { selfHealFail.Store(false) })
+	atomic.StoreInt32(&selfHealFakeOpens, 0)
+	atomic.StoreInt32(&selfHealFakeRuns, 0)
+
+	// The resolve prompts must load, or the self-heal block is never entered and every
+	// assertion below passes vacuously.
 	bundleDir := filepath.Join(t.TempDir(), "bundle")
 	if err := os.MkdirAll(filepath.Join(bundleDir, "summarize"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve.md"), []byte("RESOLVE"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve_unified.md"), []byte("RESOLVE_UNIFIED"), 0o600); err != nil {
-		t.Fatal(err)
+	for name, body := range map[string]string{"resolve.md": "RESOLVE", "resolve_unified.md": "RESOLVE_UNIFIED"} {
+		if err := os.WriteFile(filepath.Join(bundleDir, "summarize", name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("WITNESS_PROMPTS", bundleDir)
+	if lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts(); err != nil || lensPrompt == "" || unifiedPrompt == "" {
+		t.Fatalf("resolve prompts did not load, so the self-heal gate cannot be observed: %v", err)
+	}
 
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
@@ -533,20 +564,15 @@ func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-
-	// Point config at the fake runner and set up a minimal test lens.
 	if err := st.SetConfigString("runner", "selfheal"); err != nil {
 		t.Fatal(err)
 	}
-	lensDir := setupTestLens(t, st.Root)
-	if err := st.RegisterLens("test", lensDir); err != nil {
+	if err := st.RegisterLens("test", writeLensDir(t, "test", "Extract prompt.", "Review prompt.")); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.EnableLens("test"); err != nil {
 		t.Fatal(err)
 	}
-
-	// Write a facet and profile, then write portrait sources so StaleSources returns empty.
 	if err := st.WriteFacets([]store.Facet{
 		{Lens: "test", Dimension: "traits", Key: "k",
 			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
@@ -557,17 +583,16 @@ func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
 	if err := st.WriteProfile("test", md); err != nil {
 		t.Fatal(err)
 	}
-	// Write current sources (hash matches, so it's not stale).
-	src := store.PortraitSources{Sentences: []store.SourcedSentence{{Text: "Summary."}}}
-	if err := st.WritePortraitSources("test", store.PortraitHash(md), src, time.Now()); err != nil {
-		t.Fatal(err)
+	if fresh {
+		src := store.PortraitSources{Sentences: []store.SourcedSentence{{Text: md}}}
+		if err := st.WritePortraitSources("test", store.PortraitHash(md), src, time.Now()); err != nil {
+			t.Fatal(err)
+		}
 	}
-	st.Close()
+}
 
-	// Reset counters and run the worker. With sources fresh, it must NOT open the runner.
-	atomic.StoreInt32(&selfHealFakeOpens, 0)
-	atomic.StoreInt32(&selfHealFakeRuns, 0)
-
+func mustRunWorker(t *testing.T) {
+	t.Helper()
 	ran, err := runWorker(false)
 	if err != nil {
 		t.Fatalf("runWorker: %v", err)
@@ -575,17 +600,13 @@ func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
 	if !ran {
 		t.Fatal("worker should have run")
 	}
+}
 
-	// Assert LoadResolvePrompts succeeded (non-empty prompts) so we know the self-heal
-	// block was entered. Without this, the test can pass vacuously if prompts fail to load.
-	lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
-	if err != nil {
-		t.Fatalf("LoadResolvePrompts failed; test cannot verify the gate: %v", err)
-	}
-	if lensPrompt == "" || unifiedPrompt == "" {
-		t.Fatal("LoadResolvePrompts returned empty prompts; test cannot verify the gate")
-	}
-
+// The end-of-run source-resolution self-heal opens a runner ONLY when there is stale work: an idle
+// worker run with every portrait current must never open one.
+func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
+	selfHealFixture(t, true, false)
+	mustRunWorker(t)
 	if got := atomic.LoadInt32(&selfHealFakeOpens); got != 0 {
 		t.Errorf("self-heal opened runner %d times with fresh sources; want 0", got)
 	}
@@ -594,65 +615,10 @@ func TestWorkerSelfHealSkipsRunnersWhenFresh(t *testing.T) {
 	}
 }
 
-// TestWorkerSelfHealResolvesStalePortraits verifies that the end-of-run self-heal DOES
-// open the runner and call ResolveSources when there are stale portraits (portrait exists
-// but no sources row, or hash mismatch).
+// A portrait with no sources row is stale, so the self-heal DOES open the runner and resolve it.
 func TestWorkerSelfHealResolvesStalePortraits(t *testing.T) {
-	registerSelfHealOnce.Do(func() { platform.Register(selfHealFakePlatform{}) })
-
-	// Set up resolve prompts in a fake bundle dir.
-	bundleDir := filepath.Join(t.TempDir(), "bundle")
-	if err := os.MkdirAll(filepath.Join(bundleDir, "summarize"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve.md"), []byte("RESOLVE"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve_unified.md"), []byte("RESOLVE_UNIFIED"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("WITNESS_PROMPTS", bundleDir)
-
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	if err := st.SetConfigString("runner", "selfheal"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.RegisterLens("test", setupTestLens(t, st.Root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.EnableLens("test"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a facet and profile, but NO sources row → stale.
-	if err := st.WriteFacets([]store.Facet{
-		{Lens: "test", Dimension: "traits", Key: "k",
-			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.WriteProfile("test", "Stale summary."); err != nil {
-		t.Fatal(err)
-	}
-	st.Close()
-
-	atomic.StoreInt32(&selfHealFakeOpens, 0)
-	atomic.StoreInt32(&selfHealFakeRuns, 0)
-
-	ran, err := runWorker(false)
-	if err != nil {
-		t.Fatalf("runWorker: %v", err)
-	}
-	if !ran {
-		t.Fatal("worker should have run")
-	}
-
+	selfHealFixture(t, false, false)
+	mustRunWorker(t)
 	if got := atomic.LoadInt32(&selfHealFakeOpens); got != 1 {
 		t.Errorf("self-heal opened runner %d times with stale portrait; want exactly 1", got)
 	}
@@ -661,105 +627,22 @@ func TestWorkerSelfHealResolvesStalePortraits(t *testing.T) {
 	}
 }
 
-// selfHealFakePlatform is a minimal registered platform for testing the self-heal wiring.
-var selfHealFakeOpens, selfHealFakeRuns int32
-
-type selfHealFakePlatform struct{}
-
-func (selfHealFakePlatform) Name() string          { return "selfheal" }
-func (selfHealFakePlatform) SessionPrefix() string { return "selfheal:" }
-func (selfHealFakePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
-	return []string{""}
-}
-func (selfHealFakePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
-func (selfHealFakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{}, nil
-}
-func (selfHealFakePlatform) NewRunner(store.Config) platform.Runner { return selfHealFakeRunner{} }
-
-type selfHealFakeRunner struct{}
-
-func (selfHealFakeRunner) Open(context.Context) error {
-	atomic.AddInt32(&selfHealFakeOpens, 1)
-	return nil
-}
-func (selfHealFakeRunner) Close() error { return nil }
-func (selfHealFakeRunner) Run(_ context.Context, _, prompt, _ string) (string, error) {
-	atomic.AddInt32(&selfHealFakeRuns, 1)
-	if strings.Contains(prompt, "RESOLVE") {
-		return `{"links":[],"keywords":[]}`, nil
-	}
-	return "[]", nil
-}
-func (selfHealFakeRunner) ValidateModels(context.Context, ...string) error { return nil }
-func (selfHealFakeRunner) InvocationHint() string                          { return "selfheal" }
-func (selfHealFakeRunner) ConcurrentRunSafe() bool                         { return true }
-
-// TestWorkerSelfHealRetriesAreBounded verifies that a portrait whose resolve keeps failing
-// gets bounded retries: the first self-heal attempts once and sets sources_retry_after =
-// now+6h; subsequent self-heal runs within that window make zero resolver calls; after the
-// window expires (or a review runs, which ignores the gate) it retries.
+// A portrait whose resolve keeps failing gets bounded retries: the first self-heal attempts once and
+// sets sources_retry_after = now+6h; runs within that window make zero resolver calls; once the
+// window expires it retries.
 func TestWorkerSelfHealRetriesAreBounded(t *testing.T) {
-	registerSelfHealOnce.Do(func() { platform.Register(selfHealFakePlatform{}) })
-	platform.Register(selfHealFailPlatform{})
+	selfHealFixture(t, false, true)
+	runsAfter := func(label string, want int32) {
+		t.Helper()
+		atomic.StoreInt32(&selfHealFakeRuns, 0)
+		mustRunWorker(t)
+		if got := atomic.LoadInt32(&selfHealFakeRuns); got != want {
+			t.Errorf("%s: resolver called %d times, want %d", label, got, want)
+		}
+	}
 
-	// Set up resolve prompts.
-	bundleDir := filepath.Join(t.TempDir(), "bundle")
-	if err := os.MkdirAll(filepath.Join(bundleDir, "summarize"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve.md"), []byte("RESOLVE"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "summarize", "resolve_unified.md"), []byte("RESOLVE_UNIFIED"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("WITNESS_PROMPTS", bundleDir)
-
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	runsAfter("first run", 1)
 	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	if err := st.SetConfigString("runner", "selfhealfail"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.RegisterLens("test", setupTestLens(t, st.Root)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.EnableLens("test"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a profile with no sources row → stale.
-	if err := st.WriteFacets([]store.Facet{
-		{Lens: "test", Dimension: "traits", Key: "k",
-			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.WriteProfile("test", "Stale summary."); err != nil {
-		t.Fatal(err)
-	}
-	st.Close()
-
-	atomic.StoreInt32(&selfHealFailRuns, 0)
-
-	// First worker run: resolver fails → sets retry_after.
-	ran, err := runWorker(false)
-	if err != nil {
-		t.Fatalf("first runWorker: %v", err)
-	}
-	if !ran {
-		t.Fatal("first worker should have run")
-	}
-	if got := atomic.LoadInt32(&selfHealFailRuns); got != 1 {
-		t.Errorf("first run: resolver called %d times, want 1", got)
-	}
-
-	st, err = store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,98 +652,18 @@ func TestWorkerSelfHealRetriesAreBounded(t *testing.T) {
 		t.Fatal("first run should have set sources_retry_after")
 	}
 
-	atomic.StoreInt32(&selfHealFailRuns, 0)
+	runsAfter("second run within window", 0)
 
-	// Second worker run within window: makes zero resolver calls.
-	ran, err = runWorker(false)
-	if err != nil {
-		t.Fatalf("second runWorker: %v", err)
-	}
-	if !ran {
-		t.Fatal("second worker should have run")
-	}
-	if got := atomic.LoadInt32(&selfHealFailRuns); got != 0 {
-		t.Errorf("second run within window: resolver called %d times, want 0", got)
-	}
-
-	// Set retry_after in the past.
 	st, err = store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
-	if err := st.SetMetaString("sources_retry_after", past); err != nil {
+	if err := st.SetMetaString("sources_retry_after", time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
 
-	atomic.StoreInt32(&selfHealFailRuns, 0)
-
-	// Third run after window: retries.
-	ran, err = runWorker(false)
-	if err != nil {
-		t.Fatalf("third runWorker: %v", err)
-	}
-	if !ran {
-		t.Fatal("third worker should have run")
-	}
-	if got := atomic.LoadInt32(&selfHealFailRuns); got != 1 {
-		t.Errorf("third run after window: resolver called %d times, want 1", got)
-	}
-
-	// Verify removing the gate causes the test to fail (would make infinite calls if loop existed).
-	// We can't test this here, but the existence of the gate is verified by the zero-calls check above.
-}
-
-// selfHealFailPlatform is a runner that always fails, for testing retry bounds.
-var selfHealFailRuns int32
-
-type selfHealFailPlatform struct{}
-
-func (selfHealFailPlatform) Name() string          { return "selfhealfail" }
-func (selfHealFailPlatform) SessionPrefix() string { return "selfhealfail:" }
-func (selfHealFailPlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
-	return []string{""}
-}
-func (selfHealFailPlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
-func (selfHealFailPlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{}, nil
-}
-func (selfHealFailPlatform) NewRunner(store.Config) platform.Runner { return selfHealFailRunner{} }
-
-type selfHealFailRunner struct{}
-
-func (selfHealFailRunner) Open(context.Context) error { return nil }
-func (selfHealFailRunner) Close() error               { return nil }
-func (selfHealFailRunner) Run(_ context.Context, _, prompt, _ string) (string, error) {
-	atomic.AddInt32(&selfHealFailRuns, 1)
-	return "", errors.New("resolver always fails for test")
-}
-func (selfHealFailRunner) ValidateModels(context.Context, ...string) error { return nil }
-func (selfHealFailRunner) InvocationHint() string                          { return "selfhealfail" }
-func (selfHealFailRunner) ConcurrentRunSafe() bool                         { return true }
-
-// setupTestLens creates a minimal lens directory for testing.
-func setupTestLens(t *testing.T, root string) string {
-	t.Helper()
-	lensDir := filepath.Join(t.TempDir(), "testlens")
-	if err := os.MkdirAll(lensDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Write minimal lens.json
-	lensJSON := `{"name":"test","dimensions":["traits"]}`
-	if err := os.WriteFile(filepath.Join(lensDir, "lens.json"), []byte(lensJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Write minimal extract.md
-	if err := os.WriteFile(filepath.Join(lensDir, "extract.md"), []byte("Extract prompt."), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Write minimal review.md
-	if err := os.WriteFile(filepath.Join(lensDir, "review.md"), []byte("Review prompt."), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return lensDir
+	runsAfter("third run after window", 1)
 }
 
 // TestSelfHealAllowed unit-tests the selfHealAllowed gate that guards the end-of-run

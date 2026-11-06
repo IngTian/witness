@@ -80,10 +80,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil {
-		return err
-	}
+	lenses := activeLenses(st)
 	if len(lenses) == 0 {
 		fmt.Println(skipGlyph() + " no enabled lenses — nothing to compact")
 		fmt.Println(hint("enable one", "witness lens enable <name>"))

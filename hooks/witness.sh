@@ -18,7 +18,7 @@ fi
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}"
 
 # When run from a working copy (not an installed plugin) CLAUDE_PLUGIN_ROOT is
-# unset, but the binary resolves prompts/, lenses/, and assets/ relative to it.
+# unset, but the binary resolves prompts/ and assets/ relative to it.
 # Export it so a checkout "just works" without per-path WITNESS_* overrides.
 export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 

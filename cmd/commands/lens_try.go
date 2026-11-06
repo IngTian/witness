@@ -42,8 +42,7 @@ func newLensTryCmd() *cobra.Command {
 			"This is the prompt-tuning loop: edit the EXTRACT prompt, run `try`, see what " +
 			"changes. Sessions are sampled largest-first by default (deterministic, and the meatiest " +
 			"sessions are the ones a prompt is most likely to mishandle); use --recent for the latest.\n\n" +
-			"Works on both runners. On an OpenCode runner it briefly holds the worker lock while it runs " +
-			"(its shutdown sweep would otherwise disrupt a running worker); on Claude it needs no lock. " +
+			"Works on both runners and takes no lock, so it can run beside a live worker. " +
 			"Sessions are previewed in parallel (bounded by mine_concurrency).\n\n" +
 			"With --review, it also runs the lens's REVIEW prompt over the observations just mined and " +
 			"prints the profile facets it would synthesize — so you can tune both halves of a lens in one " +
@@ -137,10 +136,8 @@ type lensTryJSON struct {
 }
 
 // cmdLensTry runs the read-only preview. It opens its OWN store (independent of cmdLens)
-// and reads only — PreviewMine writes nothing (see distill.PreviewMine). On an OpenCode
-// runner it holds the single-flight WorkerLock for the runner's whole lifetime because
-// OpenCode's Close() runs a process-global sweep that would delete a concurrent worker's
-// in-flight distill session; on Claude (no sweep) it stays lock-free.
+// and reads only — PreviewMine writes nothing (see distill.PreviewMine). It takes no
+// WorkerLock on either runner (see the note at runner.Open below for why).
 func cmdLensTry(file string, opts lensTryOpts) error {
 	st, err := store.Open()
 	if err != nil {
@@ -159,19 +156,16 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 		path, registered = resolved, true
 	}
 
-	// Load the candidate. Strict first; on a reserved-name collision fall back to the
-	// lenient loader (preview never writes, so an impersonating name is harmless) and
-	// mark it so the display makes the fallback obvious.
-	candidate := false
-	ln, err := lens.LoadFromDir(path)
+	// Load the candidate. A reserved resolved name still previews (preview never writes, so
+	// an impersonating name is harmless), but under "candidate" so the display makes the
+	// fallback obvious.
+	ln, err := lens.LoadFromDirUnchecked(path)
 	if err != nil {
-		var uErr error
-		if ln, uErr = lens.LoadFromDirUnchecked(path); uErr != nil {
-			return uErr // a genuine load error (missing dir / no extract.md) — surface it
-		}
-		// LoadFromDirUnchecked succeeded where LoadFromDir failed => reserved name.
+		return err // a genuine load error (missing dir / no extract.md)
+	}
+	candidate := store.ReservedLensName(ln.Name)
+	if candidate {
 		ln.Name = "candidate"
-		candidate = true
 	}
 	// --review needs a REVIEW section to run. Fail early (before any runner work) rather
 	// than silently skipping the half the user explicitly asked for.
@@ -239,9 +233,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	runFn := distill.RunnerMine(runner)
 
 	// Preview all sessions in parallel (bounded by the engine's concurrency policy), then
-	// render in sample order. Concurrency is clamped to the sample size (and to 1 for a
-	// single --session, or a hypothetical non-concurrent runner).
-	conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
+	// render in sample order. Concurrency is clamped to the sample size (so to 1 for a
+	// single --session).
+	conc := distill.EffectiveConcurrency(cfg.MineConcurrency)
 	if conc > len(sessions) {
 		conc = len(sessions)
 	}
@@ -352,9 +346,8 @@ func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Con
 // `lens try codereview` instead of typing the archive path. It matches only a name with
 // no path separator or extension (so an actual "./foo" or "dir/lens" always stays a
 // directory path the user typed), and only when that name is in RegisteredLenses. Returns
-// ok=false to fall through to path handling. `default` isn't in RegisteredLenses (it's the
-// built-in), so `lens try default` stays a path arg — previewing the built-in isn't the
-// point here.
+// ok=false to fall through to path handling. `default` is an ordinary registered lens once
+// seeded, so `lens try default` previews it like any other.
 func registeredLensPath(st *store.Store, arg string) (string, bool) {
 	if strings.ContainsRune(arg, filepath.Separator) || strings.Contains(arg, "/") || filepath.Ext(arg) != "" {
 		return "", false
@@ -441,7 +434,7 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // when that runner differs from the resolved default. Those models belong to the default
 // runtime; on a different runtime they are a bad model name that would abort OpenCode's
 // Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
-// runtime's own default, mirroring production's applyModelUnion. cfg.Runner must already be
+// runtime's own default, mirroring production's clearCrossRuntimeModels. cfg.Runner must already be
 // the RESOLVED default runner. Pure (returns a modified copy) so it is unit-testable.
 func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
 	defaultRunner := cfg.Runner

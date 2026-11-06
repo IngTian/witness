@@ -349,7 +349,7 @@ func (q *queue) ResetLensWatermark(lens string) (int, error) {
 	// v8 the observations seq is a monotonic AUTOINCREMENT that never reuses a freed value,
 	// so re-mined obs land ABOVE any prior watermark and would be re-read regardless — but
 	// keeping this reset makes the freshly-wiped state explicit rather than relying on that.)
-	if _, err := q.db.Exec(`DELETE FROM meta WHERE key = ?`, "review_rowid:"+lens); err != nil {
+	if _, err := q.db.Exec(`DELETE FROM meta WHERE key = ?`, reviewRowidKey(lens)); err != nil {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
@@ -484,11 +484,11 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 	// Derived caches about the data just deleted. Exact key for profile_sig; prefix match
 	// for emerge_seen (one row per cluster signature). A sibling lens is untouched — the
 	// prefix ends with ':' so "emerge_seen:math:" can never match "emerge_seen:mathsy:".
-	if _, err = tx.Exec(`DELETE FROM meta WHERE key = ?`, "profile_sig:"+lens); err != nil {
+	if _, err = tx.Exec(`DELETE FROM meta WHERE key = ?`, ProfileSigKey(lens)); err != nil {
 		return 0, 0, err
 	}
 	if _, err = tx.Exec(
-		`DELETE FROM meta WHERE key LIKE ? ESCAPE '\'`, escapeMetaLike("emerge_seen:"+lens+":")+"%"); err != nil {
+		`DELETE FROM meta WHERE key LIKE ? ESCAPE '\'`, escapeMetaLike(EmergeSeenPrefix(lens))+"%"); err != nil {
 		return 0, 0, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -727,6 +727,6 @@ func (q *queue) Stats(lenses []string) Stats {
 	// A plain COUNT(DISTINCT) is cheap at this scale (no dedicated index — the drift_at
 	// != '' predicate is a rare-true filter over the small progress table).
 	_ = q.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM progress WHERE drift_at != ''`).Scan(&st.Drifted)
-	st.LastReview = metaGet(q.db, "review_ts")
+	st.LastReview = metaGet(q.db, reviewTSKey)
 	return st
 }

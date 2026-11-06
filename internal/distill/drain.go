@@ -34,14 +34,10 @@ const maxMineConcurrency = 16
 const maxInFlightChars = 2_000_000
 
 // EffectiveConcurrency is the number of sessions the engine will mine in parallel:
-// the configured cap, clamped to the CPU count, to an absolute memory-safe ceiling,
-// and to 1 when the runner cannot run concurrently. This is the POLICY
-// (engine-owned) applied to the platform FACT (runner.ConcurrentRunSafe) — the
-// platform never picks a number (issue #22).
-func EffectiveConcurrency(want int, concurrentRunSafe bool) int {
-	if !concurrentRunSafe {
-		return 1
-	}
+// the configured cap, floored at 1 and clamped to the CPU count and to an absolute
+// memory-safe ceiling. The engine owns this policy; the platform never picks a
+// number (issue #22).
+func EffectiveConcurrency(want int) int {
 	if want < 1 {
 		want = 1
 	}
@@ -225,7 +221,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 
 		if conc == 1 {
 			// Serial fast path: no goroutines/channels for the common laptop case
-			// (single pending session, or a runner that isn't ConcurrentRunSafe).
+			// (a single pending session, or MineConcurrency 1).
 			for _, s := range batch {
 				if stop() || reached(processed) {
 					return processed

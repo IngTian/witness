@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ import (
 const (
 	SessionPrefix        = "opencode:"
 	syncMetaKey          = "opencode_sync_time_updated_ms"
-	importKeysMetaPrefix = "opencode_import_keys:"
+	importKeysMetaPrefix = store.OpenCodeImportKeysNS + ":"
 )
 
 // Importer mirrors OpenCode text messages into witness raw records. It treats
@@ -34,12 +35,6 @@ const (
 type Importer struct {
 	Store  store.ImportStore
 	DBPath string
-}
-
-type ImportStats struct {
-	Sessions   int
-	Records    int
-	MaxUpdated int64
 }
 
 type sessionRow struct {
@@ -76,8 +71,8 @@ func DefaultDBPath() (string, error) {
 // Import imports the requested OpenCode sessions. With no session ids, it imports
 // sessions updated since the last full sync; the first full sync imports all
 // existing OpenCode sessions.
-func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStats, error) {
-	var stats ImportStats
+func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.ImportStats, error) {
+	stats := platform.ImportStats{Agent: "opencode"}
 	if im.Store == nil {
 		return stats, fmt.Errorf("store is required")
 	}
@@ -106,6 +101,7 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 	// The whole session list is read before the first import, so the total is exact.
 	progress := platform.ImportProgressFrom(ctx)
 	progress(0, len(sessions))
+	var maxUpdated int64 // the incremental-sync watermark
 	for i, s := range sessions {
 		n, err := im.importSession(ctx, db, s)
 		progress(i+1, len(sessions))
@@ -116,12 +112,10 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 			stats.Sessions++
 			stats.Records += n
 		}
-		if s.TimeUpdated > stats.MaxUpdated {
-			stats.MaxUpdated = s.TimeUpdated
-		}
+		maxUpdated = max(maxUpdated, s.TimeUpdated)
 	}
-	if len(sessionIDs) == 0 && stats.MaxUpdated > 0 {
-		if err := im.Store.SetMetaString(syncMetaKey, strconv.FormatInt(stats.MaxUpdated, 10)); err != nil {
+	if len(sessionIDs) == 0 && maxUpdated > 0 {
+		if err := im.Store.SetMetaString(syncMetaKey, strconv.FormatInt(maxUpdated, 10)); err != nil {
 			return stats, err
 		}
 	}
@@ -130,12 +124,11 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 
 // sqliteURI opens the user's own OpenCode database READ-ONLY with a shared cache.
 //
-// Routed through the shared sqliteFileURI (native.go) because this was previously a second,
+// Routed through the shared platform.SQLiteFileURI because this was previously a second,
 // independent copy of the same url.URL composition — and both copies were broken on Windows
-// the same way, turning the drive letter into a URI authority. See readOnlyURI for the full
-// explanation and the real error from Windows.
+// the same way, turning the drive letter into a URI authority (issue #10).
 func sqliteURI(path string) string {
-	return sqliteFileURI(path, "mode=ro&cache=shared")
+	return platform.SQLiteFileURI(path, "mode=ro&cache=shared")
 }
 
 // legacyMarkerName is the label the PRE-isolation design stamped on the scratch
@@ -233,7 +226,7 @@ func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow)
 	stateKey := importKeysMetaPrefix + session
 	oldKeys := parseImportKeys(im.Store.MetaString(stateKey))
 	rawCount := im.Store.RawCount(session)
-	if sameKeys(oldKeys, keys) && rawCount == len(keys) {
+	if slices.Equal(oldKeys, keys) && rawCount == len(keys) {
 		return 0, nil
 	}
 
@@ -276,28 +269,8 @@ func parseImportKeys(data string) []string {
 	return keys
 }
 
-func sameKeys(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func keysHavePrefix(keys, prefix []string) bool {
-	if len(prefix) > len(keys) {
-		return false
-	}
-	for i := range prefix {
-		if keys[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
+	return len(prefix) <= len(keys) && slices.Equal(keys[:len(prefix)], prefix)
 }
 
 func rawRecords(session string, turns []turn, seqOffset int) []store.RawRecord {

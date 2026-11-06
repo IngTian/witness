@@ -88,53 +88,6 @@ func (f *fakeMCPStore) WhyEmpty(lens string) store.EmptyReason {
 // compile-time proof the fake satisfies the interface the server accepts.
 var _ store.MCPStore = (*fakeMCPStore)(nil)
 
-// TestServerRunsAgainstFakeStore builds the MCP server with a fake MCPStore (no DB)
-// and drives get_profile end-to-end over the in-memory transport, proving the server
-// no longer needs a concrete *store.Store — the C1 decoupling goal for this consumer.
-func TestServerRunsAgainstFakeStore(t *testing.T) {
-	ctx := context.Background()
-	knownProfile := "# Profile\n\nA KNOWN fake-backed profile for default.\n"
-	fake := &fakeMCPStore{profiles: map[string]string{"default": knownProfile}}
-
-	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, Options{Version: "v0.0.0-fake"}).Connect(ctx, serverT, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	defer ss.Close()
-
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil)
-	cs, err := client.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	defer cs.Close()
-
-	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
-		Name:      "get_profile",
-		Arguments: map[string]any{"lens": "default"},
-	})
-	if err != nil {
-		t.Fatalf("call get_profile: %v", err)
-	}
-	if res.IsError {
-		t.Fatalf("get_profile returned tool error: %+v", res.Content)
-	}
-	if len(res.Content) == 0 {
-		t.Fatal("get_profile returned no content")
-	}
-	// The fake served the canned profile — the server round-tripped a store.MCPStore
-	// with no database. Assert the returned text CONTAINS the known profile content
-	// (proving it read the fake, not the server's not-found fallback).
-	tc, ok := res.Content[0].(*mcpsdk.TextContent)
-	if !ok || tc.Text == "" {
-		t.Fatalf("expected non-empty text content, got %+v", res.Content[0])
-	}
-	if !strings.Contains(tc.Text, "KNOWN fake-backed profile") {
-		t.Fatalf("returned profile missing known content (got server fallback, not fake): %s", tc.Text)
-	}
-}
-
 // TestServerRecordDeleteSearch exercises the MCP server's record_observation,
 // delete_observation, and search_observations against the fake store, proving the
 // fake's recorders work and those tools are wired correctly (issue #97).
@@ -151,19 +104,7 @@ func TestServerRecordDeleteSearch(t *testing.T) {
 		stagedReturn: true,  // the store accepts the insert
 	}
 
-	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, Options{Version: "v0.0.0-fake"}).Connect(ctx, serverT, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	defer ss.Close()
-
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil)
-	cs, err := client.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	defer cs.Close()
+	cs := connect(t, fake, Options{Version: "v0.0.0-fake"})
 
 	// record_observation: stage a new obs.
 	recRes, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{

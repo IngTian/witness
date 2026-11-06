@@ -81,7 +81,6 @@ func (r *tryRunner) Run(_ context.Context, _, prompt, input string) (string, err
 }
 func (*tryRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (*tryRunner) InvocationHint() string                          { return "fake" }
-func (*tryRunner) ConcurrentRunSafe() bool                         { return true }
 
 // lensTryProgress runs cmdLensTry over 3 sessions (one panics) and returns every snapshot.
 func lensTryProgress(t *testing.T, r *tryRunner, review bool) (snaps []distill.Progress, finished int) {

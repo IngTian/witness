@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -33,6 +34,22 @@ func TestDistillBackfillRejectsTimeBounds(t *testing.T) {
 		if !strings.Contains(err.Error(), "--detach") {
 			t.Fatalf("unexpected error for since=%q until=%q: %v", tc.since, tc.until, err)
 		}
+	}
+}
+
+// `worker run --detach` must not say "worker started" when the spawn failed. It used the
+// fire-and-forget spawnDetached, so a failed spawn printed success and exited 0.
+func TestDetachedWorkerRunFailsWhenTheSpawnFails(t *testing.T) {
+	var spawned []string
+	err := cmdDistillStartWith(true, "7d", "", func(args ...string) bool { spawned = args; return false })
+	if err == nil {
+		t.Fatal("a failed spawn must be an error, not a background worker that never started")
+	}
+	if len(spawned) < 3 || spawned[0] != "worker-run" || spawned[1] != "--since" {
+		t.Errorf("spawned %q, want worker-run --since <time>", spawned)
+	}
+	if err := cmdDistillStartWith(true, "", "", func(...string) bool { return true }); err != nil {
+		t.Errorf("a successful spawn returned %v", err)
 	}
 }
 
@@ -124,18 +141,14 @@ func newDistillStartForWaitBackoffsTest(t *testing.T) error {
 	cmd := newWorkerCmd()
 	cmd.SetArgs([]string{"run", "--detach", "--wait-backoffs"})
 	// Silence cobra's own usage/error printing; we only inspect the returned error.
-	cmd.SetOut(nopWriter{})
-	cmd.SetErr(nopWriter{})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	for _, c := range cmd.Commands() {
 		c.SilenceUsage = true
 		c.SilenceErrors = true
 	}
 	return cmd.Execute()
 }
-
-type nopWriter struct{}
-
-func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // B4 self-heal: a session that's backed off but whose retry is soon (within maxWait)
 // must be waited out and re-drained until it clears. We model two backoff rounds that

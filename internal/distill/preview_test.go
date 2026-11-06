@@ -16,7 +16,7 @@ import (
 
 // previewLens is a minimal candidate lens for the preview tests.
 func previewLens() *lens.Lens {
-	return &lens.Lens{Name: "cand", BuiltIn: false, Extract: "extract-cand", Review: "r", Dimensions: []string{"thinking"}}
+	return &lens.Lens{Name: "cand", Extract: "extract-cand", Review: "r", Dimensions: []string{"thinking"}}
 }
 
 // obsReply is a helper: a JSON array of one observation echoing the input.
@@ -231,12 +231,9 @@ func TestPreviewMineTransportErrorSurfaces(t *testing.T) {
 }
 
 // TestPreviewReviewSynthesizesWithoutWriting: PreviewReview runs the REVIEW prompt over
-// a set of observations and returns the facets it would assert — writing NO facets.
+// a set of observations and returns the facets it would assert. It is handed no store, so
+// "writes nothing" holds by signature; a facet count over an empty store asserted nothing.
 func TestPreviewReviewSynthesizesWithoutWriting(t *testing.T) {
-	s := newStore(t)
-	// Seed a couple of real facet rows so we can prove PreviewReview doesn't touch them.
-	facetsBefore := countFacets(t, s)
-
 	obs := []store.Observation{
 		{ID: "obs_1", Lens: "cand", Dimension: "thinking", Observation: "reasons by analogy", Poignancy: 5},
 		{ID: "obs_2", Lens: "cand", Dimension: "thinking", Observation: "reasons by analogy again", Poignancy: 4},
@@ -253,9 +250,6 @@ func TestPreviewReviewSynthesizesWithoutWriting(t *testing.T) {
 	}
 	if len(facets) != 1 || facets[0].Key != "analogical" || len(facets[0].BecauseOf) != 2 {
 		t.Fatalf("expected one facet citing 2 obs, got %+v", facets)
-	}
-	if got := countFacets(t, s); got != facetsBefore {
-		t.Fatalf("PreviewReview WROTE facets: before=%d after=%d (must write nothing)", facetsBefore, got)
 	}
 }
 
@@ -275,15 +269,6 @@ func TestPreviewReviewDriftSurfaces(t *testing.T) {
 	if !errors.Is(err, ErrNoJSONArray) {
 		t.Fatalf("a no-array reply must surface as ErrNoJSONArray (so callers can classify drift), got: %v", err)
 	}
-}
-
-func countFacets(t *testing.T, s *store.Store) int {
-	t.Helper()
-	f, err := s.ReadFacets()
-	if err != nil {
-		t.Fatalf("ReadFacets: %v", err)
-	}
-	return len(f)
 }
 
 // countObs returns the total observation rows — the read-only assertion's ground truth.

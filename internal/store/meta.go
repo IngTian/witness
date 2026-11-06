@@ -14,6 +14,24 @@ import (
 // exercised (and, at the Phase-B seam, mocked) on its own.
 type metaKV struct{ db *sql.DB }
 
+// Per-lens meta keys distill writes and the store DELETES (DeleteLensData). The store owns the
+// spelling so the two sides cannot drift: a renamed prefix used to pass every test while
+// `backfill --fresh` stopped clearing it, so the emergent pass skipped re-verifying arcs whose
+// facets it had just deleted.
+//
+// ProfileSigKey holds the content signature of the last summary written for a lens (#73-S5).
+// EmergeSeenKey records that one emergent cluster (sig) was already verified; EmergeSeenPrefix is
+// every such key for a lens, ending in ':' so "math" never matches "mathsy".
+func ProfileSigKey(lens string) string      { return "profile_sig:" + lens }
+func EmergeSeenPrefix(lens string) string   { return "emerge_seen:" + lens + ":" }
+func EmergeSeenKey(lens, sig string) string { return EmergeSeenPrefix(lens) + sig }
+
+// The global review-cadence stamps StampReview writes.
+const (
+	reviewTSKey       = "review_ts"        // when the last review ran
+	reviewObsRowidKey = "review_obs_rowid" // MAX(observations.seq) at that review
+)
+
 // metaGet reads one `meta` value (empty string if absent). A free function, not a
 // method, because several concerns need this exact primitive (metaKV's own readers,
 // the queue's Stats.LastReview, the config layer's review cadence) without taking a
