@@ -430,8 +430,10 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 			if err != nil {
 				slog.Warn("profile: source resolver prompts unavailable; self-heal skipped this run", "err", err)
 			} else {
-				sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
-				stale, err := sm.StaleSources()
+				// The no-model staleness gate, BEFORE ensureRunners: an idle worker with every
+				// portrait current never opens a runner.
+				rs := &distill.Resolver{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt}
+				stale, err := rs.StaleSources()
 				if err != nil {
 					slog.Warn("profile: failed to check stale sources; self-heal skipped this run", "err", err)
 				} else if len(stale) > 0 {
@@ -570,8 +572,8 @@ func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, l
 }
 
 // resolvePortraitSources links portrait sentences to their source facets. Reads the resolver
-// prompts, builds a Summarizer with ResolvePrompt/ResolveUnifiedPrompt, and calls
-// ResolveSources(), which resolves every stale portrait and writes the links to disk.
+// prompts, builds a distill.Resolver, and calls ResolveSources(), which resolves every stale
+// portrait and writes the links to disk.
 // Failures are logged but never propagated: source resolution is auxiliary metadata that must
 // never break the review or worker run. Returns error only for logging; callers must not
 // propagate it into the review's or worker's exit status.
@@ -581,20 +583,15 @@ func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Conf
 		slog.Warn("profile: resolver prompts unavailable; skipping source linking", "err", err)
 		return err
 	}
-	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
-	stale, err := sm.StaleSources()
+	rs := &distill.Resolver{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
+	resolved, err := rs.ResolveSources(ctx)
+	if len(resolved) > 0 {
+		slog.Info("profile: sources linked", "portraits", len(resolved))
+	}
 	if err != nil {
-		slog.Warn("profile: failed to check stale sources", "err", err)
-		return err
-	}
-	if len(stale) == 0 {
-		return nil
-	}
-	if err := sm.ResolveSources(ctx); err != nil {
 		slog.Warn("profile: source resolution failed", "err", err)
 		return err
 	}
-	slog.Info("profile: sources linked", "portraits", len(stale))
 	return nil
 }
 

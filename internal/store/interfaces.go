@@ -218,7 +218,17 @@ type SummaryStore interface {
 	// summarizer only ever visits lenses that HAVE facets, so a dropped lens's stale
 	// narrative is served to agents forever.
 	ListProfiles() ([]string, error)
-	// Portrait source methods: derived sentence→trait links, one JSON row per portrait.
+}
+
+// ResolverStore is the surface the portrait-source Resolver drives: read the active facets
+// and the portrait files, and read/write the derived sentence→trait rows. Deliberately no
+// WriteProfile and no MetaKV: the resolver can never change a portrait or the signature that
+// vouches for it.
+type ResolverStore interface {
+	ReadActiveFacets() ([]Facet, error)
+	ReadProfile(lens string) (string, bool, error)
+	ListProfiles() ([]string, error)
+	// Derived sentence→trait links, one JSON row per portrait.
 	WritePortraitSources(portrait, textHash string, src PortraitSources, at time.Time) error
 	ReadPortraitSources(portrait string) (src PortraitSources, textHash string, ok bool, err error)
 	DeletePortraitSources(portrait string) error
@@ -237,6 +247,7 @@ var (
 	_ ReviewStore           = (*Store)(nil)
 	_ EmergentStore         = (*Store)(nil)
 	_ SummaryStore          = (*Store)(nil)
+	_ ResolverStore         = (*Store)(nil)
 	_ ObservationReader     = (*Store)(nil)
 	_ MetaKV                = (*Store)(nil)
 	_ RawWriter             = (*Store)(nil)
