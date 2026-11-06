@@ -422,6 +422,7 @@ func newStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() }) // Windows: an open handle fails TempDir cleanup
 	return s
 }
 

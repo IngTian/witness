@@ -40,6 +40,7 @@ func openOptedOut(t *testing.T, home string) *store.Store {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
