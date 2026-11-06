@@ -727,7 +727,7 @@ func renderLensPrompts(l *lens.Lens) string {
 // registered lens that appears in EnabledLenses only if it was seeded+enabled (fresh
 // tool install or the pre-1a migration) and not since disabled. So an install runs
 // exactly the lenses its config enables — including ZERO (a valid state: nothing to
-// distill; the queue short-circuits, see store.emptyLensSet). No lens is force-added.
+// distill; every queue query short-circuits on an empty set). No lens is force-added.
 func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 	out := []*lens.Lens{}
 	for _, name := range st.LoadConfig().EnabledLenses {
@@ -748,10 +748,10 @@ func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 // no-progress cycle (config says active, mining always skips).
 //
 // Since #44 slice 1a an EMPTY result is legal and correct — an install with no enabled
-// lenses distills nothing, and the queue short-circuits cleanly on an empty set (see
-// store.emptyLensSet). We must NOT force ["default"] here: default has no always-on
-// status, so injecting it when it isn't enabled would offer sessions for a lens that
-// never runs (the very no-progress cycle above) and resurrect a lens the user disabled.
+// lenses distills nothing, and every queue query short-circuits cleanly on an empty set.
+// We must NOT force ["default"] here: default has no always-on status, so injecting it
+// when it isn't enabled would offer sessions for a lens that never runs (the very
+// no-progress cycle above) and resurrect a lens the user disabled.
 // Only a hard error loading the config is unexpected — return empty there too and let
 // the drain no-op rather than fabricate a lens set.
 func activeLensNames(st *store.Store) []string {
