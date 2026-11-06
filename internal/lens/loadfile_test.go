@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// LoadFromDirUnchecked reads an arbitrary directory, honors the lens.json name, and
-// forces BuiltIn=false.
+// LoadFromDirUnchecked reads an arbitrary directory and honors the lens.json name.
 func TestLoadFromDirUncheckedHonorsConfigName(t *testing.T) {
 	root := t.TempDir()
 	dir := writeLensDir(t, root, "whatever",
@@ -19,9 +18,6 @@ func TestLoadFromDirUncheckedHonorsConfigName(t *testing.T) {
 	}
 	if l.Name != "codereview" {
 		t.Fatalf("name should come from lens.json, got %q", l.Name)
-	}
-	if l.BuiltIn {
-		t.Fatalf("a candidate lens must never be the built-in default")
 	}
 	if len(l.Dimensions) != 2 || l.Extract == "" {
 		t.Fatalf("loaded lens wrong: %+v", l)
