@@ -193,16 +193,22 @@ func buildTrait(f *store.Facet, cur *store.FacetVersion, notes map[string]*store
 		t.Evidence = append(t.Evidence, Evidence{Date: day(c.at), Evidence: c.n.Evidence, Note: c.n.Observation})
 	}
 
-	// Points: every logged confirmation. The open version's stored value gets a point of its
-	// own (at LastSeen, when it was last set) only if no row records it — a row at or after
-	// the version's ValidFrom is the event that wrote or re-confirmed it.
+	// Points: every logged confirmation, in TIME order — log id order is not time order once a
+	// long review Run interleaves with a compaction Apply. The open version owns the rows at or
+	// after its ValidFrom. Its stored value gets a point of its own (at LastSeen, when it was
+	// last set) unless the latest owned row already says that value: `witness merge` adopts
+	// the other side's newer confidence WITHOUT logging (spec §7.1), and today's stored value
+	// must still be the last confirmation drawn.
 	pts := append([]stamped(nil), rows...)
 	openFrom, openOK := parseTS(cur.ValidFrom)
-	logged := false
-	for _, r := range rows {
-		logged = logged || (openOK && !r.at.Before(openFrom))
+	var latest *stamped
+	for i := range rows {
+		r := &rows[i]
+		if openOK && !r.at.Before(openFrom) && (latest == nil || !r.at.Before(latest.at)) {
+			latest = r // ties: the later-written row wins
+		}
 	}
-	if !logged {
+	if latest == nil || latest.v != cur.Confidence {
 		if ls, ok := parseTS(f.LastSeen); ok {
 			pts = append(pts, stamped{ls, cur.Confidence})
 		}
@@ -253,7 +259,10 @@ func buildTrait(f *store.Facet, cur *store.FacetVersion, notes map[string]*store
 			continue
 		}
 		to, toOK := parseTS(v.ValidTo)
-		if !fromOK || !toOK || loggedWithin(rows, from, to) {
+		// A zero-length version held its value for no time: a multi-window review Run stamps
+		// every window with one nowStr, so a facet rewritten in two windows gets a [T,T)
+		// version whose value is already a log point. It is not a span.
+		if !fromOK || !toOK || !from.Before(to) || loggedWithin(rows, from, to) {
 			continue
 		}
 		spans = append(spans, span{from, to, v.Confidence})
@@ -264,13 +273,18 @@ func buildTrait(f *store.Facet, cur *store.FacetVersion, notes map[string]*store
 	}
 
 	// Confirmed values only — what witness concluded at each review, never a decayed one, or
-	// decay alone would put a ↓ on almost every trait.
-	var confirmed []float64
-	for _, s := range t.Spans {
-		confirmed = append(confirmed, s.Value)
+	// decay alone would put a ↓ on almost every trait. In TIME order: a span (keyed by its
+	// start) can sit between logged points, e.g. a version `witness merge` appended unlogged
+	// between two logged ones. Spans go first on ties — appended first, and the sort is stable.
+	seq := make([]stamped, 0, len(spans)+len(pts))
+	for _, s := range spans {
+		seq = append(seq, stamped{s.from, s.v})
 	}
-	for _, p := range t.Points {
-		confirmed = append(confirmed, p.Value)
+	seq = append(seq, pts...)
+	sort.SliceStable(seq, func(i, j int) bool { return seq[i].at.Before(seq[j].at) })
+	var confirmed []float64
+	for _, c := range seq {
+		confirmed = append(confirmed, c.v)
 	}
 	if len(confirmed) > 0 {
 		t.TrendFrom = confirmed[0]

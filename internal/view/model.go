@@ -29,7 +29,7 @@ type Model struct {
 // facts. Only conversation sources (Claude Code, OpenCode, Codex) count; sessions from
 // `witness ingest` (file:) are excluded from every number.
 type Activity struct {
-	First       string   `json:"first"`       // YYYY-MM-DD of the first conversation turn; "" if none
+	First       string   `json:"first"`       // YYYY-MM-DD of the first conversation turn or note; "" if none
 	Last        string   `json:"last"`        // YYYY-MM-DD of now
 	Days        []Day    `json:"days"`        // days with ≥1 conversation turn, ascending
 	Cuts        []int    `json:"cuts"`        // ≤4 ascending distinct turn thresholds; shade = 1 + count(cut < turns)

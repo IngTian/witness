@@ -1,6 +1,7 @@
 package view
 
 import (
+	"cmp"
 	"sort"
 	"strconv"
 	"strings"
@@ -80,24 +81,25 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 		})
 	}
 
-	// Compute First and Last
+	// First is the earliest day with a conversation turn OR note — every dayMap key, since both
+	// loops above already dropped file: sessions and bad ts. Turns alone are not enough:
+	// `witness cleanup` reclaims transcripts (raw) but keeps notes, so an archive can hold notes
+	// whose turns are gone, and a turns-only First would leave them before every window.
 	first := ""
-	if len(dates) > 0 {
-		first = dates[0]
+	for date := range dayMap {
+		if first == "" || date < first {
+			first = date
+		}
 	}
 	last := now.In(loc).Format("2006-01-02")
 
 	// Compute Cuts (20/40/60/80th percentiles, nearest-rank)
 	cuts := computeCuts(days)
 
-	// Generate Windows
-	var windows []Window
-	if first != "" {
-		windows = generateWindows(first, last, days, dayMap, in.Notes, loc, tally)
-	} else {
-		// Empty archive: one window per kind, all containing now
-		windows = generateWindowsForEmpty(last, loc, tally)
-	}
+	// Windows run from First's to Last's. An archive with nothing dated yet gets one window per
+	// kind, all containing now: the same path started at Last, so there is no second window
+	// builder to forget an input (the old empty-archive one was handed no notes).
+	windows := generateWindows(cmp.Or(first, last), last, days, dayMap, in.Notes, loc, tally)
 
 	return Activity{
 		First:       first,
@@ -164,40 +166,30 @@ func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuild
 
 	// Months
 	for ym := monthOf(firstDate); !ym.After(monthOf(lastDate)); ym = ym.AddDate(0, 1, 0) {
-		windows = append(windows, buildWindow("month", ym, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("month", ym, first, last, days, dayMap, notes, loc, tally))
 	}
 
 	// Quarters
 	for yq := quarterOf(firstDate); !yq.After(quarterOf(lastDate)); yq = yq.AddDate(0, 3, 0) {
-		windows = append(windows, buildWindow("quarter", yq, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("quarter", yq, first, last, days, dayMap, notes, loc, tally))
 	}
 
 	// Halves
 	for yh := halfOf(firstDate); !yh.After(halfOf(lastDate)); yh = yh.AddDate(0, 6, 0) {
-		windows = append(windows, buildWindow("half", yh, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("half", yh, first, last, days, dayMap, notes, loc, tally))
 	}
 
 	// Years
 	for y := yearOf(firstDate); !y.After(yearOf(lastDate)); y = y.AddDate(1, 0, 0) {
-		windows = append(windows, buildWindow("year", y, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("year", y, first, last, days, dayMap, notes, loc, tally))
 	}
 
 	return windows
 }
 
-// generateWindowsForEmpty returns one window per kind, all containing now (Last).
-func generateWindowsForEmpty(last string, loc *time.Location, tally traitTally) []Window {
-	lastDate := parseDate(last)
-	return []Window{
-		buildWindow("month", monthOf(lastDate), last, nil, nil, nil, loc, tally),
-		buildWindow("quarter", quarterOf(lastDate), last, nil, nil, nil, loc, tally),
-		buildWindow("half", halfOf(lastDate), last, nil, nil, nil, loc, tally),
-		buildWindow("year", yearOf(lastDate), last, nil, nil, nil, loc, tally),
-	}
-}
-
-// buildWindow constructs a Window for the given kind and start date.
-func buildWindow(kind string, start time.Time, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location, tally traitTally) Window {
+// buildWindow constructs a Window for the given kind and start date. first is Activity's
+// First (or Last for an empty archive), not the first turn day: SpanDays clips to it.
+func buildWindow(kind string, start time.Time, first, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location, tally traitTally) Window {
 	var end time.Time
 	var label string
 
@@ -260,10 +252,6 @@ func buildWindow(kind string, start time.Time, last string, days []Day, dayMap m
 	}
 
 	// Compute SpanDays and SoFar
-	first := ""
-	if len(days) > 0 {
-		first = days[0].Date
-	}
 	spanDays := computeSpanDays(startStr, endStr, first, last)
 	soFar := last >= startStr && last <= endStr
 
@@ -288,16 +276,9 @@ func buildWindow(kind string, start time.Time, last string, days []Day, dayMap m
 	}
 }
 
-// computeSpanDays returns the window clipped to [First, Last], in days; 0 if disjoint.
+// computeSpanDays returns the window clipped to [First, Last], in days; 0 if disjoint. An
+// empty archive passes first == last, which clips every window to now's one day.
 func computeSpanDays(windowStart, windowEnd, first, last string) int {
-	if first == "" {
-		// No conversations: window is clipped to [last, last]
-		if last >= windowStart && last <= windowEnd {
-			return 1
-		}
-		return 0
-	}
-
 	// Clip [windowStart, windowEnd] to [first, last]
 	clipStart := windowStart
 	if first > clipStart {

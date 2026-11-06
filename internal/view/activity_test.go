@@ -2,6 +2,7 @@ package view
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -471,4 +472,63 @@ func search(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func windowByLabel(t *testing.T, m *Model, label string) Window {
+	t.Helper()
+	for _, w := range m.Activity.Windows {
+		if w.Label == label {
+			return w
+		}
+	}
+	t.Fatalf("no window %q", label)
+	return Window{}
+}
+
+// P9: `witness cleanup` reclaims transcripts (raw) but keeps notes, so notes can outlive their
+// turns. First must reach back to them, or they fall before every window.
+func TestActivityFirstCountsNotes(t *testing.T) {
+	loc := time.FixedZone("EST", -5*3600)
+	now := time.Date(2026, 3, 5, 0, 0, 0, 0, loc)
+	in := &store.ViewInput{
+		Turns: []store.ViewTurn{{Session: "s1", TS: "2026-03-01T10:00:00-05:00"}},
+		Notes: []store.ViewNote{
+			{ID: "n1", Session: "s0", TS: "2026-01-10T10:00:00-05:00"},           // its turn was reclaimed
+			{ID: "f1", Session: "file:/doc.md", TS: "2025-12-01T10:00:00-05:00"}, // ingested: never First
+			{ID: "bad", Session: "s0", TS: "garbage"},
+		},
+	}
+	m := Build(in, nil, now, loc)
+
+	if m.Activity.First != "2026-01-10" {
+		t.Errorf("First: got %q, want 2026-01-10 (the earliest conversation note)", m.Activity.First)
+	}
+	if want := []Day{{Date: "2026-03-01", Conversations: 1, Turns: 1}}; !reflect.DeepEqual(m.Activity.Days, want) {
+		t.Errorf("Days: got %+v, want %+v (only days with turns)", m.Activity.Days, want)
+	}
+	jan := windowByLabel(t, m, "Jan 2026")
+	if jan.Notes != 1 || jan.SpanDays != 22 || jan.Turns != 0 || jan.ActiveDays != 0 {
+		t.Errorf("Jan: Notes %d SpanDays %d Turns %d ActiveDays %d, want 1, 22 (Jan 10–31), 0, 0",
+			jan.Notes, jan.SpanDays, jan.Turns, jan.ActiveDays)
+	}
+	if len(m.Activity.Windows) == 0 || m.Activity.Windows[0].Label != "Jan 2026" {
+		t.Errorf("first window: want Jan 2026 (December's file: note must not open a window)")
+	}
+}
+
+func TestActivityNotesWithoutTurns(t *testing.T) {
+	loc := time.FixedZone("EST", -5*3600)
+	now := time.Date(2026, 3, 5, 0, 0, 0, 0, loc)
+	in := &store.ViewInput{Notes: []store.ViewNote{{ID: "n1", Session: "s0", TS: "2026-03-02T10:00:00-05:00"}}}
+	m := Build(in, nil, now, loc)
+
+	if m.Activity.First != "2026-03-02" {
+		t.Errorf("First: got %q, want 2026-03-02", m.Activity.First)
+	}
+	if len(m.Activity.Days) != 0 {
+		t.Errorf("Days: got %+v, want none (no turns)", m.Activity.Days)
+	}
+	if mar := windowByLabel(t, m, "Mar 2026"); mar.Notes != 1 || mar.SpanDays != 4 {
+		t.Errorf("Mar: Notes %d SpanDays %d, want 1 and 4 (Mar 2–5)", mar.Notes, mar.SpanDays)
+	}
 }

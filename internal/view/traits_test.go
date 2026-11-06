@@ -66,7 +66,7 @@ func TestTraitBasics(t *testing.T) {
 				{Value: "old", ValidFrom: "2026-03-05T12:00:00Z", ValidTo: "2026-03-08T12:00:00Z",
 					BecauseOf: []string{"n1", "n2", "gone"}, Confidence: 0.6},
 				{Value: "new", Claim: "Prestige slips into decisions.", ValidFrom: "2026-03-08T12:00:00Z",
-					BecauseOf: []string{"n2", "n3"}, Confidence: 0.9, ConfidenceSeq: 1000},
+					BecauseOf: []string{"n2", "n3", "n5"}, Confidence: 0.9, ConfidenceSeq: 1000},
 			},
 		}},
 		Notes: []store.ViewNote{
@@ -75,6 +75,8 @@ func TestTraitBasics(t *testing.T) {
 			{ID: "n2", TS: "2026-03-01T02:00:00-08:00", Session: "s1", Lens: "default", Observation: "o2", Evidence: "e2", Poignancy: 7},
 			{ID: "n3", TS: "2026-03-04T10:00:00-05:00", Session: "s1", Lens: "default", Observation: "o3", Evidence: "e3", Poignancy: 3},
 			{ID: "n4", TS: "2026-03-04T11:00:00-05:00", Session: "s1", Lens: "default", Observation: "o4", Evidence: "e4", Poignancy: 9}, // uncited
+			// Sunday night in EST, Monday Mar 9 in UTC: its week is Mar 2 only when bucketed in loc.
+			{ID: "n5", TS: "2026-03-08T22:00:00-05:00", Session: "s1", Lens: "default", Observation: "o5", Evidence: "e5", Poignancy: 1},
 		},
 		HighWater: 4000, // 3000 observations past the open version's clock: one half-life
 	}
@@ -85,13 +87,13 @@ func TestTraitBasics(t *testing.T) {
 		Lens: "default", Dimension: "biases", Key: "lets_prestige_leak",
 		Name:    "Lets prestige leak",
 		Summary: "Prestige slips into decisions.",
-		Notes:   3,            // n1, n2, n3 once each; "gone" does not exist
+		Notes:   4,            // n1, n2, n3, n5 once each; "gone" does not exist
 		Arrival: "2026-02-28", // n1, not the first version's 2026-03-05
 		Today:   0.45,         // 0.9 halved, never the stored 0.9
 		Points:  []Point{{At: "2026-03-10", Value: 0.9}},
 		Spans:   []Span{{From: "2026-03-05", To: "2026-03-08", Value: 0.6}},
 		Trend:   "up", TrendFrom: 0.6, Rewrites: 1, Changes: 1,
-		Weeks: []Week{{Week: "2026-02-23", N: 2}, {Week: "2026-03-02", N: 1}},
+		Weeks: []Week{{Week: "2026-02-23", N: 2}, {Week: "2026-03-02", N: 2}},
 		Evidence: []Evidence{
 			{Date: "2026-03-01", Evidence: "e2", Note: "o2"},
 			{Date: "2026-02-28", Evidence: "e1", Note: "o1"},
@@ -586,8 +588,9 @@ func TestActivityNewTraitsAndRewrites(t *testing.T) {
 		t.Errorf("TotalTraits: got %d, want 4", m.Activity.TotalTraits)
 	}
 
-	// No conversation turns at all: only now's windows exist, and they still count traits.
-	in.Turns = nil
+	// No conversation turns or notes at all (notes alone would set First): only now's windows
+	// exist, and they still count traits. Arrivals fall back to ValidFrom, in the same months.
+	in.Turns, in.Notes = nil, nil
 	want = []windowCount{{"Apr 2026", 1, 1}, {"Q2 2026", 1, 1}, {"H1 2026", 4, 3}, {"2026", 4, 3}}
 	if got := windowCounts(Build(in, nil, now, est)); !reflect.DeepEqual(got, want) {
 		t.Errorf("windows without turns:\n got  %+v\n want %+v", got, want)
@@ -617,4 +620,131 @@ func TestTraitBadTimestamps(t *testing.T) {
 	wantNotebooks(t, m.Notebooks, []Notebook{{Name: "default", Topics: []Topic{
 		{Key: "habits", Label: "habits", Traits: []int{0}},
 	}}})
+}
+
+func TestConfirmedValuesInTimeOrder(t *testing.T) {
+	const T = "2026-05-10T12:00:00Z"
+	in := &store.ViewInput{
+		Facets: []store.Facet{
+			{
+				// (a) A multi-window review Run stamps every window with one nowStr: rewritten in two
+				// windows, the facet gets a zero-length [T,T) version whose value is a log point.
+				Lens: "default", Dimension: "habits", Key: "same_instant", LastSeen: T,
+				Versions: []store.FacetVersion{
+					{ValidFrom: "2026-05-01T12:00:00Z", ValidTo: T, Confidence: 0.5},
+					{ValidFrom: T, ValidTo: T, Confidence: 0.6},
+					{ValidFrom: T, Confidence: 0.62},
+				},
+			},
+			{
+				// (b) An unlogged closed version (merge-appended) between a logged one and an
+				// unlogged open one: its span belongs BETWEEN the two points.
+				Lens: "default", Dimension: "habits", Key: "merge_between", LastSeen: "2026-05-25T12:00:00Z",
+				Versions: []store.FacetVersion{
+					{ValidFrom: "2026-05-01T12:00:00Z", ValidTo: "2026-05-10T12:00:00Z", Confidence: 0.5},
+					{ValidFrom: "2026-05-10T12:00:00Z", ValidTo: "2026-05-20T12:00:00Z", Confidence: 0.8},
+					{ValidFrom: "2026-05-20T12:00:00Z", Confidence: 0.82},
+				},
+			},
+			{
+				// A span and a point at the same instant (a stale LastSeen): the span goes first.
+				Lens: "default", Dimension: "habits", Key: "tie", LastSeen: "2026-05-01T12:00:00Z",
+				Versions: []store.FacetVersion{
+					{ValidFrom: "2026-05-01T12:00:00Z", ValidTo: "2026-05-10T12:00:00Z", Confidence: 0.5},
+					{ValidFrom: "2026-05-10T12:00:00Z", Confidence: 0.6},
+				},
+			},
+		},
+		Log: []store.ConfidenceEvent{
+			{Lens: "default", Dimension: "habits", Key: "same_instant", At: "2026-05-01T12:00:00Z", To: 0.5, Kind: store.EventNew},
+			{Lens: "default", Dimension: "habits", Key: "same_instant", At: T, From: 0.5, To: 0.6, Kind: store.EventRewrite},
+			{Lens: "default", Dimension: "habits", Key: "same_instant", At: T, From: 0.6, To: 0.62, Kind: store.EventRewrite},
+			{Lens: "default", Dimension: "habits", Key: "merge_between", At: "2026-05-01T12:00:00Z", To: 0.5, Kind: store.EventNew},
+		},
+	}
+	m := Build(in, nil, time.Date(2026, 5, 30, 0, 0, 0, 0, est), est)
+
+	wantTrait(t, traitByKey(t, m, "same_instant"), Trait{
+		Lens: "default", Dimension: "habits", Key: "same_instant",
+		Name: "Same instant", Arrival: "2026-05-01", Today: 0.62,
+		Points: []Point{{At: "2026-05-01", Value: 0.5}, {At: "2026-05-10", Value: 0.6}, {At: "2026-05-10", Value: 0.62}},
+		Spans:  []Span{}, // not the [T,T) version
+		Trend:  "up", TrendFrom: 0.5, Rewrites: 2, Changes: 2,
+		Weeks: []Week{}, Evidence: []Evidence{},
+	})
+	wantTrait(t, traitByKey(t, m, "merge_between"), Trait{
+		Lens: "default", Dimension: "habits", Key: "merge_between",
+		Name: "Merge between", Arrival: "2026-05-01", Today: 0.82,
+		Points: []Point{{At: "2026-05-01", Value: 0.5}, {At: "2026-05-25", Value: 0.82}},
+		Spans:  []Span{{From: "2026-05-10", To: "2026-05-20", Value: 0.8}},
+		Trend:  "up", TrendFrom: 0.5, Rewrites: 2, Changes: 2, // 0.5 → 0.8 → 0.82, not 0.8 → 0.5 → 0.82
+		Weeks: []Week{}, Evidence: []Evidence{},
+	})
+	if tie := traitByKey(t, m, "tie"); tie.Trend != "up" || tie.TrendFrom != 0.5 {
+		t.Errorf("tie: Trend %q from %v, want up from 0.5 (span before point at one instant)", tie.Trend, tie.TrendFrom)
+	}
+}
+
+func TestMergeAdoptedConfidenceIsLastPoint(t *testing.T) {
+	one := func(key string, stored float64) store.Facet {
+		return store.Facet{Lens: "default", Dimension: "habits", Key: key, LastSeen: "2026-06-08T12:00:00Z",
+			Versions: []store.FacetVersion{{ValidFrom: "2026-06-01T12:00:00Z", Confidence: stored}}}
+	}
+	row := func(key string) store.ConfidenceEvent {
+		return store.ConfidenceEvent{Lens: "default", Dimension: "habits", Key: key, At: "2026-06-01T12:00:00Z", To: 0.7, Kind: store.EventNew}
+	}
+	in := &store.ViewInput{
+		// `witness merge` adopted the other side's newer 0.85 without logging it.
+		Facets: []store.Facet{one("adopted", 0.85), one("agreed", 0.7)},
+		Log:    []store.ConfidenceEvent{row("adopted"), row("agreed")},
+	}
+	m := Build(in, nil, time.Date(2026, 6, 10, 0, 0, 0, 0, est), est)
+
+	wantTrait(t, traitByKey(t, m, "adopted"), Trait{
+		Lens: "default", Dimension: "habits", Key: "adopted",
+		Name: "Adopted", Arrival: "2026-06-01", Today: 0.85,
+		Points: []Point{{At: "2026-06-01", Value: 0.7}, {At: "2026-06-08", Value: 0.85}},
+		Spans:  []Span{},
+		Trend:  "up", TrendFrom: 0.7, Changes: 1,
+		Weeks: []Week{}, Evidence: []Evidence{},
+	})
+	if want := []Point{{At: "2026-06-01", Value: 0.7}}; !reflect.DeepEqual(traitByKey(t, m, "agreed").Points, want) {
+		t.Errorf("agreed: Points %+v, want %+v (the row already says the stored value)", traitByKey(t, m, "agreed").Points, want)
+	}
+
+	// The open version owns only rows at or after its ValidFrom: an EARLIER version's row that
+	// happens to say the same 0.7 does not confirm this unlogged (merge-appended) version.
+	carried := store.Facet{Lens: "default", Dimension: "habits", Key: "carried", LastSeen: "2026-06-08T12:00:00Z",
+		Versions: []store.FacetVersion{
+			{ValidFrom: "2026-06-01T12:00:00Z", ValidTo: "2026-06-05T12:00:00Z", Confidence: 0.7},
+			{ValidFrom: "2026-06-05T12:00:00Z", Confidence: 0.7},
+		}}
+	m = Build(&store.ViewInput{Facets: []store.Facet{carried}, Log: []store.ConfidenceEvent{row("carried")}},
+		nil, time.Date(2026, 6, 10, 0, 0, 0, 0, est), est)
+	if want := []Point{{At: "2026-06-01", Value: 0.7}, {At: "2026-06-08", Value: 0.7}}; !reflect.DeepEqual(traitByKey(t, m, "carried").Points, want) {
+		t.Errorf("carried: Points %+v, want %+v", traitByKey(t, m, "carried").Points, want)
+	}
+}
+
+func TestTraitPointsSortedByTime(t *testing.T) {
+	// Log id order is not time order once a long review Run interleaves with a compaction Apply.
+	ev := func(at string, to float64) store.ConfidenceEvent {
+		return store.ConfidenceEvent{Lens: "default", Dimension: "habits", Key: "shuffled", At: at, To: to, Kind: store.EventReinforce}
+	}
+	in := &store.ViewInput{
+		Facets: []store.Facet{{Lens: "default", Dimension: "habits", Key: "shuffled", LastSeen: "2026-07-20T12:00:00Z",
+			Versions: []store.FacetVersion{{ValidFrom: "2026-07-01T12:00:00Z", Confidence: 0.7}}}},
+		Log: []store.ConfidenceEvent{ev("2026-07-20T12:00:00Z", 0.7), ev("2026-07-01T12:00:00Z", 0.5), ev("2026-07-10T12:00:00Z", 0.6)},
+	}
+	m := Build(in, nil, time.Date(2026, 7, 25, 0, 0, 0, 0, est), est)
+
+	// The latest row by TIME already says the stored 0.7, so no LastSeen point is added.
+	wantTrait(t, traitByKey(t, m, "shuffled"), Trait{
+		Lens: "default", Dimension: "habits", Key: "shuffled",
+		Name: "Shuffled", Arrival: "2026-07-01", Today: 0.7,
+		Points: []Point{{At: "2026-07-01", Value: 0.5}, {At: "2026-07-10", Value: 0.6}, {At: "2026-07-20", Value: 0.7}},
+		Spans:  []Span{},
+		Trend:  "up", TrendFrom: 0.5, Changes: 2,
+		Weeks: []Week{}, Evidence: []Evidence{},
+	})
 }
