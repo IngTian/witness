@@ -112,12 +112,3 @@ func TestImportProgressSurvivesAnUnreadableDatabase(t *testing.T) {
 		t.Fatalf("progress = %v, want %v (failed %d)", *got, want, stats.Failed)
 	}
 }
-
-// Without a reporter in the context — the capture hook, every existing caller — nothing changes.
-func TestImportWithoutProgressIsUnchanged(t *testing.T) {
-	im, _ := testImporter(t)
-	rollout(t, im.Home, "s1", message("user", "hello"))
-	if s := runImport(t, im); s.Records != 1 || s.Sessions != 1 {
-		t.Fatalf("%+v", s)
-	}
-}

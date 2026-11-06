@@ -60,7 +60,7 @@ func (s *Store) Merge(ctx context.Context, incomingDB string, apply bool, now ti
 	}
 	defer os.RemoveAll(tmpDir)
 	copyPath := filepath.Join(tmpDir, "incoming.db")
-	if err := copyFile0600(incomingDB, copyPath); err != nil {
+	if err := copyFileInto(incomingDB, copyPath); err != nil {
 		return nil, fmt.Errorf("copy %s: %w", incomingDB, err)
 	}
 	from, err := peekUserVersion(copyPath)
@@ -1185,7 +1185,7 @@ nextIncoming:
 					continue
 				}
 			}
-			changed := adoptShared(b, f, rel, allTS, allTS)
+			changed := adoptShared(b, f, rel, allTS)
 			if changed && f.MergedInto != "" && b.MergedInto == f.MergedInto {
 				incomingRef[b] = true
 			}
@@ -1297,12 +1297,12 @@ nextIncoming:
 //     merged-into facet is redirected, never used to resurrect it.)
 //   - Otherwise the side that acted on the facet LAST wins: a facet the other side compacted away
 //     stays archived, and one we merely retired comes back if they reasserted it afterwards.
-func adoptShared(b, f *Facet, rel int, baseTS, incTS map[string]string) bool {
+func adoptShared(b, f *Facet, rel int, ts map[string]string) bool {
 	before := cloneFacets([]Facet{*b})[0]
 	n := min(len(b.Versions), len(f.Versions))
 	for i := 0; i < n; i++ {
 		bv, iv := &b.Versions[i], &f.Versions[i]
-		if evidenceTime(incTS, iv) > evidenceTime(baseTS, bv) {
+		if evidenceTime(ts, iv) > evidenceTime(ts, bv) {
 			bv.Confidence, bv.ConfidenceSeq = iv.Confidence, iv.ConfidenceSeq
 		}
 		// Only when the union adds an id. Assigning it unconditionally turned a facet with no
@@ -1348,23 +1348,6 @@ func cloneFacets(in []Facet) []Facet {
 
 // --- files ------------------------------------------------------------------------------------
 
-func copyFile0600(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
-}
-
 // peekUserVersion reads a database's schema version WITHOUT migrating it, so a database from a
 // NEWER witness is refused rather than read through column lists that silently drop what it added.
 func peekUserVersion(path string) (int, error) {
@@ -1378,7 +1361,7 @@ func peekUserVersion(path string) (int, error) {
 		return 0, err
 	}
 	var hasRaw int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('raw','l0')`).Scan(&hasRaw); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='raw'`).Scan(&hasRaw); err != nil {
 		return 0, err
 	}
 	if hasRaw == 0 {

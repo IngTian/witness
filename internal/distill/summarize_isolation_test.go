@@ -76,14 +76,14 @@ func TestOneFailingLensDoesNotStarveTheOthers(t *testing.T) {
 	}
 }
 
-// A portrait containing a FALLBACK section must not be stamped as current.
+// A failing lens keeps its PRIOR summary as its portrait section, rather than silently vanishing
+// from a portrait that is then rebuilt without it.
 //
-// When a lens fails but has a prior summary, that summary is reused for the portrait so the section
-// is not silently missing. The portrait is then correct to SERVE and wrong to VOUCH FOR: stamping
-// its signature would make the next pass match and skip the rebuild, freezing the stale section in
-// place until the facets happened to change again. Leaving it unstamped costs one regeneration and
-// self-heals on the next read.
-func TestAPortraitBuiltFromAStaleSectionIsNotStamped(t *testing.T) {
+// Stamping that portrait is safe: the unified signature covers the portrait TEXT, so the pass after
+// the lens heals sees a different section and rebuilds — no freeze is possible. It used to be left
+// unstamped "to prevent a freeze", which only re-ran the unified call on byte-identical input on
+// every read while the lens stayed broken (the mutant `if true || !stalePortrait` was green).
+func TestAFailingLensKeepsItsPriorSectionInThePortrait(t *testing.T) {
 	s := newStore(t)
 	if err := s.WriteFacets([]store.Facet{
 		facetFor("aaa", "will fail later"),
@@ -139,27 +139,21 @@ func TestAPortraitBuiltFromAStaleSectionIsNotStamped(t *testing.T) {
 		t.Errorf("the fallback should reuse the PRIOR summary text, got input=%q", lastUnifiedInput)
 	}
 
-	// THE PROPERTY THAT MATTERS: a third pass with aaa now HEALTHY must rebuild the portrait, so
-	// the stale section self-heals. Asserting the signature is empty would be wrong — a leftover
-	// signature from pass 1 is still stored, and cannot match the new portrait text anyway. What
-	// must hold is behavioral: the next pass is not skipped.
-	rebuilt := false
+	// Pass 3, aaa still broken: the portrait input is byte-identical, so it must not be paid for
+	// again (Summarize runs on reads).
+	unified := 0
 	sm.Run = func(_ context.Context, _, prompt, input string) (string, error) {
 		if prompt == "UNIFIED" {
-			rebuilt = true
-			lastUnifiedInput = input
+			unified++
 			return "PORTRAIT v3", nil
+		}
+		if strings.Contains(input, "LENS: aaa") {
+			return "", fmt.Errorf("simulated failure")
 		}
 		return "SUMMARY v3", nil
 	}
-	if err := sm.Summarize(context.Background()); err != nil {
-		t.Fatalf("third pass (all healthy) should succeed: %v", err)
-	}
-	if !rebuilt {
-		t.Error("the portrait was SKIPPED on the pass after a fallback; the stale section would " +
-			"then persist until the facets changed again, which is the freeze this guard prevents")
-	}
-	if !strings.Contains(lastUnifiedInput, "SUMMARY v3") {
-		t.Errorf("the healed portrait should be built from the fresh summaries, got %q", lastUnifiedInput)
+	_ = sm.Summarize(context.Background())
+	if unified != 0 {
+		t.Errorf("the unified call re-ran %d time(s) on an unchanged portrait while a lens was broken", unified)
 	}
 }

@@ -32,7 +32,7 @@ use; 'witness lens load-default' brings it back if you removed it.`),
 		&cobra.Command{
 			Use:   "register <name> <dir>",
 			Short: "Register or replace a lens definition.",
-			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models with `witness config --lens <name>`.",
+			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models with `witness config set <key> <value> --lens <name>`.",
 			Args:  cobra.ExactArgs(2),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"register"}, args...)) },
 		},
@@ -74,8 +74,8 @@ use; 'witness lens load-default' brings it back if you removed it.`),
 	return lensCmd
 }
 
-// groupRunE is the RunE of a command group (lens, config, observations). A group with no RunE
-// printed its help for ANY argument and exited 0 — cobra checks unknown subcommands only on the
+// groupRunE is the RunE of a command group (lens, config, observations, worker). A group with no
+// RunE printed its help for ANY argument and exited 0 — cobra checks unknown subcommands only on the
 // root — so `witness lens enabel x` looked like success to a person and to a script. Bare, it still
 // prints help; with an argument it is the same "unknown command" error the root gives, suggestion
 // included. (Checked here rather than with Args: cobra.NoArgs, which would also reject the
@@ -412,7 +412,9 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 
 	// A backfill re-mines the lens's whole history — hundreds of sessions, one or more model
 	// calls each — so it shows sessions done/total on stderr rather than sitting silent for hours.
-	ran, err := runWorkerInRange(false, sessionTimeRange{}, name)
+	// tap keeps the drain's first runner/embedder/model error so an unfinished backfill can say why.
+	tap := &causeTap{}
+	ran, err := runWorkerTapped(false, sessionTimeRange{}, name, tap)
 	if err != nil {
 		return err
 	}
@@ -436,7 +438,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// success: report the exact state and the recovery step.
 		return fmt.Errorf("backfill %q --fresh incomplete: dropped this lens's observations + facets and reset its watermark, but another distillation worker is already running so the re-mine + review could not run here — once it finishes, run `witness worker review` to rebuild the facets/profile (or re-run `witness lens backfill %s --fresh`)", name, name)
 	}
-	// End-state check (mirrors `distill start --all`): the RESET lens must be caught
+	// End-state check (mirrors the foreground `worker run`): the RESET lens must be caught
 	// up. runWorker swallows per-session failures, so a nil error alone isn't "done".
 	// Scope the check to JUST this lens (not every active lens): a DIFFERENT lens being
 	// pending or backed off is unrelated to whether THIS single-lens backfill finished,
@@ -449,8 +451,8 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	}
 	defer st2.Close()
 	stats := st2.Stats([]string{minedName})
-	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
-		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log)", stats.Pending, stats.BackedOff)
+	if stats.Pending+stats.BackedOff > 0 {
+		return backlogUnfinished(name, stats.Pending, stats.BackedOff, false, tap.cause())
 	}
 	// Always force a review from the freshly re-mined observations (see the function
 	// doc): the drain only reviews on a ReviewDue trigger, which may not fire on a small/
@@ -458,7 +460,9 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// its re-mined observations and a --fresh backfill would be left with the empty facets
 	// it dropped. Reviewing unconditionally keeps L2 + L4 consistent with L1 either way.
 	fmt.Println(dim("re-mine complete; reviewing to refresh the lens's facets + profile…"))
-	ranReview, err := forceReview(st2)
+	// A fresh tap: the profile's cause must be the profile's, not an error the drain survived.
+	rtap := &causeTap{}
+	ranReview, profErr, err := forceReviewTapped(st2, false, rtap)
 	if err != nil {
 		return fmt.Errorf("backfill %q: review failed; observations were re-mined but facets/profile are not refreshed (run `witness worker review`): %w", name, err)
 	}
@@ -468,23 +472,29 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// --fresh) — don't claim success; tell the user how to finish.
 		return fmt.Errorf("backfill %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet refreshed; run `witness worker review` to finish", name)
 	}
+	// The facets landed; a failed narrative is reported the way `worker review` reports it,
+	// never as "profile refreshed".
+	drifted := st2.DriftTotal() - driftBefore
+	if profErr != nil {
+		fmt.Println(result(warnGlyph(), "backfilled lens "+name,
+			"facets refreshed, but the profile was NOT regenerated (the previous one is kept)"))
+		rtap.note(profErr) // a model error during it, if one was seen; else its own (missing prompts …)
+		fmt.Println("  " + kvRow("cause", rtap.cause(), ""))
+		fmt.Println(hint("diagnose", "witness doctor"))
+	} else if drifted == 0 {
+		fmt.Println(result(okGlyph(), "backfilled lens "+name, "facets + profile refreshed"))
+	}
 	// A drifted lens advanced its watermark (not "pending") but distilled to zero
 	// observations — report it so a below-floor mine model is visible now.
-	if drifted := st2.DriftTotal() - driftBefore; drifted > 0 {
+	if drifted > 0 {
 		fmt.Println(result(warnGlyph(), "backfilled lens "+name,
 			countOf(drifted, "session", "sessions")+" drifted: the model returned no observations"))
 		fmt.Println(hint("raise it", "witness config set mine_model <stronger> --lens "+name))
 		fmt.Println(hint("then re-mine", "witness lens backfill "+name+" --fresh"))
-		return nil
 	}
-	fmt.Println(result(okGlyph(), "backfilled lens "+name, "facets + profile refreshed"))
 	return nil
 }
 
-// lensShow prints a lens's settings + its two prompts. Both a registered lens and the
-// built-in `default` render the same way (default's settings are hardcoded, not a
-// lens.json, but the view is identical), so the output is a consistent, copyable
-// definition regardless of source.
 // newLensShowCmd builds `witness lens show <name> [--prompts]`. By DEFAULT it prints a
 // compact card (settings + a one-line excerpt and line count of each prompt) so the
 // common "what is this lens" glance is scannable, not a 120-line wall. --prompts prints
@@ -689,8 +699,8 @@ func renderLensPrompts(l *lens.Lens) string {
 // registered lens that appears in EnabledLenses only if it was seeded+enabled (fresh
 // tool install or the pre-1a migration) and not since disabled. So an install runs
 // exactly the lenses its config enables — including ZERO (a valid state: nothing to
-// distill; the queue short-circuits, see store.emptyLensSet). No lens is force-added.
-func activeLenses(st *store.Store) ([]*lens.Lens, error) {
+// distill; every queue query short-circuits on an empty set). No lens is force-added.
+func activeLenses(st *store.Store) []*lens.Lens {
 	out := []*lens.Lens{}
 	for _, name := range st.LoadConfig().EnabledLenses {
 		l, err := lens.LoadRegistered(name, st.LensesDir())
@@ -700,7 +710,7 @@ func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 		}
 		out = append(out, l)
 	}
-	return out, nil
+	return out
 }
 
 // activeLensNames is the per-lens-watermark (#55) view of the active lens set: the
@@ -710,18 +720,12 @@ func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 // no-progress cycle (config says active, mining always skips).
 //
 // Since #44 slice 1a an EMPTY result is legal and correct — an install with no enabled
-// lenses distills nothing, and the queue short-circuits cleanly on an empty set (see
-// store.emptyLensSet). We must NOT force ["default"] here: default has no always-on
-// status, so injecting it when it isn't enabled would offer sessions for a lens that
-// never runs (the very no-progress cycle above) and resurrect a lens the user disabled.
-// Only a hard error loading the config is unexpected — return empty there too and let
-// the drain no-op rather than fabricate a lens set.
+// lenses distills nothing, and every queue query short-circuits cleanly on an empty set.
+// We must NOT force ["default"] here: default has no always-on status, so injecting it
+// when it isn't enabled would offer sessions for a lens that never runs (the very
+// no-progress cycle above) and resurrect a lens the user disabled.
 func activeLensNames(st *store.Store) []string {
-	lenses, err := activeLenses(st)
-	if err != nil {
-		slog.Warn("could not load active lenses; treating as none this pass", "err", err)
-		return nil
-	}
+	lenses := activeLenses(st)
 	names := make([]string, 0, len(lenses))
 	for _, l := range lenses {
 		names = append(names, l.Name)

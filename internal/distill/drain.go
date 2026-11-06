@@ -8,8 +8,6 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
-
-	"github.com/IngTian/witness/internal/store"
 )
 
 // maxMineConcurrency is an absolute upper bound on parallel miners, independent of
@@ -34,14 +32,10 @@ const maxMineConcurrency = 16
 const maxInFlightChars = 2_000_000
 
 // EffectiveConcurrency is the number of sessions the engine will mine in parallel:
-// the configured cap, clamped to the CPU count, to an absolute memory-safe ceiling,
-// and to 1 when the runner cannot run concurrently. This is the POLICY
-// (engine-owned) applied to the platform FACT (runner.ConcurrentRunSafe) — the
-// platform never picks a number (issue #22).
-func EffectiveConcurrency(want int, concurrentRunSafe bool) int {
-	if !concurrentRunSafe {
-		return 1
-	}
+// the configured cap, floored at 1 and clamped to the CPU count and to an absolute
+// memory-safe ceiling. The engine owns this policy; the platform never picks a
+// number (issue #22).
+func EffectiveConcurrency(want int) int {
 	if want < 1 {
 		want = 1
 	}
@@ -152,15 +146,13 @@ func (w *Worker) HasUnattempted(sessions []string, attempted map[string]bool) bo
 //
 //   - The store is written by exactly ONE goroutine (this one, in commit), so
 //     MaxOpenConns(1) / single-writer semantics are untouched.
-//   - `existing` is a single running corpus snapshot threaded through every commit
-//     and appended after each write, so a later session dedups against an earlier
-//     one's just-written observations — no cross-session dedup gap.
+//   - No cross-session dedup state is needed: obsID hashes the session, so two sessions
+//     never collide, and a re-commit of the same obs is absorbed by the store (obs_id
+//     UNIQUE + INSERT OR IGNORE). So the drain never loads the L1 corpus.
 //   - Commits happen AS EACH MAP FINISHES (commit-as-ready, issue #56 B3), not in
 //     submission order — a slow session no longer stalls the commit of finished
-//     followers behind it. Still exactly one commit goroutine, so single-writer +
-//     `existing` race-freedom are untouched; only the cross-session dedup tie-break
-//     (which near-duplicate wins) now follows completion order, which is fine for a
-//     one-shot backfill.
+//     followers behind it. Still exactly one commit goroutine, so single-writer is
+//     untouched.
 //
 // Returns the number of sessions ATTEMPTED-and-reaped this call (including
 // map-failures, backoffs, quiet sessions, and no-op advances — every reaped job
@@ -172,8 +164,6 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 	if conc < 1 {
 		conc = 1
 	}
-	existing, _ := w.Store.ReadObservations("") // ONE snapshot per drain (hoisted out of the per-session loop)
-
 	stop := func() bool { return opts.Stop != nil && opts.Stop() }
 	reached := func(claimed int) bool { return opts.Max > 0 && claimed >= opts.Max }
 
@@ -225,14 +215,14 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 
 		if conc == 1 {
 			// Serial fast path: no goroutines/channels for the common laptop case
-			// (single pending session, or a runner that isn't ConcurrentRunSafe).
+			// (a single pending session, or MineConcurrency 1).
 			for _, s := range batch {
 				if stop() || reached(processed) {
 					return processed
 				}
 				attempted[w.attemptKey(s)] = true
 				m, err := w.mineSessionSafe(ctx, s)
-				w.commitResult(m, err, &existing, opts.OnCommit)
+				w.commitResult(m, err, opts.OnCommit)
 				processed++
 				tick(processed)
 			}
@@ -244,8 +234,8 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		// slow session no longer idles the other slots or stalls new dispatch (issue
 		// #22 review #3). Commits happen as each map finishes (commit-as-ready, issue
 		// #56 B3) — no slow head stalls finished followers. Only the single Drain
-		// goroutine commits, so the store stays single-writer and `existing` race-free.
-		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, &existing, attempted, stop, reached, processed, opts.OnCommit, tick)
+		// goroutine commits, so the store stays single-writer.
+		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, attempted, stop, reached, processed, opts.OnCommit, tick)
 
 		if stop() || reached(processed) {
 			return processed
@@ -265,7 +255,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 // The char accounting is mutated only by this single dispatcher goroutine (add at
 // dispatch, subtract on reap), so it stays lock-free and race-free like the rest of
 // the reducer.
-func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, existing *[]store.Observation, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string), tick func(done int)) int {
+func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string), tick func(done int)) int {
 	type minedResult struct {
 		idx int // submission index, for char-budget accounting
 		m   *SessionMining
@@ -308,11 +298,8 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 	// finished session behind it (head-of-line blocking): `distill status` understated
 	// progress and a --max/interrupted backfill committed fewer than it mined. Only the
 	// single Drain goroutine calls reap, so committing here keeps the store single-writer
-	// and `existing` race-free exactly as before — we drop only the ORDER, not the
-	// serialization. Cross-session dedup (which earlier-committed obs a later session
-	// dedups against) now depends on completion order rather than submission order; both
-	// are valid distillations (the survivor of two >=0.93 near-duplicates just differs by
-	// provenance), and determinism here mattered for tests, not a one-shot backfill.
+	// exactly as before — we drop only the ORDER, not the serialization. Nothing a commit
+	// writes depends on which session committed first (obsIDs are per-session).
 	reap := func(r minedResult) {
 		inFlightChars -= sizeByIdx[r.idx]
 		delete(sizeByIdx, r.idx)
@@ -341,7 +328,7 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 					"now", window, "cap", conc)
 			}
 		}
-		w.commitResult(r.m, r.err, existing, onCommit)
+		w.commitResult(r.m, r.err, onCommit)
 		committed++
 		tick(processedBase + committed) // reap runs on the Drain goroutine only, so tick does too
 	}
@@ -427,7 +414,7 @@ func (w *Worker) mineSessionSafe(ctx context.Context, session string) (m *Sessio
 // skipped (nothing written, watermark untouched, so it retries next drain),
 // otherwise CommitMining runs (which itself handles a mine transport failure as a
 // backoff without writing).
-func (w *Worker) commitResult(m *SessionMining, mineErr error, existing *[]store.Observation, onCommit func(session string)) {
+func (w *Worker) commitResult(m *SessionMining, mineErr error, onCommit func(session string)) {
 	if mineErr != nil {
 		if m != nil {
 			slog.Error("mine session", "session", m.Session, "err", mineErr)
@@ -439,7 +426,7 @@ func (w *Worker) commitResult(m *SessionMining, mineErr error, existing *[]store
 	if onCommit != nil {
 		onCommit(m.Session)
 	}
-	if err := w.CommitMining(m, existing); err != nil {
+	if err := w.CommitMining(m); err != nil {
 		slog.Error("commit session", "session", m.Session, "err", err)
 	}
 }

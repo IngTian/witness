@@ -61,8 +61,8 @@ func parityWorker(s *store.Store, m *parityMiner) *Worker {
 		Store:    s,
 		Embedder: fakeEmbedder{},
 		Lenses: []*lens.Lens{
-			{Name: store.LensDefault, BuiltIn: true, Extract: "extract-default", Review: "review-default", Dimensions: []string{"thinking"}},
-			{Name: parityLens, BuiltIn: false, Extract: "extract-parity", Review: "review-parity", Dimensions: []string{"thinking"}},
+			{Name: store.LensDefault, Extract: "extract-default", Review: "review-default", Dimensions: []string{"thinking"}},
+			{Name: parityLens, Extract: "extract-parity", Review: "review-parity", Dimensions: []string{"thinking"}},
 		},
 		Config: store.Config{},
 		Run:    m.run,

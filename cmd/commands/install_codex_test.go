@@ -14,13 +14,12 @@ import (
 
 // Tests for `witness wire codex` (issue #179).
 //
-// SCOPE, stated plainly because it bounds what these prove: no Codex is installed on
-// the machine that wrote this, so nothing here verifies that Codex READS hooks.json or
-// FIRES these events. That is spec-derived from the official hooks guide and needs a
-// real Codex run to confirm. What IS verified below is everything on witness's side of
-// the boundary — the document we write, its idempotency, its ownership discipline, and
-// the Windows form — because those are where the silent failures the issue is about
-// actually live.
+// SCOPE, stated plainly because it bounds what these prove: nothing here runs Codex, so
+// nothing here verifies that Codex READS hooks.json or FIRES these events. A real Codex
+// run confirmed that once ("What is verified" in docs/codex-capture.md); these tests do
+// not. What IS verified below is everything on witness's side of the boundary — the
+// document we write, its idempotency, its ownership discipline, and the Windows form —
+// because those are where the silent failures the issue is about actually live.
 
 const unixShim = "/repo/hooks/witness.sh"
 

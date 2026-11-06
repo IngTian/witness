@@ -35,7 +35,7 @@ func mustReadRaw(t *testing.T, st *store.Store, session string) []store.RawRecor
 
 func TestCaptureUserPrompt(t *testing.T) {
 	st := openTmpStore(t)
-	e := HookEvent{HookEventName: "UserPromptSubmit", SessionID: "s1", Prompt: "hello"}
+	e := HookEvent{SessionID: "s1", Prompt: "hello"}
 	if err := Capture(st, e, time.Now()); err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
@@ -51,7 +51,6 @@ func TestCaptureUserPrompt(t *testing.T) {
 func TestCaptureAssistantWithEffort(t *testing.T) {
 	st := openTmpStore(t)
 	e := HookEvent{
-		HookEventName:        "Stop",
 		SessionID:            "s1",
 		LastAssistantMessage: "hi back",
 		Effort:               map[string]any{"level": "high"},
@@ -75,7 +74,7 @@ func TestCaptureAssistantWithEffort(t *testing.T) {
 // the prompt wins — matching the switch order in Capture — and it's a user turn.
 func TestCaptureBothFieldsPrefersPrompt(t *testing.T) {
 	st := openTmpStore(t)
-	e := HookEvent{HookEventName: "Stop", SessionID: "s1", Prompt: "P", LastAssistantMessage: "A"}
+	e := HookEvent{SessionID: "s1", Prompt: "P", LastAssistantMessage: "A"}
 	if err := Capture(st, e, time.Now()); err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
@@ -93,8 +92,8 @@ func TestCaptureNoOpCases(t *testing.T) {
 		name string
 		e    HookEvent
 	}{
-		{"empty session", HookEvent{HookEventName: "UserPromptSubmit", Prompt: "orphan"}},
-		{"no content", HookEvent{HookEventName: "Stop", SessionID: "s1"}},
+		{"empty session", HookEvent{Prompt: "orphan"}},
+		{"no content", HookEvent{SessionID: "s1"}},
 	}
 	for _, c := range cases {
 		if err := Capture(st, c.e, time.Now()); err != nil {
@@ -115,9 +114,9 @@ func TestCaptureAssignsMonotonicSeq(t *testing.T) {
 	for i, text := range []string{"a", "b", "c"} {
 		var e HookEvent
 		if i%2 == 0 {
-			e = HookEvent{HookEventName: "UserPromptSubmit", SessionID: "s1", Prompt: text}
+			e = HookEvent{SessionID: "s1", Prompt: text}
 		} else {
-			e = HookEvent{HookEventName: "Stop", SessionID: "s1", LastAssistantMessage: text}
+			e = HookEvent{SessionID: "s1", LastAssistantMessage: text}
 		}
 		if err := Capture(st, e, now.Add(time.Duration(i)*time.Second)); err != nil {
 			t.Fatalf("Capture #%d: %v", i, err)

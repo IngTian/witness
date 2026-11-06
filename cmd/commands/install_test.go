@@ -419,6 +419,29 @@ func TestRemoveWitnessHooks(t *testing.T) {
 	}
 }
 
+// OpenCode reads its config from XDG_CONFIG_HOME/opencode when XDG is set; wiring to ~/.config there
+// writes a plugin + MCP entry OpenCode never loads, and still reports success (the #10 class).
+func TestOpenCodeConfigPathHonoursXDGConfigHome(t *testing.T) {
+	home, xdg, explicit := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	if got, want := opencodeConfigPath(), filepath.Join(xdg, "opencode", "opencode.json"); got != want {
+		t.Errorf("with XDG_CONFIG_HOME set: got %s, want %s", got, want)
+	}
+	t.Setenv("OPENCODE_CONFIG_DIR", explicit) // the explicit override still wins
+	if got, want := opencodeConfigPath(), filepath.Join(explicit, "opencode.json"); got != want {
+		t.Errorf("with OPENCODE_CONFIG_DIR set: got %s, want %s", got, want)
+	}
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got, want := opencodeConfigPath(), filepath.Join(home, ".config", "opencode", "opencode.json"); got != want {
+		t.Errorf("with neither set: got %s, want %s", got, want)
+	}
+}
+
 func TestMergeOpenCodeMCP(t *testing.T) {
 	in := []byte(`{"mcp":{"other":{"type":"local","command":["x"]}},"plugin":["p"]}`)
 	out, err := mergeOpenCodeMCP(in, "/repo/hooks/witness.sh")

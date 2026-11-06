@@ -63,7 +63,7 @@ func runCLI(t *testing.T, args ...string) (string, error) {
 // on the root only — so a typo read as success to a person and to a script.
 func TestGroupCommandsRejectATypoButStillPrintHelpBare(t *testing.T) {
 	readFixture(t)
-	for _, group := range []string{"lens", "config", "observations"} {
+	for _, group := range []string{"lens", "config", "observations", "worker"} {
 		if _, err := runCLI(t, group, "frob"); err == nil || !strings.Contains(err.Error(), `unknown command "frob"`) {
 			t.Errorf("witness %s frob must fail as an unknown command, got %v", group, err)
 		}
@@ -74,6 +74,9 @@ func TestGroupCommandsRejectATypoButStillPrintHelpBare(t *testing.T) {
 	}
 	if _, err := runCLI(t, "lens", "enabel"); err == nil || !strings.Contains(err.Error(), "did you mean enable?") {
 		t.Errorf("a near-miss should suggest the real subcommand like the root does, got %v", err)
+	}
+	if _, err := runCLI(t, "worker", "stpo"); err == nil || !strings.Contains(err.Error(), "did you mean stop?") {
+		t.Errorf("worker is a group too: a near-miss should suggest stop, got %v", err)
 	}
 }
 
@@ -324,11 +327,11 @@ func TestLensTryFailsOnlyWhenEverySessionFailed(t *testing.T) {
 func TestLensTryTitlesARegisteredLensByItsRegisteredName(t *testing.T) {
 	s := seedTryStore(t, store.RunnerOpenCode)
 	opened := false
-	previous := runnerForStore
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+	previous := runnerForName
+	runnerForName = func(string, store.Config) (platform.Runner, error) {
 		return limitedPreviewRunner{opened: &opened}, nil
 	}
-	t.Cleanup(func() { runnerForStore = previous })
+	t.Cleanup(func() { runnerForName = previous })
 	registerRenamedLens(t, s, "corpus-example", "regime")
 	var err error
 	out := captureStdout(t, func() { err = cmdLensTry("corpus-example", lensTryOpts{nSessions: 1}) })

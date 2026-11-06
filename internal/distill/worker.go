@@ -63,7 +63,7 @@ type MineFunc func(ctx context.Context, model, prompt, input string) (string, er
 
 // RunnerMine adapts a platform.Runner into the MineFunc seam. This keeps the
 // injectable MineFunc for tests while routing production through the single Runner
-// (platform.RunnerFor) resolved once per drain. distill knows only platform.Runner
+// (platform.RunnerForName) resolved once per drain. distill knows only platform.Runner
 // — never which runtime it is.
 func RunnerMine(r platform.Runner) MineFunc {
 	return func(ctx context.Context, model, prompt, input string) (string, error) {
@@ -202,8 +202,8 @@ type LensMining struct {
 	Native []*platform.NativeSession
 }
 
-// Process runs a full fast-path pass for one session: MineSession then CommitMining
-// against a fresh store snapshot. It is the serial entry point kept for the
+// Process runs a full fast-path pass for one session: MineSession then CommitMining.
+// It is the serial entry point kept for the
 // single-session callers and every existing test. The parallel drain calls
 // MineSession (concurrently) and CommitMining (serially) directly instead.
 func (w *Worker) Process(ctx context.Context, session string) error {
@@ -211,8 +211,7 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 	if err != nil {
 		return err
 	}
-	existing, _ := w.Store.ReadObservations("")
-	return w.CommitMining(m, &existing)
+	return w.CommitMining(m)
 }
 
 // MineSession is the MAP half: read the delta, drain staged, and run every lens's
@@ -381,16 +380,18 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 
 	// 3. Embed active + each lens's mined for later recall (MCP/CLI vector search).
 	// Done in the map phase so the serial commit stays cheap; the embedder's own mutex
-	// makes this concurrency-safe. A mined obs whose embedding FAILS is KEPT with an
-	// empty embedding — the embedding is now consulted only at read-time recall (the
-	// write-path dedup that used to require it is gone), so an un-embeddable obs is
-	// still a fully valid L1 event (recall-only degradation until it is re-embedded).
-	// This matches the active-obs loop just above (keep-on-failure) and honors "keep
-	// full L1 to preserve expensive mining work."
+	// makes this concurrency-safe. An obs whose embedding FAILS (an embedder error, or a
+	// tokenizer panic Embed recovers into one) is KEPT with no vector — "keep full L1 to
+	// preserve expensive mining work" — but such a row is left out of vector search and of
+	// long-arc clustering, and NOTHING re-embeds it later. So each failure is logged: that
+	// warning is the only trace. (A doctor count and a re-embed pass wait until it shows up.)
 	for i := range m.Active {
 		if len(m.Active[i].Embedding) == 0 {
 			if v, err := w.Embedder.Embed(m.Active[i].Observation); err == nil {
 				m.Active[i].Embedding = v
+			} else {
+				slog.Warn("embed: active observation kept without a vector; search and long-arc clustering will skip it",
+					"session", session, "obs", m.Active[i].ID, "err", err)
 			}
 		}
 	}
@@ -398,22 +399,25 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 		for i := range m.Lenses[li].Mined {
 			if v, err := w.Embedder.Embed(m.Lenses[li].Mined[i].Observation); err == nil {
 				m.Lenses[li].Mined[i].Embedding = v
+			} else {
+				slog.Warn("embed: mined observation kept without a vector; search and long-arc clustering will skip it",
+					"session", session, "lens", m.Lenses[li].Lens, "obs", m.Lenses[li].Mined[i].ID, "err", err)
 			}
 		}
 	}
 	return m, nil
 }
 
-// CommitMining is the REDUCE half: given one session's mining result and a pointer
-// to the RUNNING corpus snapshot, write L1 (append-only), advance the watermark, and
-// clear staged rows. It is the SOLE L1 writer and MUST run serially. `existing` is
-// threaded by pointer and APPENDED with each session's newly-written observations so
-// the exact-obsID idempotency check below sees an earlier session's writes within the
-// same drain — the ONLY remaining use of `existing` now that the embedding dedup gate
-// is gone (L1 is an append-only event log). It cannot suppress a genuine recurrence:
-// obsID hashes the session, so two different sessions with identical text get distinct
-// obsIDs and both survive.
-func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) error {
+// CommitMining is the REDUCE half: given one session's mining result, write L1
+// (append-only), advance the watermark, and clear staged rows. It is the SOLE L1 writer
+// and MUST run serially. Idempotency against what L1 already holds is the store's: obs_id
+// is UNIQUE and both write paths are INSERT OR IGNORE, so a crash-then-re-run or a
+// re-drained staged obs is absorbed there. Nothing here reads the corpus — it used to load
+// every observation per drain to seed that same check (a leftover of the cosine dedup #116
+// deleted), ~200ms and ~230MB live at 75k observations. It cannot suppress a genuine
+// recurrence: obsID hashes the session, so two different sessions with identical text get
+// distinct obsIDs and both survive.
+func (w *Worker) CommitMining(m *SessionMining) error {
 	if m.NothingToDo {
 		// Every lens is already at the watermark; the stamp is idempotent. Advance each
 		// lens (CAS-guarded per #49 C2 so a raw replace/cleanup mid-mine can't blind-
@@ -447,13 +451,9 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 		combined = append(combined, m.Lenses[li].Mined...)
 	}
 
-	// Drop anything whose exact obsID is already in L1. This makes the pass
-	// idempotent on re-run: re-drained active obs and identical re-mines (after a
-	// crash) are skipped rather than duplicated. `seen` also dedups within the batch.
-	seen := make(map[string]bool, len(*existing))
-	for _, o := range *existing {
-		seen[o.ID] = true
-	}
+	// Dedup WITHIN the batch (a within-session repeat); against L1, the store's INSERT OR
+	// IGNORE on the UNIQUE obs_id makes a re-run idempotent.
+	seen := make(map[string]bool, len(combined))
 	var toWrite []store.Observation
 	for _, o := range combined {
 		if seen[o.ID] {
@@ -559,21 +559,11 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 	// (a drift over a since-replaced generation didn't really "happen" for the archive —
 	// the session will re-mine the new generation, so counting it would be misleading).
 	if driftCount > 0 && generationCurrent {
-		if err := w.Store.RecordDrift(driftCount, m.Session, lastDriftLens); err != nil {
+		if err := w.Store.RecordDrift(driftCount, lastDriftLens); err != nil {
 			// Surfacing is best-effort bookkeeping; a meta-write hiccup must never fail a
 			// commit whose L1/watermark writes already succeeded.
 			slog.Warn("distill: could not record drift counter", "session", m.Session, "err", err)
 		}
-	}
-
-	// Feed the just-written observations into the running snapshot so a later session in
-	// this drain sees them in the exact-obsID idempotency check (a re-mine of the SAME
-	// (session,lens,text) within the drain won't double-write). Active obs always landed;
-	// mined obs only landed if the generation was current, so feed them conditionally —
-	// else the seen-map would reference phantom rows not actually in L1.
-	*existing = append(*existing, activeToWrite...)
-	if generationCurrent {
-		*existing = append(*existing, minedToWrite...)
 	}
 
 	// Clear the staged rows we drained — LAST, so a crash before it just re-drains

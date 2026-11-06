@@ -81,7 +81,6 @@ func (r *tryRunner) Run(_ context.Context, _, prompt, input string) (string, err
 }
 func (*tryRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (*tryRunner) InvocationHint() string                          { return "fake" }
-func (*tryRunner) ConcurrentRunSafe() bool                         { return true }
 
 // lensTryProgress runs cmdLensTry over 3 sessions (one panics) and returns every snapshot.
 func lensTryProgress(t *testing.T, r *tryRunner, review bool) (snaps []distill.Progress, finished int) {
@@ -100,9 +99,9 @@ func lensTryProgress(t *testing.T, r *tryRunner, review bool) (snaps []distill.P
 			t.Fatal(err)
 		}
 	}
-	prevRunner, prevProgress := runnerForStore, tryProgress
-	t.Cleanup(func() { runnerForStore, tryProgress = prevRunner, prevProgress })
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) { return r, nil }
+	prevRunner, prevProgress := runnerForName, tryProgress
+	t.Cleanup(func() { runnerForName, tryProgress = prevRunner, prevProgress })
+	runnerForName = func(string, store.Config) (platform.Runner, error) { return r, nil }
 	var mu sync.Mutex
 	tryProgress = func() (distill.ProgressFunc, func()) {
 		return func(p distill.Progress) { mu.Lock(); snaps = append(snaps, p); mu.Unlock() },
