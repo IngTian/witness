@@ -42,7 +42,11 @@ they exist for recovery and debugging, and everything they do also happens autom
   observations. (Hidden, like the rest of `worker`: review normally runs on its own schedule —
   `review_every` / `review_poignancy` — so reaching for this by hand is the exception. `--full`
   also runs the emergent long-arc pass.)
-- `witness lens register|enable|disable|list` — manage lenses.
+- `witness lens register|deregister|enable|disable|list` — manage lenses.
+- `witness lens show <name>` — print one lens's settings and a prompt excerpt (`--prompts` prints
+  both prompts in full).
+- `witness lens try <file|lens-name>` — preview a lens's extract prompt on real sessions without
+  writing anything; `--review` also previews the facets its review prompt would produce.
 - `witness lens backfill <name> [--fresh]` — re-mine one lens over the whole history and refresh its
   facets; `--fresh` first drops the lens's observations + facets (for a changed prompt).
 - `witness lens load-default` — re-seed / restore the built-in "default" person-growth lens (it is
@@ -50,6 +54,7 @@ they exist for recovery and debugging, and everything they do also happens autom
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
 - `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
+- `witness import --agent codex` — import Codex sessions; see [Codex capture](codex-capture.md).
 - `witness status` — what has been captured, whether the worker is running, and how fresh the
   distilled data is (`--json` for scripts).
 - `witness worker run` / `witness worker stop` — the operator escape hatch for the background
@@ -87,10 +92,12 @@ they exist for recovery and debugging, and everything they do also happens autom
   and distill them into the archive. Reads from stdin or a file. See the record contract in
   [`prompts/SCHEMA.md`](../prompts/SCHEMA.md#records-in-the-ingest-contract).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
+- `witness config get|set|unset|list [--lens <name>]` — read or change the runner and models, for
+  the default scope or one lens; `witness config path` prints where `config.toml` lives.
 
 ## Configuration
 
-`~/.local/share/witness/config.toml` (all optional; sensible defaults):
+`~/.local/share/witness/config.toml` (`witness config path` prints yours; all optional; sensible defaults):
 
 ```toml
 runner           = "claude"   # "claude" (default) or "opencode"
