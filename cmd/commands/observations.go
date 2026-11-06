@@ -97,7 +97,10 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 		return err
 	}
 	defer st.Close()
-	obs, err := st.ReadObservations("")
+	// Observations carry the lens's mined name, which a registered lens may override. Read only
+	// that lens: Search filters by it anyway, and every other lens's embeddings cost ~5x the memory.
+	dataName := lens.DataName(st, lensName)
+	obs, err := st.ReadObservations(dataName)
 	if err != nil {
 		return err
 	}
@@ -109,8 +112,6 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	// Observations carry the lens's mined name, which a registered lens may override.
-	dataName := lens.DataName(st, lensName)
 	hits := vector.Search(obs, qv, dataName, k)
 	if asJSON {
 		out := observationSearchJSON{Lens: lensName, Query: query, Limit: k, Hits: []observationHitJSON{}}
@@ -232,11 +233,14 @@ func cmdObservationRecord(session, lensName, dimension, observation, evidence st
 		return err
 	}
 	defer st.Close()
+	// Stage under the lens's MINED name: the row drains into L1 verbatim and the review reads the
+	// lens by that name, so the registered name here would orphan the observation.
+	dataName := lens.DataName(st, lensName)
 	o := store.Observation{
-		ID:          cliObsID(session, lensName, observation),
+		ID:          cliObsID(session, dataName, observation),
 		TS:          time.Now().UTC().Format(time.RFC3339),
 		Session:     session,
-		Lens:        lensName,
+		Lens:        dataName,
 		Dimension:   dimension,
 		Observation: observation,
 		Evidence:    evidence,
