@@ -20,8 +20,8 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 		if strings.HasPrefix(t.Session, "file:") {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, t.TS)
-		if err != nil {
+		ts, ok := parseTS(t.TS)
+		if !ok {
 			continue
 		}
 		local := ts.In(loc)
@@ -42,8 +42,8 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 		if strings.HasPrefix(n.Session, "file:") {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, n.TS)
-		if err != nil {
+		ts, ok := parseTS(n.TS)
+		if !ok {
 			continue
 		}
 		local := ts.In(loc)

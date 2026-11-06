@@ -9,8 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/mattn/go-isatty"
-
 	"github.com/IngTian/witness/internal/distill"
 )
 
@@ -62,7 +60,7 @@ const progressRedraw = time.Second
 func startProgress() *progressLine {
 	// The clock starts at the first update, not here: setup (opening the store, a migration, listing
 	// the work) is not the pass, and counting it once made a 5 s import open on "~3m18s left".
-	p := &progressLine{w: os.Stderr, tty: isatty.IsTerminal(os.Stderr.Fd()), minRedraw: 100 * time.Millisecond}
+	p := &progressLine{w: os.Stderr, tty: stderrIsTerminal, minRedraw: 100 * time.Millisecond}
 	p.color = p.tty && os.Getenv("NO_COLOR") == ""
 	p.cols = func() int {
 		if n := termWidth(os.Stderr); n > 0 {
