@@ -228,8 +228,16 @@ func TestHomeAndReadOnlyURI(t *testing.T) {
 	if p, err := Home(); err != nil || p != a {
 		t.Fatalf("home %q %v", p, err)
 	}
-	if uri := readOnlyURI(filepath.Join(a, "sp ace#中文.sqlite")); !strings.Contains(uri, "mode=ro") || strings.Contains(uri, "#中文") {
-		t.Fatal(uri)
+	// The history database opens through platform.SQLiteFileURI, so a hostile home path — an
+	// unescaped '#' would truncate the URI and open a different, empty database — still reads it.
+	im, _ := testImporter(t)
+	im.Home = filepath.Join(im.Home, "sp ace#中文")
+	if err := os.MkdirAll(im.Home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sqlMessages(t, testHistoryDB(t, im.Home))
+	if s := runImport(t, im); s.Records != 2 {
+		t.Fatalf("history database under %q not read: %+v", im.Home, s)
 	}
 	if _, ok := any(Platform{}).(platform.RunnerProvider); ok {
 		t.Fatal("capture source unexpectedly provides a runner")

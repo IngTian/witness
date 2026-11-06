@@ -123,12 +123,11 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 
 // sqliteURI opens the user's own OpenCode database READ-ONLY with a shared cache.
 //
-// Routed through the shared sqliteFileURI (native.go) because this was previously a second,
+// Routed through the shared platform.SQLiteFileURI because this was previously a second,
 // independent copy of the same url.URL composition — and both copies were broken on Windows
-// the same way, turning the drive letter into a URI authority. See readOnlyURI for the full
-// explanation and the real error from Windows.
+// the same way, turning the drive letter into a URI authority (issue #10).
 func sqliteURI(path string) string {
-	return sqliteFileURI(path, "mode=ro&cache=shared")
+	return platform.SQLiteFileURI(path, "mode=ro&cache=shared")
 }
 
 // legacyMarkerName is the label the PRE-isolation design stamped on the scratch
