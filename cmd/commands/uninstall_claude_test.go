@@ -9,7 +9,7 @@ import (
 
 // `witness unwire claude` must not claim success when the hooks are still wired.
 //
-// It used to `_ =` away BOTH removeWitnessHooks's parse error and writeFileAtomic's error,
+// It used to `_ =` away BOTH removeWitnessHooks's parse error and the atomic write's error,
 // print "hooks removed from ...", and return nil. So on an unparseable settings.json — or a
 // read-only ~/.claude — every witness hook stayed installed while the user was told they
 // were gone. They then delete the binary, and Claude Code fires a hook for a missing

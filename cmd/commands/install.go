@@ -723,7 +723,7 @@ func cmdInstallClaude() (wireOutcome, error) {
 	if err != nil {
 		return wireOutcome{}, err
 	}
-	if err := writeFileAtomic(settings, merged); err != nil {
+	if err := store.WriteFileAtomic(settings, merged); err != nil {
 		return wireOutcome{}, err
 	}
 	fmt.Println(resultRow(okGlyph(), "hooks", tildePath(settings), pluralize(len(witnessHookSpecs(inv)), "event", "events")))
@@ -827,13 +827,13 @@ func cmdInstallOpenCode() (wireOutcome, error) {
 		return wireOutcome{}, err
 	}
 	pluginPath := openCodePluginPath(dir, openCodePluginName)
-	if err := writeFileAtomic(pluginPath, []byte(opencodeplugin.Source(target))); err != nil {
+	if err := store.WriteFileAtomic(pluginPath, []byte(opencodeplugin.Source(target))); err != nil {
 		return wireOutcome{}, err
 	}
 	removeLegacyOpenCodePlugins(dir)
 	fmt.Println(resultRow(okGlyph(), "plugin", tildePath(pluginPath), ""))
 
-	if err := writeFileAtomic(config, merged); err != nil {
+	if err := store.WriteFileAtomic(config, merged); err != nil {
 		return wireOutcome{}, err
 	}
 	fmt.Println(resultRow(okGlyph(), "MCP server", "witness", "in "+tildePath(config)))
@@ -900,7 +900,7 @@ func cmdUninstallClaude() (removed bool, warning string, err error) {
 		// Compare before writing, the way codex does: re-marshalling an already-clean file
 		// produces equal JSON, and "hooks removed" on every re-run hid whether there were any.
 		if !jsonEqual(data, cleaned) {
-			if err := writeFileAtomic(settings, cleaned); err != nil {
+			if err := store.WriteFileAtomic(settings, cleaned); err != nil {
 				return false, "", fmt.Errorf("write %s: %w", settings, err)
 			}
 			fmt.Println(resultRow(okGlyph(), "hooks", "removed from "+tildePath(settings), ""))
@@ -1024,7 +1024,7 @@ func cmdUninstallOpenCode() (removed bool, err error) {
 		if err != nil {
 			return false, err
 		}
-		if err := writeFileAtomic(config, cleaned); err != nil {
+		if err := store.WriteFileAtomic(config, cleaned); err != nil {
 			return false, err
 		}
 		fmt.Println(resultRow(okGlyph(), "MCP server", "removed from "+tildePath(config), ""))
@@ -1180,14 +1180,4 @@ func removeTrailingCommas(data []byte) []byte {
 
 func isJSONWhitespace(c byte) bool {
 	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
-}
-
-// writeFileAtomic writes via temp + rename so a crash can't leave a half-written
-// settings.json (which would silently disable ALL of the user's settings).
-func writeFileAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
