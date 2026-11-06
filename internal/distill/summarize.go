@@ -367,9 +367,12 @@ func (sm *Summarizer) Stale() (map[string]bool, error) {
 		anyStale = anyStale || stale[p.name]
 		writeSection(&portrait, p.name, p.prior)
 	}
-	// anyStale is the rule stated outright. The signature alone would agree today (a stale
-	// section is empty here, and Summarize never writes an empty section), but only by way of
-	// that invariant.
+	// anyStale is load-bearing, not a restatement of the signature check. A stale lens adds an
+	// EMPTY section here, and archives written before #148 can hold exactly that: an empty reply
+	// was written to <lens>.md, its signature stamped, and the unified signature stamped over a
+	// portrait containing "## <lens>\n\n\n\n". That signature still matches this rebuild, yet
+	// Summarize regenerates the lens and then the portrait. Without the guard, Stale would call
+	// the portrait current when a model call is coming.
 	_, _, current := sm.unifiedPass(portrait.String())
 	stale[store.ProfileUnified] = anyStale || !current
 	return stale, nil

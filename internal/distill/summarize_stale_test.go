@@ -447,3 +447,51 @@ func TestStaleMissingFileIsStale(t *testing.T) {
 		t.Errorf("default.md blank: Stale() = %v, want %v", got, want)
 	}
 }
+
+// Before #148 an empty runner reply was written to <lens>.md with its signature stamped, and
+// the unified signature was stamped over a portrait holding that empty section. The unified
+// signature over the on-disk priors then still MATCHES, yet Summarize regenerates the blank
+// lens and then the portrait. Only the "unified is stale whenever a notebook is" rule catches
+// this, so it is pinned here rather than left to the signature.
+func TestStaleUnifiedOverALegacyEmptySection(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	var called []string
+	sm := &Summarizer{Store: s, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: portraitCaller(&called)}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reproduce the legacy state: default.md blank (its signature still stamped by the pass
+	// above), and a unified signature over exactly the portrait such a pass would have built.
+	if err := s.WriteProfile("default", ""); err != nil {
+		t.Fatal(err)
+	}
+	mathPrior, ok, err := s.ReadProfile("math")
+	if err != nil || !ok {
+		t.Fatalf("precondition: math profile, ok=%v err=%v", ok, err)
+	}
+	var legacy strings.Builder
+	writeSection(&legacy, "default", "")
+	writeSection(&legacy, "math", mathPrior)
+	sig := summarySignature(ModelFor(store.Config{}, nil, PhaseReview), "UNIFIED", legacy.String())
+	if err := s.SetMetaString(profileSigKey(store.ProfileUnified), sig); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := sm.Stale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]bool{"default": true, "math": false, store.ProfileUnified: true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("legacy empty section: Stale() = %v, want %v", got, want)
+	}
+	called = nil
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(called)
+	if want := []string{"default", store.ProfileUnified}; !reflect.DeepEqual(called, want) {
+		t.Errorf("Summarize called the runner for %v, want %v", called, want)
+	}
+}
