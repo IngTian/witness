@@ -1,0 +1,369 @@
+package view
+
+import (
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/IngTian/witness/internal/store"
+)
+
+// buildActivity computes all activity metrics from ViewInput: days, cuts, windows and facts.
+// Only conversation sources count (Claude Code, OpenCode, Codex); file: sessions are excluded.
+func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location) Activity {
+	// Parse and bucket turns by local date
+	dayMap := make(map[string]*dayBuilder)
+	for _, t := range in.Turns {
+		if strings.HasPrefix(t.Session, "file:") {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, t.TS)
+		if err != nil {
+			continue
+		}
+		local := ts.In(loc)
+		date := local.Format("2006-01-02")
+
+		if dayMap[date] == nil {
+			dayMap[date] = &dayBuilder{
+				date:     date,
+				sessions: make(map[string]struct{}),
+			}
+		}
+		dayMap[date].sessions[t.Session] = struct{}{}
+		dayMap[date].turns++
+	}
+
+	// Parse and bucket notes by local date
+	for _, n := range in.Notes {
+		if strings.HasPrefix(n.Session, "file:") {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, n.TS)
+		if err != nil {
+			continue
+		}
+		local := ts.In(loc)
+		date := local.Format("2006-01-02")
+
+		if dayMap[date] == nil {
+			dayMap[date] = &dayBuilder{
+				date:     date,
+				sessions: make(map[string]struct{}),
+			}
+		}
+		dayMap[date].notes++
+	}
+
+	// Sort days
+	var dates []string
+	for date := range dayMap {
+		// Only include days with ≥1 conversation turn
+		if dayMap[date].turns > 0 {
+			dates = append(dates, date)
+		}
+	}
+	sort.Strings(dates)
+
+	// Build Days slice (never nil, always [] when empty)
+	days := []Day{}
+	for _, date := range dates {
+		db := dayMap[date]
+		days = append(days, Day{
+			Date:          date,
+			Conversations: len(db.sessions),
+			Turns:         db.turns,
+			Notes:         db.notes,
+		})
+	}
+
+	// Compute First and Last
+	first := ""
+	if len(dates) > 0 {
+		first = dates[0]
+	}
+	last := now.In(loc).Format("2006-01-02")
+
+	// Compute Cuts (20/40/60/80th percentiles, nearest-rank)
+	cuts := computeCuts(days)
+
+	// Generate Windows
+	var windows []Window
+	if first != "" {
+		windows = generateWindows(first, last, days, dayMap, in.Notes, loc)
+	} else {
+		// Empty archive: one window per kind, all containing now
+		windows = generateWindowsForEmpty(last, loc)
+	}
+
+	return Activity{
+		First:       first,
+		Last:        last,
+		Days:        days,
+		Cuts:        cuts,
+		Windows:     windows,
+		TotalTraits: 0, // Task 4 will fill this
+	}
+}
+
+type dayBuilder struct {
+	date     string
+	sessions map[string]struct{}
+	turns    int
+	notes    int
+}
+
+// computeCuts returns the 20/40/60/80th percentiles of Turns over Days, deduplicated.
+func computeCuts(days []Day) []int {
+	if len(days) == 0 {
+		return []int{}
+	}
+
+	// Extract turn counts
+	var turns []int
+	for _, d := range days {
+		turns = append(turns, d.Turns)
+	}
+	sort.Ints(turns)
+
+	// Nearest-rank percentiles
+	percentiles := []float64{0.2, 0.4, 0.6, 0.8}
+	var cuts []int
+	seen := make(map[int]struct{})
+
+	for _, p := range percentiles {
+		// Nearest-rank: position = ceil(p * n)
+		pos := int(p*float64(len(turns)) + 0.999999) // ceiling
+		if pos < 1 {
+			pos = 1
+		}
+		if pos > len(turns) {
+			pos = len(turns)
+		}
+		val := turns[pos-1] // 0-indexed
+
+		if _, ok := seen[val]; !ok {
+			cuts = append(cuts, val)
+			seen[val] = struct{}{}
+		}
+	}
+
+	sort.Ints(cuts)
+	return cuts
+}
+
+// generateWindows builds all windows from First's window to Last's window.
+func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location) []Window {
+	firstDate := parseDate(first)
+	lastDate := parseDate(last)
+
+	var windows []Window
+
+	// Months
+	for ym := monthOf(firstDate); !ym.After(monthOf(lastDate)); ym = ym.AddDate(0, 1, 0) {
+		windows = append(windows, buildWindow("month", ym, last, days, dayMap, notes, loc))
+	}
+
+	// Quarters
+	for yq := quarterOf(firstDate); !yq.After(quarterOf(lastDate)); yq = yq.AddDate(0, 3, 0) {
+		windows = append(windows, buildWindow("quarter", yq, last, days, dayMap, notes, loc))
+	}
+
+	// Halves
+	for yh := halfOf(firstDate); !yh.After(halfOf(lastDate)); yh = yh.AddDate(0, 6, 0) {
+		windows = append(windows, buildWindow("half", yh, last, days, dayMap, notes, loc))
+	}
+
+	// Years
+	for y := yearOf(firstDate); !y.After(yearOf(lastDate)); y = y.AddDate(1, 0, 0) {
+		windows = append(windows, buildWindow("year", y, last, days, dayMap, notes, loc))
+	}
+
+	return windows
+}
+
+// generateWindowsForEmpty returns one window per kind, all containing now (Last).
+func generateWindowsForEmpty(last string, loc *time.Location) []Window {
+	lastDate := parseDate(last)
+	return []Window{
+		buildWindow("month", monthOf(lastDate), last, nil, nil, nil, loc),
+		buildWindow("quarter", quarterOf(lastDate), last, nil, nil, nil, loc),
+		buildWindow("half", halfOf(lastDate), last, nil, nil, nil, loc),
+		buildWindow("year", yearOf(lastDate), last, nil, nil, nil, loc),
+	}
+}
+
+// buildWindow constructs a Window for the given kind and start date.
+func buildWindow(kind string, start time.Time, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location) Window {
+	var end time.Time
+	var label string
+
+	switch kind {
+	case "month":
+		end = start.AddDate(0, 1, 0).Add(-time.Second) // last moment of month
+		label = start.Format("Jan 2006")
+	case "quarter":
+		end = start.AddDate(0, 3, 0).Add(-time.Second)
+		q := (start.Month()-1)/3 + 1
+		label = "Q" + strconv.Itoa(int(q)) + start.Format(" 2006")
+	case "half":
+		end = start.AddDate(0, 6, 0).Add(-time.Second)
+		h := (start.Month()-1)/6 + 1
+		label = "H" + strconv.Itoa(int(h)) + start.Format(" 2006")
+	case "year":
+		end = start.AddDate(1, 0, 0).Add(-time.Second)
+		label = start.Format("2006")
+	}
+
+	startStr := start.Format("2006-01-02")
+	endStr := end.Format("2006-01-02")
+
+	// Compute metrics
+	sessions := make(map[string]struct{})
+	turns := 0
+	activeDays := 0
+	var busiest *Day
+
+	for _, d := range days {
+		if d.Date >= startStr && d.Date <= endStr {
+			activeDays++
+			if dayMap[d.Date] != nil {
+				for s := range dayMap[d.Date].sessions {
+					sessions[s] = struct{}{}
+				}
+			}
+			turns += d.Turns
+
+			if busiest == nil || d.Turns > busiest.Turns || (d.Turns == busiest.Turns && d.Date < busiest.Date) {
+				busiest = &Day{Date: d.Date, Conversations: d.Conversations, Turns: d.Turns, Notes: d.Notes}
+			}
+		}
+	}
+
+	// Count notes directly by parsed ts date (not sum over Days)
+	notesCount := 0
+	for _, n := range notes {
+		if strings.HasPrefix(n.Session, "file:") {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, n.TS)
+		if err != nil {
+			continue
+		}
+		date := ts.In(loc).Format("2006-01-02")
+		if date >= startStr && date <= endStr {
+			notesCount++
+		}
+	}
+
+	// Compute SpanDays and SoFar
+	first := ""
+	if len(days) > 0 {
+		first = days[0].Date
+	}
+	spanDays := computeSpanDays(startStr, endStr, first, last)
+	soFar := last >= startStr && last <= endStr
+
+	// Compute LongestRun
+	longestRun := computeLongestRun(startStr, endStr, days)
+
+	return Window{
+		Kind:          kind,
+		Start:         startStr,
+		End:           endStr,
+		Label:         label,
+		Conversations: len(sessions),
+		Turns:         turns,
+		Notes:         notesCount,
+		NewTraits:     0, // Task 4
+		Rewrites:      0, // Task 4
+		ActiveDays:    activeDays,
+		SpanDays:      spanDays,
+		SoFar:         soFar,
+		LongestRun:    longestRun,
+		Busiest:       busiest,
+	}
+}
+
+// computeSpanDays returns the window clipped to [First, Last], in days; 0 if disjoint.
+func computeSpanDays(windowStart, windowEnd, first, last string) int {
+	if first == "" {
+		// No conversations: window is clipped to [last, last]
+		if last >= windowStart && last <= windowEnd {
+			return 1
+		}
+		return 0
+	}
+
+	// Clip [windowStart, windowEnd] to [first, last]
+	clipStart := windowStart
+	if first > clipStart {
+		clipStart = first
+	}
+	clipEnd := windowEnd
+	if last < clipEnd {
+		clipEnd = last
+	}
+
+	if clipStart > clipEnd {
+		return 0 // disjoint
+	}
+
+	startDate := parseDate(clipStart)
+	endDate := parseDate(clipEnd)
+	return int(endDate.Sub(startDate).Hours()/24) + 1
+}
+
+// computeLongestRun returns the longest run of consecutive conversation days within [start, end].
+func computeLongestRun(start, end string, days []Day) int {
+	longest := 0
+	current := 0
+	var prevDate time.Time
+
+	for _, d := range days {
+		if d.Date < start || d.Date > end {
+			continue
+		}
+
+		date := parseDate(d.Date)
+		if current == 0 || date.Sub(prevDate).Hours() == 24 {
+			current++
+		} else {
+			if current > longest {
+				longest = current
+			}
+			current = 1
+		}
+		prevDate = date
+	}
+
+	if current > longest {
+		longest = current
+	}
+	return longest
+}
+
+// Helpers
+func parseDate(s string) time.Time {
+	t, _ := time.Parse("2006-01-02", s)
+	return t
+}
+
+func monthOf(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
+}
+
+func quarterOf(t time.Time) time.Time {
+	q := ((t.Month() - 1) / 3) * 3
+	return time.Date(t.Year(), time.Month(q+1), 1, 0, 0, 0, 0, t.Location())
+}
+
+func halfOf(t time.Time) time.Time {
+	h := ((t.Month() - 1) / 6) * 6
+	return time.Date(t.Year(), time.Month(h+1), 1, 0, 0, 0, 0, t.Location())
+}
+
+func yearOf(t time.Time) time.Time {
+	return time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location())
+}
