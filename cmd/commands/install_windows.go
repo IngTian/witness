@@ -173,8 +173,8 @@ func probeSrcTree(exeDir, subdir string) (string, bool) {
 
 // copyFile copies src to dst (0o755 so the binary stays executable), atomically:
 // it streams to a temp file on the same directory and renames it over dst, so an
-// interrupted copy can never replace a good file with a truncated one (mirrors
-// writeFileAtomic for settings.json). If src and dst are the SAME file (e.g. a
+// interrupted copy can never replace a good file with a truncated one (as
+// store.WriteFileAtomic does for settings.json, but streamed). If src and dst are the SAME file (e.g. a
 // re-install run from the already-installed exe now that install put its dir on
 // PATH), it is a no-op — Windows would otherwise deny writing a running image.
 func copyFile(src, dst string) error {

@@ -198,14 +198,6 @@ func (e *runnerDownError) Error() string {
 	return "runner " + e.name + " is unavailable this drain (open failed)"
 }
 
-// applyModelUnion sets rcfg's TriageModel/DistillModel to models valid on runtime `name`.
-// For the default runtime it keeps the configured default models (they belong to it). For a
-// NON-default runtime the configured default models are for the wrong runtime, so it clears them
-// (the runner uses its own default) — per-lens models are validated separately by the
-// runner's own Open against the union we pass via ValidateModels in doctor; here we only
-// need Open's prewarm to not choke on a wrong-runtime default model. The per-lens models
-// themselves are passed per-call (ModelFor), and OpenCode's server accepts any configured
-// model per-call, so prewarming the default models is sufficient for Open to succeed.
 // clearCrossRuntimeModels blanks the configured default stage models when minting a runner for a
 // NON-default runtime, because a model name is only valid on its own runtime: passing the
 // Claude-side default to an OpenCode runner would make its Open-time validation reject a name that
