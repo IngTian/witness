@@ -148,26 +148,12 @@ func (q *queue) MarkDistilled(session, lens string, count int) error {
 // path. On the append-only Claude path the mined rawHighID always still exists, so
 // the guard always passes — free insurance there, an active fix on the OpenCode/
 // cleanup paths that can delete raw under a mine.
+//
+// It is CommitLensDistillation with no observations and one lens, so the NothingToDo path
+// and the mining commit share ONE generation guard: a second copy of that SQL would let a
+// tightened CAS land on only one of them.
 func (q *queue) MarkDistilledIfCurrent(session, lens string, count int, rawHighID int64) (bool, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
-	// The guard: only write when a raw row with the mined generation's high id still
-	// exists for this session. rawHighID==0 means the mine saw an empty session
-	// (nothing mined) — still gate on "no raw exists now" so a concurrent import that
-	// added rows isn't clobbered. The generation is a property of the session's raw,
-	// not the lens, so the guard is unchanged in spirit — only the row it writes/
-	// conflicts on is now keyed by (session, lens).
-	res, err := q.db.Exec(
-		`INSERT INTO progress(session, lens, distilled, distilled_at)
-		 SELECT ?, ?, ?, ?
-		  WHERE (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
-		     OR EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)
-		 ON CONFLICT(session, lens) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`,
-		session, lens, count, now, rawHighID, session, session, rawHighID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return q.CommitLensDistillation(nil, session, count, rawHighID, []string{lens})
 }
 
 // CommitLensDistillation is the ATOMIC write for issue #67-2: it writes the lens-
@@ -184,8 +170,8 @@ func (q *queue) MarkDistilledIfCurrent(session, lens string, count int, rawHighI
 // mining outage never delays them.
 //
 // Promotion-safe under WAL + MaxOpenConns(1): EVERY statement is a conditional write
-// gated on the SAME `EXISTS(raw WHERE id=rawHighID)` predicate MarkDistilledIfCurrent
-// uses, so the first statement acquires the write lock outright (no read-then-write
+// gated on the SAME `EXISTS(raw WHERE id=rawHighID)` predicate (MarkDistilledIfCurrent is
+// this function with one lens), so the first statement acquires the write lock outright (no read-then-write
 // lock promotion that WAL would reject with SQLITE_BUSY_SNAPSHOT), and all statements
 // see one consistent snapshot. obsID is the PK, so INSERT OR IGNORE keeps a crash-then-
 // re-run idempotent — the same crash-safety AppendObservations gave, now folded into
@@ -201,8 +187,7 @@ func (q *queue) CommitLensDistillation(mined []Observation, session string, coun
 	// The generation guard, shared by every statement below: current iff a raw row
 	// with the mined high id still exists (rawHighID==0 = an empty session the mine
 	// saw as empty; still gate on "no raw exists now" so a concurrent import isn't
-	// clobbered). Identical in spirit to MarkDistilledIfCurrent — the fact is a
-	// property of the session's raw, not any one lens.
+	// clobbered). The fact is a property of the session's raw, not any one lens.
 	const guard = ` (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
 	     OR EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)`
 
