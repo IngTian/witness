@@ -160,11 +160,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// (runner_bound) still wins (see ResolveRunner). Per-lens runners layer on top via
 	// newRunnerSet below.
 	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil {
-		slog.Error("load lenses", "err", err)
-		return true, err
-	}
+	lenses := activeLenses(st)
 	// The pending query cross-joins sessions against the ACTIVE lens set (#55). Use
 	// the same loaded lenses the drain will mine, so the queue only offers pairs the
 	// worker can actually process (a config-enabled-but-unloadable lens is excluded by

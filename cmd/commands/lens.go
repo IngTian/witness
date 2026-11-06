@@ -690,7 +690,7 @@ func renderLensPrompts(l *lens.Lens) string {
 // tool install or the pre-1a migration) and not since disabled. So an install runs
 // exactly the lenses its config enables — including ZERO (a valid state: nothing to
 // distill; the queue short-circuits, see store.emptyLensSet). No lens is force-added.
-func activeLenses(st *store.Store) ([]*lens.Lens, error) {
+func activeLenses(st *store.Store) []*lens.Lens {
 	out := []*lens.Lens{}
 	for _, name := range st.LoadConfig().EnabledLenses {
 		l, err := lens.LoadRegistered(name, st.LensesDir())
@@ -700,7 +700,7 @@ func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 		}
 		out = append(out, l)
 	}
-	return out, nil
+	return out
 }
 
 // activeLensNames is the per-lens-watermark (#55) view of the active lens set: the
@@ -714,14 +714,8 @@ func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 // store.emptyLensSet). We must NOT force ["default"] here: default has no always-on
 // status, so injecting it when it isn't enabled would offer sessions for a lens that
 // never runs (the very no-progress cycle above) and resurrect a lens the user disabled.
-// Only a hard error loading the config is unexpected — return empty there too and let
-// the drain no-op rather than fabricate a lens set.
 func activeLensNames(st *store.Store) []string {
-	lenses, err := activeLenses(st)
-	if err != nil {
-		slog.Warn("could not load active lenses; treating as none this pass", "err", err)
-		return nil
-	}
+	lenses := activeLenses(st)
 	names := make([]string, 0, len(lenses))
 	for _, l := range lenses {
 		names = append(names, l.Name)

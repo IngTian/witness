@@ -23,7 +23,7 @@ func TestProfilePullZeroLensesNeverLoadsPrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if ls, _ := activeLenses(st); len(ls) != 0 {
+	if ls := activeLenses(st); len(ls) != 0 {
 		t.Fatalf("precondition: no lens enabled, got %d", len(ls))
 	}
 
@@ -42,7 +42,7 @@ func TestProfilePullLockHeldTouchesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if ls, _ := activeLenses(st); len(ls) == 0 {
+	if ls := activeLenses(st); len(ls) == 0 {
 		t.Fatal("precondition: the default lens should be enabled")
 	}
 	t.Setenv("WITNESS_PROMPTS", t.TempDir())

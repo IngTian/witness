@@ -95,9 +95,9 @@ func ensureProfileFresh(st *store.Store) (bool, error) {
 func profileSummarizer(st *store.Store) (*distill.Summarizer, error) {
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil || len(lenses) == 0 {
-		return nil, err
+	lenses := activeLenses(st)
+	if len(lenses) == 0 {
+		return nil, nil
 	}
 	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts(st.Root)
 	if err != nil {
