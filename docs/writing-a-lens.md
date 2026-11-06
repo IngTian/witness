@@ -4,8 +4,11 @@ A **lens** is how you tell witness what to notice. The one it ships tracks a per
 lens you write can track anything that has a state which changes — a research area, a market
 regime, an incident log, a knowledge base.
 
-This is the main extension point. Nothing in the engine is person-specific: records in,
-observations, dated facets, narrative out. Only the prompts decide what the subject is.
+This is the main extension point. The pipeline itself is subject-agnostic — records in,
+observations, dated facets, narrative out — and your lens's prompts decide what the subject is.
+A few built-in prompts no lens can override still describe a person: the claim pass (the short
+summary the review reads in place of each facet), `witness compact`'s merge judge, and the
+portrait-source resolver. On a corpus lens they work, but read your facets as "one person".
 
 ## The loop
 

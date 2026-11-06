@@ -64,7 +64,9 @@ pair, 200 → 558 → 83).
 built-in `default` lens and the summary prompts say "notice things about the person". For a
 non-person corpus you write your own lens (three files; start from
 [`prompts/lens/corpus-example`](prompts/lens/corpus-example) or one of the examples) and, if you want,
-override the summary prompt with one file.
+override the summary prompt with one file. Three built-in prompts no lens can override are still
+written about a person: the facet claims the review reads, `witness compact`'s merge judge, and the
+portrait-source resolver.
 
 ## Is this you?
 
