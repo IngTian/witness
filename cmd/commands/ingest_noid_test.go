@@ -64,7 +64,7 @@ func TestIngestDoesNotReappendAnIDLessRecord(t *testing.T) {
 	}
 	// The stored key list must not accumulate duplicates either — it is the dedup state.
 	st, _ := store.Open()
-	keys := st.MetaString("file_import_keys:file:docs")
+	keys := st.MetaString(store.FileImportKeysNS + ":file:docs")
 	st.Close()
 	if strings.Count(keys, "h:") != 1 {
 		t.Errorf("stored keys accumulated duplicates: %s", keys)

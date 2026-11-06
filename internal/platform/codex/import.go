@@ -21,7 +21,7 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-const statePrefix = "codex_import_state:"
+const statePrefix = store.CodexImportStateNS + ":"
 
 type Importer struct {
 	Store store.ImportStore

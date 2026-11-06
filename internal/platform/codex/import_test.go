@@ -167,10 +167,16 @@ func TestSQLiteAppendEditMigrationAndCleanup(t *testing.T) {
 	if len(recs) != 3 || recs[1].Text != "edited answer" {
 		t.Fatal("edit missing")
 	}
+	// The manifest must live in the namespace the store reaps and merges; otherwise the cleanup
+	// check below passes because the row was never under that name.
+	manifest := store.CodexImportStateNS + ":codex:s1"
+	if st.MetaString(manifest) == "" {
+		t.Fatalf("import state is not under the store's %q namespace", store.CodexImportStateNS)
+	}
 	if _, _, err := st.PruneSessionsBefore("2027-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if st.MetaString(statePrefix+"codex:s1") != "" {
+	if st.MetaString(manifest) != "" {
 		t.Fatal("cleanup leaked manifest")
 	}
 	if s := runImport(t, im); s.Records != 3 {

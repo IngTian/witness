@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // Pruning a session must not delete PER-LENS meta rows.
 //
@@ -88,15 +91,12 @@ func TestPerSessionMetaNamespacesAreAllReaped(t *testing.T) {
 			}
 		})
 	}
-	// The two namespaces that exist today, pinned by name so a rename has to be deliberate.
-	// Their definitions live outside this package (internal/platform/opencode/import.go,
-	// cmd/commands/ingest.go), which the store cannot import, so this is the sync check.
-	want := map[string]bool{"opencode_import_keys": true, "file_import_keys": true, "codex_import_state": true}
-	for _, ns := range PerSessionMetaNamespaces {
-		delete(want, ns)
-	}
-	for missing := range want {
-		t.Errorf("%q dropped out of PerSessionMetaNamespaces — if the producing constant was "+
-			"renamed, update both together or its rows leak forever", missing)
+	// Every exported namespace must be on the list. The producers build their keys from these
+	// constants, so this is what ties a producer's rows to the reap and the merge.
+	for _, ns := range []string{CodexImportStateNS, OpenCodeImportKeysNS, FileImportKeysNS} {
+		if !slices.Contains(PerSessionMetaNamespaces, ns) {
+			t.Errorf("%q dropped out of PerSessionMetaNamespaces — its rows leak forever and a "+
+				"merge drops them", ns)
+		}
 	}
 }
