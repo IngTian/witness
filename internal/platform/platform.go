@@ -1,8 +1,8 @@
-// Package platform holds the agent-runtime adapters (Claude Code, OpenCode) and
-// the shared identity/stats types. Core witness code depends on these small
-// boundaries instead of embedding Claude Code or OpenCode details throughout the
-// CLI. The per-runtime implementations live in the claude/ and opencode/
-// subpackages; this file holds the cross-runtime constants and value types.
+// Package platform holds the session-source registry (Claude Code, OpenCode, Codex,
+// ingested files) and the shared identity/stats types. Core witness code depends on
+// these small boundaries instead of embedding any one source's details throughout the
+// CLI. The per-source implementations live in the claude/, opencode/, codex/ and file/
+// subpackages; this file holds the cross-source constants and value types.
 package platform
 
 import "context"

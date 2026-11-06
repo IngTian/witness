@@ -133,13 +133,6 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 	return cmd
 }
 
-// buildRunCmd assembles the isolated `claude -p` invocation, separating witness's
-// instructions from the corpus: the instructions become the system prompt; the
-// corpus is the user turn (stdin), fenced by platform.WrapCorpus so it cannot
-// impersonate witness's instructions. This is the profile prompt-injection defense
-// — a hostile repo that induces record_observation(<payload>) cannot have that
-// payload reach the reviewer as instructions. Split out from Run so the wiring is
-// unit-testable. WITNESS_WORKER=1 is the recursion guard.
 // buildRunCmdFn is the test seam for the child process. It exists so the deadline-attribution
 // test can drive the REAL Run() — including its error classification, the part that was wrong —
 // against a stand-in that hangs, instead of spawning the user's actual `claude` CLI. Nothing in
@@ -150,6 +143,13 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 // stayed green while the production path leaked unbounded children.
 var buildRunCmdFn = buildRunCmd
 
+// buildRunCmd assembles the isolated `claude -p` invocation, separating witness's
+// instructions from the corpus: the instructions become the system prompt; the
+// corpus is the user turn (stdin), fenced by platform.WrapCorpus so it cannot
+// impersonate witness's instructions. This is the profile prompt-injection defense
+// — a hostile repo that induces record_observation(<payload>) cannot have that
+// payload reach the reviewer as instructions. Split out from Run so the wiring is
+// unit-testable. WITNESS_WORKER=1 is the recursion guard.
 func buildRunCmd(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
 	cmd := newClaudeCmd(ctx, model)
 	cmd.Args = append(cmd.Args, "--append-system-prompt", systemPrompt+"\n\n"+platform.CorpusNotice)
