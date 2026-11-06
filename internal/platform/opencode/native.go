@@ -209,7 +209,6 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
-		n.server.deleteSessionBestEffort(strings.TrimPrefix(w.Session, SessionPrefix))
 	}
 	newRequest := m.MessageID == ""
 	if newRequest {

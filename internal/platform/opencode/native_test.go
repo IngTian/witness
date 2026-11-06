@@ -91,6 +91,10 @@ func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 		case r.Method == http.MethodDelete:
 			if strings.HasPrefix(r.URL.Path, "/session/fork_") {
 				forkDeletes++
+			} else {
+				// Setup only ever deletes sessions it created. A DELETE for the user's own id
+				// was left over from the fork design (#143) and always 404'd in the private db.
+				t.Errorf("deleted %s, a session this runtime never created", r.URL.Path)
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
