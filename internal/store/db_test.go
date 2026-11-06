@@ -948,12 +948,21 @@ func TestWriteProfileReplacesAtomically(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.WriteProfile("math", "new"); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The mode alone cannot tell a rename from an in-place write followed by a chmod; the
+	// inode can. A truncate-and-rewrite keeps the inode a concurrent reader is holding.
+	if os.SameFile(before, fi) {
+		t.Fatal("profile rewritten in place (same inode), not replaced")
 	}
 	if fi.Mode().Perm() != 0o600 {
 		t.Fatalf("profile mode = %o, want 0600 (the file must be replaced, not rewritten in place)", fi.Mode().Perm())

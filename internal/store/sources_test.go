@@ -521,12 +521,13 @@ func TestCurrentPortraitSourcesRejectsEmptyRow(t *testing.T) {
 }
 
 func TestDedupeLinksDirectFirst(t *testing.T) {
-	// Mix of direct and partial. The partials are deliberately NOT in alphabetical order, so a
-	// sort by key in place of the stable insertion order fails this test.
+	// Mix of direct and partial. The partials are deliberately unsorted on lens, dimension AND
+	// key, so a sort by any of them (or by the whole facetKey, the dedupe key) in place of the
+	// stable insertion order fails this test.
 	links := []TraitLink{
-		{Lens: "default", Dimension: "habits", Key: "reviews", Strength: LinkPartial},
+		{Lens: "math", Dimension: "skills", Key: "reviews", Strength: LinkPartial},
 		{Lens: "default", Dimension: "skills", Key: "python", Strength: LinkDirect},
-		{Lens: "default", Dimension: "skills", Key: "go", Strength: LinkPartial},
+		{Lens: "default", Dimension: "habits", Key: "go", Strength: LinkPartial},
 	}
 	got := DedupeLinks(links)
 	if len(got) != 3 {
