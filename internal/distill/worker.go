@@ -380,16 +380,18 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 
 	// 3. Embed active + each lens's mined for later recall (MCP/CLI vector search).
 	// Done in the map phase so the serial commit stays cheap; the embedder's own mutex
-	// makes this concurrency-safe. A mined obs whose embedding FAILS is KEPT with an
-	// empty embedding — the embedding is now consulted only at read-time recall (the
-	// write-path dedup that used to require it is gone), so an un-embeddable obs is
-	// still a fully valid L1 event (recall-only degradation until it is re-embedded).
-	// This matches the active-obs loop just above (keep-on-failure) and honors "keep
-	// full L1 to preserve expensive mining work."
+	// makes this concurrency-safe. An obs whose embedding FAILS (an embedder error, or a
+	// tokenizer panic Embed recovers into one) is KEPT with no vector — "keep full L1 to
+	// preserve expensive mining work" — but such a row is left out of vector search and of
+	// long-arc clustering, and NOTHING re-embeds it later. So each failure is logged: that
+	// warning is the only trace. (A doctor count and a re-embed pass wait until it shows up.)
 	for i := range m.Active {
 		if len(m.Active[i].Embedding) == 0 {
 			if v, err := w.Embedder.Embed(m.Active[i].Observation); err == nil {
 				m.Active[i].Embedding = v
+			} else {
+				slog.Warn("embed: active observation kept without a vector; search and long-arc clustering will skip it",
+					"session", session, "obs", m.Active[i].ID, "err", err)
 			}
 		}
 	}
@@ -397,6 +399,9 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 		for i := range m.Lenses[li].Mined {
 			if v, err := w.Embedder.Embed(m.Lenses[li].Mined[i].Observation); err == nil {
 				m.Lenses[li].Mined[i].Embedding = v
+			} else {
+				slog.Warn("embed: mined observation kept without a vector; search and long-arc clustering will skip it",
+					"session", session, "lens", m.Lenses[li].Lens, "obs", m.Lenses[li].Mined[i].ID, "err", err)
 			}
 		}
 	}
