@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,13 +21,13 @@ func TestRecordDriftAccumulates(t *testing.T) {
 	if ts, lens := s.DriftLast(); ts != "" || lens != "" {
 		t.Fatalf("absent last-stamp must be empty, got ts=%q lens=%q", ts, lens)
 	}
-	if err := s.RecordDrift(2, "s1", "codereview"); err != nil {
+	if err := s.RecordDrift(2, "codereview"); err != nil {
 		t.Fatalf("RecordDrift: %v", err)
 	}
 	if got := s.DriftTotal(); got != 2 {
 		t.Fatalf("after +2: want 2, got %d", got)
 	}
-	if err := s.RecordDrift(3, "s2", "math"); err != nil {
+	if err := s.RecordDrift(3, "math"); err != nil {
 		t.Fatalf("RecordDrift: %v", err)
 	}
 	if got := s.DriftTotal(); got != 5 {
@@ -37,7 +38,7 @@ func TestRecordDriftAccumulates(t *testing.T) {
 		t.Fatalf("last-stamp must reflect the most recent drift: ts=%q lens=%q", ts, lens)
 	}
 	// n<=0 is a no-op (never negatively adjusts or clobbers stamps).
-	if err := s.RecordDrift(0, "s3", "ignored"); err != nil {
+	if err := s.RecordDrift(0, "ignored"); err != nil {
 		t.Fatalf("RecordDrift(0): %v", err)
 	}
 	if got := s.DriftTotal(); got != 5 {
@@ -90,6 +91,38 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 	c := st.LoadConfig()
 	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 || !c.AutoDistill || c.MineConcurrency != DefaultMineConcurrency {
 		t.Errorf("template defaults not loadable: %+v", c)
+	}
+}
+
+// The template must not PIN the defaults. An active `review_max_chars = 16000` line froze
+// the archive at its creation-time value — a v0.11.0 archive stayed at 16000 after the
+// constant was changed — because LoadConfig reads the file over DefaultConfig(). So every
+// value line ships commented and shows the CURRENT default (rendered from DefaultConfig, so
+// the text cannot drift from the constant either).
+func TestConfigTemplateDoesNotPinDefaults(t *testing.T) {
+	s := tempStore(t)
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") {
+			t.Errorf("template line is active, so it pins its value against future defaults: %q", line)
+		}
+	}
+	d := DefaultConfig()
+	for _, want := range []string{
+		fmt.Sprintf("# runner = %q", d.Runner),
+		fmt.Sprintf("# review_every = %d", d.ReviewEvery),
+		fmt.Sprintf("# review_poignancy = %d", d.ReviewPoignancy),
+		fmt.Sprintf("# auto_distill = %t", d.AutoDistill),
+		fmt.Sprintf("# mine_concurrency = %d", d.MineConcurrency),
+		fmt.Sprintf("# chunk_max_chars = %d", d.ChunkMaxChars),
+		fmt.Sprintf("# review_max_chars = %d", d.ReviewMaxChars),
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("template does not show the current default %q", want)
+		}
 	}
 }
 
@@ -460,20 +493,6 @@ func TestRunnerBoundFlagIsAuthoritativeOverConfigText(t *testing.T) {
 	t.Setenv("WITNESS_RUNNER", "opencode")
 	if got := s2.ResolveRunner(s2.LoadConfig()); got != "claude" {
 		t.Fatalf("a bound store must ignore the env fallback even with no runner line, got %q", got)
-	}
-}
-
-// SetRunner must stamp runner_bound so the very next ResolveRunner honors it.
-func TestSetRunnerStampsBound(t *testing.T) {
-	s := tempStore(t)
-	if s.MetaString("runner_bound") == "1" {
-		t.Fatal("runner_bound should be unset before install")
-	}
-	if err := s.SetRunner("opencode"); err != nil {
-		t.Fatal(err)
-	}
-	if s.MetaString("runner_bound") != "1" {
-		t.Error("SetRunner did not stamp runner_bound")
 	}
 }
 

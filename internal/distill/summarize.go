@@ -392,8 +392,8 @@ func (sm *Summarizer) deleteProfileAndSignature(lens string) {
 // orphan: its facets were dropped (`lens backfill --fresh`, `lens deregister`) and the main
 // loop, which iterates only lenses that HAVE facets, would never visit it again.
 //
-// The unified portrait is deliberately skipped here — it is not a per-lens summary and has
-// its own <2-lens rule downstream, so reaping it on this basis would fight that logic.
+// The unified portrait is deliberately skipped here — it is not a per-lens summary. Summarize
+// deletes it itself when no lens has facets, and otherwise regenerates it.
 func (sm *Summarizer) reapOrphanProfiles(withFacets map[string][]store.Facet) {
 	onDisk, err := sm.Store.ListProfiles()
 	if err != nil {

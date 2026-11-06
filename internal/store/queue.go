@@ -106,19 +106,20 @@ func (q *queue) PendingInputChars(session string, lenses []string) int {
 	return n
 }
 
-// DriftAt returns the RFC3339 stamp of the last prose-drift for one (session, lens),
-// or "" if that pair never drifted / has since re-mined cleanly (#69 Part 2). This is
-// the point-read accessor for the persisted per-(session,lens) drift; Stats.Drifted
-// aggregates it. Absent row also reads "".
+// DriftAt is a TEST accessor: the RFC3339 stamp of the last prose-drift for one
+// (session, lens), or "" if that pair never drifted / has since re-mined cleanly (#69
+// Part 2). Absent row also reads "". Production reads the column only through
+// Stats.Drifted, which aggregates it.
 func (q *queue) DriftAt(session, lens string) string {
 	var at string
 	_ = q.db.QueryRow(`SELECT COALESCE(drift_at, '') FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&at)
 	return at
 }
 
-// MarkDistilled records the watermark (count of L0 records this lens has mined) and
-// stamps when it advanced (for review cadence). Written LAST in Process so a
-// crash mid-distill re-runs the delta; obsID dedup keeps that from duplicating.
+// MarkDistilled is a TEST FIXTURE: a blind upsert of the watermark (count of L0 records
+// this lens has mined) plus its distilled_at stamp. Production advances only through
+// MarkDistilledIfCurrent, because a blind write can resurrect a progress row a concurrent
+// delete just removed (below). Exported because tests in other packages seed progress with it.
 func (q *queue) MarkDistilled(session, lens string, count int) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := q.db.Exec(

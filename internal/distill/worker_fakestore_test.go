@@ -131,7 +131,7 @@ func (q *fakeQueue) IncRetry(session, lens string) int              { return 1 }
 func (q *fakeQueue) ResetRetry(session, lens string)                {}
 func (q *fakeQueue) SetNextAttempt(s, l string, at time.Time) error { return nil }
 func (q *fakeQueue) SetDrift(session, lens string) error            { return nil }
-func (q *fakeQueue) RecordDrift(n int, session, lens string) error {
+func (q *fakeQueue) RecordDrift(n int, lens string) error {
 	q.drifts = append(q.drifts, lens)
 	return nil
 }

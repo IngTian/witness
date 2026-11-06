@@ -53,14 +53,23 @@ func TestPruneSessionsBeforeKeepsAnotherLiveSessionsMeta(t *testing.T) {
 }
 
 // The ordinary namespaced case must still be reclaimed, including an OpenCode session id
-// (which contains both a colon and an underscore — the reason this is not a LIKE).
+// (which contains both a colon and an underscore — the reason this is not a LIKE). The live
+// sibling is what makes that claim testable: as a LIKE pattern, each "_" in the stale id
+// matches any character, so pruning it would also take sesXabcX123's dedup state.
 func TestPruneSessionsBeforeStillReclaimsNamespacedMeta(t *testing.T) {
 	s := tempStore(t)
 	sess := "opencode:ses_abc_123"
+	live := "opencode:sesXabcX123"
 	if err := s.AppendRaw(RawRecord{TS: "2020-01-01T00:00:00Z", Session: sess, Role: "user", Text: "old"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.AppendRaw(RawRecord{TS: "2030-01-01T00:00:00Z", Session: live, Role: "user", Text: "new"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetMetaString("opencode_import_keys:"+sess, `["k"]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMetaString("opencode_import_keys:"+live, `["live"]`); err != nil {
 		t.Fatal(err)
 	}
 	// Unrelated meta that must SURVIVE: a lens-keyed scalar and a plain scalar.
@@ -75,6 +84,9 @@ func TestPruneSessionsBeforeStillReclaimsNamespacedMeta(t *testing.T) {
 	}
 	if got := s.MetaString("opencode_import_keys:" + sess); got != "" {
 		t.Errorf("per-session meta was not reclaimed: %q", got)
+	}
+	if got := s.MetaString("opencode_import_keys:" + live); got != `["live"]` {
+		t.Errorf("pruning %q deleted the live session %q's dedup state (got %q)", sess, live, got)
 	}
 	if got := s.MetaString("review_rowid:default"); got != "42" {
 		t.Errorf("clobbered the per-lens review watermark: %q", got)
