@@ -128,7 +128,6 @@ type Queue interface {
 	// inputs
 	ReadRawSnapshot(session string) (recs []RawRecord, rawHighID int64, err error)
 	RawCount(session string) int
-	ReadObservations(lens string) ([]Observation, error)
 	DrainStaged(session string) (obs []Observation, throughID int64, err error)
 	// per-(session,lens) watermark / readiness
 	DistilledCount(session, lens string) int

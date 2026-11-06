@@ -202,8 +202,8 @@ type LensMining struct {
 	Native []*platform.NativeSession
 }
 
-// Process runs a full fast-path pass for one session: MineSession then CommitMining
-// against a fresh store snapshot. It is the serial entry point kept for the
+// Process runs a full fast-path pass for one session: MineSession then CommitMining.
+// It is the serial entry point kept for the
 // single-session callers and every existing test. The parallel drain calls
 // MineSession (concurrently) and CommitMining (serially) directly instead.
 func (w *Worker) Process(ctx context.Context, session string) error {
@@ -211,8 +211,7 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 	if err != nil {
 		return err
 	}
-	existing, _ := w.Store.ReadObservations("")
-	return w.CommitMining(m, &existing)
+	return w.CommitMining(m)
 }
 
 // MineSession is the MAP half: read the delta, drain staged, and run every lens's
@@ -404,16 +403,16 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 	return m, nil
 }
 
-// CommitMining is the REDUCE half: given one session's mining result and a pointer
-// to the RUNNING corpus snapshot, write L1 (append-only), advance the watermark, and
-// clear staged rows. It is the SOLE L1 writer and MUST run serially. `existing` is
-// threaded by pointer and APPENDED with each session's newly-written observations so
-// the exact-obsID idempotency check below sees an earlier session's writes within the
-// same drain — the ONLY remaining use of `existing` now that the embedding dedup gate
-// is gone (L1 is an append-only event log). It cannot suppress a genuine recurrence:
-// obsID hashes the session, so two different sessions with identical text get distinct
-// obsIDs and both survive.
-func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) error {
+// CommitMining is the REDUCE half: given one session's mining result, write L1
+// (append-only), advance the watermark, and clear staged rows. It is the SOLE L1 writer
+// and MUST run serially. Idempotency against what L1 already holds is the store's: obs_id
+// is UNIQUE and both write paths are INSERT OR IGNORE, so a crash-then-re-run or a
+// re-drained staged obs is absorbed there. Nothing here reads the corpus — it used to load
+// every observation per drain to seed that same check (a leftover of the cosine dedup #116
+// deleted), ~200ms and ~230MB live at 75k observations. It cannot suppress a genuine
+// recurrence: obsID hashes the session, so two different sessions with identical text get
+// distinct obsIDs and both survive.
+func (w *Worker) CommitMining(m *SessionMining) error {
 	if m.NothingToDo {
 		// Every lens is already at the watermark; the stamp is idempotent. Advance each
 		// lens (CAS-guarded per #49 C2 so a raw replace/cleanup mid-mine can't blind-
@@ -447,13 +446,9 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 		combined = append(combined, m.Lenses[li].Mined...)
 	}
 
-	// Drop anything whose exact obsID is already in L1. This makes the pass
-	// idempotent on re-run: re-drained active obs and identical re-mines (after a
-	// crash) are skipped rather than duplicated. `seen` also dedups within the batch.
-	seen := make(map[string]bool, len(*existing))
-	for _, o := range *existing {
-		seen[o.ID] = true
-	}
+	// Dedup WITHIN the batch (a within-session repeat); against L1, the store's INSERT OR
+	// IGNORE on the UNIQUE obs_id makes a re-run idempotent.
+	seen := make(map[string]bool, len(combined))
 	var toWrite []store.Observation
 	for _, o := range combined {
 		if seen[o.ID] {
@@ -564,16 +559,6 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 			// commit whose L1/watermark writes already succeeded.
 			slog.Warn("distill: could not record drift counter", "session", m.Session, "err", err)
 		}
-	}
-
-	// Feed the just-written observations into the running snapshot so a later session in
-	// this drain sees them in the exact-obsID idempotency check (a re-mine of the SAME
-	// (session,lens,text) within the drain won't double-write). Active obs always landed;
-	// mined obs only landed if the generation was current, so feed them conditionally —
-	// else the seen-map would reference phantom rows not actually in L1.
-	*existing = append(*existing, activeToWrite...)
-	if generationCurrent {
-		*existing = append(*existing, minedToWrite...)
 	}
 
 	// Clear the staged rows we drained — LAST, so a crash before it just re-drains

@@ -24,6 +24,7 @@ type fakeQueue struct {
 	platform  map[string]string         // session -> owning platform ("" = unknown)
 
 	appendCalls int
+	readObs     int // ReadObservations calls: a tripwire, the Worker must never load L1
 	drifts      []string
 }
 
@@ -43,16 +44,8 @@ func (q *fakeQueue) ReadRawSnapshot(session string) ([]store.RawRecord, int64, e
 }
 func (q *fakeQueue) RawCount(session string) int { return len(q.raw[session]) }
 func (q *fakeQueue) ReadObservations(lens string) ([]store.Observation, error) {
-	if lens == "" {
-		return q.obs, nil
-	}
-	var out []store.Observation
-	for _, o := range q.obs {
-		if o.Lens == lens {
-			out = append(out, o)
-		}
-	}
-	return out, nil
+	q.readObs++
+	return q.obs, nil
 }
 func (q *fakeQueue) DrainStaged(session string) ([]store.Observation, int64, error) {
 	s := q.staged[session]
@@ -79,8 +72,22 @@ func (q *fakeQueue) PendingInputChars(session string, lenses []string) int {
 // --- commit + advance ---
 func (q *fakeQueue) AppendObservations(obs []store.Observation) error {
 	q.appendCalls++
-	q.obs = append(q.obs, obs...)
+	q.insertOrIgnore(obs)
 	return nil
+}
+
+// insertOrIgnore mirrors the real write: obs_id is UNIQUE and both paths are INSERT OR IGNORE.
+func (q *fakeQueue) insertOrIgnore(obs []store.Observation) {
+	seen := map[string]bool{}
+	for _, o := range q.obs {
+		seen[o.ID] = true
+	}
+	for _, o := range obs {
+		if !seen[o.ID] {
+			seen[o.ID] = true
+			q.obs = append(q.obs, o)
+		}
+	}
 }
 func (q *fakeQueue) MarkDistilledIfCurrent(session, lens string, count int, rawHighID int64) (bool, error) {
 	// Mimic the real CAS: advance only if the mined generation is still the current
@@ -97,20 +104,11 @@ func (q *fakeQueue) MarkDistilledIfCurrent(session, lens string, count int, rawH
 func (q *fakeQueue) CommitLensDistillation(mined []store.Observation, session string, count int, rawHighID int64, lenses []string) (bool, error) {
 	// Mimic the real atomic write (issue #67-2): gate the mined-obs write AND the
 	// watermark advance on the generation still being current; either both happen or
-	// neither. INSERT OR IGNORE semantics via obsID dedup against already-appended obs.
+	// neither, with the same INSERT OR IGNORE semantics.
 	if rawHighID != q.rawHigh[session] {
 		return false, nil // stale generation — no obs, no advance (no orphans)
 	}
-	seen := map[string]bool{}
-	for _, o := range q.obs {
-		seen[o.ID] = true
-	}
-	for _, o := range mined {
-		if !seen[o.ID] {
-			seen[o.ID] = true
-			q.obs = append(q.obs, o)
-		}
-	}
+	q.insertOrIgnore(mined)
 	if q.distilled[session] == nil {
 		q.distilled[session] = map[string]int{}
 	}
@@ -171,8 +169,7 @@ func TestWorkerMinesAgainstFakeQueue(t *testing.T) {
 	if mining.NothingToDo {
 		t.Fatal("expected a delta to mine, got NothingToDo")
 	}
-	var existing []store.Observation
-	if err := w.CommitMining(mining, &existing); err != nil {
+	if err := w.CommitMining(mining); err != nil {
 		t.Fatalf("CommitMining against fake queue: %v", err)
 	}
 
@@ -185,6 +182,44 @@ func TestWorkerMinesAgainstFakeQueue(t *testing.T) {
 	// The miner saw the whole session as one transcript (default chunk policy = whole).
 	if len(miner.inputs) != 1 {
 		t.Fatalf("miner inputs = %d, want 1 (whole-session default policy)", len(miner.inputs))
+	}
+}
+
+// A drain must not load the L1 corpus: obs_id is UNIQUE and both write paths are INSERT OR IGNORE,
+// so a re-commit is idempotent in the store itself. Seeding a dedup from every observation cost
+// ~200ms and ~230MB live per Drain call at 75k observations, at least twice per worker run.
+func TestDrainDoesNotReadTheObservationCorpus(t *testing.T) {
+	q := newFakeQueue()
+	const sess = "s-fake"
+	q.raw[sess] = []store.RawRecord{{Session: sess, Seq: 0, Role: "user", Text: "hi"}, {Session: sess, Seq: 1, Role: "assistant", Text: "yo"}}
+	q.rawHigh[sess] = 2
+	w := &Worker{Store: q, Embedder: fakeEmbedder{}, Run: (&fakeMiner{}).run,
+		Lenses: []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}}}
+	pending := func() []string {
+		if q.DistilledCount(sess, "default") < 2 {
+			return []string{sess}
+		}
+		return nil
+	}
+	w.Drain(context.Background(), DrainOpts{Conc: 1, Pending: pending})
+	if q.readObs != 0 {
+		t.Errorf("Drain read the whole L1 corpus %d time(s)", q.readObs)
+	}
+	n := len(q.obs)
+	if n == 0 {
+		t.Fatal("precondition: the drain should have written observations")
+	}
+	// Re-committing the same mining (a crash before the watermark landed) must not duplicate.
+	q.distilled[sess]["default"] = 0
+	m, err := w.MineSession(context.Background(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CommitMining(m); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.obs) != n {
+		t.Errorf("a re-commit wrote %d observations, want %d (obs_id is unique)", len(q.obs), n)
 	}
 }
 
@@ -213,14 +248,13 @@ func TestCommitMiningFinalizesNativeForksOnlyForCurrentGeneration(t *testing.T) 
 			}},
 		}
 	}
-	var existing []store.Observation
-	if err := w.CommitMining(result("current"), &existing); err != nil {
+	if err := w.CommitMining(result("current")); err != nil {
 		t.Fatal(err)
 	}
 	if finalized != 1 {
 		t.Fatalf("current generation finalizers=%d, want 1", finalized)
 	}
-	if err := w.CommitMining(result("stale"), &existing); err != nil {
+	if err := w.CommitMining(result("stale")); err != nil {
 		t.Fatal(err)
 	}
 	if finalized != 1 {

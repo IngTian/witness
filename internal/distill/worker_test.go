@@ -211,8 +211,7 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	replaceRaw(t, s, sess, []string{"edited one", "edited two", "edited three"})
 
 	// REDUCE: commit the stale mining result.
-	existing, _ := s.ReadObservations("")
-	if err := w.CommitMining(mining, &existing); err != nil {
+	if err := w.CommitMining(mining); err != nil {
 		t.Fatal(err)
 	}
 
@@ -342,8 +341,7 @@ func TestCommitDoesNotWriteMinedObsWhenRawReplacedMidMine(t *testing.T) {
 	replaceRaw(t, s, sess, []string{"edited one", "edited two", "edited three"})
 
 	// REDUCE: commit the stale mining result.
-	existing, _ := s.ReadObservations("")
-	if err := w.CommitMining(mining, &existing); err != nil {
+	if err := w.CommitMining(mining); err != nil {
 		t.Fatal(err)
 	}
 
@@ -395,8 +393,7 @@ func TestCommitAdvancesWatermarkOnAppendOnlyPath(t *testing.T) {
 	// exists, so the guard passes and the watermark advances to the mined count.
 	capture(t, s, sess, "user", "three (arrived during mine)")
 
-	existing, _ := s.ReadObservations("")
-	if err := w.CommitMining(mining, &existing); err != nil {
+	if err := w.CommitMining(mining); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.DistilledCount(sess, "default"); got != 2 {
