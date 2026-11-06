@@ -59,9 +59,9 @@ they exist for recovery and debugging, and everything they do also happens autom
   distilled data is (`--json` for scripts).
 - `witness worker run` / `witness worker stop` — the operator escape hatch for the background
   distillation worker (hidden from `--help`; normally it runs off editor hooks). `run` drains in
-  the foreground, `--detach` backgrounds it. It accepts `--since`/`--until` to select pending
-  sessions by their latest raw timestamp — for example `witness worker run --since 7d` distills
-  sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates
+  the foreground, `--detach` backgrounds it. With `--detach` it accepts `--since`/`--until` to
+  select pending sessions by their latest raw timestamp — for example
+  `witness worker run --detach --since 7d` distills sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates
   (`YYYY-MM-DD`) and do not discard sessions outside the selected range.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness export <path>` — write a consistent single-file snapshot of the **database** (safe to back
