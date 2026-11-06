@@ -36,6 +36,23 @@ func normalizeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\r", "\n")
 }
 
+// funcSource returns the function in the named source file whose declaration starts with sig,
+// up to its closing brace. It fails the test when sig is missing, so a renamed function cannot
+// turn a source guard into a silent pass.
+func funcSource(t *testing.T, file, sig string) string {
+	t.Helper()
+	src := readSource(t, file)
+	i := strings.Index(src, sig)
+	if i < 0 {
+		t.Fatalf("%s not found in %s", sig, file)
+	}
+	fn := src[i:]
+	if end := strings.Index(fn, "\n}\n"); end >= 0 {
+		fn = fn[:end]
+	}
+	return fn
+}
+
 // No test may spawn the real `claude` CLI, and the production call must be killable.
 //
 // This exists because of a concrete incident, not a style preference. cmdUninstallClaude

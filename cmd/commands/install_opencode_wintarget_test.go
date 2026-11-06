@@ -134,37 +134,39 @@ func TestResolveOpenCodeInstallReturnsASpawnableTarget(t *testing.T) {
 // A SOURCE guard for the Windows branch, because nothing else can catch this off-Windows.
 //
 // The original #10 bug compiled cleanly for GOOS=windows and passed `go vet` — it was a
-// semantic mistake (returning the bash shim where no shell exists), not a type error. And the
-// behavioral assertion above is runtime.GOOS-gated, so on the maintainer's macOS and in Linux
-// CI it can never fail. Without this, reverting the fix would go completely undetected by the
-// whole suite until someone ran it on real Windows.
+// semantic mistake (returning the bash shim where no shell exists), not a type error. And no
+// behavioral test reaches the Windows branch off Windows, so on the maintainer's macOS and in
+// Linux CI it can never fail. Without this, reverting the fix would go completely undetected by
+// the whole suite until someone ran it on real Windows.
 //
-// So: read install_windows.go and require that its resolveOpenCodeInstall does NOT hand back
-// the shim. Asserting on source is the weakest kind of test, and it is used here precisely
-// because the strong kind is unavailable on this platform.
-func TestWindowsResolverDoesNotReturnTheBashShim(t *testing.T) {
-	src := readSource(t, "install_windows.go")
-	i := strings.Index(src, "func resolveOpenCodeInstall(")
-	if i < 0 {
-		t.Fatal("resolveOpenCodeInstall not found in install_windows.go — issue #10 would regress " +
-			"to the shim path with no shell to run it")
+// So: read install_windows.go and require that each of its resolvers self-installs and does NOT
+// hand back the shim — Claude's included, the oldest Windows path. Asserting on source is the
+// weakest kind of test, and it is used here precisely because the strong kind is unavailable on
+// this platform.
+func TestWindowsResolversSelfInstallAndNeverReturnTheShim(t *testing.T) {
+	for _, tc := range []struct{ sig, form, why string }{
+		{"func resolveClaudeInstall()", "execInvocation(",
+			"a Windows Claude Code hook runs in exec form with no shell, so a shell-form hook never runs"},
+		{"func resolveOpenCodeInstall()", "", ""},
+		{"func resolveCodexInstall()", "powerShell: true",
+			"without it the hook is written in the POSIX `command` field, which Codex will not use on Windows"},
+	} {
+		fn := funcSource(t, "install_windows.go", tc.sig)
+		if strings.Contains(fn, "repoShim()") {
+			t.Errorf("%s (Windows) returns the bash shim: Windows has no guaranteed shell to run "+
+				"witness.sh, so NOTHING is captured — while `wire` still reports success (issue #10)", tc.sig)
+		}
+		if !strings.Contains(fn, "installSelf()") {
+			t.Errorf("%s (Windows) must self-install and return the installed witness.exe: the "+
+				"wiring holds an absolute path, so it cannot point at a build checkout", tc.sig)
+		}
+		if tc.form != "" && !strings.Contains(fn, tc.form) {
+			t.Errorf("%s (Windows) must use %s: %s", tc.sig, tc.form, tc.why)
+		}
 	}
-	fn := src[i:]
-	if end := strings.Index(fn, "\n}\n"); end > 0 {
-		fn = fn[:end]
-	}
-	if strings.Contains(fn, "repoShim()") {
-		t.Error("the Windows OpenCode resolver returns the bash shim: Windows has no guaranteed " +
-			"shell to run witness.sh, so the plugin's Bun.spawn fails and NOTHING is captured " +
-			"— while `wire opencode` still reports success (issue #10)")
-	}
-	if !strings.Contains(fn, "installSelf()") {
-		t.Error("the Windows resolver must self-install and return the installed witness.exe; " +
-			"the plugin bakes in an absolute path, so it cannot point at a build checkout")
-	}
-	// And the shared install path must still be what Claude uses, so the two cannot drift.
-	if !strings.Contains(src, "func installSelf()") {
-		t.Error("installSelf is missing; both integrations must share one install sequence")
+	// And the integrations must share one install sequence, so they cannot drift.
+	if !strings.Contains(readSource(t, "install_windows.go"), "func installSelf()") {
+		t.Error("installSelf is missing; every integration must share one install sequence")
 	}
 }
 
