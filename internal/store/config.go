@@ -237,7 +237,7 @@ const runnerBoundKey = "runner_bound"
 // ResolveRunner returns the distillation runner to actually use, layering a
 // non-persistent WITNESS_RUNNER env fallback UNDER any explicit config choice.
 //
-// Why this exists: the npm OpenCode plugin user never runs `witness install`, so
+// Why this exists: the npm OpenCode plugin user never runs `witness wire opencode`, so
 // their config.toml carries the template default runner="claude" — but they have
 // no `claude` CLI, and distillation would silently fail. The plugin passes
 // WITNESS_RUNNER=opencode so the worker it kicks distills via OpenCode instead.

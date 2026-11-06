@@ -20,8 +20,8 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 		if platform.IsCorpusSession(t.Session) {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, t.TS)
-		if err != nil {
+		ts, ok := parseTS(t.TS)
+		if !ok {
 			continue
 		}
 		local := ts.In(loc)
@@ -42,8 +42,8 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 		if platform.IsCorpusSession(n.Session) {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, n.TS)
-		if err != nil {
+		ts, ok := parseTS(n.TS)
+		if !ok {
 			continue
 		}
 		local := ts.In(loc)
@@ -246,8 +246,8 @@ func buildWindow(kind string, start time.Time, first, last string, days []Day, d
 		if platform.IsCorpusSession(n.Session) {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, n.TS)
-		if err != nil {
+		ts, ok := parseTS(n.TS)
+		if !ok {
 			continue
 		}
 		date := ts.In(loc).Format("2006-01-02")

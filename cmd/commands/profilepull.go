@@ -74,8 +74,8 @@ func ensureProfileFresh(st *store.Store) (bool, error) {
 	//   - The first frame is one tick (90ms) away, and a fully-cached pass returns in ~20ms
 	//     (measured). So the fast path prints NOTHING — no frame, no escape codes, no flicker.
 	//     Only a pass slow enough to need feedback ever shows any.
-	//   - startSpinner returns nil unless stdout is an interactive TTY, so the MCP server (stdio
-	//     pipes) and every redirect get silence for free. The get_profile path needs no special
+	//   - startSpinner returns nil unless stdout and stderr are both terminals, so the MCP server
+	//     (stdio pipes) and every redirect get silence for free. The get_profile path needs no special
 	//     case: it cannot animate even by accident.
 	sp := startSpinner("distilling the profile from the latest facets…")
 	err = sm.Summarize(ctx)
@@ -95,9 +95,9 @@ func ensureProfileFresh(st *store.Store) (bool, error) {
 func profileSummarizer(st *store.Store) (*distill.Summarizer, error) {
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil || len(lenses) == 0 {
-		return nil, err
+	lenses := activeLenses(st)
+	if len(lenses) == 0 {
+		return nil, nil
 	}
 	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts(st.Root)
 	if err != nil {

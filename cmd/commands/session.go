@@ -41,20 +41,13 @@ func cmdSessionStart() error {
 //
 // What does NOT fire it:
 //   - compaction — that is PreCompact/PostCompact; the session continues with the
-//     same id (we re-inject on SessionStart source=compact instead, not distill).
+//     same id, so there is nothing new to distill yet.
 //   - hard kills (SIGKILL/crash/power loss) — the process dies before any hook runs;
 //     the SessionStart backlog sweep recovers those next launch.
 //
 // We don't branch on the reason — any end means "distill what's new". We just kick
 // the single-flight consumer, which drains ALL pending sessions (the watermark
 // tells it what's new), so the specific session id isn't needed here.
-// Distillation is delta-based, so resume→end→resume→end is safe.
-func cmdSessionEnd() error {
-	st, err := store.Open()
-	if err != nil {
-		return nil
-	}
-	defer st.Close()
-	maybeSpawnAutoWorker(st)
-	return nil
-}
+// Distillation is delta-based, so resume→end→resume→end is safe. So it is the same kick as
+// SessionStart; the two stay separate cobra commands because the installed hooks name both.
+func cmdSessionEnd() error { return cmdSessionStart() }

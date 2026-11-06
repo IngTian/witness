@@ -471,12 +471,10 @@ func validateRuntimeModels(ctx context.Context, st *store.Store, cfg store.Confi
 	add(defaultRunner, cfg.TriageModel)
 	add(defaultRunner, cfg.DistillModel)
 	// Each lens's per-lens models belong to the runtime the lens routes to.
-	if lenses, err := activeLenses(st); err == nil {
-		for _, l := range lenses {
-			rt := distill.RunnerFor(cfg, l)
-			add(rt, l.ExtractModel)
-			add(rt, l.ReviewModel)
-		}
+	for _, l := range activeLenses(st) {
+		rt := distill.RunnerFor(cfg, l)
+		add(rt, l.ExtractModel)
+		add(rt, l.ReviewModel)
 	}
 	// Ensure the default runner is validated even with no models (it mints + is the report's
 	// InvocationHint source; an unknown default-runner name is a real config error).

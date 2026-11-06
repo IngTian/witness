@@ -4,15 +4,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/mattn/go-isatty"
 )
 
-// A minimal spinner for the one place a witness command blocks on a model: read-time L4
-// regeneration (issue #100), measured at ~13s. Without it `witness profile` prints nothing for
-// twelve seconds and looks hung, which is indistinguishable from a wedged runner.
+// A minimal spinner for where a witness command blocks on a model call it cannot count: L4
+// regeneration (read-time in `witness profile`, issue #100, measured at ~13s; and after a review)
+// and linking the profile to its sources. Without it `witness profile` prints nothing for twelve
+// seconds and looks hung, which is indistinguishable from a wedged runner.
 //
 // It follows the same contract as style.go: decorative only, and silent unless stdout is a real
 // TTY with NO_COLOR unset. That is what keeps `witness profile > file`, `| head`, `--json`, and
@@ -29,9 +29,6 @@ import (
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 const spinnerInterval = 90 * time.Millisecond
-
-// stderrIsTerminal is where the frames go; a var so a test can pin the redirected case.
-var stderrIsTerminal = isatty.IsTerminal(os.Stderr.Fd())
 
 // spinner animates a one-line status until Stop is called. The zero value is not usable; call
 // startSpinner. A nil *spinner is safe to Stop, so callers need no nil check.
@@ -96,10 +93,4 @@ func (s *spinner) Stop() {
 	})
 }
 
-func spaces(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = ' '
-	}
-	return string(b)
-}
+func spaces(n int) string { return strings.Repeat(" ", n) }
