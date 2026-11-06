@@ -39,6 +39,9 @@ func TestLensBackfillFreshDeclinesWhileTheWorkerLockIsHeld(t *testing.T) {
 	if err := st.MarkDistilled("s1", "default", 1); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.AppendObservations([]store.Observation{{ID: "o1", Session: "s1", Lens: "default", Observation: "x", Poignancy: 3}}); err != nil {
+		t.Fatal(err)
+	}
 	before := st.DistilledCount("s1", "default")
 	if before != 1 {
 		t.Fatalf("precondition: want DistilledCount 1, got %d", before)
@@ -63,6 +66,9 @@ func TestLensBackfillFreshDeclinesWhileTheWorkerLockIsHeld(t *testing.T) {
 	// Nothing may have been dropped, and the watermark must be intact.
 	if got := st.DistilledCount("s1", "default"); got != before {
 		t.Errorf("a declined --fresh reset the watermark: %d -> %d", before, got)
+	}
+	if obs, _ := st.ReadObservations("default"); len(obs) != 1 {
+		t.Errorf("a declined --fresh dropped observations: %d left, want 1", len(obs))
 	}
 }
 

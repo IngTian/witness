@@ -287,41 +287,6 @@ func TestBackfillFreshDisabledDefaultFailsFast(t *testing.T) {
 	}
 }
 
-// TestBackfillFreshWorkerActiveFailsFast guards the #102-fix ordering: `backfill --fresh`
-// must FAIL FAST when a distillation worker is already running, BEFORE dropping any data —
-// otherwise it would DeleteLensData and then find runWorker returns ran=false (lock held),
-// leaving the lens gutted with no re-mine. We stand in for a live worker by holding the
-// WorkerLock (the sole liveness authority), then assert --fresh errors and drops nothing.
-func TestBackfillFreshWorkerActiveFailsFast(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "witness")
-	s := openSeedTestStore(t, home) // fresh open auto-seeds + enables default
-	if err := s.AppendObservations([]store.Observation{{ID: "o1", Lens: store.LensDefault, Observation: "x", Poignancy: 3}}); err != nil {
-		t.Fatalf("AppendObservations: %v", err)
-	}
-	obsBefore, _ := s.ReadObservations("")
-
-	// Stand in for a running worker: hold the WorkerLock so WorkerActive() reports true.
-	unlock, ok := s.WorkerLock()
-	if !ok {
-		t.Fatal("precondition: should have acquired the worker lock")
-	}
-	defer unlock()
-
-	// --fresh must refuse (worker running) and drop NOTHING — even with assumeYes, since the
-	// worker-active guard is checked before the confirm and before DeleteLensData.
-	err := lensBackfill(s, store.LensDefault, true, true)
-	if err == nil {
-		t.Fatal("backfill --fresh while a worker is running must fail fast, not drop data it can't re-mine")
-	}
-	if !strings.Contains(err.Error(), "worker is running") {
-		t.Fatalf("expected a 'worker is running' error, got: %v", err)
-	}
-	obsAfter, _ := s.ReadObservations("")
-	if len(obsAfter) != len(obsBefore) || len(obsAfter) == 0 {
-		t.Fatalf("worker-active --fresh must NOT have dropped observations: before=%d after=%d", len(obsBefore), len(obsAfter))
-	}
-}
-
 // TestSeedDefaultLensRestoresFromAnyState guards the `witness lens load-default` restore
 // path: seedDefaultLens must leave default registered AND enabled from ALL three states a
 // user can reach — including the DISABLED case, which an old skip-if-registered guard
