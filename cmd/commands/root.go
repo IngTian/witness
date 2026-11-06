@@ -37,36 +37,44 @@ var (
 	buildTime = "unknown"
 )
 
+// Kept to the bare call: every decision lives in stamp, where a test can fail on it.
 func init() {
-	if version != "dev" {
-		return // ldflags win: a release build says exactly what the Makefile stamped
-	}
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		version, commit, buildTime = buildStamp(bi)
-	}
+	bi, ok := debug.ReadBuildInfo()
+	version, commit, buildTime = stamp(version, commit, buildTime, bi, ok)
 }
 
-// buildStamp reads the version Go derives from the tag/commit (already "+dirty" when the tree
-// was), the short revision, and vcs.time. vcs.time is the COMMIT time, not the build time — the
-// closest thing a plain build records, and enough to tell two binaries apart.
-func buildStamp(bi *debug.BuildInfo) (v, c, at string) {
-	v, c, at = "dev", "none", "unknown"
+// stamp fills the build variables from the VCS stamp Go writes into a plain build: the version
+// Go derives from the tag/commit (already "+dirty" when the tree was), the short revision, and
+// vcs.time — the COMMIT time, not the build time, but the closest thing a plain build records
+// and enough to tell two binaries apart.
+//
+// A version other than "dev" means ldflags ran, and a release build must say exactly what the
+// Makefile stamped, so it passes through untouched. Otherwise a field changes only when the
+// stamp has a value for it: a Makefile build outside a checkout stamps "dev"/"none" but a REAL
+// buildTime, which a missing vcs.time must not reset to "unknown".
+func stamp(v, c, at string, bi *debug.BuildInfo, ok bool) (string, string, string) {
+	if v != "dev" || !ok {
+		return v, c, at
+	}
 	if mv := bi.Main.Version; mv != "" && mv != "(devel)" {
 		v = mv
 	}
-	dirty := false
+	rev, dirty := "", false
 	for _, s := range bi.Settings {
 		switch s.Key {
 		case "vcs.revision":
-			c = s.Value[:min(7, len(s.Value))]
+			rev = s.Value[:min(7, len(s.Value))]
 		case "vcs.time":
 			at = s.Value
 		case "vcs.modified":
 			dirty = s.Value == "true"
 		}
 	}
-	if dirty && c != "none" {
-		c += "+dirty"
+	if rev != "" {
+		c = rev
+		if dirty {
+			c += "+dirty"
+		}
 	}
 	return v, c, at
 }
