@@ -6,8 +6,19 @@ import path from "node:path"
 import test from "node:test"
 import { pathToFileURL } from "node:url"
 
-const sourcePath = new URL("./witness.js", import.meta.url)
-const source = await readFile(sourcePath, "utf8")
+// The two plugin files share their import queue, idle dedupe, quiet-period worker and dispose
+// logic: npm's witness.js, and the one `witness wire opencode` embeds into the Go binary. The
+// behaviour tests below that cover that shared logic run against BOTH, so a change to one copy
+// cannot pass here while the other drifts. Only the npm copy has the model downloader, the MCP
+// config hook and the inert-platform warning, so those tests stay npm-only.
+const PLUGINS = [
+  { name: "npm", downloads: true, source: await readFile(new URL("./witness.js", import.meta.url), "utf8") },
+  {
+    name: "embedded",
+    downloads: false,
+    source: await readFile(new URL("../../internal/platform/opencode/plugin/witness.js", import.meta.url), "utf8"),
+  },
+]
 
 function deferred() {
   let resolve
@@ -42,7 +53,7 @@ function makeProc(label, events, options = {}) {
   return proc
 }
 
-async function loadPlugin(harness) {
+async function loadPlugin(harness, source = PLUGINS[0].source) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "witness-opencode-plugin-"))
   await mkdir(path.join(dir, "bin"), { recursive: true })
   await writeFile(path.join(dir, "witness.js"), source)
@@ -224,177 +235,185 @@ test("npm plugin reconciles on init/idle, does not import activity events, and a
   }
 })
 
-test("npm plugin imports idle sessions immediately and starts one auto worker after a resettable five-minute quiet period", async () => {
-  const spawns = []
-  const timers = []
-  const realSetTimeout = globalThis.setTimeout
-  const realClearTimeout = globalThis.clearTimeout
-  let now = 0
-  const harness = {
-    modelDir: () => "/assets/e5-small",
-    modelReady: () => true,
-    startModelDownload() {
-      throw new Error("download should not start when model is ready")
-    },
-    spawn(args) {
-      spawns.push(args)
-      return makeProc(`${args[1]}-${spawns.length}`, [], { autoExit: 0 })
-    },
-  }
-  globalThis.setTimeout = (fn, delay) => {
-    const timer = { fn, due: now + delay, delay, active: true }
-    timers.push(timer)
-    return timer
-  }
-  globalThis.clearTimeout = (timer) => {
-    timer.active = false
-  }
-  const advance = async (ms) => {
-    now += ms
-    for (const timer of timers) {
-      if (!timer.active || timer.due > now) continue
-      timer.active = false
-      timer.fn()
+for (const variant of PLUGINS) {
+  test(`${variant.name} plugin imports idle sessions immediately and starts one auto worker after a resettable five-minute quiet period`, async () => {
+    const spawns = []
+    const timers = []
+    const realSetTimeout = globalThis.setTimeout
+    const realClearTimeout = globalThis.clearTimeout
+    let now = 0
+    const harness = {
+      modelDir: () => "/assets/e5-small",
+      modelReady: () => true,
+      startModelDownload() {
+        throw new Error("download should not start when model is ready")
+      },
+      spawn(args) {
+        spawns.push(args)
+        return makeProc(`${args[1]}-${spawns.length}`, [], { autoExit: 0 })
+      },
     }
-    await Promise.resolve()
-    await Promise.resolve()
-  }
-
-  const { mod, restore } = await loadPlugin(harness)
-  try {
-    const hooks = await mod.default()
-    await Promise.resolve()
-    const imports = () => spawns.filter((args) => args[1] === "import")
-    // worker-kick, not worker-run: dispose runs `worker stop --auto-only`, which latches a
-    // durable stop flag that an auto worker refuses to run under, and only the shared kick
-    // gate clears it. Spawning worker-run directly would freeze auto-distillation
-    // permanently after the first OpenCode close.
-    const workers = () => spawns.filter((args) => args[1] === "worker-kick")
-    assert.deepEqual(imports()[0], ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick"])
-
-    await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
-    assert.deepEqual(imports().at(-1), ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick", "--session", "ses_a"])
-    assert.equal(workers().length, 0, "idle imports must not start a worker")
-    const firstQuietTimer = timers.at(-1)
-    assert.equal(firstQuietTimer.delay, 300000)
-
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
-    assert.equal(timers.length, 1, "modern and legacy idle events are one occurrence")
-
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_b" } } })
-    assert.equal(firstQuietTimer.active, false, "a qualifying idle resets the quiet period")
-    const resetQuietTimer = timers.at(-1)
-    assert.equal(resetQuietTimer.delay, 300000)
-
-    await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_b", status: { type: "busy" } } } })
-    assert.equal(resetQuietTimer.active, false, "a non-idle status cancels qualification")
-    await advance(300000)
-    assert.equal(workers().length, 0, "another idle is required after a non-idle status")
-
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_activity" } } })
-    const activityQuietTimer = timers.at(-1)
-    await hooks.event({ event: { type: "message.updated", properties: { sessionID: "ses_activity" } } })
-    assert.equal(activityQuietTimer.active, false, "message activity cancels quiet qualification")
-    await advance(300000)
-    assert.equal(workers().length, 0, "activity requires a new idle before auto mining")
-
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_c" } } })
-    await advance(299999)
-    assert.equal(workers().length, 0)
-    await advance(1)
-    assert.deepEqual(workers(), [["/shim/witness", "worker-kick"]])
-    assert.ok(
-      spawns.every((args) => args[1] !== "worker-run"),
-      "plugin must never spawn worker-run directly; it bypasses the stop-flag clear",
-    )
-
-    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_d" } } })
-    const disposeQuietTimer = timers.at(-1)
-    await hooks.dispose()
-    assert.equal(disposeQuietTimer.active, false, "dispose must clear the quiet timer")
-    await advance(300000)
-    assert.equal(workers().length, 1, "dispose must not allow a pending worker launch")
-    assert.ok(spawns.every((args) => args[1] !== "export"), "plugin must not invoke export commands")
-    assert.ok(imports().every((args) => args.slice(1, 6).join(" ") === "import --agent opencode --quiet --no-kick" && !args.includes("--auto")))
-  } finally {
-    await restore()
-    globalThis.setTimeout = realSetTimeout
-    globalThis.clearTimeout = realClearTimeout
-  }
-})
-
-test("npm plugin waits for idle batches, deduplicates modern/legacy pairs, and drains later arrivals", async () => {
-  const events = []
-  const imports = []
-  const harness = {
-    modelDir: () => "/assets/e5-small",
-    modelReady: () => true,
-    startModelDownload() {
-      throw new Error("download should not start when model is ready")
-    },
-    spawn(args) {
-      if (args[1] === "import") {
-        events.push(`spawn:${args.join(" ")}`)
-        const proc = makeProc(`import-${imports.length + 1}`, events)
-        imports.push(proc)
-        return proc
+    globalThis.setTimeout = (fn, delay) => {
+      const timer = { fn, due: now + delay, delay, active: true }
+      timers.push(timer)
+      return timer
+    }
+    globalThis.clearTimeout = (timer) => {
+      timer.active = false
+    }
+    const advance = async (ms) => {
+      now += ms
+      for (const timer of timers) {
+        if (!timer.active || timer.due > now) continue
+        timer.active = false
+        timer.fn()
       }
-      return makeProc("distill", events, { autoExit: 0 })
-    },
-  }
-  const { mod, restore } = await loadPlugin(harness)
-  try {
-    const hooks = await mod.default()
-    assert.equal(imports.length, 1, "initial full reconcile should start immediately")
-    assert.doesNotMatch(events[0], /--session/, "initial reconcile must be global")
+      await Promise.resolve()
+      await Promise.resolve()
+    }
 
-    await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_busy", status: { type: "busy" } } } })
-    await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_retry", status: { type: "retry" } } } })
-    assert.equal(imports.length, 1, "non-idle statuses must not import")
+    const { mod, restore } = await loadPlugin(harness, variant.source)
+    try {
+      const hooks = await mod.default()
+      await Promise.resolve()
+      const imports = () => spawns.filter((args) => args[1] === "import")
+      // worker-kick, not worker-run: dispose runs `worker stop --auto-only`, which latches a
+      // durable stop flag that an auto worker refuses to run under, and only the shared kick
+      // gate clears it. Spawning worker-run directly would freeze auto-distillation
+      // permanently after the first OpenCode close.
+      const workers = () => spawns.filter((args) => args[1] === "worker-kick")
+      assert.deepEqual(imports()[0], ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick"])
 
-    let modernResolved = false
-    let legacyResolved = false
-    const modern = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
-    const legacy = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
-    const legacyFirst = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_d" } } })
-    const modernSecond = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_d", status: { type: "idle" } } } })
-    const other = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_b" } } })
-    modern.then(() => { modernResolved = true })
-    legacy.then(() => { legacyResolved = true })
-    assert.equal(imports.length, 1, "idle events must queue behind the active import")
-    await Promise.resolve()
-    assert.equal(modernResolved, false, "queued idle must wait for its import")
-    assert.equal(legacyResolved, false, "deduplicated legacy idle must wait for the same import")
+      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
+      assert.deepEqual(imports().at(-1), ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick", "--session", "ses_a"])
+      assert.equal(workers().length, 0, "idle imports must not start a worker")
+      const firstQuietTimer = timers.at(-1)
+      assert.equal(firstQuietTimer.delay, 300000)
 
-    imports[0].finish()
-    await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(imports.length, 2)
-    assert.match(events.at(-1), /--session ses_a/)
-    assert.match(events.at(-1), /--session ses_b/)
-    assert.equal((events.at(-1).match(/--session ses_d/g) || []).length, 1, "legacy then modern idle is one logical import")
-    assert.equal((events.at(-1).match(/--session ses_a/g) || []).length, 1, "modern and legacy idle are one logical import")
-    assert.equal(modernResolved, false, "active idle import must keep its promise pending")
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
+      assert.equal(timers.length, 1, "modern and legacy idle events are one occurrence")
 
-    const later = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_c", status: { type: "idle" } } } })
-    const sameSession = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
-    assert.equal(imports.length, 2, "new work must not start concurrently")
-    imports[1].finish()
-    await new Promise((resolve) => setImmediate(resolve))
-    await Promise.all([modern, legacy, other])
-    assert.equal(modernResolved, true)
-    assert.equal(legacyResolved, true)
-    await Promise.all([legacyFirst, modernSecond])
-    assert.equal(imports.length, 3, "new session idle arriving during import must run afterward")
-    assert.match(events.at(-1), /--session ses_c/)
-    assert.doesNotMatch(events.at(-1), /--session ses_a/, "duplicate same-session idle must stay deduplicated")
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_b" } } })
+      assert.equal(firstQuietTimer.active, false, "a qualifying idle resets the quiet period")
+      const resetQuietTimer = timers.at(-1)
+      assert.equal(resetQuietTimer.delay, 300000)
 
-    imports[2].finish()
-    await Promise.all([later, sameSession])
-    await hooks.dispose()
-  } finally {
-    await restore()
-  }
-})
+      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_b", status: { type: "busy" } } } })
+      assert.equal(resetQuietTimer.active, false, "a non-idle status cancels qualification")
+      await advance(300000)
+      assert.equal(workers().length, 0, "another idle is required after a non-idle status")
+
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_activity" } } })
+      const activityQuietTimer = timers.at(-1)
+      await hooks.event({ event: { type: "message.updated", properties: { sessionID: "ses_activity" } } })
+      assert.equal(activityQuietTimer.active, false, "message activity cancels quiet qualification")
+      await advance(300000)
+      assert.equal(workers().length, 0, "activity requires a new idle before auto mining")
+
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_c" } } })
+      await advance(299999)
+      assert.equal(workers().length, 0)
+      await advance(1)
+      assert.deepEqual(workers(), [["/shim/witness", "worker-kick"]])
+      assert.ok(
+        spawns.every((args) => args[1] !== "worker-run"),
+        "plugin must never spawn worker-run directly; it bypasses the stop-flag clear",
+      )
+
+      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_d" } } })
+      const disposeQuietTimer = timers.at(-1)
+      await hooks.dispose()
+      assert.equal(disposeQuietTimer.active, false, "dispose must clear the quiet timer")
+      await advance(300000)
+      assert.equal(workers().length, 1, "dispose must not allow a pending worker launch")
+      // Dispose stops only AUTO workers: a manual `witness worker run --detach` survives OpenCode closing.
+      assert.deepEqual(
+        spawns.filter((args) => args[1] === "worker"),
+        [["/shim/witness", "worker", "stop", "--auto-only"]],
+        "dispose must run exactly `worker stop --auto-only`",
+      )
+      assert.ok(spawns.every((args) => args[1] !== "export"), "plugin must not invoke export commands")
+      assert.ok(imports().every((args) => args.slice(1, 6).join(" ") === "import --agent opencode --quiet --no-kick" && !args.includes("--auto")))
+    } finally {
+      await restore()
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+    }
+  })
+
+  test(`${variant.name} plugin waits for idle batches, deduplicates modern/legacy pairs, and drains later arrivals`, async () => {
+    const events = []
+    const imports = []
+    const harness = {
+      modelDir: () => "/assets/e5-small",
+      modelReady: () => true,
+      startModelDownload() {
+        throw new Error("download should not start when model is ready")
+      },
+      spawn(args) {
+        if (args[1] === "import") {
+          events.push(`spawn:${args.join(" ")}`)
+          const proc = makeProc(`import-${imports.length + 1}`, events)
+          imports.push(proc)
+          return proc
+        }
+        return makeProc("distill", events, { autoExit: 0 })
+      },
+    }
+    const { mod, restore } = await loadPlugin(harness, variant.source)
+    try {
+      const hooks = await mod.default()
+      assert.equal(imports.length, 1, "initial full reconcile should start immediately")
+      assert.doesNotMatch(events[0], /--session/, "initial reconcile must be global")
+
+      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_busy", status: { type: "busy" } } } })
+      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_retry", status: { type: "retry" } } } })
+      assert.equal(imports.length, 1, "non-idle statuses must not import")
+
+      let modernResolved = false
+      let legacyResolved = false
+      const modern = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
+      const legacy = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
+      const legacyFirst = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_d" } } })
+      const modernSecond = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_d", status: { type: "idle" } } } })
+      const other = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_b" } } })
+      modern.then(() => { modernResolved = true })
+      legacy.then(() => { legacyResolved = true })
+      assert.equal(imports.length, 1, "idle events must queue behind the active import")
+      await Promise.resolve()
+      assert.equal(modernResolved, false, "queued idle must wait for its import")
+      assert.equal(legacyResolved, false, "deduplicated legacy idle must wait for the same import")
+
+      imports[0].finish()
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(imports.length, 2)
+      assert.match(events.at(-1), /--session ses_a/)
+      assert.match(events.at(-1), /--session ses_b/)
+      assert.equal((events.at(-1).match(/--session ses_d/g) || []).length, 1, "legacy then modern idle is one logical import")
+      assert.equal((events.at(-1).match(/--session ses_a/g) || []).length, 1, "modern and legacy idle are one logical import")
+      assert.equal(modernResolved, false, "active idle import must keep its promise pending")
+
+      const later = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_c", status: { type: "idle" } } } })
+      const sameSession = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
+      assert.equal(imports.length, 2, "new work must not start concurrently")
+      imports[1].finish()
+      await new Promise((resolve) => setImmediate(resolve))
+      await Promise.all([modern, legacy, other])
+      assert.equal(modernResolved, true)
+      assert.equal(legacyResolved, true)
+      await Promise.all([legacyFirst, modernSecond])
+      assert.equal(imports.length, 3, "new session idle arriving during import must run afterward")
+      assert.match(events.at(-1), /--session ses_c/)
+      assert.doesNotMatch(events.at(-1), /--session ses_a/, "duplicate same-session idle must stay deduplicated")
+
+      imports[2].finish()
+      await Promise.all([later, sameSession])
+      await hooks.dispose()
+    } finally {
+      await restore()
+    }
+  })
+}
 
 test("npm plugin retries model download with bounded exponential backoff on lock contention and failure", async () => {
   const events = []
@@ -458,134 +477,138 @@ test("npm plugin retries model download with bounded exponential backoff on lock
   }
 })
 
-test("npm plugin dispose drains startup and idle imports before stopping downloader and auto workers", async () => {
-  const events = []
-  const timers = []
-  const realSetTimeout = globalThis.setTimeout
-  const realClearTimeout = globalThis.clearTimeout
-  let importCount = 0
-  const importArgs = []
-  const imports = []
-  let workerStopArgs
-  const harness = {
-    modelDir: () => "/assets/e5-small",
-    modelReady: () => false,
-    startModelDownload() {
-      const child = makeProc("download-child", events)
-      return {
-        child,
-        stop() {
-          events.push("download-stop")
-          child.kill()
-        },
+for (const variant of PLUGINS) {
+  test(`${variant.name} plugin dispose drains startup and idle imports before stopping downloader and auto workers`, async () => {
+    const events = []
+    const timers = []
+    const realSetTimeout = globalThis.setTimeout
+    const realClearTimeout = globalThis.clearTimeout
+    let importCount = 0
+    const importArgs = []
+    const imports = []
+    let workerStopArgs
+    const harness = {
+      modelDir: () => "/assets/e5-small",
+      modelReady: () => false,
+      startModelDownload() {
+        const child = makeProc("download-child", events)
+        return {
+          child,
+          stop() {
+            events.push("download-stop")
+            child.kill()
+          },
+        }
+      },
+      spawn(args) {
+        if (args[1] === "import") {
+          importCount += 1
+          importArgs.push(args)
+          events.push(`spawn:import-${importCount}`)
+          const proc = makeProc(`import-${importCount}`, events)
+          imports.push(proc)
+          return proc
+        }
+        if (args[1] === "worker") {
+          workerStopArgs = args
+          events.push("spawn:worker-stop")
+          return makeProc("worker-stop", events, { autoExit: 0 })
+        }
+        return makeProc("other", events, { autoExit: 0 })
+      },
+    }
+    globalThis.setTimeout = (fn, delay) => {
+      const timer = { fn, delay }
+      timers.push(timer)
+      return timer
+    }
+    globalThis.clearTimeout = (timer) => {
+      events.push(`clear:${timer.delay}`)
+    }
+
+    const { mod, restore } = await loadPlugin(harness, variant.source)
+    try {
+      const hooks = await mod.default()
+      const pending = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_pending" } } })
+      timers.push({ delay: 1000 })
+      let disposed = false
+      const dispose = hooks.dispose().then(() => { disposed = true })
+      await Promise.resolve()
+      assert.equal(disposed, false)
+      assert.equal(events.includes("kill:import-1"), false, "graceful disposal must not kill the active startup import")
+
+      // Finish the global startup import: the pending idle session must still drain
+      // before disposal is allowed to stop the downloader or auto worker.
+      imports[0].finish()
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(imports.length, 2)
+      assert.ok(importArgs[1].includes("ses_pending"))
+      assert.equal(disposed, false)
+      assert.equal(events.includes("kill:import-2"), false, "graceful disposal must not kill the active idle import")
+
+      imports[1].finish()
+      await pending
+      await dispose
+
+      const distillStop = events.indexOf("spawn:worker-stop")
+      assert.notEqual(distillStop, -1)
+      if (variant.downloads) {
+        const downloadStop = events.indexOf("download-stop")
+        assert.notEqual(downloadStop, -1)
+        assert.ok(downloadStop < distillStop)
       }
-    },
-    spawn(args) {
-      if (args[1] === "import") {
-        importCount += 1
-        importArgs.push(args)
-        events.push(`spawn:import-${importCount}`)
-        const proc = makeProc(`import-${importCount}`, events)
-        imports.push(proc)
-        return proc
-      }
-      if (args[1] === "worker") {
-        workerStopArgs = args
-        events.push("spawn:worker-stop")
-        return makeProc("worker-stop", events, { autoExit: 0 })
-      }
-      return makeProc("other", events, { autoExit: 0 })
-    },
-  }
-  globalThis.setTimeout = (fn, delay) => {
-    const timer = { fn, delay }
-    timers.push(timer)
-    return timer
-  }
-  globalThis.clearTimeout = (timer) => {
-    events.push(`clear:${timer.delay}`)
-  }
+      assert.deepEqual(workerStopArgs, ["/shim/witness", "worker", "stop", "--auto-only"])
+    } finally {
+      await restore()
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+    }
+  })
 
-  const { mod, restore } = await loadPlugin(harness)
-  try {
-    const hooks = await mod.default()
-    const pending = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_pending" } } })
-    timers.push({ delay: 1000 })
-    let disposed = false
-    const dispose = hooks.dispose().then(() => { disposed = true })
-    await Promise.resolve()
-    assert.equal(disposed, false)
-    assert.equal(events.includes("kill:import-1"), false, "graceful disposal must not kill the active startup import")
+  test(`${variant.name} plugin kills a hung import after the dispose grace period`, async () => {
+    const events = []
+    const timers = []
+    const realSetTimeout = globalThis.setTimeout
+    const realClearTimeout = globalThis.clearTimeout
+    let startupImport
+    const harness = {
+      modelDir: () => "/assets/e5-small",
+      modelReady: () => true,
+      startModelDownload() {
+        throw new Error("download should not start when model is ready")
+      },
+      spawn(args) {
+        if (args[1] === "import") {
+          startupImport = makeProc("hung-import", events)
+          return startupImport
+        }
+        return makeProc("distill-stop", events, { autoExit: 0 })
+      },
+    }
+    globalThis.setTimeout = (fn, delay) => {
+      const timer = { fn, delay }
+      timers.push(timer)
+      return timer
+    }
+    globalThis.clearTimeout = () => {}
 
-    // Finish the global startup import: the pending idle session must still drain
-    // before disposal is allowed to stop the downloader or auto worker.
-    imports[0].finish()
-    await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(imports.length, 2)
-    assert.ok(importArgs[1].includes("ses_pending"))
-    assert.equal(disposed, false)
-    assert.equal(events.includes("kill:import-2"), false, "graceful disposal must not kill the active idle import")
+    const { mod, restore } = await loadPlugin(harness, variant.source)
+    try {
+      const hooks = await mod.default()
+      let disposed = false
+      const dispose = hooks.dispose().then(() => { disposed = true })
+      await Promise.resolve()
+      assert.equal(disposed, false)
+      assert.equal(timers[0]?.delay, 5000)
 
-    imports[1].finish()
-    await pending
-    await dispose
-
-    const downloadStop = events.indexOf("download-stop")
-    const distillStop = events.indexOf("spawn:worker-stop")
-    assert.notEqual(downloadStop, -1)
-    assert.notEqual(distillStop, -1)
-    assert.ok(downloadStop < distillStop)
-    assert.deepEqual(workerStopArgs, ["/shim/witness", "worker", "stop", "--auto-only"])
-  } finally {
-    await restore()
-    globalThis.setTimeout = realSetTimeout
-    globalThis.clearTimeout = realClearTimeout
-  }
-})
-
-test("npm plugin kills a hung import after the dispose grace period", async () => {
-  const events = []
-  const timers = []
-  const realSetTimeout = globalThis.setTimeout
-  const realClearTimeout = globalThis.clearTimeout
-  let startupImport
-  const harness = {
-    modelDir: () => "/assets/e5-small",
-    modelReady: () => true,
-    startModelDownload() {
-      throw new Error("download should not start when model is ready")
-    },
-    spawn(args) {
-      if (args[1] === "import") {
-        startupImport = makeProc("hung-import", events)
-        return startupImport
-      }
-      return makeProc("distill-stop", events, { autoExit: 0 })
-    },
-  }
-  globalThis.setTimeout = (fn, delay) => {
-    const timer = { fn, delay }
-    timers.push(timer)
-    return timer
-  }
-  globalThis.clearTimeout = () => {}
-
-  const { mod, restore } = await loadPlugin(harness)
-  try {
-    const hooks = await mod.default()
-    let disposed = false
-    const dispose = hooks.dispose().then(() => { disposed = true })
-    await Promise.resolve()
-    assert.equal(disposed, false)
-    assert.equal(timers[0]?.delay, 5000)
-
-    timers[0].fn()
-    await dispose
-    assert.equal(startupImport.killed, true)
-    assert.ok(events.includes("kill:hung-import"))
-  } finally {
-    await restore()
-    globalThis.setTimeout = realSetTimeout
-    globalThis.clearTimeout = realClearTimeout
-  }
-})
+      timers[0].fn()
+      await dispose
+      assert.equal(startupImport.killed, true)
+      assert.ok(events.includes("kill:hung-import"))
+    } finally {
+      await restore()
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+    }
+  })
+}
