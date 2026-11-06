@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -225,7 +226,7 @@ func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow)
 	stateKey := importKeysMetaPrefix + session
 	oldKeys := parseImportKeys(im.Store.MetaString(stateKey))
 	rawCount := im.Store.RawCount(session)
-	if sameKeys(oldKeys, keys) && rawCount == len(keys) {
+	if slices.Equal(oldKeys, keys) && rawCount == len(keys) {
 		return 0, nil
 	}
 
@@ -268,28 +269,8 @@ func parseImportKeys(data string) []string {
 	return keys
 }
 
-func sameKeys(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func keysHavePrefix(keys, prefix []string) bool {
-	if len(prefix) > len(keys) {
-		return false
-	}
-	for i := range prefix {
-		if keys[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
+	return len(prefix) <= len(keys) && slices.Equal(keys[:len(prefix)], prefix)
 }
 
 func rawRecords(session string, turns []turn, seqOffset int) []store.RawRecord {

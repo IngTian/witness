@@ -212,7 +212,7 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 	}
 	newRequest := m.MessageID == ""
 	if newRequest {
-		m.MessageID = "msg_" + mustRandomHex(12)
+		m.MessageID = "msg_" + randomHex(12)
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
@@ -234,7 +234,7 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		// message id and reads only messages after it, so a prior attempt's output can never be
 		// mistaken for this one's.
 		if !newRequest {
-			m.MessageID = "msg_" + mustRandomHex(12)
+			m.MessageID = "msg_" + randomHex(12)
 			n.mu.Lock()
 			locked = true
 			if err = n.save(p, m); err != nil {
@@ -310,7 +310,7 @@ func (n *nativeRuntime) export(ctx context.Context, w *platform.NativeSession, s
 	}
 	// A per-call name so concurrent lenses/sessions can never share (or delete) one
 	// another's copy; sweepable by reconcile via the sourceCopyPrefix.
-	copyPath := filepath.Join(n.dir(), sourceCopyPrefix+mustRandomHex(8)+".db")
+	copyPath := filepath.Join(n.dir(), sourceCopyPrefix+randomHex(8)+".db")
 	if err = snapshotSourceDB(src, copyPath); err != nil {
 		return err
 	}
