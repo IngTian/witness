@@ -102,7 +102,7 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
     every OS — a `runtime.GOOS == "windows"` check can only fail on Windows.
   - OpenCode's config dir is `~/.config/opencode` on Windows too (verified against
     OpenCode's own resolution: `XDG_CONFIG_HOME` else `~/.config`, no OS branch), so
-    `opencodeDir()` needs no GOOS split.
+    `opencode.ConfigDir()` (shared by `wire opencode` and the auth probe) needs no GOOS split.
 - **Hook name contract.** Installed hooks invoke `witness <session-start|capture|
   session-end>` (shell form) or the same tokens as exec-form `args`; the binary
   must keep cobra commands of exactly those names, and `isWitnessEntry` must

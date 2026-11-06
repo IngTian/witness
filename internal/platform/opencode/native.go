@@ -427,7 +427,8 @@ func exportedTranscriptDigest(data []byte) (string, error) {
 // single probe was always sufficient there — which is exactly why a Windows gap could go unnoticed
 // for this long. A Windows install can place per-user state under %APPDATA%/%LOCALAPPDATA% instead
 // (the desktop build's own crash reporter writes under AppData\Roaming), so those are checked too.
-// XDG_CONFIG_HOME is honoured for the same reason DefaultDBPath honours XDG_DATA_HOME.
+// OpenCode's config dir (ConfigDir: XDG_CONFIG_HOME-aware) is probed for the same reason DefaultDBPath
+// honours XDG_DATA_HOME.
 //
 // Returning the searched list is deliberate: the caller reports it, so a miss tells the user WHERE
 // witness looked rather than only that something was missing.
@@ -443,9 +444,7 @@ func findOpenCodeAuth() (path string, searched []string) {
 	if db, err := DefaultDBPath(); err == nil {
 		add(filepath.Dir(db))
 	}
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		add(filepath.Join(dir, "opencode"))
-	}
+	add(ConfigDir())
 	if home, err := os.UserHomeDir(); err == nil {
 		add(filepath.Join(home, ".local", "share", "opencode"))
 		add(filepath.Join(home, ".config", "opencode"))
