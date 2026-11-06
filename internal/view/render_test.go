@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -12,9 +13,10 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// TestRenderOrderAndCSP verifies the HTML structure: charset meta before CSP meta before first
-// script, CSP exactly matches the global-constraints string with the hash recomputed, and title
-// is constant.
+// TestRenderOrderAndCSP verifies the HTML structure: exact prefix (doctype, lang, translate,
+// charset before CSP), CSP meta before first script, hash computed from the ACTUAL spliced JS
+// bytes (not from pageJS, which could differ if Render added whitespace), and constant title
+// that appears exactly once.
 func TestRenderOrderAndCSP(t *testing.T) {
 	m := Build(&store.ViewInput{}, nil, time.Now(), time.UTC)
 	html, err := Render(m)
@@ -24,96 +26,155 @@ func TestRenderOrderAndCSP(t *testing.T) {
 
 	s := string(html)
 
-	// charset meta before CSP meta
-	charsetIdx := strings.Index(s, `<meta charset="utf-8">`)
-	if charsetIdx == -1 {
-		t.Fatal("missing <meta charset=\"utf-8\">")
+	// Exact prefix: doctype, lang, translate="no", charset, CSP. This pins translate="no" and
+	// charset-first, so a reordering or omission fails cleanly instead of silently degrading.
+	expectedPrefix := `<!doctype html><html lang="en" translate="no"><head><meta charset="utf-8"><meta http-equiv=`
+	if !strings.HasPrefix(s, expectedPrefix) {
+		t.Fatalf("output does not start with expected prefix\ngot:  %s...\nwant: %s...", s[:min(len(s), len(expectedPrefix)+20)], expectedPrefix)
 	}
 
+	// Title occurs exactly once
+	titleCount := strings.Count(s, "<title")
+	if titleCount != 1 {
+		t.Fatalf("found %d <title occurrences, want 1", titleCount)
+	}
+	if !strings.Contains(s, "<title>witness</title>") {
+		t.Error("title is not constant witness")
+	}
+
+	// Extract CSP content attribute
 	cspIdx := strings.Index(s, `<meta http-equiv="Content-Security-Policy"`)
 	if cspIdx == -1 {
 		t.Fatal("missing CSP meta")
 	}
-	if cspIdx < charsetIdx {
-		t.Error("CSP meta before charset meta")
-	}
-
-	// CSP before first script
 	firstScriptIdx := strings.Index(s, "<script")
 	if firstScriptIdx == -1 {
 		t.Fatal("no <script> tag")
 	}
 	if firstScriptIdx < cspIdx {
-		t.Error("first script before CSP meta")
+		t.Fatal("first script before CSP meta")
 	}
 
-	// CSP string matches expected format with hash
-	// Expected: default-src 'none'; script-src 'sha256-<hash>'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'
 	cspMatch := regexp.MustCompile(`content="([^"]+)"`).FindStringSubmatch(s[cspIdx:firstScriptIdx])
 	if cspMatch == nil {
 		t.Fatal("no content= in CSP meta")
 	}
 	cspContent := cspMatch[1]
 
-	// Compute expected hash from embedded JS
-	h := sha256.Sum256(pageJS)
-	expectedHash := base64.StdEncoding.EncodeToString(h[:])
-	expectedCSP := "default-src 'none'; script-src 'sha256-" + expectedHash + "'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+	// Extract the ACTUAL spliced JS bytes from the output. The second <script> (after the data
+	// one) is the page.js script. If Render accidentally adds whitespace (leading space,
+	// trailing newline), the browser would hash different bytes and block the script.
+	dataScriptEnd := strings.Index(s, `</script>`)
+	if dataScriptEnd == -1 {
+		t.Fatal("no </script> end tag for data script")
+	}
+	secondScriptStart := strings.Index(s[dataScriptEnd:], "<script>")
+	if secondScriptStart == -1 {
+		t.Fatal("no second <script> tag for page.js")
+	}
+	secondScriptStart += dataScriptEnd + len("<script>")
+	secondScriptEnd := strings.Index(s[secondScriptStart:], "</script>")
+	if secondScriptEnd == -1 {
+		t.Fatal("no </script> end tag for page.js")
+	}
+	actualJS := []byte(s[secondScriptStart : secondScriptStart+secondScriptEnd])
+
+	// Hash the actual spliced bytes
+	h := sha256.Sum256(actualJS)
+	actualHash := base64.StdEncoding.EncodeToString(h[:])
+	expectedCSP := "default-src 'none'; script-src 'sha256-" + actualHash + "'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
 
 	if cspContent != expectedCSP {
 		t.Errorf("CSP mismatch\ngot:  %s\nwant: %s", cspContent, expectedCSP)
 	}
-
-	// title is constant
-	if !strings.Contains(s, "<title>witness</title>") {
-		t.Error("title is not constant witness")
-	}
 }
 
-// TestBundleGuards verifies the embedded JS and CSS contain no forbidden patterns. The same
-// guard runs at render time and returns errBundle.
+// TestBundleGuards verifies that the embedded JS and CSS contain no forbidden patterns, and
+// that Render's runtime guard (which uses the same package regexps) returns errBundle when
+// given bad assets. The table test temporarily swaps pageJS/pageCSS with hostile content,
+// calls Render, asserts errBundle, and restores the vars.
 func TestBundleGuards(t *testing.T) {
-	// The guard checks both JS and CSS for these patterns
-	forbidden := []struct {
-		name string
-		re   *regexp.Regexp
-	}{
-		{"</script (case-insensitive)", regexp.MustCompile(`(?i)</script`)},
-		{"HTML comment", regexp.MustCompile(`<!--`)},
-		{"carriage return", regexp.MustCompile(`\r`)},
+	// Check that the real embedded assets pass the guards
+	if bundleForbidden.Match(pageJS) {
+		t.Error("page.js contains forbidden pattern (bundleForbidden)")
 	}
-
-	for _, f := range forbidden {
-		if f.re.Match(pageJS) {
-			t.Errorf("page.js contains forbidden pattern: %s", f.name)
-		}
-		if f.re.Match(pageCSS) {
-			t.Errorf("page.css contains forbidden pattern: %s", f.name)
-		}
+	if bundleForbidden.Match(pageCSS) {
+		t.Error("page.css contains forbidden pattern (bundleForbidden)")
 	}
-
-	// JS-only forbidden patterns
-	jsForbidden := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|localStorage|sessionStorage|indexedDB|location\.hash|pushState|replaceState|document\.title\s*=`)
 	if jsForbidden.Match(pageJS) {
-		t.Error("page.js contains forbidden JS API")
+		t.Error("page.js contains forbidden JS API (jsForbidden)")
 	}
 
-	// Render should also check and return errBundle
-	// We'll test this by trying to render (which should succeed with clean assets)
+	// Render should not return errBundle for clean assets
 	m := Build(&store.ViewInput{}, nil, time.Now(), time.UTC)
 	_, err := Render(m)
-	if err == errBundle {
+	if errors.Is(err, errBundle) {
 		t.Error("Render returned errBundle for clean assets")
 	} else if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
+
+	// Table test: swap pageJS/pageCSS with bad bundles, assert Render returns errBundle.
+	// Each case restores the original vars in t.Cleanup so subsequent tests see clean assets.
+	badBundles := []struct {
+		name    string
+		js      []byte
+		css     []byte
+		wantErr bool
+	}{
+		{"innerHTML", []byte("el.innerHTML = x"), nil, true},
+		{"dangerouslySetInnerHTML", []byte("el.dangerouslySetInnerHTML = x"), nil, true},
+		{"createContextualFragment", []byte("range.createContextualFragment(x)"), nil, true},
+		{"parseFromString", []byte("parser.parseFromString(x, 'text/html')"), nil, true},
+		{"setHTMLUnsafe", []byte("el.setHTMLUnsafe(x)"), nil, true},
+		{"srcdoc", []byte("iframe.srcdoc = x"), nil, true},
+		{"location.href", []byte("location.href = x"), nil, true},
+		{"location.assign", []byte("location.assign(x)"), nil, true},
+		{"location.replace", []byte("location.replace(x)"), nil, true},
+		{"</SCRIPT in JS", []byte("x = '</SCRIPT>'"), nil, true},
+		{"</script in JS", []byte("x = '</script>'"), nil, true},
+		{"<!-- in JS", []byte("<!-- comment"), nil, true},
+		{"\\r in JS", []byte("var x = 1;\r\nvar y = 2;"), nil, true},
+		{"</style in CSS", []byte("ignored"), []byte("</style>"), true},
+		{"<!-- in CSS", []byte("ignored"), []byte("/* <!-- */"), true},
+		{"\\r in CSS", []byte("ignored"), []byte("body {\r\n  margin: 0;\r\n}"), true},
+		{"clean", []byte("document.body.textContent = 'ok'"), []byte("body { margin: 0; }"), false},
+	}
+
+	for _, tc := range badBundles {
+		t.Run(tc.name, func(t *testing.T) {
+			origJS := pageJS
+			origCSS := pageCSS
+			t.Cleanup(func() {
+				pageJS = origJS
+				pageCSS = origCSS
+			})
+
+			if tc.js != nil {
+				pageJS = tc.js
+			}
+			if tc.css != nil {
+				pageCSS = tc.css
+			}
+
+			_, err := Render(m)
+			if tc.wantErr && !errors.Is(err, errBundle) {
+				t.Errorf("expected errBundle, got %v", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
 }
 
 // TestRenderEscapesHostileText verifies that json.Marshal properly escapes dangerous characters
-// in the model data. A Model with hostile text renders, the output has only two </script
-// occurrences (the real end tags), and parsing the JSON back returns the original string.
+// in the model data. A Model with hostile text (end tags, HTML comments, bold, ampersand,
+// Chinese, U+2028/U+2029 line/paragraph separators) renders, the output has only two
+// case-insensitive </script occurrences (the real end tags), and parsing the JSON back returns
+// the original string exactly.
 func TestRenderEscapesHostileText(t *testing.T) {
-	hostileText := `</script><!--<b>& 中文`
+	hostileText := "</script></SCRIPT><!--<b>& 中文  "
 
 	// Create a Model with hostile text in a Trait's Summary field
 	m := &Model{
@@ -156,10 +217,12 @@ func TestRenderEscapesHostileText(t *testing.T) {
 
 	s := string(html)
 
-	// Count </script occurrences: should be exactly 2 (data script end tag, page.js script end tag)
-	count := strings.Count(s, "</script")
+	// Count case-insensitive </script occurrences: should be exactly 2 (data script end tag,
+	// page.js script end tag). The hostile text contains "</script></SCRIPT>" but json.Marshal
+	// escapes < and > so they cannot break out.
+	count := len(regexp.MustCompile(`(?i)</script`).FindAllString(s, -1))
 	if count != 2 {
-		t.Errorf("found %d </script occurrences, want 2", count)
+		t.Errorf("found %d case-insensitive </script occurrences, want 2", count)
 	}
 
 	// Extract JSON from #data and parse it back

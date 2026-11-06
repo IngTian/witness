@@ -21,17 +21,18 @@ var pageCSS []byte
 // render time and is also checked by TestBundleGuards.
 var errBundle = errors.New("embedded bundle violates guard")
 
-// bundleForbidden matches patterns forbidden in both JS and CSS: case-insensitive </script,
-// HTML comments, and carriage returns. These would break the single-file construction or leak
-// through json.Marshal's escaping.
-var bundleForbidden = regexp.MustCompile(`(?i)</script|<!--|` + "\r")
+// bundleForbidden matches patterns forbidden in both JS and CSS: case-insensitive </script
+// and </style (would break single-file construction), HTML comments (could smuggle out data),
+// and carriage returns (would bypass other guards on a Windows checkout without .gitattributes).
+var bundleForbidden = regexp.MustCompile(`(?i)</script|</style|<!--|` + "\r")
 
-// jsForbidden matches APIs forbidden in page.js: DOM APIs that bypass textContent (innerHTML,
-// outerHTML, insertAdjacentHTML, document.write), eval, storage APIs (localStorage,
-// sessionStorage, indexedDB), and navigation/history APIs (location.hash, pushState,
-// replaceState, document.title assignment). All state must live in memory only, and all
-// rendering must be safe by construction.
-var jsForbidden = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|localStorage|sessionStorage|indexedDB|location\.hash|pushState|replaceState|document\.title\s*=`)
+// jsForbidden matches APIs forbidden in page.js: DOM APIs that bypass textContent (innerHTML
+// family, case-insensitive to catch dangerouslySetInnerHTML; createContextualFragment,
+// parseFromString, setHTMLUnsafe, document.write), eval, storage APIs (localStorage,
+// sessionStorage, indexedDB), navigation/history APIs (location.hash/href/assign/replace,
+// pushState, replaceState, document.title assignment), and srcdoc (iframe sandbox escape).
+// All state must live in memory only, and all rendering must be safe by construction.
+var jsForbidden = regexp.MustCompile(`(?i)innerHTML|outerHTML|insertAdjacentHTML|createContextualFragment|parseFromString|setHTMLUnsafe|srcdoc|document\.write|eval\(|localStorage|sessionStorage|indexedDB|location\.(hash|href|assign|replace)|pushState|replaceState|document\.title\s*=`)
 
 // Render builds a single self-contained HTML file from the Model. The output is a complete
 // HTML5 document with a hash-based CSP that allows only the embedded script to run. The Model
