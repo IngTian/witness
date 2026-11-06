@@ -101,6 +101,12 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	}
 	defer st.Close()
 	defer setupLogging(st)()
+	// Refuse a newer archive before the lock, the meta stamps and the retry wakeup: the capture
+	// hooks spawn this on every turn, and it should exit with the reason in witness.log, not try.
+	if err := st.ArchiveNewer(); err != nil {
+		slog.Error("worker refused", "err", err)
+		return false, err
+	}
 	cfg := st.LoadConfig()
 	if auto && !cfg.AutoDistill {
 		return false, nil
