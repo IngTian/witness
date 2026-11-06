@@ -40,7 +40,7 @@ type Config struct {
 	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
 	ReviewPoignancy int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
 	AutoDistill     bool   // whether hooks/plugins may start the worker automatically
-	MineConcurrency int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and to 1 when the runner is not ConcurrentRunSafe (issue #22). <=0 means DefaultMineConcurrency.
+	MineConcurrency int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and a memory-safe ceiling (issue #22). <=0 means DefaultMineConcurrency.
 	// ChunkMaxChars is the per-input character budget for shaping a session into model
 	// input (issue #57). 0 (the default) = NEVER chunk: mine each session whole, which
 	// the measured data shows is the best-quality path (splitting a session into

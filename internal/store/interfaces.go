@@ -69,7 +69,7 @@ type MetaKV interface {
 
 // ImportStore is what a platform importer needs: its own source lock, watermark
 // bookkeeping, the raw-import commit, a raw-count probe, and platform stamping. It is
-// the store slice threaded through platform.Platform.Import (satisfied by *Store; the
+// the store slice threaded through platform.Importer.Import (satisfied by *Store; the
 // OpenCode Importer holds one).
 type ImportStore interface {
 	MetaKV

@@ -64,7 +64,7 @@ func cmdCapture(args []string) error {
 		slog.Warn("capture: agent does not support event capture", "agent", agent)
 		return nil
 	}
-	if _, err := capturer.Capture(st, data, time.Now()); err != nil {
+	if err := capturer.Capture(st, data, time.Now()); err != nil {
 		// Best-effort: a malformed payload or write error is logged, never fatal —
 		// capture must never break the user's session.
 		slog.Error("capture: event failed", "agent", agent, "err", err)

@@ -31,16 +31,10 @@ var registerLeakFake sync.Once
 // runner when the default runner is the one that fails (the 61d00fc leak fix).
 type leakFakePlatform struct{}
 
-func (leakFakePlatform) Name() string          { return "fakeleak" }
-func (leakFakePlatform) SessionPrefix() string { return "fakeleak:" }
-func (leakFakePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
-	return []string{""}
-}
+func (leakFakePlatform) Name() string                                          { return "fakeleak" }
+func (leakFakePlatform) SessionPrefix() string                                 { return "fakeleak:" }
 func (leakFakePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
-func (leakFakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{}, nil
-}
-func (leakFakePlatform) NewRunner(store.Config) platform.Runner { return leakFakeRunner{} }
+func (leakFakePlatform) NewRunner(store.Config) platform.Runner                { return leakFakeRunner{} }
 
 type leakFakeRunner struct{}
 
@@ -51,7 +45,6 @@ func (leakFakeRunner) Run(context.Context, string, string, string) (string, erro
 }
 func (leakFakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (leakFakeRunner) InvocationHint() string                          { return "fakeleak" }
-func (leakFakeRunner) ConcurrentRunSafe() bool                         { return true }
 
 // A lens routed to an UNKNOWN runner is circuit-broken (its RunFor returns a failing
 // MineFunc) while lenses on the healthy default runner get a working one — the per-runtime

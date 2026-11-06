@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -94,15 +93,6 @@ func Home() (string, error) {
 		return "", err
 	}
 	return filepath.Join(h, ".codex"), nil
-}
-
-func readOnlyURI(path string) string {
-	p, _ := filepath.Abs(path)
-	p = filepath.ToSlash(p)
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
-	return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String()
 }
 
 // Import reads only supported conversation text, never credentials, config,
@@ -258,6 +248,10 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	}
 	return nil
 }
+
+// readOnlyURI opens a Codex history database read-only. It must go through
+// platform.SQLiteFileURI, never url.URL (issue #10 — see there); TestReadOnlyURIWindowsShape pins it.
+func readOnlyURI(path string) string { return platform.SQLiteFileURI(path, "mode=ro") }
 
 func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[string]bool, stats *platform.ImportStats, prog *progress) error {
 	db, err := sql.Open("sqlite", readOnlyURI(path))

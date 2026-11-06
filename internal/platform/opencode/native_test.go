@@ -92,6 +92,10 @@ func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 		case r.Method == http.MethodDelete:
 			if strings.HasPrefix(r.URL.Path, "/session/fork_") {
 				forkDeletes++
+			} else {
+				// Setup only ever deletes sessions it created. A DELETE for the user's own id
+				// was left over from the fork design (#143) and always 404'd in the private db.
+				t.Errorf("deleted %s, a session this runtime never created", r.URL.Path)
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -336,31 +340,6 @@ func TestNativeMalformedManifestIsRetainedError(t *testing.T) {
 	}
 	if _, err := n.load(p); err == nil || !strings.Contains(err.Error(), "malformed") {
 		t.Fatalf("load error=%v", err)
-	}
-}
-
-func TestReadOnlyURIConnectsEscapedAbsolutePathReadOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "witness#archive.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE marker(value TEXT); INSERT INTO marker VALUES ('correct database')`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	ro, err := sql.Open("sqlite", readOnlyURI(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ro.Close()
-	var value string
-	if err := ro.QueryRow(`SELECT value FROM marker`).Scan(&value); err != nil || value != "correct database" {
-		t.Fatalf("read correct database: value=%q err=%v", value, err)
-	}
-	if _, err := ro.Exec(`INSERT INTO marker VALUES ('must fail')`); err == nil {
-		t.Fatal("read-only URI allowed write")
 	}
 }
 
