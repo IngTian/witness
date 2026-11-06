@@ -554,11 +554,7 @@ func TestCodexIsARegisteredInstallTarget(t *testing.T) {
 	if _, ok := platform.InstallerFor("codex"); !ok {
 		t.Fatal("codex is not registered as an install target, so `witness wire codex` cannot dispatch")
 	}
-	for _, name := range platform.InstallTargets() {
-		if !strings.Contains(newWireCmd().Use, name) {
-			t.Errorf("wire help omits registered target %q", name)
-		}
-	}
+	// TestWireUnwireInstallShapes checks that wire's help names every registered target.
 }
 
 // fakeCaptureOnlyInstaller stands in for a venue that captures but runs no model.

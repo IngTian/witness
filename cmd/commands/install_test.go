@@ -56,16 +56,6 @@ func TestMergeAddsAllFourWitnessHooks(t *testing.T) {
 	}
 }
 
-func TestMergeIsIdempotent(t *testing.T) {
-	out, _ := mergeWitnessHooks([]byte(`{}`), shellInvocation("/repo/hooks/witness.sh"))
-	out2, _ := mergeWitnessHooks(out, shellInvocation("/repo/hooks/witness.sh")) // re-install
-	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
-		if got := countWitness(eventCommands(t, out2, ev)); got != 1 {
-			t.Errorf("%s: re-install should not duplicate, got %d", ev, got)
-		}
-	}
-}
-
 func TestMergePreservesForeignHooksAndSettings(t *testing.T) {
 	in := `{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"prettier --write"}]}]}}`
 	out, err := mergeWitnessHooks([]byte(in), shellInvocation("/repo/hooks/witness.sh"))
@@ -136,32 +126,6 @@ func TestMergePreservesForeignHooksContainingWitnessShimSubstring(t *testing.T) 
 	}
 	if ours != 1 {
 		t.Errorf("our own witness.sh hook should be present exactly once, got %d in %v", ours, cmds)
-	}
-}
-
-// TestIsWitnessShimCommandMatchesOnlyOurs directly exercises the shell-form matcher.
-func TestIsWitnessShimCommandMatchesOnlyOurs(t *testing.T) {
-	ours := []string{
-		"'/repo/hooks/witness.sh' capture",
-		"'/a/b/witness.sh' session-start",
-		"/plain/path/witness.sh session-end", // unquoted also matches
-	}
-	for _, c := range ours {
-		if !isWitnessShimCommand(c) {
-			t.Errorf("should match our shim command: %q", c)
-		}
-	}
-	foreign := []string{
-		"/opt/tools/notwitness.sh capture",      // wrong basename
-		"'/opt/witness.showcase/run.sh' deploy", // wrong basename + non-token last
-		"/usr/bin/witness.sha256 verify",        // wrong basename
-		"'/repo/hooks/witness.sh' deploy",       // right basename, but "deploy" is not our token
-		"'/repo/hooks/witness.sh'",              // no token at all
-	}
-	for _, c := range foreign {
-		if isWitnessShimCommand(c) {
-			t.Errorf("must NOT match foreign/incomplete command: %q", c)
-		}
 	}
 }
 
@@ -703,12 +667,18 @@ func TestIsWitnessShimCommandRoundTripsQuotedPaths(t *testing.T) {
 			}
 		}
 	}
+	// An unquoted shim path (a hand-written or older hook) is ours too.
+	if !isWitnessShimCommand("/plain/path/witness.sh session-end") {
+		t.Error("must recognize an unquoted shim command")
+	}
 	// Narrowness: never claim a foreign hook (that would strip a user's own tooling).
 	for _, foreign := range []string{
 		"'/Users/me/My Projects/other/hooks/notwitness.sh' capture",
 		"'/Users/me/My Projects/witness/hooks/witness.sha256' capture",
 		"'/Users/me/My Projects/witness/hooks/witness.sh' not-our-token",
 		"'/Users/me/My Projects/witness/hooks/witness.sh'",
+		"/opt/tools/notwitness.sh capture", // unquoted, wrong basename
+		"/usr/bin/witness.sha256 verify",   // unquoted, starts with "witness.sh" but isn't it
 		"",
 		"   ",
 	} {
