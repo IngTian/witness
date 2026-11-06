@@ -58,10 +58,6 @@ func (fakePlatform) Capture(st store.CaptureStore, data []byte, now time.Time) e
 	return nil
 }
 
-func (fakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{Agent: "fake"}, nil
-}
-
 // NewRunner: the fake engine returns a canned observation array, proving RunnerFor
 // resolves a 3rd runner and the real Worker mines through it.
 func (fakePlatform) NewRunner(store.Config) platform.Runner { return fakeRunner{} }

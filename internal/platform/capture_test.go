@@ -1,7 +1,6 @@
 package platform_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -60,18 +59,5 @@ func TestOpenCodeDoesNotSupportEventCapture(t *testing.T) {
 	p, _ := platform.ByName("opencode")
 	if _, ok := p.(platform.Capturer); ok {
 		t.Fatal("OpenCode must reconcile from SQLite instead of partial event payloads")
-	}
-}
-
-// Claude's Importer is a no-op (hook-fed); it must return cleanly with zero work.
-func TestClaudeImporterIsNoOp(t *testing.T) {
-	st := openStore(t)
-	p, _ := platform.ByName("claude")
-	stats, err := p.Import(context.Background(), st, nil)
-	if err != nil {
-		t.Fatalf("Import: %v", err)
-	}
-	if stats.Sessions != 0 || stats.Records != 0 {
-		t.Fatalf("claude import should be a no-op, got %+v", stats)
 	}
 }

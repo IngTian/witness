@@ -2,6 +2,7 @@ package platform_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/IngTian/witness/internal/platform"
@@ -28,12 +29,6 @@ type mixedCasePlatform struct{}
 
 func (mixedCasePlatform) Name() string          { return " MixedCasePlat " }
 func (mixedCasePlatform) SessionPrefix() string { return "mixedcaseplat:" }
-func (mixedCasePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
-	return []string{""}
-}
-func (mixedCasePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{}, nil
-}
 
 func TestByNameAndDefault(t *testing.T) {
 	if _, ok := platform.ByName("claude"); !ok {
@@ -94,47 +89,24 @@ func TestForSessionColumnOverridesPrefix(t *testing.T) {
 	}
 }
 
-// TestRenderInputsPerPlatform pins the SOURCE-AGNOSTIC shaping contract (#57): under
-// the default policy (MaxChars 0 = off) BOTH runtimes send the whole session as one
-// transcript, and under a tiny positive budget BOTH split the same long session into
-// several windows. Pre-#57 OpenCode chunked unconditionally while Claude never did;
-// that asymmetry (the root of the "OpenCode quality is low" report, #56 B1) is gone —
-// the only thing that decides chunking now is the policy, not the platform.
-func TestRenderInputsPerPlatform(t *testing.T) {
-	short := []store.RawRecord{
-		{Role: "user", Text: "hello"},
-		{Role: "assistant", Text: "hi"},
-	}
+// RenderInputs and Import are optional capabilities. A platform without them — every shipped one
+// for RenderInputs, the hook-fed Claude for Import — shapes by the shared RenderChunks under the
+// same policy (#57: chunking is decided by the policy, never by the source) and imports nothing.
+// proof_test.go covers the other branch: a platform's own RenderInputs wins.
+func TestOptionalCapabilitiesFallBack(t *testing.T) {
+	cc, _ := platform.ByName("claude")
 	long := []store.RawRecord{
 		{Role: "user", Text: "alpha alpha alpha"},
 		{Role: "assistant", Text: "beta beta beta"},
 		{Role: "user", Text: "gamma gamma gamma"},
 	}
-	off := platform.ChunkPolicy{} // MaxChars 0 -> whole
-	// A budget that fits the whole `short` session (~28 chars incl. role+framing) in one
-	// window but is smaller than `long` (~77 chars), so `long` must split and `short`
-	// must not — proving the split is size-gated, not unconditional.
-	budget := platform.ChunkPolicy{MaxChars: 40}
-	cc, _ := platform.ByName("claude")
-	oc, _ := platform.ByName("opencode")
-
-	// Default policy: every platform sends ONE whole transcript, regardless of source.
-	for name, p := range map[string]platform.Platform{"claude": cc, "opencode": oc} {
-		if got := p.RenderInputs(short, off); len(got) != 1 {
-			t.Fatalf("%s under default policy should render one whole transcript, got %d", name, len(got))
-		}
-		if got := p.RenderInputs(long, off); len(got) != 1 {
-			t.Fatalf("%s under default policy must NOT chunk even a longer session, got %d", name, len(got))
+	for _, policy := range []platform.ChunkPolicy{{}, {MaxChars: 40}} {
+		if got, want := platform.RenderInputsFor(cc, long, policy), platform.RenderChunks(long, policy); !slices.Equal(got, want) {
+			t.Errorf("policy %+v: RenderInputsFor = %q, want the shared RenderChunks %q", policy, got, want)
 		}
 	}
-	// Positive budget: every platform splits the SAME long session into >1 window
-	// (source-agnostic), while a session that fits the budget stays one chunk.
-	for name, p := range map[string]platform.Platform{"claude": cc, "opencode": oc} {
-		if got := p.RenderInputs(long, budget); len(got) <= 1 {
-			t.Fatalf("%s under a 40-char budget should split the long session, got %d", name, len(got))
-		}
-		if got := p.RenderInputs(short, budget); len(got) != 1 {
-			t.Fatalf("%s: a session that fits the budget should stay one chunk, got %d", name, len(got))
-		}
+	stats, err := platform.ImportFor(context.Background(), cc, nil, nil)
+	if err != nil || stats != (platform.ImportStats{Agent: "claude"}) {
+		t.Fatalf("a platform with no Importer must import nothing, cleanly: %+v, %v", stats, err)
 	}
 }

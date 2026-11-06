@@ -185,9 +185,9 @@ func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorke
 		return platform.ImportStats{}, false, fmt.Errorf("unknown agent %q — want one of: %s", agent, importAgents(", "))
 	}
 	// The Importer owns its own reconcile mechanics (OpenCode takes the sync lock
-	// and reads its SQLite store; Claude is a hook-fed no-op) — cmd no longer
-	// branches on the runtime.
-	stats, err := p.Import(ctx, st, sessionIDs)
+	// and reads its SQLite store; hook-fed Claude has no Importer and imports
+	// nothing) — cmd no longer branches on the runtime.
+	stats, err := platform.ImportFor(ctx, p, st, sessionIDs)
 	if err != nil {
 		return stats, false, missingSource(agent, err)
 	}
@@ -243,7 +243,7 @@ func cmdImportHook(agent string, input io.Reader) error {
 		slog.Warn("import hook: unknown agent", "agent", agent)
 		return nil
 	}
-	stats, err := p.Import(context.Background(), st, []string{event.SessionID})
+	stats, err := platform.ImportFor(context.Background(), p, st, []string{event.SessionID})
 	if err != nil {
 		slog.Warn("import hook failed", "agent", agent, "err", err)
 		return nil

@@ -666,16 +666,10 @@ var selfHealFakeOpens, selfHealFakeRuns int32
 
 type selfHealFakePlatform struct{}
 
-func (selfHealFakePlatform) Name() string          { return "selfheal" }
-func (selfHealFakePlatform) SessionPrefix() string { return "selfheal:" }
-func (selfHealFakePlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
-	return []string{""}
-}
+func (selfHealFakePlatform) Name() string                                          { return "selfheal" }
+func (selfHealFakePlatform) SessionPrefix() string                                 { return "selfheal:" }
 func (selfHealFakePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
-func (selfHealFakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{}, nil
-}
-func (selfHealFakePlatform) NewRunner(store.Config) platform.Runner { return selfHealFakeRunner{} }
+func (selfHealFakePlatform) NewRunner(store.Config) platform.Runner                { return selfHealFakeRunner{} }
 
 type selfHealFakeRunner struct{}
 
@@ -817,16 +811,10 @@ var selfHealFailRuns int32
 
 type selfHealFailPlatform struct{}
 
-func (selfHealFailPlatform) Name() string          { return "selfhealfail" }
-func (selfHealFailPlatform) SessionPrefix() string { return "selfhealfail:" }
-func (selfHealFailPlatform) RenderInputs(r []store.RawRecord, _ platform.ChunkPolicy) []string {
-	return []string{""}
-}
+func (selfHealFailPlatform) Name() string                                          { return "selfhealfail" }
+func (selfHealFailPlatform) SessionPrefix() string                                 { return "selfhealfail:" }
 func (selfHealFailPlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
-func (selfHealFailPlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{}, nil
-}
-func (selfHealFailPlatform) NewRunner(store.Config) platform.Runner { return selfHealFailRunner{} }
+func (selfHealFailPlatform) NewRunner(store.Config) platform.Runner                { return selfHealFailRunner{} }
 
 type selfHealFailRunner struct{}
 

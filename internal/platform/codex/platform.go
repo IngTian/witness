@@ -14,9 +14,6 @@ type Platform struct{}
 func init()                            { platform.Register(Platform{}) }
 func (Platform) Name() string          { return "codex" }
 func (Platform) SessionPrefix() string { return "codex:" }
-func (Platform) RenderInputs(raw []store.RawRecord, policy platform.ChunkPolicy) []string {
-	return platform.RenderChunks(raw, policy)
-}
 func (Platform) Import(ctx context.Context, st store.ImportStore, ids []string) (platform.ImportStats, error) {
 	unlock, ok := st.ImportLock("codex")
 	if !ok {

@@ -27,17 +27,6 @@ func (Platform) SessionPrefix() string { return SessionPrefix }
 // comparison the engine used to make on its own.
 func (Platform) SupportsNativeSessions() bool { return true }
 
-// RenderInputs shapes the session by the shared, source-agnostic policy: whole by
-// default (policy.MaxChars <= 0), split into overlapping windows only when a session
-// overflows a positive budget. OpenCode used to chunk UNCONDITIONALLY at a fixed 24K
-// budget; the #57 measurements showed that structurally under-extracts long arc-heavy
-// sessions (~70% recall loss, 20× drift) — the root of the "OpenCode quality is low"
-// report (#56 B1). It now rides the same platform.RenderChunks as Claude, so both
-// runtimes shape identically and only a giant session is ever split.
-func (Platform) RenderInputs(raw []store.RawRecord, policy platform.ChunkPolicy) []string {
-	return platform.RenderChunks(raw, policy)
-}
-
 // Import reconciles OpenCode's SQLite store into L0. It takes the sync lock INSIDE
 // the method (so cmd need not know about it) and maps the internal stats onto the
 // shared platform.ImportStats. A held lock means another import is in flight —
