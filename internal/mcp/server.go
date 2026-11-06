@@ -229,7 +229,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 			return errResult(err.Error()), nil, nil
 		}
 		o := store.Observation{
-			ID:          obsID(in.Session, in.Lens, in.Observation),
+			ID:          store.ObservationID(in.Session, in.Lens, in.Observation),
 			TS:          time.Now().UTC().Format(time.RFC3339),
 			Session:     in.Session,
 			Lens:        in.Lens,
@@ -448,10 +448,4 @@ func renderFacets(lensName string, facets []store.Facet, decaySeq int64, hint fu
 	}
 	header := fmt.Sprintf("Growth facets (%s lens) — %d:\n\n", lensName, count)
 	return header + b.String()
-}
-
-func obsID(session, lens, text string) string {
-	// match the worker's id scheme so active+mined dedup is coherent
-	h := sha1sum(session + "|" + lens + "|" + text)
-	return "obs_" + h[:12]
 }

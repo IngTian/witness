@@ -185,7 +185,7 @@ func TestParityReviewAndFacets(t *testing.T) {
 	s := newStore(t)
 	for _, ln := range []string{store.LensDefault, parityLens} {
 		if err := s.AppendObservations([]store.Observation{{
-			ID: obsID("sess", ln, "o-"+ln), Session: "sess", Lens: ln,
+			ID: store.ObservationID("sess", ln, "o-"+ln), Session: "sess", Lens: ln,
 			Dimension: "thinking", Observation: "did a thing", Poignancy: 5,
 		}}); err != nil {
 			t.Fatalf("seed obs %s: %v", ln, err)
@@ -222,7 +222,7 @@ func assertFailingLensBlocksStamp(t *testing.T, failing string) {
 	s := newStore(t)
 	for _, ln := range []string{store.LensDefault, parityLens} {
 		_ = s.AppendObservations([]store.Observation{{
-			ID: obsID("sess", ln, "o-"+ln), Session: "sess", Lens: ln,
+			ID: store.ObservationID("sess", ln, "o-"+ln), Session: "sess", Lens: ln,
 			Dimension: "thinking", Observation: "x", Poignancy: 3,
 		}})
 	}

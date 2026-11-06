@@ -2,7 +2,6 @@ package distill
 
 import (
 	"context"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -630,7 +629,7 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 			m.Poignancy = 1
 		}
 		obs = append(obs, store.Observation{
-			ID:          obsID(session, ln.Name, m.Observation),
+			ID:          store.ObservationID(session, ln.Name, m.Observation),
 			Session:     session,
 			Lens:        ln.Name,
 			Dimension:   m.Dimension,
@@ -699,11 +698,6 @@ func PreviewMine(ctx context.Context, run MineFunc, cfg store.Config, st Preview
 	// anywhere AND at least one input drifted, so a session where one chunk extracts
 	// fine is never miscounted.
 	return obs, chunkCount, sawDrift && !producedObs, nil
-}
-
-func obsID(session, lens, text string) string {
-	h := sha1.Sum([]byte(session + "|" + lens + "|" + text))
-	return "obs_" + fmt.Sprintf("%x", h[:6])
 }
 
 // mustJSON is a small helper for embedding structured input into prompts.
