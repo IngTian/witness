@@ -24,9 +24,10 @@ type fakeMCPStore struct {
 	lastStaged        store.Observation
 	deletedIDs        []string
 	existsReturn      bool
-	// readCalls counts full-corpus reads, so a test can prove search short-circuits an
-	// oversized query BEFORE paying for one.
+	// readCalls counts observation reads, so a test can prove search short-circuits an
+	// oversized query BEFORE paying for one; readLens is the lens the last read asked for.
 	readCalls int
+	readLens  string
 	// stagedReturn is what StageObservationCapped reports. Defaults to false via the zero
 	// value, so tests that need a successful stage set it explicitly; the pre-existing
 	// TestServerRecordDeleteSearch sets it to true.
@@ -43,6 +44,7 @@ func (f *fakeMCPStore) ObservationHighWater() (int64, error) { return f.highWate
 
 func (f *fakeMCPStore) ReadObservations(lens string) ([]store.Observation, error) {
 	f.readCalls++
+	f.readLens = lens
 	return f.obs, nil
 }
 
@@ -90,7 +92,7 @@ func TestServerRunsAgainstFakeStore(t *testing.T) {
 	fake := &fakeMCPStore{profiles: map[string]string{"default": knownProfile}}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
+	ss, err := newServer(fake, fakeEmbedder{}, Options{Version: "v0.0.0-fake"}).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -145,7 +147,7 @@ func TestServerRecordDeleteSearch(t *testing.T) {
 	}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
+	ss, err := newServer(fake, fakeEmbedder{}, Options{Version: "v0.0.0-fake"}).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}

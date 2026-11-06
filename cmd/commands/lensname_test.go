@@ -109,6 +109,20 @@ func TestObservationRecordReachesTheReview(t *testing.T) {
 	}
 }
 
+// The MCP tools apply whatever mapping cmd injects (internal/mcp tests drive that with a fake);
+// this pins that cmd injects the real one, and the wire command the CLI prints.
+func TestMCPGetsTheLensMappingAndTheWireCommand(t *testing.T) {
+	st := readFixture(t)
+	registerRenamedLens(t, st, "corpus-example", "regime")
+	opts := mcpOptions(st)
+	if got := opts.DataName("corpus-example"); got != "regime" {
+		t.Errorf("DataName(corpus-example) = %q, want regime", got)
+	}
+	if opts.Wire != wireCommand() || opts.Refresh == nil {
+		t.Errorf("wire %q (want %q), refresh set %v", opts.Wire, wireCommand(), opts.Refresh != nil)
+	}
+}
+
 type fakeTestEmbedder struct{}
 
 func (fakeTestEmbedder) Embed(string) ([]float32, error) { return []float32{0.1, 0.2, 0.3}, nil }
