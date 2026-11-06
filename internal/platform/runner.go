@@ -16,6 +16,29 @@ const DisableExternalRunnersEnv = "WITNESS_DISABLE_EXTERNAL_RUNNERS"
 
 func ExternalRunnersDisabled() bool { return os.Getenv(DisableExternalRunnersEnv) == "1" }
 
+// maxStderrExcerpt bounds how much of a failed child's stderr is interpolated into the error.
+//
+// That error string becomes ONE line in witness.log (the worker logs it on a mine failure), and
+// a child's stderr is unbounded (across claude's 10-minute timeout, say) — so a chatty or
+// looping CLI could write a single multi-megabyte log line. The measured real case is only
+// ~0.5KB (repeated ANSI-wrapped "AWS auth refresh timed out"), so this is a ceiling on a
+// known-possible shape rather than a fix for observed damage.
+const maxStderrExcerpt = 4000
+
+// StderrExcerpt trims a child's stderr and keeps its TAIL when oversized. Every runner's
+// spawned CLI goes through it.
+//
+// The tail, not the head: a failing CLI puts the actual error last, after any banner or progress
+// noise, so truncating from the front would preserve exactly the useless part. The marker makes
+// the truncation visible so nobody debugs a silently clipped message.
+func StderrExcerpt(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxStderrExcerpt {
+		return s
+	}
+	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
+}
+
 // NativeSession identifies one L0 input whose owning runtime keeps its own conversation
 // store. Runners that support native isolation use it to RETAIN an isolated scratch context
 // until that input's L1 commit succeeds, so a crash mid-generation resumes instead of

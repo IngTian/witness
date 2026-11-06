@@ -258,13 +258,13 @@ func TestValidateOpenCodeCapabilityBoundsAHungVersionProbe(t *testing.T) {
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
 	// Faithful to exec.CommandContext's contract: it returns only when the ctx is done.
-	openCodeVersionCommand = func(ctx context.Context) ([]byte, error) {
+	openCodeVersionCommand = func(ctx context.Context, _ string) ([]byte, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- ValidateOpenCodeCapability(context.Background()) }()
+	go func() { done <- ValidateOpenCodeCapability(context.Background(), "") }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -283,7 +283,7 @@ func TestProbeDeadlineDerivesFromTheCallerContext(t *testing.T) {
 
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(ctx context.Context) ([]byte, error) {
+	openCodeVersionCommand = func(ctx context.Context, _ string) ([]byte, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -291,7 +291,7 @@ func TestProbeDeadlineDerivesFromTheCallerContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already dead
 	done := make(chan error, 1)
-	go func() { done <- ValidateOpenCodeCapability(ctx) }()
+	go func() { done <- ValidateOpenCodeCapability(ctx, "") }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -310,12 +310,12 @@ func TestValidateOpenCodeCapabilityStillJudgesVersionsOnTheirMerits(t *testing.T
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
 
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.18.5\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
 		t.Errorf("1.18.5 must be accepted, got %v", err)
 	}
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.17.9\n"), nil }
-	err := ValidateOpenCodeCapability(context.Background())
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.17.9\n"), nil }
+	err := ValidateOpenCodeCapability(context.Background(), "")
 	if err == nil {
 		t.Fatal("1.17.9 must be rejected")
 	}
@@ -331,7 +331,7 @@ func TestLoadOpenCodeModelsUsesTheCacheWithoutSpawning(t *testing.T) {
 	withShortTimeouts(t, 5*time.Second)
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
 
 	// Seed the cache for a provider name no real install would have, and remove it after so
 	// the sync.Map does not leak into other tests in this package.

@@ -66,7 +66,7 @@ func TestOpenCodeCommandUsesTheTestSeam(t *testing.T) {
 		return prev(ctx, "echo", "stubbed")
 	}
 
-	cmd := openCodeCommand(context.Background(), "serve", "--pure")
+	cmd := openCodeCommand(context.Background(), "", "serve", "--pure")
 	if cmd == nil {
 		t.Fatal("openCodeCommand returned nil")
 	}

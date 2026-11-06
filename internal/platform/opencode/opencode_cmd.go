@@ -2,11 +2,13 @@ package opencode
 
 import (
 	"context"
+	"os"
 	"os/exec"
 )
 
-// openCodeCommand builds every `opencode` invocation witness makes, so the three
-// platform concerns are decided in exactly one place instead of at each spawn site.
+// openCodeCommand builds every `opencode` invocation witness makes, so the platform
+// concerns and the spawn policy are decided in exactly one place instead of at each spawn
+// site.
 //
 //  1. WHICH BINARY. openCodeExe resolves it (see opencode_exe_windows.go: the desktop
 //     build puts a GUI shim on PATH ahead of the real CLI). Falling back to the bare
@@ -21,12 +23,31 @@ import (
 //     indirection point, so tests can stub command execution. Calling
 //     exec.CommandContext directly here would bypass that and let a unit test spawn
 //     the user's real opencode.
-func openCodeCommand(ctx context.Context, args ...string) *exec.Cmd {
+//  4. THE SPAWN POLICY. Applied per call site it drifted (`--version` had none of it,
+//     `models` no BindToParent, `export` no WITNESS_WORKER; the same drift produced two
+//     of #119's findings), so every command gets all four rules here. The cwd is pinned
+//     to a neutral temp dir: OpenCode derives the PROJECT it records (worktree, vcs,
+//     sandboxes) from it, and the worker's cwd is a user repo, since neither
+//     spawnDetached nor the plugin's Bun.spawn sets one. WITNESS_WORKER=1 is the
+//     recursion guard. isolatedEnv(root) points OPENCODE_DB and XDG_DATA_HOME at
+//     witness's runtime root, because several subcommands open their DB read-WRITE and
+//     apply migrations, so the ambient env would reach into the USER's database (root ""
+//     keeps the ambient env, for a caller with no runtime root yet). And
+//     procCtl.BindToParent makes the child die with the worker on Linux. A caller layers
+//     its own variables on top with replaceEnv(cmd.Env, …).
+func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
 	binary, err := openCodeExe()
 	if err != nil {
 		binary = "opencode"
 	}
 	cmd := execCommandContext(ctx, binary, args...)
 	hideOpenCodeWindow(cmd)
+	cmd.Dir = os.TempDir()
+	env := []string{"WITNESS_WORKER=1"}
+	if root != "" {
+		env = append(env, isolatedEnv(root)...)
+	}
+	cmd.Env = replaceEnv(os.Environ(), env)
+	procCtl.BindToParent(cmd)
 	return cmd
 }

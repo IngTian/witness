@@ -55,20 +55,20 @@ func TestBuildOpenCodeServeCmdUsesPrivateRuntimeEnv(t *testing.T) {
 func TestValidateOpenCodeCapability(t *testing.T) {
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.17.9\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade") {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.17.9\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unsupported version error = %v", err)
 	}
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.18.5\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("2.0.0\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.0.0\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("version unknown\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade") {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("version unknown\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("malformed version error=%v", err)
 	}
 }

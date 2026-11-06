@@ -72,12 +72,12 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 			// ctx is already done the worker is shutting down, which is not a provider signal and
 			// must not narrow the window.
 			if ctx.Err() != nil {
-				return "", fmt.Errorf("claude -p canceled: %w (stderr: %s)", ctx.Err(), stderrExcerpt(errb.String()))
+				return "", fmt.Errorf("claude -p canceled: %w (stderr: %s)", ctx.Err(), platform.StderrExcerpt(errb.String()))
 			}
 			return "", fmt.Errorf("claude -p exceeded %s and was killed: %w (stderr: %s)",
-				claudeRunTimeout, de, stderrExcerpt(errb.String()))
+				claudeRunTimeout, de, platform.StderrExcerpt(errb.String()))
 		}
-		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", err, stderrExcerpt(errb.String()))
+		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", err, platform.StderrExcerpt(errb.String()))
 	}
 	return out.String(), nil
 }
@@ -85,28 +85,6 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 // claudeRunTimeout bounds one `claude -p`. It is a var only so the deadline-attribution test can
 // shrink it; nothing in production reassigns it.
 var claudeRunTimeout = 10 * time.Minute
-
-// maxStderrExcerpt bounds how much of a failed child's stderr is interpolated into the error.
-//
-// That error string becomes ONE line in witness.log (the worker logs it on a mine failure), and
-// the child's stderr is unbounded across the 10-minute timeout — so a chatty or looping `claude`
-// could write a single multi-megabyte log line. The measured real case is only ~0.5KB (repeated
-// ANSI-wrapped "AWS auth refresh timed out"), so this is a ceiling on a known-possible shape
-// rather than a fix for observed damage.
-const maxStderrExcerpt = 4000
-
-// stderrExcerpt trims a child's stderr and keeps its TAIL when oversized.
-//
-// The tail, not the head: a failing CLI puts the actual error last, after any banner or progress
-// noise, so truncating from the front would preserve exactly the useless part. The marker makes
-// the truncation visible so nobody debugs a silently clipped message.
-func stderrExcerpt(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= maxStderrExcerpt {
-		return s
-	}
-	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
-}
 
 // newClaudeCmd builds the isolated `claude -p` invocation used for distillation:
 //   - --no-session-persistence: don't write a transcript (otherwise the worker's
