@@ -273,8 +273,8 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 // the same way as a registered lens, but is intentionally LENIENT about identity: the
 // name falls back to the directory's basename, then the literal "candidate", so a
 // work-in-progress lens missing a lens.json name still previews. It does NOT apply the
-// reserved-name gate (see LoadFromDir for the strict variant) — a preview never writes
-// to the archive, so an impersonating name can't collide with anything. It still
+// reserved-name gate — a preview never writes to the archive, so an impersonating name
+// can't collide with anything (`lens try` displays a reserved one as "candidate"). It still
 // requires a non-empty extract.md (that is the prompt being previewed).
 func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	base := strings.TrimSpace(filepath.Base(strings.TrimRight(dir, string(filepath.Separator))))
@@ -284,23 +284,6 @@ func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	}
 	if strings.TrimSpace(l.Name) == "" {
 		l.Name = "candidate"
-	}
-	return l, nil
-}
-
-// LoadFromDir is the STRICT arbitrary-path loader: LoadFromDirUnchecked plus the
-// reserved-name gate LoadRegistered enforces (a directory whose resolved name is the
-// reserved "unified" identity, case-folded, is rejected — "default" is an ordinary lens
-// since #44 slice 1a). Callers that only PREVIEW (never write) may catch the
-// reserved-name error and fall back to the Unchecked variant with a display name of
-// "candidate"; callers that would persist under the resolved name must use this one.
-func LoadFromDir(dir string) (*Lens, error) {
-	l, err := LoadFromDirUnchecked(dir)
-	if err != nil {
-		return nil, err
-	}
-	if store.ReservedLensName(l.Name) {
-		return nil, fmt.Errorf("lens dir %q resolves to reserved name %q (the cross-lens 'unified' profile identity); rename it in lens.json", dir, l.Name)
 	}
 	return l, nil
 }

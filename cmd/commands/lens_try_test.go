@@ -103,6 +103,32 @@ func TestLensTryOnOpenCodeIsLockFree(t *testing.T) {
 	}
 }
 
+// A lens.json naming the reserved "unified" identity still previews (a preview writes
+// nothing), but under the display name "candidate" with the JSON flag set — so the output
+// can never be read as the cross-lens portrait.
+func TestLensTryReservedNamePreviewsAsCandidate(t *testing.T) {
+	seedTryStore(t, store.RunnerOpenCode)
+	opened := false
+	previous := runnerForStore
+	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+		return limitedPreviewRunner{opened: &opened}, nil
+	}
+	t.Cleanup(func() { runnerForStore = previous })
+
+	out := captureStdout(t, func() {
+		if err := cmdLensTry(writeLensDir(t, "Unified", "mine", "synth"), lensTryOpts{nSessions: 1, asJSON: true}); err != nil {
+			t.Errorf("a reserved-name lens must still preview: %v", err)
+		}
+	})
+	var got lensTryJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+	if got.Lens != "candidate" || !got.Candidate {
+		t.Fatalf("reserved name must preview as candidate, got lens=%q candidate=%v", got.Lens, got.Candidate)
+	}
+}
+
 // On Claude (no shutdown sweep) a preview must NOT take the worker lock — it can safely
 // overlap a running worker. With the lock held, the command proceeds past the lock and
 // stops at the unknown --session validation (proving it never blocked on the lock).
