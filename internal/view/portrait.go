@@ -59,7 +59,7 @@ func buildPortrait(f PortraitFile, kind string, ids map[facetID]int, loc *time.L
 	}
 	// Only a LEADING heading is the portrait's title (both prompts open with one). The
 	// overall's becomes Title; a notebook's is dropped, since the page gives it a plain heading
-	// of its name (spec §4.2). A heading anywhere later is a section and stays in the column.
+	// of its name. A heading anywhere later is a section and stays in the column.
 	if kind == "overall" {
 		p.Title = ""
 	}
@@ -107,7 +107,7 @@ func buildPortrait(f PortraitFile, kind string, ids map[facetID]int, loc *time.L
 
 // linkIDs maps one sentence's links to active trait ids, deduped by DedupeLinks (a key cited
 // both ways counts as direct). It returns the live direct links, or, only when none is live,
-// the partial ones (spec §7.2: partials are look-alike padding next to a real support), at
+// the partial ones (beside a real support a partial is look-alike padding, not evidence), at
 // most three. Dead keys are dropped FIRST, so a direct link to a retired trait never hides
 // the live partial ones.
 func linkIDs(links []store.TraitLink, ids map[facetID]int) []int {

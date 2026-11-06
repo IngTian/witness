@@ -67,6 +67,12 @@ the built-in `default` prompts — it doesn't extend them — so each must be **
 including its output JSON schema** (the tool appends the transcript / observations as the user
 message, but injects no schema for you).
 
+**An optional fourth file, `emerge.md`.** `witness worker review --full` also runs a long-arc pass:
+it clusters observations that recur across sessions and asks a judge whether each cluster is a
+pattern the facets have missed. `emerge.md` is that judge's prompt; without it, `review.md` is
+used. The judge gets one cluster at a time and returns one facet in `review.md`'s output shape,
+or `[]` to decline. [`prompts/default/emerge.md`](../prompts/default/emerge.md) is a working one.
+
 Two **complete, copy-paste-ready** lenses ship as starting points. Copy the directory and rewrite the
 dimensions and prose for your domain:
 
@@ -76,15 +82,6 @@ dimensions and prose for your domain:
   regime), for tracking a subject that is not you. Start here for research notes, a knowledge base,
   incident reports, or any document stream; its README explains what has to change when the subject
   stops being a person.
-
-```sh
-cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/example" ./math   # edit the files, then:
-witness lens register math ./math      # copies the definition into your store (a snapshot)
-witness lens enable  math               # start running it on every session
-```
-
-`register` stores a **copy** — editing the original afterward has no effect until you re-register.
-`enable` is the separate switch that makes it actually run.
 
 **Per-lens models (optional).** By default every lens rides the default models (`witness config set
 triage_model / distill_model`). A rare heavy lens can pin a stronger model just for itself —
@@ -146,18 +143,9 @@ claims about *the market regime* … not about any person, author, or writing st
 
 ## A worked example
 
-`prompts/lens/corpus-example/` is a `regime` lens over market commentary, and it has been run end
-to end on real data. In an archive with **no** person lens enabled at all, 7 news records became 22
-observations and 13 facets. Then the regime flipped hawkish → dovish:
-
-```
-inflation/core_trend
-  "Disinflation has broken rather than paused: core CPI reaccelerating…"   valid_to 2026-06-…
-  "Core is disinflating persistently rather than reaccelerating…"          (current)
-```
-
-Five facets closed and reopened that way in a single review, and the generated brief flagged that
-its own earlier thesis had been falsified by the new data.
+`prompts/lens/corpus-example/` is a `regime` lens over market commentary, run end to end on real
+data before it shipped. [Its README](../prompts/lens/corpus-example/README.md#verified-working)
+shows the regime flip it recorded, and what changes when the subject stops being a person.
 
 To run a corpus-only archive with no person tracking at all:
 
@@ -167,9 +155,6 @@ witness ingest --file news.ndjson          # {"text":"…","id":"n1","session":"
 witness facets regime                      # current state, with confidence and provenance
 witness profile regime                     # the narrative brief
 ```
-
-See [`prompts/lens/corpus-example/README.md`](../prompts/lens/corpus-example/README.md) for what
-changes when the subject stops being a person.
 
 ### At full size
 

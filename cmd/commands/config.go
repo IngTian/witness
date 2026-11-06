@@ -204,7 +204,8 @@ func cmdConfigSet(key, value string, lensName string) error {
 	}
 	value = strings.TrimSpace(value)
 	// runner validation ONLY at default scope; at lens scope allow any runner string
-	// (a lens may target a runtime that isn't the default — matches today's `lens set --runner`).
+	// (a lens may target a runtime that isn't the default; SetLensRunner leaves an unknown
+	// name to surface at drain time and in `witness doctor`).
 	if canonical == "runner" && lensName == "" && value != "" {
 		// Ask the platform registry, not a hardcoded pair. The old allowlist was a closed
 		// set in a system that is otherwise uniformly registry-driven, and it DISAGREED with

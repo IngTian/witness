@@ -78,7 +78,7 @@ uninstall-opencode: build
 
 ## doctor: verify the embedder + model + config
 doctor: build
-	GOMLX_BACKEND=go $(BIN) doctor
+	$(BIN) doctor
 
 ## test / vet / fmt
 test:
