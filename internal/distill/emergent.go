@@ -79,12 +79,14 @@ func kBand(n int) []int {
 
 // Candidates builds ranked emergent-arc candidates for one lens. Pure over its inputs.
 //
-// onK, when non-nil, is called after each k of the band: the band is where the time goes. Every k
-// is a full O(n²) mutual-kNN, so the step count is known up front and each costs about the same —
+// onRank, when non-nil, is called before the first observation is ranked and after each one:
+// ranking is where the time goes. It used to be a full O(n²) mutual-kNN per k of the band —
 // measured on a real 17,413-observation lens, 14 k values at 2m33s–2m50s each, 38 minutes of CPU
-// before the first verify call. Everything after the band (re-expansion, coverage, the sort) took
-// 5s there, so it is not counted as a step.
-func Candidates(obs []store.Observation, facets []store.Facet, lens string, onK func(done, total int)) []CandidateArc {
+// before the first verify call — but the ranking does not depend on k, so it now runs once for
+// the band's largest k and every k reads its graph off a prefix (vector.KNNRanks). What is left
+// per k (mutuality over k-long lists, components, pair counts) and after the band (re-expansion,
+// coverage, the sort; 5s there) is not counted as a step.
+func Candidates(obs []store.Observation, facets []store.Facet, lens string, onRank func(done, total int)) []CandidateArc {
 	band := kBand(len(obs))
 
 	// Persistence at the PAIR level (base-invariant, and robust to a cluster gaining or
@@ -98,15 +100,9 @@ func Candidates(obs []store.Observation, facets []store.Facet, lens string, onK 
 	m := len(idx.obs)
 	need := (len(band) + 1) / 2 // >= half the band (ceil)
 	together := make(map[int64]int)
-	step := func(done int) {
-		if onK != nil {
-			onK(done, len(band))
-		}
-	}
-	step(0)
-	for i, k := range band {
-		nodes, adj := vector.MutualKNNAdj(obs, lens, k)
-		for _, cc := range vector.ConnectedComponents(adj) {
+	nodes, ranks := vector.KNNRanks(obs, lens, band[len(band)-1], onRank)
+	for _, k := range band {
+		for _, cc := range vector.ConnectedComponents(vector.MutualAt(ranks, k)) {
 			if len(cc) < 2 {
 				continue
 			}
@@ -123,7 +119,6 @@ func Candidates(obs []store.Observation, facets []store.Facet, lens string, onK 
 				}
 			}
 		}
-		step(i + 1)
 	}
 	// Build the co-membership adjacency (edge iff the pair was together at >= need k's).
 	adj := make([][]int, m)
@@ -332,7 +327,7 @@ func memberIDs(members []store.Observation) []string {
 }
 
 // obsIndex is a stable indexing of a lens's embeddable observations, so the pair-level
-// persistence graph can use dense int indices regardless of MutualKNNAdj's own ordering.
+// persistence graph can use dense int indices regardless of KNNRanks' own ordering.
 type obsIndex struct {
 	obs  []store.Observation
 	byID map[string]int
@@ -465,8 +460,8 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 		}
 		// Clustering is CPU and a verify is a model call, so they are reported as two phases —
 		// the verify snapshots drop this stage — rather than one sum whose estimate would price a
-		// verify at the minutes of a k step. The verify stage is Open here: its total is unknown
-		// until clustering ends, so the estimate is a floor.
+		// verify at the milliseconds of a ranked observation. The verify stage is Open here: its
+		// total is unknown until clustering ends, so the estimate is a floor.
 		var cluster func(done, total int)
 		if r.Progress != nil && len(obs) > 0 {
 			cluster = func(done, total int) {
