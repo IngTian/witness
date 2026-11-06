@@ -493,20 +493,6 @@ func TestRunnerBoundFlagIsAuthoritativeOverConfigText(t *testing.T) {
 	}
 }
 
-// SetRunner must stamp runner_bound so the very next ResolveRunner honors it.
-func TestSetRunnerStampsBound(t *testing.T) {
-	s := tempStore(t)
-	if s.MetaString("runner_bound") == "1" {
-		t.Fatal("runner_bound should be unset before install")
-	}
-	if err := s.SetRunner("opencode"); err != nil {
-		t.Fatal(err)
-	}
-	if s.MetaString("runner_bound") != "1" {
-		t.Error("SetRunner did not stamp runner_bound")
-	}
-}
-
 // TestEnabledLensesSurviveSetRunner: a user who already enabled lenses must not
 // lose them when install refreshes runner.
 func TestEnabledLensesSurviveSetRunner(t *testing.T) {

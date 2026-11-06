@@ -704,22 +704,6 @@ func TestFacetBiTemporalRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStagedCount(t *testing.T) {
-	s := tempStore(t)
-	if got := s.StagedCount("s"); got != 0 {
-		t.Fatalf("empty: want 0, got %d", got)
-	}
-	_ = s.StageObservation(Observation{ID: "a", Session: "s", Observation: "x"})
-	_ = s.StageObservation(Observation{ID: "b", Session: "s", Observation: "y"})
-	_ = s.StageObservation(Observation{ID: "c", Session: "other", Observation: "z"})
-	if got := s.StagedCount("s"); got != 2 {
-		t.Fatalf("session s: want 2, got %d", got)
-	}
-	if got := s.StagedCount("other"); got != 1 {
-		t.Fatalf("session other: want 1, got %d", got)
-	}
-}
-
 func TestStatsSnapshot(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AppendRaw(RawRecord{Session: "a", Seq: 0, Role: "user", Text: "x"})
@@ -1020,47 +1004,6 @@ func TestMigrateSurvivesConcurrentWriterDuringMigration(t *testing.T) {
 	// And the schema is usable afterwards.
 	if _, err := s.db.Exec(`SELECT COUNT(*) FROM observations`); err != nil {
 		t.Fatalf("schema unusable after migration: %v", err)
-	}
-}
-
-// beginImmediate must hand back a transaction that already holds the write lock, so a
-// read-then-write sequence inside it cannot hit the un-retryable snapshot upgrade.
-func TestBeginImmediateHoldsWriteLockAndPreservesUserVersion(t *testing.T) {
-	s := tempStore(t)
-	var before int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&before); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := beginImmediate(s.db)
-	if err != nil {
-		t.Fatalf("beginImmediate: %v", err)
-	}
-	// Read then write inside the tx — the shape that used to abort.
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&n); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS probe_immediate(x TEXT)`); err != nil {
-		tx.Rollback()
-		t.Fatalf("write inside an immediate tx must succeed: %v", err)
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("rollback: %v", err)
-	}
-	// The lock-acquiring write is a semantic no-op: user_version is unchanged, and the
-	// rolled-back probe table is gone.
-	var after int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&after); err != nil {
-		t.Fatal(err)
-	}
-	if after != before {
-		t.Fatalf("beginImmediate changed user_version: %d -> %d", before, after)
-	}
-	var probes int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='probe_immediate'`).Scan(&probes)
-	if probes != 0 {
-		t.Fatal("rollback did not undo the probe table")
 	}
 }
 

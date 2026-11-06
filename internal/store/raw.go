@@ -7,8 +7,8 @@ import (
 // rawIO is the L0 ground-truth concern: the append-only `raw` transcript plus the
 // read-side size/sampling/pruning helpers over it. A DB leaf — holds only the shared
 // *sql.DB. The distillation watermark that COUNTS raw records lives on the queue
-// concern; rawIO owns the transcript itself and the raw-generation id (MaxRawID) the
-// watermark CAS gates on.
+// concern; rawIO owns the transcript itself and the raw-generation id (ReadRawSnapshot's
+// high id) the watermark CAS gates on.
 type rawIO struct{ db *sql.DB }
 
 // --- raw capture --------------------------------------------------------------
@@ -235,18 +235,6 @@ func (r *rawIO) LastDistilledRawTS() string {
 
 // NextSeq returns the next per-session ordinal (== current record count).
 func (r *rawIO) NextSeq(session string) int { return r.RawCount(session) }
-
-// MaxRawID returns the highest raw.id for a session — the session's raw
-// "generation". raw.id is INTEGER PRIMARY KEY AUTOINCREMENT, so an id is NEVER
-// reused after its row is deleted (that's the AUTOINCREMENT guarantee); a replace-
-// import (DELETE + re-INSERT) therefore always yields a strictly higher max id
-// than what a worker read before the replace. That property is what makes the
-// watermark CAS below sound. Returns 0 for a session with no raw rows.
-func (r *rawIO) MaxRawID(session string) int64 {
-	var id int64
-	_ = r.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM raw WHERE session = ?`, session).Scan(&id)
-	return id
-}
 
 // RawPruneStats reports how many sessions and raw records PruneSessionsBefore
 // would remove for the given cutoff (an RFC3339 timestamp): every session whose
