@@ -206,13 +206,7 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 	c.tick()
 	var plans []CompactPlan
 	for _, ln := range c.Lenses {
-		plan, err := c.planLens(ctx, ln, all)
-		if err != nil {
-			// One lens's failure must not strand the others: compaction is maintenance, and a
-			// partial plan is still useful. Surface it and continue.
-			slog.Error("compact: lens planning failed", "lens", ln.Name, "err", err)
-			continue
-		}
+		plan := c.planLens(ctx, ln, all)
 		// Keep a plan that found nothing but FAILED or REFUSED something. Dropping it would
 		// report "nothing to compact" for a lens whose calls never ran, or whose every
 		// proposal was rejected by the validator — and "your profile is already tight" is the
@@ -225,11 +219,11 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 	return plans, nil
 }
 
-func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Facet) (CompactPlan, error) {
+func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Facet) CompactPlan {
 	active := activeForLens(all, ln.Name)
 	plan := CompactPlan{Lens: ln.Name, Before: len(active), Skipped: map[string]int{}}
 	if len(active) == 0 {
-		return plan, nil
+		return plan
 	}
 	// Index the whole lens once: validation needs to know what exists and what is active.
 	byKey := make(map[string]store.Facet, len(active))
@@ -358,7 +352,7 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 	slog.Info("compact: planned", "lens", ln.Name, "active", plan.Before,
 		"actions", len(plan.Actions), "would_archive", plan.Archived,
 		"skipped", plan.Skipped, "failed_batches", plan.Failed)
-	return plan, nil
+	return plan
 }
 
 // groupBatch is STAGE 1: one model call that decides which facets are the same disposition and

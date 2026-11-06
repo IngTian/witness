@@ -36,6 +36,22 @@ func TestDistillBackfillRejectsTimeBounds(t *testing.T) {
 	}
 }
 
+// `worker run --detach` must not say "worker started" when the spawn failed. It used the
+// fire-and-forget spawnDetached, so a failed spawn printed success and exited 0.
+func TestDetachedWorkerRunFailsWhenTheSpawnFails(t *testing.T) {
+	var spawned []string
+	err := cmdDistillStartWith(true, "7d", "", func(args ...string) bool { spawned = args; return false })
+	if err == nil {
+		t.Fatal("a failed spawn must be an error, not a background worker that never started")
+	}
+	if len(spawned) < 3 || spawned[0] != "worker-run" || spawned[1] != "--since" {
+		t.Errorf("spawned %q, want worker-run --since <time>", spawned)
+	}
+	if err := cmdDistillStartWith(true, "", "", func(...string) bool { return true }); err != nil {
+		t.Errorf("a successful spawn returned %v", err)
+	}
+}
+
 // Review #2: `--all` must NOT report success when the backlog was not drained.
 // With pending L0 but no embedding model available (the test env has none), the
 // worker can't mine, so work stays pending — and cmdDistillBackfill must surface

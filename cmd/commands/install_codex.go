@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/IngTian/witness/internal/platform/codex"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // Codex hook wiring (issue #179).
@@ -200,7 +201,7 @@ func wireCodexHooks(path string, h codexHook) (changed bool, err error) {
 	if bytes.Equal(data, merged) {
 		return false, nil
 	}
-	if err := writeFileAtomic(path, merged); err != nil {
+	if err := store.WriteFileAtomic(path, merged); err != nil {
 		return false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, nil
@@ -264,7 +265,7 @@ func unwireCodexHooks(path string) (changed bool, err error) {
 		}
 		return true, nil
 	}
-	if err := writeFileAtomic(path, cleaned); err != nil {
+	if err := store.WriteFileAtomic(path, cleaned); err != nil {
 		return false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, nil
