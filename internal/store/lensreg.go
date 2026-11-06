@@ -63,28 +63,86 @@ func (r *lensReg) lensRegistryLock() (unlock func(), ok bool) {
 	return flockPath(r.root, ".lens-registry.lock")
 }
 
-// lensFileNames are the on-disk files of a lens directory. Duplicated from
-// internal/lens (which the store must not import — store is the bottom of the stack)
-// as small string literals; keep them in sync. lensConfigFile is the presence probe
-// for RegisteredLenses.
+// The lens-directory format (issue #75), defined ONCE. The store is the bottom of the stack,
+// so it owns the format and internal/lens aliases it. The registry used to keep its own
+// literal copies "in sync by comment", and merge a third list: that drift is how emerge.md,
+// which the loader reads, went uncopied by RegisterLens from v0.6.0 to v0.7.3 — the lens
+// silently lost its long-arc verify prompt and fell back to review.md with no warning.
 const (
-	lensConfigFile  = "lens.json"
-	lensExtractFile = "extract.md"
-	lensReviewFile  = "review.md"
-	// emerge.md is the S3 long-arc verify prompt. OPTIONAL, but it MUST be copied: the
-	// loader reads it (internal/lens loadDir/readPromptPair via lens.EmergeFile), so a lens
-	// that ships one and is not copied here silently loses it — RegisterLens stores a
-	// snapshot, so the file simply is not in the registered copy and the reviewer falls back
-	// to review.md with no warning. prompts/default/ ships an emerge.md, which is how this
-	// was found.
-	lensEmergeFile = "emerge.md"
+	LensConfigFile  = "lens.json"  // settings; optional
+	LensExtractFile = "extract.md" // the mining prompt; the one required file
+	LensReviewFile  = "review.md"  // the review prompt; optional
+	LensEmergeFile  = "emerge.md"  // the S3 long-arc verify prompt; optional (absent → review.md)
 )
+
+// LensFile is one file of a lens directory.
+type LensFile struct {
+	Name     string
+	Required bool // a lens directory without it is not a lens
+}
+
+// LensFiles is EVERY file a lens directory consists of: RegisterLens copies exactly these,
+// merge compares exactly these, and the loader reads nothing else
+// (internal/lens TestLoadDirReadsOnlyLensFiles).
+var LensFiles = []LensFile{
+	{LensConfigFile, false},
+	{LensExtractFile, true},
+	{LensReviewFile, false},
+	{LensEmergeFile, false},
+}
+
+// The lens.json keys. internal/lens's LensConfig struct tags must spell these (struct tags
+// cannot reference constants; a test ties them), and the CLI's field writes use them.
+const (
+	LensKeyName         = "name"
+	LensKeyDimensions   = "dimensions"
+	LensKeyRunner       = "runner"
+	LensKeyExtractModel = "extract_model"
+	LensKeyReviewModel  = "review_model"
+)
+
+// ReadLensExtract reads a lens directory's mining prompt — the one required file — and
+// refuses a missing or blank one: a lens without a mining prompt would mine nothing, and an
+// empty prompt must be a loud error, never a silently-empty section.
+func ReadLensExtract(dir string) ([]byte, error) {
+	b, err := os.ReadFile(filepath.Join(dir, LensExtractFile))
+	if err != nil {
+		return nil, fmt.Errorf("missing %s (the mining prompt): %w", LensExtractFile, err)
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return nil, fmt.Errorf("%s is empty (the mining prompt is required)", LensExtractFile)
+	}
+	return b, nil
+}
+
+// ResolveLensName is a lens directory's effective name: its lens.json `name` when present and
+// non-blank, else fallback (the registry dir name). The loader and the registry's collision
+// checks both resolve through here, so they can never disagree on a lens's identity.
+func ResolveLensName(dir, fallback string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, LensConfigFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fallback, nil
+		}
+		return "", fmt.Errorf("read %s: %w", LensConfigFile, err)
+	}
+	var cfg struct {
+		Name string `json:"name"` // LensKeyName
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return "", fmt.Errorf("parse %s: %w", LensConfigFile, err)
+	}
+	if strings.TrimSpace(cfg.Name) != "" {
+		return strings.TrimSpace(cfg.Name), nil
+	}
+	return fallback, nil
+}
 
 // RegisterLens copies a lens definition DIRECTORY into the registry under `name`,
 // creating/overwriting <root>/lenses/<name>/ with the source's lens.json (optional),
 // extract.md (required — the mining prompt), and review.md (optional). srcDir is the
 // user's authored directory (issue #75: a lens is a directory, not one parsed file);
-// only the three known files are copied, so stray files in the source dir are ignored.
+// only the LensFiles are copied, so stray files in the source dir are ignored.
 //
 // It is lossless under SELF-REGISTER (srcDir == the registry dir, i.e. the user edited
 // the registered copy in place and re-registered it): ALL source files are read into
@@ -145,7 +203,7 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 	// This catches both lens.json-name collisions (probe dir with lens.json name="default"
 	// collides with the real default lens) AND a lens.json name that shadows another
 	// lens's DIR name (probe lens.json name="math" vs. existing dir "math" with no lens.json).
-	resolvedName, resolveErr := r.resolveNameFromSource(name, srcDir)
+	resolvedName, resolveErr := ResolveLensName(srcDir, name)
 	if resolveErr != nil {
 		return resolveErr // fail fast on corrupted/unreadable lens.json
 	}
@@ -186,14 +244,10 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 		return err
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("lens source %q must be a directory holding %s + %s (+ optional %s); the single-file lens format was replaced (issue #75)", srcDir, lensExtractFile, lensReviewFile, lensConfigFile)
+		return fmt.Errorf("lens source %q must be a directory holding %s + %s (+ optional %s); the single-file lens format was replaced (issue #75)", srcDir, LensExtractFile, LensReviewFile, LensConfigFile)
 	}
-	extract, err := os.ReadFile(filepath.Join(srcDir, lensExtractFile))
-	if err != nil {
-		return fmt.Errorf("lens source is missing %s (the mining prompt): %w", lensExtractFile, err)
-	}
-	if strings.TrimSpace(string(extract)) == "" {
-		return fmt.Errorf("lens source %s is empty (the mining prompt is required)", lensExtractFile)
+	if _, err := ReadLensExtract(srcDir); err != nil {
+		return fmt.Errorf("lens source: %w", err)
 	}
 	return nil
 }
@@ -213,16 +267,14 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 	}
 	// Read EVERY source file into memory up front — before any destination mutation — so
 	// a self-register (srcDir == dest) can't lose review.md/lens.json to the wipe below.
-	extract, err := os.ReadFile(filepath.Join(srcDir, lensExtractFile))
-	if err != nil {
-		return fmt.Errorf("lens source is missing %s (the mining prompt): %w", lensExtractFile, err)
-	}
-	files := map[string][]byte{lensExtractFile: extract}
-	for _, fn := range []string{lensReviewFile, lensConfigFile, lensEmergeFile} { // all optional
-		if data, rerr := os.ReadFile(filepath.Join(srcDir, fn)); rerr == nil {
-			files[fn] = data
-		} else if !os.IsNotExist(rerr) {
-			return fmt.Errorf("read %s: %w", fn, rerr)
+	files := map[string][]byte{}
+	for _, f := range LensFiles {
+		data, rerr := os.ReadFile(filepath.Join(srcDir, f.Name))
+		switch {
+		case rerr == nil:
+			files[f.Name] = data
+		case f.Required || !os.IsNotExist(rerr):
+			return fmt.Errorf("read lens source %s: %w", f.Name, rerr)
 		}
 	}
 	// Stage into a sibling .tmp dir, fully build it, then swap. A reader sees either the
@@ -286,7 +338,7 @@ func (r *lensReg) RegisteredLenses() []string {
 		if !e.IsDir() || isLensStagingDir(e.Name()) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(r.LensesDir(), e.Name(), lensExtractFile)); err == nil {
+		if _, err := os.Stat(filepath.Join(r.LensesDir(), e.Name(), LensExtractFile)); err == nil {
 			names = append(names, e.Name())
 		}
 	}
@@ -302,33 +354,10 @@ func isLensStagingDir(name string) bool {
 	return strings.HasSuffix(name, ".tmp") || strings.HasSuffix(name, ".bak")
 }
 
-// resolveNameFromSource computes the effective lens name from a source dir BEFORE it is
-// registered: read its lens.json `name` field if present, else fall back to the registry
-// dir name. This mirrors the loadDir resolution rule in internal/lens/lens.go (lines 176-177).
-func (r *lensReg) resolveNameFromSource(dirName, srcDir string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(srcDir, lensConfigFile))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return dirName, nil // no lens.json → name is the registry dir name
-		}
-		return "", fmt.Errorf("read %s: %w", lensConfigFile, err)
-	}
-	var cfg struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", fmt.Errorf("parse %s: %w", lensConfigFile, err)
-	}
-	if strings.TrimSpace(cfg.Name) != "" {
-		return strings.TrimSpace(cfg.Name), nil
-	}
-	return dirName, nil // empty lens.json name → fall back to dir name
-}
-
 // resolveNameFromRegistry computes the effective lens name for an ALREADY-registered lens
 // (a lens under <root>/lenses/<dirName>/). Same rule: lens.json name if present, else dir name.
 func (r *lensReg) resolveNameFromRegistry(dirName string) (string, error) {
-	return r.resolveNameFromSource(dirName, filepath.Join(r.LensesDir(), dirName))
+	return ResolveLensName(filepath.Join(r.LensesDir(), dirName), dirName)
 }
 
 // SetLensModel updates a registered lens's per-lens model in its lens.json (issue #75),
@@ -341,9 +370,9 @@ func (r *lensReg) SetLensModel(name, phase, model string) error {
 	var field string
 	switch phase {
 	case "extract":
-		field = "extract_model"
+		field = LensKeyExtractModel
 	case "review":
-		field = "review_model"
+		field = LensKeyReviewModel
 	default:
 		return fmt.Errorf("unknown lens model phase %q (want extract|review)", phase)
 	}
@@ -357,7 +386,7 @@ func (r *lensReg) SetLensModel(name, phase, model string) error {
 // name surfaces at drain time via the runner-set's circuit breaker + at `witness doctor`),
 // matching how per-lens models are handled.
 func (r *lensReg) SetLensRunner(name, runner string) error {
-	return r.setLensJSONField(name, "runner", runner)
+	return r.setLensJSONField(name, LensKeyRunner, runner)
 }
 
 // setLensJSONField is the shared, locked read-modify-write for a single lens.json field:
@@ -376,13 +405,13 @@ func (r *lensReg) setLensJSONField(name, field, value string) error {
 	if !slices.Contains(r.RegisteredLenses(), name) {
 		return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", name, name)
 	}
-	path := filepath.Join(r.LensesDir(), sanitize(name), lensConfigFile)
+	path := filepath.Join(r.LensesDir(), sanitize(name), LensConfigFile)
 	// Read-modify-write the existing lens.json (preserving other fields); an absent file
 	// starts from an empty config.
 	var raw map[string]any
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("parse %s: %w", lensConfigFile, err)
+			return fmt.Errorf("parse %s: %w", LensConfigFile, err)
 		}
 	} else if !os.IsNotExist(err) {
 		return err
