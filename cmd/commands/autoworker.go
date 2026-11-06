@@ -51,8 +51,8 @@ func maybeSpawnAutoWorker(st *store.Store) bool {
 	// a user frozen whenever the gate declines for a transient reason (no pending work
 	// yet, a worker already live, the embedding model still downloading): the flag would
 	// survive to block every later start too.
-	if st.MetaString("worker_stop_requested") == "1" {
-		_ = st.SetMetaString("worker_stop_requested", "")
+	if st.MetaString(metaWorkerStopRequested) == "1" {
+		_ = st.SetMetaString(metaWorkerStopRequested, "")
 	}
 	pending, _ := st.PendingSessions(activeLensNames(st))
 	modelReady := embed.ModelReady()
@@ -62,7 +62,7 @@ func maybeSpawnAutoWorker(st *store.Store) bool {
 		}
 		return false
 	}
-	_ = st.SetMetaString("worker_mode", "auto-pending")
+	_ = st.SetMetaString(metaWorkerMode, workerModeAutoPending)
 	spawnDetached("worker-run", "--auto")
 	return true
 }

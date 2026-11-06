@@ -364,13 +364,13 @@ func cmdDistillStatus(asJSON bool) error {
 	var pid, mode, heartbeat, current string
 	if active {
 		status = "running"
-		if st.MetaString("worker_stop_requested") == "1" {
+		if st.MetaString(metaWorkerStopRequested) == "1" {
 			status = "stopping"
 		}
-		pid = st.MetaString("worker_pid")
-		mode = st.MetaString("worker_mode")
-		heartbeat = st.MetaString("worker_heartbeat")
-		current = st.MetaString("worker_current")
+		pid = st.MetaString(metaWorkerPID)
+		mode = st.MetaString(metaWorkerMode)
+		heartbeat = st.MetaString(metaWorkerHeartbeat)
+		current = st.MetaString(metaWorkerCurrent)
 	}
 	lastRaw := st.LastRawTS()
 	lastDistilled := st.LastDistilledRawTS()
@@ -515,14 +515,14 @@ func cmdDistillStop(autoOnly bool) error {
 	if !autoOnly {
 		_ = clearScheduledWakeup(st, "")
 	}
-	mode := st.MetaString("worker_mode")
-	if autoOnly && mode == "manual" {
+	mode := st.MetaString(metaWorkerMode)
+	if autoOnly && mode == workerModeManual {
 		return nil
 	}
-	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
+	if err := st.SetMetaString(metaWorkerStopRequested, "1"); err != nil {
 		return err
 	}
-	if autoOnly && mode != "auto" {
+	if autoOnly && mode != workerModeAuto {
 		return nil // cancels an auto worker that has been spawned but has not claimed the lock yet
 	}
 	// The flock is the liveness authority (issue #75): if no worker holds it, none is
@@ -541,7 +541,7 @@ func cmdDistillStop(autoOnly bool) error {
 	// worker_stop_requested=1 (set above) IS the "stopping" state now — cmdDistillStatus
 	// derives it from that flag while the worker is live, so there's no separate status
 	// key to update here.
-	pid := st.MetaString("worker_pid")
+	pid := st.MetaString(metaWorkerPID)
 	if err := terminateWorker(pid); err != nil {
 		fmt.Println(okGlyph() + " stop requested — the worker exits at its next checkpoint")
 		return nil

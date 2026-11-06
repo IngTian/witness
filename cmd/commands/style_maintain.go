@@ -59,7 +59,7 @@ func errLines(headline string, lines ...string) error {
 // workerBusyHead is the one sentence for "a worker holds the lock", with its pid when it stamped one.
 func workerBusyHead(st *store.Store, skipped string) string {
 	head := "a distillation worker is running"
-	if pid := strings.TrimSpace(st.MetaString("worker_pid")); pid != "" {
+	if pid := strings.TrimSpace(st.MetaString(metaWorkerPID)); pid != "" {
 		head += " (pid " + pid + ")"
 	}
 	return head + " — " + skipped
