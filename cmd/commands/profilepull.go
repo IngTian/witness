@@ -50,40 +50,22 @@ func ensureProfileFresh(st *store.Store) (bool, error) {
 	}
 	defer unlock()
 
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil {
-		return false, err
-	}
-	// Nothing enabled → nothing to summarize. Bail before opening a runner: on a fresh archive
-	// this is the difference between a read that returns instantly and one that starts (and
-	// prewarms) a model runtime to produce nothing.
-	if len(lenses) == 0 {
-		return false, nil
-	}
-
-	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts(st.Root)
-	if err != nil {
+	sm, err := profileSummarizer(st)
+	// Nothing enabled (sm == nil) → nothing to summarize. Bail before opening a runner: on a
+	// fresh archive this is the difference between a read that returns instantly and one that
+	// starts (and prewarms) a model runtime to produce nothing.
+	if err != nil || sm == nil {
 		return false, err
 	}
 
 	ctx := context.Background()
-	rs, err := newRunnerSet(ctx, st, cfg, lenses)
+	rs, err := newRunnerSet(ctx, st, sm.Config, sm.Lenses)
 	if err != nil {
 		return false, err
 	}
 	defer rs.Close()
+	sm.Run, sm.RunFor = rs.RunFor(nil), rs.RunFor
 
-	sm := &distill.Summarizer{
-		Store:         st,
-		Config:        cfg,
-		Lenses:        lenses,
-		LensPrompt:    lensPrompt,
-		UnifiedPrompt: unifiedPrompt,
-		Run:           rs.RunFor(nil),
-		RunFor:        rs.RunFor,
-	}
 	// A ~13s silent wait is indistinguishable from a hang, so animate it.
 	//
 	// Two properties make this safe to start unconditionally, rather than needing to predict
@@ -102,4 +84,24 @@ func ensureProfileFresh(st *store.Store) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// profileSummarizer is the Summarizer `witness profile` regenerates with, minus its runner, or
+// nil when no lens is enabled. One construction for every reader, because Stale compares
+// signatures that embed the model, and the model depends on the RESOLVED runner (ModelFor reads
+// cfg.Runner against each lens's own): a copy that skipped ResolveRunner would compute other
+// signatures and call fresh portraits stale. ensureProfileFresh adds the runner; `witness view`
+// only asks Stale, which never calls one.
+func profileSummarizer(st *store.Store) (*distill.Summarizer, error) {
+	cfg := st.LoadConfig()
+	cfg.Runner = st.ResolveRunner(cfg)
+	lenses, err := activeLenses(st)
+	if err != nil || len(lenses) == 0 {
+		return nil, err
+	}
+	lensPrompt, unifiedPrompt, err := lens.LoadSummarizePrompts(st.Root)
+	if err != nil {
+		return nil, err
+	}
+	return &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt}, nil
 }
