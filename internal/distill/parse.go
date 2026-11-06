@@ -1,5 +1,17 @@
-// Package distill holds the response-parsing logic shared by every runner's reply
-// (the runner implementations themselves live in internal/platform/*).
+// Package distill is the worker's engine: it turns L0 raw turns into the derived layers.
+//
+//   - worker.go, drain.go — MINE (L0→L1): per session, each enabled lens's extract prompt
+//     turns new raw turns into observations. Mining runs in parallel; one goroutine commits.
+//   - reviewer.go — REVIEW (L1→L2): folds a lens's new observations into bi-temporal facets.
+//   - emergent.go — the long-arc pass (`worker review --full`): clusters a lens's history
+//     for arcs no single fold could see, and merges verified ones through the same path.
+//   - compact.go, claim.go — maintenance, run only by `witness compact`: merge or retire
+//     facets, and write each facet's short claim, which the review reads instead of its prose.
+//   - summarize.go, sources.go — L4: the per-lens and unified portraits, and the links from
+//     each portrait sentence back to the facets it rests on.
+//
+// Every model call goes through a MineFunc. The runners behind it (`claude -p`, `opencode
+// serve`) live in internal/platform/*; this file holds the reply parsing they all share.
 package distill
 
 import (

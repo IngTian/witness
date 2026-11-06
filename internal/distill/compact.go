@@ -46,8 +46,8 @@ import (
 //
 // SAFETY. Every action is validated in Go before anything is written (validate): the model can
 // only act on facets it was actually shown, cannot touch another lens or dimension, cannot
-// absorb a facet twice, cannot merge a single facet (that is a rename), and cannot archive more
-// than compactMaxArchiveFraction of a lens in one pass. This mirrors the division of labour in
+// absorb a facet twice, cannot merge a single facet (that is a rename), and cannot leave a
+// dimension with fewer than compactMinSurvivors facets. This mirrors the division of labour in
 // applyFacet — the model judges what is the same, code enforces what may be done about it.
 const (
 	// compactBatchChars bounds one compaction call's facet payload. Sized like
@@ -121,8 +121,9 @@ type CompactPlan struct {
 	Failed int `json:"failed,omitempty"`
 }
 
-// Compactor rebalances the active facet surface of each lens. It is the only writer of
-// ArchivedAt/MergedInto.
+// Compactor rebalances the active facet surface of each lens. It is the main writer of
+// ArchivedAt/MergedInto; the reviewer clears them when new evidence resurrects a retired
+// facet (resolveArchived), and `witness merge` sets them on a key collision.
 type Compactor struct {
 	Store     store.CompactStore
 	Lenses    []*lens.Lens

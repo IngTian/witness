@@ -143,24 +143,22 @@ func (w *Worker) HasUnattempted(sessions []string, attempted map[string]bool) bo
 	return false
 }
 
-// Drain is the engine's session-drain loop. It preserves drainQueueLimit's contract
-// exactly — every pending job attempted at most once per drain, jobs arriving
-// mid-drain picked up on the next scan, terminates even if a job stays pending,
-// optional budget cap — but splits each session into a parallel MAP (MineSession,
-// the expensive LLM calls, up to Conc at once) and a serial REDUCE (CommitMining,
-// the sole L1 writer). Invariants that make the parallelism safe:
+// Drain is the engine's session-drain loop. Its contract: every pending job attempted at
+// most once per drain, jobs arriving mid-drain picked up on the next scan, terminates even
+// if a job stays pending, optional budget cap. It splits each session into a parallel
+// MAP (MineSession, the expensive LLM calls, up to Conc at once) and a serial REDUCE
+// (CommitMining, the sole L1 writer). Invariants that make the parallelism safe:
 //
 //   - The store is written by exactly ONE goroutine (this one, in commit), so
 //     MaxOpenConns(1) / single-writer semantics are untouched.
 //   - `existing` is a single running corpus snapshot threaded through every commit
-//     and appended after each write, so a later session dedups against an earlier
-//     one's just-written observations — no cross-session dedup gap.
+//     and appended after each write, so CommitMining's exact-obsID idempotency check
+//     sees an earlier session's just-written observations.
 //   - Commits happen AS EACH MAP FINISHES (commit-as-ready, issue #56 B3), not in
 //     submission order — a slow session no longer stalls the commit of finished
 //     followers behind it. Still exactly one commit goroutine, so single-writer +
-//     `existing` race-freedom are untouched; only the cross-session dedup tie-break
-//     (which near-duplicate wins) now follows completion order, which is fine for a
-//     one-shot backfill.
+//     `existing` race-freedom are untouched. obsIDs hash the session, so commit order
+//     cannot change which observations are written.
 //
 // Returns the number of sessions ATTEMPTED-and-reaped this call (including
 // map-failures, backoffs, quiet sessions, and no-op advances — every reaped job
@@ -305,19 +303,22 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 	// reap absorbs one completion and commits it IMMEDIATELY — commit-as-ready (issue
 	// #56 B3). The old code buffered results and committed only a contiguous prefix from
 	// a submission index, so one slow session at the head stalled the commit of every
-	// finished session behind it (head-of-line blocking): `distill status` understated
+	// finished session behind it (head-of-line blocking): `witness status` understated
 	// progress and a --max/interrupted backfill committed fewer than it mined. Only the
 	// single Drain goroutine calls reap, so committing here keeps the store single-writer
 	// and `existing` race-free exactly as before — we drop only the ORDER, not the
-	// serialization. Cross-session dedup (which earlier-committed obs a later session
-	// dedups against) now depends on completion order rather than submission order; both
-	// are valid distillations (the survivor of two >=0.93 near-duplicates just differs by
-	// provenance), and determinism here mattered for tests, not a one-shot backfill.
+	// serialization. Nothing order-dependent is left in the commit: the near-duplicate
+	// filter whose survivor depended on order was removed in #116.
 	reap := func(r minedResult) {
 		inFlightChars -= sizeByIdx[r.idx]
 		delete(sizeByIdx, r.idx)
-		// A session counts as starved if the whole request deadlined, or if any of its lenses did
-		// (MineTimedOut). Per-session is the right unit: the window is a count of sessions.
+		// A session counts as starved if any of its lenses hit a deadline (MineTimedOut; the
+		// runners wrap their timeouts as context.DeadlineExceeded, because os/exec alone reports
+		// "signal: killed" and once left this signal silently dead). The r.err term cannot fire
+		// today — MineSession's own error is a store read, which takes no ctx — but keep it: if
+		// those reads become ctx-aware, a whole-session deadline lands here, and without the term
+		// backpressure would silently stop. Per-session is the right unit: the window is a count
+		// of sessions.
 		starved := r.err != nil && errors.Is(r.err, context.DeadlineExceeded)
 		if !starved && r.m != nil {
 			for _, lm := range r.m.Lenses {
