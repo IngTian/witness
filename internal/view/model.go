@@ -20,9 +20,10 @@ import (
 type Model struct {
 	Snapshot  string     `json:"snapshot"` // now, RFC3339 in loc
 	Activity  Activity   `json:"activity"`
-	Notebooks []Notebook `json:"notebooks"` // lenses with ≥1 active trait, by name
-	Traits    []Trait    `json:"traits"`    // ACTIVE only; index = trait id used everywhere
-	Portraits []Portrait `json:"portraits"` // Task 5
+	Notebooks []Notebook `json:"notebooks"`          // lenses with ≥1 active trait, by name
+	Traits    []Trait    `json:"traits"`             // ACTIVE only; index = trait id used everywhere
+	Portraits []Portrait `json:"portraits"`          // Task 5
+	E2EStart  string     `json:"e2eStart,omitempty"` // test hook only: "changed" to land on the second page
 }
 
 // Activity measures how much has been recorded: conversation days, turn counts, windows and
@@ -192,7 +193,8 @@ type Keyword struct {
 
 // Build constructs a complete Model from store.ViewInput, computing all activity metrics,
 // notebooks, traits and portraits. The snapshot is timestamped at `now` and bucketed by `loc`.
-// Traits come first because the activity windows count their arrivals and rewrites.
+// Traits come first because the activity windows count their arrivals and rewrites. E2EStart is
+// never set; only the e2e test sets it.
 func Build(in *store.ViewInput, portraits []PortraitFile, now time.Time, loc *time.Location) *Model {
 	notebooks, traits, tally := buildTraits(in, loc)
 	return &Model{
@@ -201,5 +203,6 @@ func Build(in *store.ViewInput, portraits []PortraitFile, now time.Time, loc *ti
 		Notebooks: notebooks,
 		Traits:    traits,
 		Portraits: buildPortraits(portraits, notebooks, traits, loc),
+		// E2EStart: deliberately omitted; set only in e2e_test.go
 	}
 }

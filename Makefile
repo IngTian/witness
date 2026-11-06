@@ -7,7 +7,7 @@ LDFLAGS    := -X github.com/IngTian/witness/cmd/commands.version=$(VERSION) -X g
 TEST_GOMAXPROCS ?= 2
 TEST_GOMEMLIMIT ?= 1GiB
 
-.PHONY: build build-all build-npm-platforms package-windows npm-opencode-package fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
+.PHONY: build build-all build-npm-platforms package-windows npm-opencode-package fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt view-e2e clean
 
 ## build: compile the binary for this OS/arch into bin/
 build:
@@ -88,6 +88,10 @@ vet:
 	CGO_ENABLED=0 GOMAXPROCS=$(TEST_GOMAXPROCS) GOMEMLIMIT=$(TEST_GOMEMLIMIT) go vet -p 1 ./...
 fmt:
 	gofmt -w internal cmd
+
+## view-e2e: headless-Chrome check for witness view (separate from `make test`)
+view-e2e:
+	./scripts/view-e2e.sh
 
 ## clean: remove built binaries and the fetched model
 clean:

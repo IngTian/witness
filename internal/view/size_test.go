@@ -123,3 +123,12 @@ func TestBuildSizeAt75kNotes(t *testing.T) {
 		t.Errorf("snapshot JSON is %d bytes, over the 50 MiB witness view warns at", len(b))
 	}
 }
+
+// TestBuildNeverSetsE2EStart pins that Build never sets E2EStart; only the e2e test sets it.
+func TestBuildNeverSetsE2EStart(t *testing.T) {
+	in := &store.ViewInput{}
+	m := Build(in, nil, time.Now(), time.UTC)
+	if m.E2EStart != "" {
+		t.Errorf("Build set E2EStart = %q, want empty", m.E2EStart)
+	}
+}
