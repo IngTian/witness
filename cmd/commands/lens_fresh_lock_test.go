@@ -276,7 +276,7 @@ func TestLensBackfillUnfinishedNamesTheCauseAndBothRecoverySteps(t *testing.T) {
 		t.Fatal("a backfill that mined nothing must not succeed")
 	}
 	msg := err2.Error()
-	for _, want := range []string{"1 session still pending", "embedding model", "witness worker run --wait-backoffs", "witness worker review"} {
+	for _, want := range []string{"1 session still pending", "embed model not found", "witness worker run --wait-backoffs", "witness worker review"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("missing %q:\n%s", want, msg)
 		}
