@@ -66,11 +66,11 @@ func TestClaudeMCPRemoveIsBoundedAndStubbable(t *testing.T) {
 
 	// The timeout is real and sane: long enough not to abort a healthy CLI, short enough
 	// that a wedged one cannot hold the command open indefinitely.
-	if claudeMCPRemoveTimeout <= 0 {
-		t.Error("claudeMCPRemoveTimeout must be positive; an unbounded child is what leaked 366 orphans")
+	if claudeCLITimeout <= 0 {
+		t.Error("claudeCLITimeout must be positive; an unbounded child is what leaked 366 orphans")
 	}
-	if claudeMCPRemoveTimeout > 2*time.Minute {
-		t.Errorf("claudeMCPRemoveTimeout = %s is too long to be a liveness bound", claudeMCPRemoveTimeout)
+	if claudeCLITimeout > 2*time.Minute {
+		t.Errorf("claudeCLITimeout = %s is too long to be a liveness bound", claudeCLITimeout)
 	}
 
 	// And the PRODUCTION builder must actually honor a deadline.

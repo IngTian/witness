@@ -549,9 +549,9 @@ func cmdProvision(path string) error {
 	return nil
 }
 
-// cmdInstall wires witness into Claude Code or OpenCode. The target is required
-// (enforced by cobra ExactArgs) so install always binds the matching distillation
-// runtime into config.toml. Since #102 install is a pure MECHANISM — hooks/plugin + MCP
+// cmdInstall is `witness wire <editor>`. The target is required (enforced by cobra
+// ExactArgs) so wiring binds the matching distillation runtime into config.toml when
+// that editor can run a model (Codex cannot; see below). Since #102 wiring is a pure MECHANISM — hooks/plugin + MCP
 // + bind runner — and never prompts nor seeds content: the built-in default lens is
 // auto-seeded once by the first-open hook (which fires the moment bindRunner opens the
 // store) and is fully deletable. Keeping install prompt-free is what makes it safe to
@@ -730,7 +730,7 @@ func cmdInstallClaude() (wireOutcome, error) {
 
 	out := wireOutcome{glyph: okGlyph(), line: "wired — restart Claude Code (or open /hooks) to load the hooks", note: pullOnlyNote}
 	// Register the MCP server (idempotent: skip if already present). Both probes are
-	// bounded — see claudeMCPRemoveTimeout for why: an unbounded `claude` child hung
+	// bounded — see claudeCLITimeout for why: an unbounded `claude` child hung
 	// `witness wire` forever and orphaned itself to PID 1, unreapable.
 	if list, _ := claudeCLIOutput("mcp", "list"); mcpServerRegistered(list, "witness") {
 		fmt.Println(resultRow(okGlyph(), "MCP server", "witness", "already registered"))
@@ -759,7 +759,7 @@ func mcpAddFailure(err error) string {
 	case errors.Is(err, exec.ErrNotFound):
 		return "`claude` is not on PATH"
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Sprintf("`claude mcp add` did not finish within %s", claudeMCPRemoveTimeout)
+		return fmt.Sprintf("`claude mcp add` did not finish within %s", claudeCLITimeout)
 	case errors.As(err, &ee):
 		return fmt.Sprintf("`claude mcp add` exited %d", ee.ExitCode())
 	}
@@ -924,7 +924,7 @@ func cmdUninstallClaude() (removed bool, warning string, err error) {
 		fmt.Println(resultRow(warnGlyph(), "MCP server", "not checked", "`claude` is not on PATH"))
 		warning = "the MCP server was not checked"
 	case errors.Is(err, context.DeadlineExceeded):
-		fmt.Println(resultRow(warnGlyph(), "MCP server", "not removed", fmt.Sprintf("`claude mcp remove witness` did not finish within %s", claudeMCPRemoveTimeout)))
+		fmt.Println(resultRow(warnGlyph(), "MCP server", "not removed", fmt.Sprintf("`claude mcp remove witness` did not finish within %s", claudeCLITimeout)))
 		fmt.Println(subHint("by hand", "claude mcp remove witness"))
 		warning = "the MCP server may still be registered"
 	default: // claude ran and refused: the server is not registered
@@ -942,7 +942,7 @@ func jsonEqual(a, b []byte) bool {
 	return reflect.DeepEqual(x, y)
 }
 
-// claudeMCPRemoveTimeout bounds the `claude mcp remove` subprocess.
+// claudeCLITimeout bounds every `claude` subprocess wiring runs (`claude mcp list/add/remove`).
 //
 // This is not hypothetical caution. The call used to be a bare exec.Command(...).Run() with
 // no deadline and no way to kill the child, and I watched 366 of them accumulate on a real
@@ -953,7 +953,7 @@ func jsonEqual(a, b []byte) bool {
 //
 // CommandContext + a deadline makes the child killable, so the worst case is a bounded wait
 // and a best-effort skip rather than an unbounded pile of orphans.
-const claudeMCPRemoveTimeout = 20 * time.Second
+const claudeCLITimeout = 20 * time.Second
 
 // removeClaudeMCP is the seam that keeps `claude mcp remove` out of tests. Overridden in
 // tests so uninstall can be exercised without spawning the real CLI — which is exactly how
@@ -980,13 +980,13 @@ func claudeCLICommand(ctx context.Context, args ...string) *exec.Cmd {
 // overrun is reported as context.DeadlineExceeded so callers can distinguish "the CLI is
 // wedged" from "the CLI said no".
 func claudeCLIRun(args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), claudeMCPRemoveTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), claudeCLITimeout)
 	defer cancel()
 	cmd := claudeCLICommand(ctx, args...)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	err := cmd.Run()
 	if ctx.Err() != nil {
-		return fmt.Errorf("claude %s timed out after %s: %w", strings.Join(args, " "), claudeMCPRemoveTimeout, context.DeadlineExceeded)
+		return fmt.Errorf("claude %s timed out after %s: %w", strings.Join(args, " "), claudeCLITimeout, context.DeadlineExceeded)
 	}
 	return err
 }
@@ -995,11 +995,11 @@ func claudeCLIRun(args ...string) error {
 // timeout yields the empty string, which the caller treats as "not registered" — the
 // idempotent path then attempts an add, which is itself bounded and merely reports failure.
 func claudeCLIOutput(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), claudeMCPRemoveTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), claudeCLITimeout)
 	defer cancel()
 	out, err := claudeCLICommand(ctx, args...).CombinedOutput()
 	if ctx.Err() != nil {
-		return "", fmt.Errorf("claude %s timed out after %s: %w", strings.Join(args, " "), claudeMCPRemoveTimeout, context.DeadlineExceeded)
+		return "", fmt.Errorf("claude %s timed out after %s: %w", strings.Join(args, " "), claudeCLITimeout, context.DeadlineExceeded)
 	}
 	return string(out), err
 }
