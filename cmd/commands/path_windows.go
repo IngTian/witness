@@ -23,6 +23,10 @@ import (
 // with SetExpandStringValue (REG_EXPAND_SZ), so tokens like %SystemRoot% survive
 // verbatim. Best-effort and non-fatal: a failure here only means the user must
 // add dir to PATH manually; the hooks (absolute exe path) work regardless.
+//
+// Unix has no counterpart: its install points hooks at the in-repo shim by absolute path and
+// never relocates the binary, so there is nothing to add to PATH, and silently editing shell rc
+// files is exactly the surprise to avoid.
 func ensureOnUserPath(dir string) error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, "Environment", registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
