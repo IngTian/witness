@@ -59,6 +59,12 @@ type openedRunner struct {
 // earlier is not worth it. If per-lens models ever become common enough that a fail-at-Open check
 // pays for itself, StartOpenCodeServerIn already accepts variadic models — the plumbing is there.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
+	// Every model call opens through here (worker, review + emergent, compact + claims, profile
+	// regeneration), so this is the one place to refuse an archive a newer witness wrote — before
+	// a call is paid for, not at the facet write after it (see store.ErrArchiveNewer).
+	if err := st.ArchiveNewer(); err != nil {
+		return nil, err
+	}
 	rs := &runnerSet{cfg: cfg, byName: map[string]*openedRunner{}, defaultR: strings.TrimSpace(cfg.Runner)}
 
 	// Which runtimes are actually needed, and the model union per runtime.
