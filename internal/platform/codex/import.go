@@ -249,8 +249,12 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	return nil
 }
 
+// readOnlyURI opens a Codex history database read-only. It must go through
+// platform.SQLiteFileURI, never url.URL (issue #10 — see there); TestReadOnlyURIWindowsShape pins it.
+func readOnlyURI(path string) string { return platform.SQLiteFileURI(path, "mode=ro") }
+
 func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[string]bool, stats *platform.ImportStats, prog *progress) error {
-	db, err := sql.Open("sqlite", platform.SQLiteFileURI(path, "mode=ro"))
+	db, err := sql.Open("sqlite", readOnlyURI(path))
 	if err != nil {
 		return err
 	}

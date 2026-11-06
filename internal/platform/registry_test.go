@@ -92,7 +92,8 @@ func TestForSessionColumnOverridesPrefix(t *testing.T) {
 // RenderInputs and Import are optional capabilities. A platform without them — every shipped one
 // for RenderInputs, the hook-fed Claude for Import — shapes by the shared RenderChunks under the
 // same policy (#57: chunking is decided by the policy, never by the source) and imports nothing.
-// proof_test.go covers the other branch: a platform's own RenderInputs wins.
+// The other branch — a platform's own RenderInputs wins — is pinned by proof_test.go, whose
+// fake runner rejects any input the fake platform did not render.
 func TestOptionalCapabilitiesFallBack(t *testing.T) {
 	cc, _ := platform.ByName("claude")
 	long := []store.RawRecord{

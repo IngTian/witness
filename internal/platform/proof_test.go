@@ -11,6 +11,7 @@ package platform_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +60,9 @@ func (fakePlatform) Capture(st store.CaptureStore, data []byte, now time.Time) e
 }
 
 // NewRunner: the fake engine returns a canned observation array, proving RunnerFor
-// resolves a 3rd runner and the real Worker mines through it.
+// resolves a 3rd runner and the real Worker mines through it. It refuses any input the
+// fake's own RenderInputs did not shape, so the mine in step 4 succeeding proves
+// RenderInputsFor dispatched to the platform's InputRenderer, not the RenderChunks fallback.
 func (fakePlatform) NewRunner(store.Config) platform.Runner { return fakeRunner{} }
 
 type fakeRunner struct{}
@@ -68,7 +71,10 @@ func (fakeRunner) Open(context.Context) error                      { return nil 
 func (fakeRunner) Close() error                                    { return nil }
 func (fakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (fakeRunner) InvocationHint() string                          { return "fake-run" }
-func (fakeRunner) Run(_ context.Context, _, _, _ string) (string, error) {
+func (fakeRunner) Run(_ context.Context, _, _, input string) (string, error) {
+	if !strings.HasPrefix(input, "FAKE-RENDER\n") {
+		return "", fmt.Errorf("input was not shaped by the fake's RenderInputs: %q", input)
+	}
 	return `[{"dimension":"thinking","observation":"the fake platform was mined by the real engine","evidence":"proof","poignancy":5}]`, nil
 }
 
@@ -147,8 +153,8 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 		t.Fatalf("real engine did not produce L1 for the fake platform: %+v", obs)
 	}
 
-	// 5. The fake's OWN RenderInputs shaping was used (not a Claude/OpenCode default):
-	// the observation came from a transcript the fake rendered. (Indirect: the mine
-	// succeeded end to end through the fake's renderer + runner.)
+	// 5. The fake's OWN RenderInputs shaping was used, not the RenderChunks fallback:
+	// fakeRunner.Run errors on any input without the FAKE-RENDER header, so step 4's
+	// L1 row exists only if RenderInputsFor took the InputRenderer branch.
 	t.Logf("proof complete: L0→L1 for platform %q with zero engine edits", "fake")
 }

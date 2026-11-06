@@ -217,6 +217,21 @@ func TestCommitRetryAndErrors(t *testing.T) {
 	}
 }
 
+// url.URL percent-encodes '#', space and CJK, which SQLite decodes, so the hostile-home case in
+// TestHomeAndReadOnlyURI passes even with the pre-#10 url.URL builder. That shape breaks only on
+// a Windows path (drive letter as authority, %5C), so this is what pins Codex to the shared
+// builder on a non-Windows CI.
+func TestReadOnlyURIWindowsShape(t *testing.T) {
+	const p = `C:\x\y.sqlite`
+	got := readOnlyURI(p)
+	if want := platform.SQLiteFileURI(p, "mode=ro"); got != want {
+		t.Errorf("readOnlyURI diverged from platform.SQLiteFileURI: %s vs %s", got, want)
+	}
+	if strings.Contains(got, "%5C") || strings.HasPrefix(got, "file://") {
+		t.Errorf("regressed to the broken Windows shape: %s", got)
+	}
+}
+
 func TestHomeAndReadOnlyURI(t *testing.T) {
 	a, b := t.TempDir(), t.TempDir()
 	t.Setenv("CODEX_HOME", a)
