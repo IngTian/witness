@@ -138,11 +138,57 @@ type Evidence struct {
 	Note     string `json:"note"`
 }
 
-// Portrait and PortraitFile are placeholders filled by Task 5.
-type Portrait struct{}
+// PortraitFile is one portrait as the command found it on disk, with its stored sources. Build
+// never reads a file or the database itself: the caller gathers these, so Build stays pure.
+type PortraitFile struct {
+	ID        string                // store.ProfileUnified or a lens name
+	Markdown  string                // the file, byte for byte
+	Written   time.Time             // file mtime
+	Stale     bool                  // Summarizer.Stale: `witness profile` would rewrite it
+	Sources   store.PortraitSources // CurrentPortraitSources (merges followed, retired dropped)
+	SourcesOK bool                  // false: no sources for this exact text
+}
 
-// PortraitFile is filled by Task 5. Build accepts a slice of them.
-type PortraitFile struct{}
+// Portrait is one portrait as the reading column draws it. Sentence numbers (Sentence.N, the
+// index into Links, Keyword.Sentences) are distill.SplitSentences' numbering of the whole
+// file — the numbering the stored links were written against.
+type Portrait struct {
+	ID       string    `json:"id"`
+	Kind     string    `json:"kind"`    // "overall" (unified) | "notebook" | "other" (a corpus notebook)
+	Title    string    `json:"title"`   // overall: text of its first heading; else the lens name
+	Written  string    `json:"written"` // YYYY-MM-DD (loc) of the file mtime
+	Stale    bool      `json:"stale"`
+	Sources  bool      `json:"sources"`  // false → "Sources for this portrait aren't recorded yet."
+	Blocks   []Block   `json:"blocks"`   // in file order
+	Links    [][]int   `json:"links"`    // one per sentence: ≤3 active trait ids, direct first
+	Keywords []Keyword `json:"keywords"` // ≤8; [] without sources
+}
+
+// Block is a heading, a paragraph or a list item. Only headings carry Text; the other two
+// carry their sentences, so every word of them is clickable.
+type Block struct {
+	Kind      string     `json:"kind"`      // "h" | "p" | "li"
+	Text      string     `json:"text"`      // headings only
+	Sentences []Sentence `json:"sentences"` // p / li
+}
+
+// Sentence is one sentence, split into runs so bold lead sentences stay bold.
+type Sentence struct {
+	N    int   `json:"n"` // global sentence number
+	Runs []Run `json:"runs"`
+}
+
+// Run is a stretch of a sentence that is all bold or all plain.
+type Run struct {
+	Text string `json:"t"`
+	Bold bool   `json:"b"`
+}
+
+// Keyword is a chip: clicking it highlights these sentence numbers.
+type Keyword struct {
+	Word      string `json:"word"`
+	Sentences []int  `json:"sentences"`
+}
 
 // Build constructs a complete Model from store.ViewInput, computing all activity metrics,
 // notebooks, traits and portraits. The snapshot is timestamped at `now` and bucketed by `loc`.
@@ -154,6 +200,6 @@ func Build(in *store.ViewInput, portraits []PortraitFile, now time.Time, loc *ti
 		Activity:  buildActivity(in, now, loc, tally),
 		Notebooks: notebooks,
 		Traits:    traits,
-		Portraits: []Portrait{},
+		Portraits: buildPortraits(portraits, notebooks, traits, loc),
 	}
 }
