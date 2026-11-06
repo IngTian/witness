@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	// Register every platform with the registry (issue #21). These blank imports
@@ -27,13 +28,56 @@ const (
 	groupAdmin  = "admin"
 )
 
-// Build-time variables, injected via -ldflags by the Makefile (and install.sh).
-// Defaults render a runnable `go build` without ldflags as "dev".
+// Build-time variables, injected via -ldflags by the Makefile. install.sh, `go build` and
+// `go install` pass none, so init fills them from the VCS stamp Go writes into every build;
+// they stay "dev" only when there is nothing to read (`go test`, a build outside a checkout).
 var (
 	version   = "dev"
 	commit    = "none"
 	buildTime = "unknown"
 )
+
+// Kept to the bare call: every decision lives in stamp, where a test can fail on it.
+func init() {
+	bi, ok := debug.ReadBuildInfo()
+	version, commit, buildTime = stamp(version, commit, buildTime, bi, ok)
+}
+
+// stamp fills the build variables from the VCS stamp Go writes into a plain build: the version
+// Go derives from the tag/commit (already "+dirty" when the tree was), the short revision, and
+// vcs.time — the COMMIT time, not the build time, but the closest thing a plain build records
+// and enough to tell two binaries apart.
+//
+// A version other than "dev" means ldflags ran, and a release build must say exactly what the
+// Makefile stamped, so it passes through untouched. Otherwise a field changes only when the
+// stamp has a value for it: a Makefile build outside a checkout stamps "dev"/"none" but a REAL
+// buildTime, which a missing vcs.time must not reset to "unknown".
+func stamp(v, c, at string, bi *debug.BuildInfo, ok bool) (string, string, string) {
+	if v != "dev" || !ok {
+		return v, c, at
+	}
+	if mv := bi.Main.Version; mv != "" && mv != "(devel)" {
+		v = mv
+	}
+	rev, dirty := "", false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value[:min(7, len(s.Value))]
+		case "vcs.time":
+			at = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if rev != "" {
+		c = rev
+		if dirty {
+			c += "+dirty"
+		}
+	}
+	return v, c, at
+}
 
 // Run is the CLI entry point used by cmd/witness/main.go. It owns the recursion
 // guard (never act inside a witness-driven agent subprocess), cobra execution,

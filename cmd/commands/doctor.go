@@ -10,6 +10,7 @@ import (
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -48,6 +49,10 @@ func cmdDoctor(asJSON bool) error {
 	// when/lens so the count reads as dated rather than "broken forever".
 	driftTotal := st.DriftTotal()
 	driftLastTS, driftLastLens := st.DriftLast()
+	// Both schema versions: every distillation entry point refuses an archive a newer witness
+	// wrote (store.ErrArchiveNewer), and this is where a stale binary shows itself.
+	archiveSchema, binarySchema := st.SchemaVersions()
+	newerErr := st.ArchiveNewer()
 
 	// Resolve the runner once; doctor asks IT how it runs and whether its models are
 	// valid — no branching on the runner name. runnerCmd is the runner's own
@@ -107,6 +112,11 @@ func cmdDoctor(asJSON bool) error {
 		enUnrelated = embed.Cosine(en, un)
 	}
 
+	// A newer archive wins the exit error: whatever else is wrong, this binary will not distill it.
+	if newerErr != nil {
+		deferredErr = newerErr
+	}
+
 	lastReview := stat.LastReview
 	if lastReview == "" {
 		lastReview = "never"
@@ -139,6 +149,8 @@ func cmdDoctor(asJSON bool) error {
 				DriftLast:       driftLastTS,
 				DriftLastLens:   driftLastLens,
 				LastReview:      lastReview,
+				Schema:          archiveSchema,
+				BinarySchema:    binarySchema,
 			},
 			Embedder: doctorEmbedderJSON{
 				Status:      embedderStatus,
@@ -189,7 +201,7 @@ func cmdDoctor(asJSON bool) error {
 	}
 	fix := func(label, command string) { fmt.Println("  " + hint(label, command)) }
 	// Lenses are named by what the user registered them as; the stats key on the mined name.
-	shown := func(mined string) string { return lensRegisteredName(st, mined) }
+	shown := func(mined string) string { return lens.RegisteredName(st, mined) }
 
 	// Runner block. This is the DEFAULT runner: one process distills every session
 	// regardless of source (Claude Code and OpenCode both feed the same L0), and it
@@ -256,6 +268,12 @@ func cmdDoctor(asJSON bool) error {
 	row("layers", fmt.Sprintf("%s · %s raw messages · %s · %s",
 		countOf(stat.Sessions, "session", "sessions"), humanCount(stat.RawRecords),
 		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")), "")
+	row("schema", fmt.Sprintf("v%d", archiveSchema), fmt.Sprintf("this binary writes v%d", binarySchema))
+	if newerErr != nil {
+		warn("written by a newer witness — distillation is refused")
+		because("capture keeps working; worker, review, compact and backfill refuse until witness is upgraded, " +
+			"so this binary cannot rewrite what the newer schema added")
+	}
 	if stat.Sessions == 0 {
 		warn("nothing captured yet — no editor is feeding this archive")
 		fix("wire editor", wireCommand())
@@ -405,6 +423,8 @@ type doctorArchiveJSON struct {
 	DriftLast       string `json:"drift_last,omitempty"`
 	DriftLastLens   string `json:"drift_last_lens,omitempty"`
 	LastReview      string `json:"last_review"`
+	Schema          int    `json:"schema_version"`        // the archive's PRAGMA user_version (-1 = unreadable)
+	BinarySchema    int    `json:"binary_schema_version"` // the schema this binary writes
 }
 
 type doctorEmbedderJSON struct {

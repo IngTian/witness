@@ -66,8 +66,8 @@ func TestReviewProgressCountsEveryWindow(t *testing.T) {
 	}
 }
 
-// The long-arc pass reports clustering (the band of k values, minutes of CPU each on a real lens)
-// and then its verify calls, each with a total known before the first step.
+// The long-arc pass reports clustering (ranking each observation's neighbours, minutes of CPU on a
+// real lens) and then its verify calls, each with a total known before the first step.
 func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 	s := newStore(t)
 	// Three arcs, so a budget of 1 leaves arcs unverified: a total that grew on a SUCCESS (not only
@@ -76,7 +76,7 @@ func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 	seedArc(t, s, "b", 6, []float32{0, 1, 0})
 	seedArc(t, s, "c", 6, []float32{0, 0, 1})
 	obs, _ := s.ReadObservations("math")
-	band := len(kBand(len(obs)))
+	ranked := len(obs) // every seeded observation is embedded, so each one is ranked
 
 	run := func(maxVerify, failOn int) (evs []Progress, calls int) {
 		r := emergentReviewer(s, func(context.Context, string, string, string) (string, error) {
@@ -115,12 +115,12 @@ func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 	// call follows, and the total must grow to meet it rather than stall at 1/1 or end at 2/1.
 	evs, calls := run(1, 1)
 	cl, vf := split(evs)
-	if len(cl) != band+1 {
-		t.Fatalf("want one clustering event per k plus the start (%d), got %d", band+1, len(cl))
+	if len(cl) != ranked+1 {
+		t.Fatalf("want one clustering event per ranked observation plus the start (%d), got %d", ranked+1, len(cl))
 	}
 	for i, e := range cl {
 		c, v := stage(t, e, "clustering"), stage(t, e, "verifying arcs")
-		if c.Done != i || c.Total != band || !v.Open || v.Total != 0 {
+		if c.Done != i || c.Total != ranked || !v.Open || v.Total != 0 {
 			t.Fatalf("clustering event %d: %+v / %+v", i, c, v)
 		}
 	}

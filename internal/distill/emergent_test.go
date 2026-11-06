@@ -1,10 +1,14 @@
 package distill
 
 import (
+	"fmt"
+	"maps"
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/IngTian/witness/internal/store"
+	"github.com/IngTian/witness/internal/vector"
 )
 
 // Candidates() is the pure S3 hypothesis engine (issue #16 long-arc retrieval): given
@@ -154,5 +158,67 @@ func TestCandidatesSalienceRanksUncoveredFirst(t *testing.T) {
 	}
 	if cands[0].BestFacetCoverage > 0.5 {
 		t.Fatalf("top candidate should be the uncovered arc (cov~0), got %.2f", cands[0].BestFacetCoverage)
+	}
+}
+
+// clusteredObs is n seeded observations around a few random centres: 1 in 4 copies an earlier
+// row's embedding exactly (a cosine tie), 1 in 15 is unembedded, 1 in 15 is on another lens.
+func clusteredObs(n int, seed uint64) []store.Observation {
+	rng := rand.New(rand.NewPCG(seed, uint64(n)))
+	const d = 12
+	centers := make([][]float32, 2+rng.IntN(8))
+	for c := range centers {
+		centers[c] = make([]float32, d)
+		for x := range centers[c] {
+			centers[c][x] = float32(rng.NormFloat64())
+		}
+	}
+	obs := make([]store.Observation, 0, n)
+	for i := range n {
+		c, spread := centers[rng.IntN(len(centers))], 0.05+0.6*rng.Float64()
+		v := make([]float32, d)
+		for x := range v {
+			v[x] = c[x] + float32(spread*rng.NormFloat64())
+		}
+		o := dirObs(fmt.Sprintf("o%04d", i), fmt.Sprintf("s%d", rng.IntN(30)), v)
+		if i > 0 && rng.IntN(4) == 0 {
+			o.Embedding = obs[rng.IntN(i)].Embedding
+		}
+		switch rng.IntN(15) {
+		case 0:
+			o.Embedding = nil
+		case 1:
+			o.Lens = "other"
+		}
+		obs = append(obs, o)
+	}
+	return obs
+}
+
+// TestBandTogetherMatchesPerKReference pins bandTogether — one ranking for the band's top k, each
+// k read off a prefix — to the loop it replaced: a fresh MutualKNNAdj per k. The vector test
+// proves MutualAt == MutualKNNAdj for any k <= kMax; this proves the band asks for the right
+// kMax (MutualAt clamps, so a short one would silently give every larger k a smaller graph).
+func TestBandTogetherMatchesPerKReference(t *testing.T) {
+	for _, n := range []int{3, 5, 17, 60, 250} {
+		for seed := uint64(1); seed <= 4; seed++ {
+			obs := clusteredObs(n, seed)
+			band, idx := kBand(len(obs)), indexObs(obs, "math")
+			want := make(map[int64]int)
+			for _, k := range band {
+				nodes, adj := vector.MutualKNNAdj(obs, "math", k)
+				for _, cc := range vector.ConnectedComponents(adj) {
+					for a := range cc {
+						for b := a + 1; b < len(cc); b++ {
+							want[pairKey(idx.byID[nodes[cc[a]].ID], idx.byID[nodes[cc[b]].ID])]++
+						}
+					}
+				}
+			}
+			if got := bandTogether(obs, "math", band, idx, nil); !maps.Equal(got, want) {
+				t.Fatalf("n=%d seed=%d band=%v: %d pairs counted, per-k MutualKNNAdj counts %d (or the counts differ)",
+					n, seed, band, len(got), len(want))
+			}
+		}
 	}
 }
