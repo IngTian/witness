@@ -365,21 +365,11 @@ func pairKey(a, b int) int64 {
 }
 func unpairKey(k int64) (int, int) { return int(k >> 32), int(uint32(k)) }
 
-// signature is the order-independent identity of a component: its sorted member ids.
-func signature(members []store.Observation) string {
-	ids := memberIDs(members)
-	s := ""
-	for _, id := range ids {
-		s += id + "\x00"
-	}
-	return s
-}
-
 func dedupArcs(arcs []CandidateArc) []CandidateArc {
 	seen := map[string]bool{}
 	var out []CandidateArc
 	for _, a := range arcs {
-		sig := signature(a.Members)
+		sig := arcSignature("", a.Members) // one lens's candidates, so no namespace needed
 		if seen[sig] {
 			continue
 		}
@@ -425,12 +415,7 @@ type EmergentReviewer struct {
 }
 
 func (r *EmergentReviewer) runnerFor(ln *lens.Lens) MineFunc {
-	if r.RunnerFor != nil {
-		if fn := r.RunnerFor(ln); fn != nil {
-			return fn
-		}
-	}
-	return r.Runner
+	return resolveRunner(r.RunnerFor, ln, r.Runner)
 }
 
 // RunFull runs the emergent pass over every lens. Errors from one lens/candidate are
