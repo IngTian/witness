@@ -61,43 +61,44 @@ var ErrTruncatedJSONArray = errors.New("reply began a JSON array but never close
 // in a personal growth archive, the worst failure mode this tool has. A model's genuine
 // answer always FOLLOWS anything it echoes, so last-wins is the correct tiebreak; for a
 // well-behaved single-array reply the two are identical.
+//
+// Last-wins alone cannot see an answer that never closed: a reply that echoes the example and is
+// then cut off mid-array has the EXAMPLE as its last complete array. So a winner is returned only
+// if no unclosed array opening an element follows it in the reply (truncatedArray on the rest);
+// otherwise the reply is ErrTruncatedJSONArray. The check is skipped when the winner came only from
+// a fenced block, whose offsets are not the reply's.
 func ParseJSONArray[T any](reply string) ([]T, error) {
 	candidates := append(fencedBlocks(reply), reply)
+	whole := len(candidates) - 1 // the whole reply is always the last candidate
 	sawEmpty := false
-	// Tier 1: top-level arrays only (the strict, correct shape).
-	var best []T
-	found := false
-	for _, c := range candidates {
-		for _, span := range arraySpans(c) {
-			if !span.topLevel {
-				continue
-			}
-			if arr, ok, empty := decodeArray[T](span.text); ok {
-				if !empty {
-					best, found = arr, true // keep scanning: later wins
-				} else if !markdownCheckbox(c, span.start) {
-					sawEmpty = true
+	// Tier 1: top-level arrays only (the strict, correct shape). Tier 2: any array at any depth
+	// (object-wrapped result fallback), only if tier 1 found nothing.
+	for _, topOnly := range []bool{true, false} {
+		var best []T
+		found, bestEnd := false, -1 // bestEnd: where the winner ends in the WHOLE reply, -1 if fenced only
+		for ci, c := range candidates {
+			for _, span := range arraySpans(c) {
+				if topOnly && !span.topLevel {
+					continue
+				}
+				if arr, ok, empty := decodeArray[T](span.text); ok {
+					if !empty {
+						best, found, bestEnd = arr, true, -1 // keep scanning: later wins
+						if ci == whole {
+							bestEnd = span.start + len(span.text)
+						}
+					} else if !markdownCheckbox(c, span.start) {
+						sawEmpty = true
+					}
 				}
 			}
 		}
-	}
-	if found {
-		return best, nil
-	}
-	// Tier 2: any array at any depth (object-wrapped result fallback).
-	for _, c := range candidates {
-		for _, span := range arraySpans(c) {
-			if arr, ok, empty := decodeArray[T](span.text); ok {
-				if !empty {
-					best, found = arr, true
-				} else if !markdownCheckbox(c, span.start) {
-					sawEmpty = true
-				}
+		if found {
+			if bestEnd >= 0 && truncatedArray(reply[bestEnd:]) {
+				return nil, ErrTruncatedJSONArray
 			}
+			return best, nil
 		}
-	}
-	if found {
-		return best, nil
 	}
 	// No usable array. Before treating this as either a quiet session or drift — BOTH of which
 	// advance the watermark — check whether the reply was cut off mid-array. That is a retryable
@@ -129,10 +130,12 @@ func ParseJSONArray[T any](reply string) ([]T, error) {
 //
 //   - the '[' must be unbalanced (matchBracket finds no closing ']'), so any complete array
 //     anywhere in the reply is unaffected;
-//   - the text after it must contain '{' or '"' — evidence of a real element in progress.
-//     This is what keeps prose out: a markdown checkbox ("- [ ] todo"), an unmatched
-//     bracket in a sentence, or "[the user]" mid-paragraph has no such element and stays
-//     ErrNoJSONArray, i.e. drift.
+//   - its next non-space character must be '{' or '"' — an element in progress. This is what
+//     keeps prose out: a markdown checkbox ("- [ ] todo"), an unmatched bracket in a sentence,
+//     or `[the "x" message` has no such element and stays ErrNoJSONArray, i.e. drift. (It was
+//     "a '{' or '"' anywhere after it", which read `[the "x" message` as truncation; after a
+//     complete array — see ParseJSONArray — that would stall review on trailing prose.) A '['
+//     that fails this guard is skipped, not decisive, so a real cut-off array later still counts.
 //
 // String literals are respected via the same scan arraySpans uses, so a '[' inside a quoted
 // string is not mistaken for the start of an array.
@@ -159,8 +162,10 @@ func truncatedArray(s string) bool {
 				i = end // balanced: skip it whole, it is not the truncation
 				continue
 			}
-			// Unclosed. Only truncation if something element-like follows.
-			return strings.ContainsAny(s[i+1:], `{"`)
+			// Unclosed. Only truncation if an element opens right after it.
+			if rest := strings.TrimLeft(s[i+1:], " \t\r\n"); rest != "" && (rest[0] == '{' || rest[0] == '"') {
+				return true
+			}
 		}
 	}
 	return false
