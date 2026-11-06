@@ -9,11 +9,14 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
+// SessionPrefix namespaces Codex sessions in L0. The ONE spelling: the importer builds every id from it.
+const SessionPrefix = "codex:"
+
 type Platform struct{}
 
 func init()                            { platform.Register(Platform{}) }
 func (Platform) Name() string          { return "codex" }
-func (Platform) SessionPrefix() string { return "codex:" }
+func (Platform) SessionPrefix() string { return SessionPrefix }
 func (Platform) RenderInputs(raw []store.RawRecord, policy platform.ChunkPolicy) []string {
 	return platform.RenderChunks(raw, policy)
 }
