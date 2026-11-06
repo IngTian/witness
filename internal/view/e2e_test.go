@@ -28,8 +28,8 @@ func TestWriteE2EFixtures(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, loc)
 
 	// Hostile text from Review Focus 2: </script>, HTML comment, bold, ampersand, Chinese,
-	// U+2028 (line separator), U+2029 (paragraph separator).
-	hostile := "</script></SCRIPT><!--<b>& 中文  "
+	// U+2028 (line separator), U+2029 (paragraph separator), plus a unique probe tag.
+	hostile := "</script></SCRIPT><!--<b>& 中文  <witness-probe>"
 
 	// full.html: a synthetic archive with every feature.
 	fullIn := &store.ViewInput{
@@ -80,6 +80,12 @@ func TestWriteE2EFixtures(t *testing.T) {
 					{Value: "Corpus trait.", Claim: "A recurring theme.", ValidFrom: "2026-10-15T14:00:00Z", BecauseOf: []string{"n4", "n6"}, Confidence: 0.75, ConfidenceSeq: 1800},
 				},
 			},
+			{
+				Lens: "default", Dimension: "workstyle", Key: "no_summary_trait", LastSeen: "2026-11-01T09:00:00Z",
+				Versions: []store.FacetVersion{
+					{Value: "A trait with no summary.", Claim: "", ValidFrom: "2026-11-01T09:00:00Z", BecauseOf: []string{"n5"}, Confidence: 0.7, ConfidenceSeq: 1900},
+				},
+			},
 		},
 		Log: []store.ConfidenceEvent{
 			{Lens: "default", Dimension: "habits", Key: "asks_direct_questions", At: "2026-10-20T12:00:00Z", From: 0.9, To: 0.85, Kind: "review"},
@@ -127,6 +133,14 @@ func TestWriteE2EFixtures(t *testing.T) {
 				},
 			},
 			SourcesOK: true,
+		},
+		{
+			ID:        "default",
+			Markdown:  "# Default Notebook\n\nA portrait without sources.",
+			Written:   now,
+			Stale:     false,
+			Sources:   store.PortraitSources{},
+			SourcesOK: false,
 		},
 	}
 

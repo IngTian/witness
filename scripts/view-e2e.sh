@@ -50,9 +50,11 @@ check_file() {
 
   echo "Checking $file..."
 
-  # Create temp user-data-dir for this run.
-  local profile
-  profile=$(mktemp -d)
+  # Create temp user-data-dir for this run under $tmpdir so EXIT trap cleans it.
+  local name
+  name=$(basename "$file" .html)
+  local profile="$tmpdir/profile-$name"
+  mkdir -p "$profile"
 
   # Run Chrome headless and capture stdout (DOM) and stderr separately.
   local dom
@@ -64,7 +66,6 @@ check_file() {
     echo "Chrome failed for $file"
     cat "$stderr_file"
     rm -f "$stderr_file"
-    rm -rf "$profile"
     exit 1
   }
 
@@ -73,7 +74,6 @@ check_file() {
     echo "FAIL: $file has Uncaught error in stderr:"
     grep "Uncaught" "$stderr_file"
     rm -f "$stderr_file"
-    rm -rf "$profile"
     exit 1
   fi
   rm -f "$stderr_file"
@@ -86,23 +86,26 @@ check_file() {
     fi
   done
 
-  # For hostile.html, verify escaping: the data must NOT contain a real <b> element from the
-  # hostile text (it must be escaped as &lt;b&gt;), but the DOM SHOULD contain the escaped text.
+  # For hostile.html, verify escaping using the unique <witness-probe> tag. The whole DOM must
+  # NOT contain a real <witness-probe element (JSON holds escaped <, so no literal can appear),
+  # but must contain at least one &lt;witness-probe&gt; (proving the text was rendered as text).
   if [ "$file" = "hostile.html" ]; then
-    # The hostile text includes <b>, which should be escaped. Check the JSON data script does NOT
-    # contain a real <b> element (other than in escaped form).
-    if echo "$dom" | grep -A9999 '<script type="application/json"' | grep -B9999 '</script>' | grep -q '<b>'; then
-      echo "FAIL: hostile.html contains unescaped <b> in data"
+    # Capture grep results explicitly so failures under `set -e` don't pass silently.
+    local probe_element_count
+    local probe_escaped_count
+    probe_element_count=$(echo "$dom" | grep -c '<witness-probe' || true)
+    probe_escaped_count=$(echo "$dom" | grep -c '&lt;witness-probe&gt;' || true)
+
+    if [ "$probe_element_count" -ne 0 ]; then
+      echo "FAIL: hostile.html contains $probe_element_count real <witness-probe element(s)"
       exit 1
     fi
-    # The DOM should contain the escaped form.
-    if ! echo "$dom" | grep -q '&lt;b&gt;'; then
-      echo "FAIL: hostile.html missing escaped &lt;b&gt; in data"
+    if [ "$probe_escaped_count" -eq 0 ]; then
+      echo "FAIL: hostile.html missing escaped &lt;witness-probe&gt;"
       exit 1
     fi
   fi
 
-  rm -rf "$profile"
   echo "  ✓ $file"
 }
 
@@ -117,11 +120,11 @@ if [ -n "${SHOTS:-}" ]; then
   echo "Taking screenshots to $SHOTS..."
   mkdir -p "$SHOTS"
   for page in full full-changed; do
-    profile=$(mktemp -d)
+    profile="$tmpdir/profile-screenshot-$page"
+    mkdir -p "$profile"
     "$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check \
       --user-data-dir="$profile" --force-prefers-reduced-motion --virtual-time-budget=3000 \
       --screenshot="$SHOTS/$page.png" --window-size=1440,1000 "file://$tmpdir/$page.html" >/dev/null 2>&1 || true
-    rm -rf "$profile"
     echo "  wrote $SHOTS/$page.png"
   done
 fi
