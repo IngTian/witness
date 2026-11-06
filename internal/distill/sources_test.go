@@ -45,7 +45,7 @@ func TestResolveSourcesWritesLinks(t *testing.T) {
 	sm := &Summarizer{
 		Store:         s,
 		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:        []*lens.Lens{{Name: "default"}},
 		ResolvePrompt: "RESOLVE",
 		Run:           fakeResolve,
 	}
@@ -133,7 +133,7 @@ func TestResolveSourcesLeavesSummaryByteIdentical(t *testing.T) {
 	sm1 := &Summarizer{
 		Store:         s1,
 		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:        []*lens.Lens{{Name: "default"}},
 		LensPrompt:    "LENS",
 		UnifiedPrompt: "UNIFIED",
 		Run:           fake1,
@@ -158,7 +158,7 @@ func TestResolveSourcesLeavesSummaryByteIdentical(t *testing.T) {
 	sm2 := &Summarizer{
 		Store:         s2,
 		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:        []*lens.Lens{{Name: "default"}},
 		LensPrompt:    "LENS",
 		UnifiedPrompt: "UNIFIED",
 		ResolvePrompt: "RESOLVE",
@@ -224,7 +224,7 @@ func TestResolveSourcesFailureIsIsolated(t *testing.T) {
 	sm := &Summarizer{
 		Store:         s,
 		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:        []*lens.Lens{{Name: "default"}},
 		ResolvePrompt: "RESOLVE",
 		Run:           fakeResolve,
 	}
@@ -290,7 +290,7 @@ func TestResolveSourcesIgnoresUnparseableReply(t *testing.T) {
 			sm := &Summarizer{
 				Store:         st,
 				Config:        store.Config{},
-				Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}},
+				Lenses:        []*lens.Lens{{Name: "default"}},
 				ResolvePrompt: "RESOLVE",
 				Run:           fakeResolve,
 			}
@@ -426,7 +426,7 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 	sm := &Summarizer{
 		Store:         s,
 		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		Lenses:        []*lens.Lens{{Name: "default"}, {Name: "math"}},
 		ResolvePrompt: "RESOLVE",
 		Run:           fakeResolve,
 	}
@@ -553,7 +553,7 @@ func TestResolveSourcesSelfHeals(t *testing.T) {
 	sm := &Summarizer{
 		Store:         s,
 		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		Lenses:        []*lens.Lens{{Name: "default"}, {Name: "math"}},
 		ResolvePrompt: "RESOLVE",
 		Run:           fakeResolve,
 	}
@@ -647,7 +647,7 @@ func TestResolveSourcesUsesPerLensRunner(t *testing.T) {
 	sm := &Summarizer{
 		Store:         s,
 		Config:        store.Config{Runner: "claude", DistillModel: "sonnet"},
-		Lenses:        []*lens.Lens{{Name: "default", BuiltIn: true}, mathLens},
+		Lenses:        []*lens.Lens{{Name: "default"}, mathLens},
 		ResolvePrompt: "RESOLVE",
 		Run:           defaultRunner,
 		RunFor: func(ln *lens.Lens) SummarizeFunc {
@@ -700,7 +700,7 @@ func TestResolveSourcesOffWithoutPrompt(t *testing.T) {
 	sm := &Summarizer{
 		Store:  s,
 		Config: store.Config{},
-		Lenses: []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses: []*lens.Lens{{Name: "default"}},
 		// ResolvePrompt is empty, feature is off.
 		Run: fakeResolve,
 	}
@@ -751,7 +751,7 @@ func TestResolveUnifiedInheritsNotebookLinks(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:               []*lens.Lens{{Name: "default"}},
 		ResolvePrompt:        "RESOLVE",
 		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
 		Run:                  fakeResolve,
@@ -823,7 +823,7 @@ func TestResolveUnifiedWeakensPartialRefs(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:               []*lens.Lens{{Name: "default"}},
 		ResolvePrompt:        "RESOLVE",
 		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
 		Run:                  fakeResolve,
@@ -884,7 +884,7 @@ func TestResolveUnifiedReResolvesWhenANotebookChanges(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:               []*lens.Lens{{Name: "default"}},
 		ResolvePrompt:        "RESOLVE",
 		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
 		Run:                  fakeResolve,
@@ -975,7 +975,7 @@ func TestResolveUnifiedSkipsMissingNotebooks(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
 		ResolvePrompt:        "RESOLVE",
 		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
 		Run:                  successfulResolve,
@@ -1063,7 +1063,7 @@ func TestResolveUnifiedLoopGuard(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
 		ResolvePrompt:        "RESOLVE",
 		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
 		Run:                  successfulResolve,
@@ -1122,7 +1122,7 @@ func TestResolveUnifiedSkipsWhenNoNotebookHasSources(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
 		ResolvePrompt:        "RESOLVE",
 		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
 		Run:                  fakeResolve,
@@ -1192,7 +1192,7 @@ func TestResolveUnifiedSkipsWhenAllNotebookResolversFail(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}, {Name: "math"}},
+		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
 		ResolvePrompt:        "RESOLVE",
 		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
 		Run:                  failingResolve,
@@ -1253,7 +1253,7 @@ func TestSummarizeNeverCallsResolver(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default", BuiltIn: true}},
+		Lenses:               []*lens.Lens{{Name: "default"}},
 		LensPrompt:           "LENS",
 		UnifiedPrompt:        "UNIFIED",
 		ResolvePrompt:        "RESOLVE",

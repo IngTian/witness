@@ -17,31 +17,11 @@ var testOptions = Options{Version: "v0.0.0-fake", Wire: "witness wire <a|b>"}
 // callText drives one tool over the in-memory transport and returns its text content.
 func callText(t *testing.T, fake *fakeMCPStore, opts Options, tool string, args map[string]any) string {
 	t.Helper()
-	ctx := context.Background()
-	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, opts).Connect(ctx, serverT, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	defer ss.Close()
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil)
-	cs, err := client.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	defer cs.Close()
-
-	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: tool, Arguments: args})
+	res, err := connect(t, fake, opts).CallTool(context.Background(), &mcpsdk.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
 		t.Fatalf("call %s: %v", tool, err)
 	}
-	var b strings.Builder
-	for _, c := range res.Content {
-		if tc, ok := c.(*mcpsdk.TextContent); ok {
-			b.WriteString(tc.Text)
-		}
-	}
-	return b.String()
+	return resultText(res)
 }
 
 // An empty answer must name the layer that is actually missing. Before #166 every empty

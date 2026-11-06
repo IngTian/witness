@@ -156,19 +156,16 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 		path, registered = resolved, true
 	}
 
-	// Load the candidate. Strict first; on a reserved-name collision fall back to the
-	// lenient loader (preview never writes, so an impersonating name is harmless) and
-	// mark it so the display makes the fallback obvious.
-	candidate := false
-	ln, err := lens.LoadFromDir(path)
+	// Load the candidate. A reserved resolved name still previews (preview never writes, so
+	// an impersonating name is harmless), but under "candidate" so the display makes the
+	// fallback obvious.
+	ln, err := lens.LoadFromDirUnchecked(path)
 	if err != nil {
-		var uErr error
-		if ln, uErr = lens.LoadFromDirUnchecked(path); uErr != nil {
-			return uErr // a genuine load error (missing dir / no extract.md) — surface it
-		}
-		// LoadFromDirUnchecked succeeded where LoadFromDir failed => reserved name.
+		return err // a genuine load error (missing dir / no extract.md)
+	}
+	candidate := store.ReservedLensName(ln.Name)
+	if candidate {
 		ln.Name = "candidate"
-		candidate = true
 	}
 	// --review needs a REVIEW section to run. Fail early (before any runner work) rather
 	// than silently skipping the half the user explicitly asked for.
