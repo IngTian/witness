@@ -319,13 +319,13 @@ func TestMigrateV14CreatesConfidenceLog(t *testing.T) {
 		t.Fatalf("migrate v14->v15: %v", err)
 	}
 
-	// Verify user_version=15
+	// Verify user_version=schemaVersion
 	var v int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 15 {
-		t.Errorf("user_version = %d, want 15", v)
+	if v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 
 	// Verify the table exists
@@ -354,8 +354,8 @@ func TestMigrateV14CreatesConfidenceLog(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v2); err != nil {
 		t.Fatal(err)
 	}
-	if v2 != 15 {
-		t.Errorf("after second migrate: user_version = %d, want 15", v2)
+	if v2 != schemaVersion {
+		t.Errorf("after second migrate: user_version = %d, want %d", v2, schemaVersion)
 	}
 }
 
@@ -392,7 +392,7 @@ func TestDeleteLensDataDeletesItsConfidenceLog(t *testing.T) {
 		t.Fatalf("DeleteLensData: %v", err)
 	}
 	if obs != 0 || facets != 1 {
-		t.Logf("DeleteLensData returned obs=%d facets=%d", obs, facets)
+		t.Errorf("DeleteLensData returned obs=%d facets=%d, want obs=0 facets=1", obs, facets)
 	}
 
 	// Verify lensA events are gone, lensB events remain

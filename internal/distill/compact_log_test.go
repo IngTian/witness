@@ -218,9 +218,9 @@ func TestCompactLogsNothingForRetiredOrAbsorbed(t *testing.T) {
 func TestCompactSkippedGroupLogsNothing(t *testing.T) {
 	now := time.Date(2026, 11, 5, 7, 0, 0, 0, time.FixedZone("EST", -5*3600))
 
-	// The skip at compact.go:663 (`absorbed < compactMinAbsorb` → continue) is Apply's guard
-	// for facets that vanished between Plan and Apply. A test that goes through Plan never
-	// reaches it (Plan rejects the action). Call Apply directly with a hand-built plan.
+	// The skip (`absorbed < compactMinAbsorb` → continue) is Apply's guard for facets that
+	// vanished between Plan and Apply. A test that goes through Plan never reaches it (Plan
+	// rejects the action). Call Apply directly with a hand-built plan.
 	st := &fakeCompactStore{
 		facets: []store.Facet{
 			cfSeq("thinking", "survivor", mergedValue, 0.9, 500),

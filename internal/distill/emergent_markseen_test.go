@@ -9,7 +9,7 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// failingWriteFacets is a real store with WriteFacets forced to fail — the crash-window
+// failingWriteFacets is a real store with WriteFacetsLogged forced to fail — the crash-window
 // stand-in. It has to be an embedded *store.Store so signature state, observations, and
 // facet reads all behave exactly as in production.
 type failingWriteFacets struct {
@@ -17,7 +17,6 @@ type failingWriteFacets struct {
 	err error
 }
 
-func (f failingWriteFacets) WriteFacets([]store.Facet) error { return f.err }
 func (f failingWriteFacets) WriteFacetsLogged([]store.Facet, []store.ConfidenceEvent) error {
 	return f.err
 }
