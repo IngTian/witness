@@ -3,6 +3,7 @@ package view
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,12 +69,8 @@ func TestActivityDaysAndConversations(t *testing.T) {
 	}
 
 	// March window: Conversations should be 2 (set union of s1, s2)
-	for _, w := range m.Activity.Windows {
-		if w.Kind == "month" && w.Label == "Mar 2026" {
-			if w.Conversations != 2 {
-				t.Errorf("March.Conversations: got %d, want 2 (set union, not sum)", w.Conversations)
-			}
-		}
+	if w := windowByLabel(t, m, "Mar 2026"); w.Conversations != 2 {
+		t.Errorf("March.Conversations: got %d, want 2 (set union, not sum)", w.Conversations)
 	}
 }
 
@@ -139,19 +136,8 @@ func TestActivityWindows(t *testing.T) {
 	m := Build(in, nil, now, loc)
 
 	// Expect 10 months (Feb–Nov), 4 quarters (Q1–Q4), 2 halves (H1, H2), 1 year (2026)
-	var months, quarters, halves, years []Window
-	for _, w := range m.Activity.Windows {
-		switch w.Kind {
-		case "month":
-			months = append(months, w)
-		case "quarter":
-			quarters = append(quarters, w)
-		case "half":
-			halves = append(halves, w)
-		case "year":
-			years = append(years, w)
-		}
-	}
+	k := windowsByKind(m)
+	months, quarters, halves, years := k["month"], k["quarter"], k["half"], k["year"]
 
 	if len(months) != 10 {
 		t.Errorf("months: got %d, want 10 (Feb–Nov)", len(months))
@@ -181,24 +167,13 @@ func TestActivityWindows(t *testing.T) {
 	}
 
 	// Nov has SoFar true and SpanDays 5 (Nov 1–5)
-	for _, w := range months {
-		if w.Label == "Nov 2026" {
-			if !w.SoFar {
-				t.Errorf("Nov.SoFar: got false, want true")
-			}
-			if w.SpanDays != 5 {
-				t.Errorf("Nov.SpanDays: got %d, want 5 (Nov 1–5)", w.SpanDays)
-			}
-		}
+	if w := windowByLabel(t, m, "Nov 2026"); !w.SoFar || w.SpanDays != 5 {
+		t.Errorf("Nov: SoFar %v SpanDays %d, want true and 5 (Nov 1–5)", w.SoFar, w.SpanDays)
 	}
 
 	// Feb has SpanDays 19 (Feb 10–28, 19 days)
-	for _, w := range months {
-		if w.Label == "Feb 2026" {
-			if w.SpanDays != 19 {
-				t.Errorf("Feb.SpanDays: got %d, want 19 (Feb 10–28)", w.SpanDays)
-			}
-		}
+	if w := windowByLabel(t, m, "Feb 2026"); w.SpanDays != 19 {
+		t.Errorf("Feb.SpanDays: got %d, want 19 (Feb 10–28)", w.SpanDays)
 	}
 }
 
@@ -222,26 +197,19 @@ func TestActivityLongestRunAndBusiest(t *testing.T) {
 
 	m := Build(in, nil, now, loc)
 
+	mar := windowByLabel(t, m, "Mar 2026")
 	// LongestRun: days 1, 2, 3 = 3 consecutive days
-	for _, w := range m.Activity.Windows {
-		if w.Kind == "month" && w.Label == "Mar 2026" {
-			if w.LongestRun != 3 {
-				t.Errorf("March.LongestRun: got %d, want 3 (days 1,2,3)", w.LongestRun)
-			}
-		}
+	if mar.LongestRun != 3 {
+		t.Errorf("March.LongestRun: got %d, want 3 (days 1,2,3)", mar.LongestRun)
 	}
 
 	// Busiest: day 5 with 3 turns (ties go to earliest, but day 5 wins outright)
-	for _, w := range m.Activity.Windows {
-		if w.Kind == "month" && w.Label == "Mar 2026" {
-			if w.Busiest == nil {
-				t.Errorf("March.Busiest: got nil, want day 5")
-			} else if w.Busiest.Date != "2026-03-05" {
-				t.Errorf("March.Busiest.Date: got %s, want 2026-03-05", w.Busiest.Date)
-			} else if w.Busiest.Turns != 3 {
-				t.Errorf("March.Busiest.Turns: got %d, want 3", w.Busiest.Turns)
-			}
-		}
+	if mar.Busiest == nil {
+		t.Errorf("March.Busiest: got nil, want day 5")
+	} else if mar.Busiest.Date != "2026-03-05" {
+		t.Errorf("March.Busiest.Date: got %s, want 2026-03-05", mar.Busiest.Date)
+	} else if mar.Busiest.Turns != 3 {
+		t.Errorf("March.Busiest.Turns: got %d, want 3", mar.Busiest.Turns)
 	}
 
 	// Test tie-breaking: if two days have same turns, earliest wins
@@ -255,14 +223,10 @@ func TestActivityLongestRunAndBusiest(t *testing.T) {
 	}
 
 	m2 := Build(in2, nil, now, loc)
-	for _, w := range m2.Activity.Windows {
-		if w.Kind == "month" && w.Label == "Mar 2026" {
-			if w.Busiest == nil {
-				t.Errorf("March.Busiest (tie): got nil")
-			} else if w.Busiest.Date != "2026-03-01" {
-				t.Errorf("March.Busiest.Date (tie): got %s, want 2026-03-01 (earliest)", w.Busiest.Date)
-			}
-		}
+	if w := windowByLabel(t, m2, "Mar 2026"); w.Busiest == nil {
+		t.Errorf("March.Busiest (tie): got nil")
+	} else if w.Busiest.Date != "2026-03-01" {
+		t.Errorf("March.Busiest.Date (tie): got %s, want 2026-03-01 (earliest)", w.Busiest.Date)
 	}
 }
 
@@ -312,44 +276,6 @@ func TestActivityCuts(t *testing.T) {
 	// Day with 1 turn: shade 1 (0 cuts < 1)
 	// Day with 3 turns: shade 2 (cuts 2 < 3: no; so 1 cut < 3)
 	// This is implicit in the cuts being correct; just verify no crash
-}
-
-func TestActivityNotesOnTurnlessDays(t *testing.T) {
-	loc := time.FixedZone("EST", -5*3600)
-	now := time.Date(2026, 3, 10, 0, 0, 0, 0, loc)
-
-	// P6: window notes are counted directly by parsed ts date, NOT sum over Days.
-	// One conversation note on 2026-03-05 with NO turn on that day, and one turn on 03-06.
-	in := &store.ViewInput{
-		Turns: []store.ViewTurn{
-			{Session: "s1", TS: "2026-03-06T10:00:00-05:00"}, // turn on 03-06
-		},
-		Notes: []store.ViewNote{
-			{Session: "s1", TS: "2026-03-05T10:00:00-05:00", Observation: "note on turnless day"}, // note on 03-05
-		},
-	}
-
-	m := Build(in, nil, now, loc)
-
-	// Days should have exactly one entry (03-06), whose Notes == 0
-	if len(m.Activity.Days) != 1 {
-		t.Fatalf("Days: got %d, want 1 (only 03-06 has turns)", len(m.Activity.Days))
-	}
-	if m.Activity.Days[0].Date != "2026-03-06" {
-		t.Errorf("Days[0].Date: got %s, want 2026-03-06", m.Activity.Days[0].Date)
-	}
-	if m.Activity.Days[0].Notes != 0 {
-		t.Errorf("Days[0].Notes: got %d, want 0 (note is on 03-05, not 03-06)", m.Activity.Days[0].Notes)
-	}
-
-	// March window's Notes should be 1 (counted directly from note's ts, not sum of Day.Notes)
-	for _, w := range m.Activity.Windows {
-		if w.Kind == "month" && w.Label == "Mar 2026" {
-			if w.Notes != 1 {
-				t.Errorf("March.Notes: got %d, want 1 (note on 03-05, even though no turn that day)", w.Notes)
-			}
-		}
-	}
 }
 
 func TestActivityCutsNearestRankCeil(t *testing.T) {
@@ -410,19 +336,8 @@ func TestBuildEmptyArchive(t *testing.T) {
 	}
 
 	// Exactly one window per kind, all containing now
-	var months, quarters, halves, years []Window
-	for _, w := range m.Activity.Windows {
-		switch w.Kind {
-		case "month":
-			months = append(months, w)
-		case "quarter":
-			quarters = append(quarters, w)
-		case "half":
-			halves = append(halves, w)
-		case "year":
-			years = append(years, w)
-		}
-	}
+	k := windowsByKind(m)
+	months, quarters, halves, years := k["month"], k["quarter"], k["half"], k["year"]
 
 	if len(months) != 1 {
 		t.Errorf("months: got %d, want 1 (Nov)", len(months))
@@ -443,38 +358,34 @@ func TestBuildEmptyArchive(t *testing.T) {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	s := string(data)
-	if !contains(s, `"days":[]`) {
+	if !strings.Contains(s, `"days":[]`) {
 		t.Errorf("JSON days: want [], got something else")
 	}
-	if !contains(s, `"notebooks":[]`) {
+	if !strings.Contains(s, `"notebooks":[]`) {
 		t.Errorf("JSON notebooks: want [], got something else")
 	}
-	if !contains(s, `"traits":[]`) {
+	if !strings.Contains(s, `"traits":[]`) {
 		t.Errorf("JSON traits: want [], got something else")
 	}
-	if !contains(s, `"portraits":[]`) {
+	if !strings.Contains(s, `"portraits":[]`) {
 		t.Errorf("JSON portraits: want [], got something else")
 	}
 	// Verify slice fields in activity are not null (busiest is a pointer and can be null per spec)
-	if contains(s, `"cuts":null`) {
+	if strings.Contains(s, `"cuts":null`) {
 		t.Errorf("JSON cuts: want [], got null")
 	}
-	if contains(s, `"windows":null`) {
+	if strings.Contains(s, `"windows":null`) {
 		t.Errorf("JSON windows: want [], got null")
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && search(s, substr))
-}
-
-func search(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+// windowsByKind groups the windows by Kind, in build order.
+func windowsByKind(m *Model) map[string][]Window {
+	k := map[string][]Window{}
+	for _, w := range m.Activity.Windows {
+		k[w.Kind] = append(k[w.Kind], w)
 	}
-	return false
+	return k
 }
 
 func windowByLabel(t *testing.T, m *Model, label string) Window {
@@ -497,6 +408,7 @@ func TestActivityFirstCountsNotes(t *testing.T) {
 		Turns: []store.ViewTurn{{Session: "s1", TS: "2026-03-01T10:00:00-05:00"}},
 		Notes: []store.ViewNote{
 			{ID: "n1", Session: "s0", TS: "2026-01-10T10:00:00-05:00"},           // its turn was reclaimed
+			{ID: "n2", Session: "s0", TS: "2026-01-10T11:00:00-05:00"},           // two notes, one day
 			{ID: "f1", Session: "file:/doc.md", TS: "2025-12-01T10:00:00-05:00"}, // ingested: never First
 			{ID: "bad", Session: "s0", TS: "garbage"},
 		},
@@ -510,9 +422,13 @@ func TestActivityFirstCountsNotes(t *testing.T) {
 		t.Errorf("Days: got %+v, want %+v (only days with turns)", m.Activity.Days, want)
 	}
 	jan := windowByLabel(t, m, "Jan 2026")
-	if jan.Notes != 1 || jan.SpanDays != 22 || jan.Turns != 0 || jan.ActiveDays != 0 {
-		t.Errorf("Jan: Notes %d SpanDays %d Turns %d ActiveDays %d, want 1, 22 (Jan 10–31), 0, 0",
+	if jan.Notes != 2 || jan.SpanDays != 22 || jan.Turns != 0 || jan.ActiveDays != 0 {
+		t.Errorf("Jan: Notes %d SpanDays %d Turns %d ActiveDays %d, want 2, 22 (Jan 10–31), 0, 0",
 			jan.Notes, jan.SpanDays, jan.Turns, jan.ActiveDays)
+	}
+	// Notes counts notes, not dayMap dates: Mar 1 has a turn and no note.
+	if mar := windowByLabel(t, m, "Mar 2026"); mar.Notes != 0 {
+		t.Errorf("Mar: Notes %d, want 0 (a turn-only day holds no notes)", mar.Notes)
 	}
 	if len(m.Activity.Windows) == 0 || m.Activity.Windows[0].Label != "Jan 2026" {
 		t.Errorf("first window: want Jan 2026 (December's file: note must not open a window)")
@@ -553,7 +469,7 @@ func TestActivityClockSkewAllRecordsAfterNow(t *testing.T) {
 
 	m := Build(in, nil, now, loc)
 
-	// First is clamped to Last (today, 2026-03-05), not April
+	// First stays the earliest record (April); only the windows' start is clamped to Last
 	if m.Activity.First != "2026-04-10" {
 		t.Errorf("First: got %q, want 2026-04-10 (earliest record)", m.Activity.First)
 	}
@@ -562,19 +478,8 @@ func TestActivityClockSkewAllRecordsAfterNow(t *testing.T) {
 	}
 
 	// Every kind must have at least one window containing last (2026-03-05)
-	var months, quarters, halves, years []Window
-	for _, w := range m.Activity.Windows {
-		switch w.Kind {
-		case "month":
-			months = append(months, w)
-		case "quarter":
-			quarters = append(quarters, w)
-		case "half":
-			halves = append(halves, w)
-		case "year":
-			years = append(years, w)
-		}
-	}
+	k := windowsByKind(m)
+	months, quarters, halves, years := k["month"], k["quarter"], k["half"], k["year"]
 
 	if len(months) == 0 {
 		t.Errorf("months: got 0, want at least 1 (containing last)")

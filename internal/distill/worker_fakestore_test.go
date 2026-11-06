@@ -156,7 +156,7 @@ func TestWorkerMinesAgainstFakeQueue(t *testing.T) {
 	w := &Worker{
 		Store:    q,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		Run:      miner.run,
 	}
@@ -194,7 +194,7 @@ func TestDrainDoesNotReadTheObservationCorpus(t *testing.T) {
 	q.raw[sess] = []store.RawRecord{{Session: sess, Seq: 0, Role: "user", Text: "hi"}, {Session: sess, Seq: 1, Role: "assistant", Text: "yo"}}
 	q.rawHigh[sess] = 2
 	w := &Worker{Store: q, Embedder: fakeEmbedder{}, Run: (&fakeMiner{}).run,
-		Lenses: []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}}}
+		Lenses: []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}}}
 	pending := func() []string {
 		if q.DistilledCount(sess, "default") < 2 {
 			return []string{sess}
@@ -276,7 +276,7 @@ func TestMineSessionPassesCapturedTranscriptDigestToNativeRunner(t *testing.T) {
 	w := &Worker{
 		Store:    q,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		NativeFor: func(*lens.Lens) bool {
 			return true
