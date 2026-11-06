@@ -47,6 +47,23 @@ jobs:
       - name: test
         run: make test
 
+      # The rest of what a release ships. These ran only on the release event before, so a
+      # stale JS assertion passed PR CI and then blocked the v0.7.0 publish (release gotcha
+      # #1), and a manifest that drifted from the version surfaced only after the tag existed.
+      # Steps of THIS job, so they inherit its required-check status.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: opencode plugin tests
+        run: npm --prefix npm/opencode run check
+
+      - name: codex converter tests
+        run: python3 -I -m unittest discover -s scripts
+
+      - name: release manifests (versions + MCP Registry description cap)
+        run: ./scripts/check-release-manifests.sh
+
       # Prove the "one pure-Go binary" promise on every target we ship.
       - name: cross-compile (darwin/linux × amd64/arm64)
         run: make build-all

@@ -64,42 +64,13 @@ jobs:
       # Trusted publishing needs npm >= 11.5.1 (newer than what Node 22 bundles).
       - run: npm install -g npm@latest
 
-      # Fail fast if the release tag (vX.Y.Z) doesn't match the committed package
-      # version — 0.0.1 is already published and immutable, so the tag must bump it.
-      # Also guard the two Claude-plugin manifests: they carry their own version and
-      # silently drift from the tag if bumped separately (issue #54 minor). Checking
-      # them here keeps a single release surface consistent across npm + marketplace.
+      # Fail fast if the release tag (vX.Y.Z) doesn't match every committed manifest
+      # version — 0.0.1 is already published and immutable, so the tag must bump it —
+      # or server.json's description exceeds the MCP Registry's 100-char cap. PR CI
+      # runs the same script without a tag, so drift is normally caught before this.
       - name: Verify release tag matches package versions
         if: github.event_name == 'release'
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          check() {
-            local label="$1" got="$2"
-            if [ "$tag" != "$got" ]; then
-              echo "release tag ($tag) != $label version ($got)" >&2
-              echo "bump $label to $tag (or tag v$got) and re-release." >&2
-              exit 1
-            fi
-          }
-          check "npm/opencode/package.json" "$(node -p "require('./npm/opencode/package.json').version")"
-          check ".claude-plugin/plugin.json" "$(node -p "require('./.claude-plugin/plugin.json').version")"
-          check ".claude-plugin/marketplace.json" "$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].version")"
-          # server.json feeds the MCP Registry publish at the end of this job. Both its
-          # own version and the npm package reference must track the tag, or the registry
-          # would either reject a stale version or point at the wrong npm package.
-          check "server.json" "$(node -p "require('./server.json').version")"
-          check "server.json packages[0]" "$(node -p "require('./server.json').packages[0].version")"
-
-          # The MCP Registry caps server.json's description at 100 characters and rejects a longer
-          # one with a 422 — AFTER npm has already published, so the run fails with the packages live
-          # and the registry entry missing. That happened on v0.7.8 (186 chars). Fail HERE instead,
-          # before anything is published, where the fix is one edit and a re-tag.
-          desc_len="$(node -p "require('./server.json').description.length")"
-          if [ "$desc_len" -gt 100 ]; then
-            echo "server.json description is $desc_len chars; the MCP Registry rejects >100" >&2
-            node -p "require('./server.json').description" >&2
-            exit 1
-          fi
+        run: ./scripts/check-release-manifests.sh "${GITHUB_REF_NAME#v}"
 
       - name: Test and stage packages
         run: |
