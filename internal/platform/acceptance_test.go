@@ -113,9 +113,11 @@ func TestEngineHasNoPlatformDispatch(t *testing.T) {
 			//
 			// The exemption is one FILE, not a tree, and it is narrower than the hole it
 			// replaces: before this commit "codex" appeared in no pattern at all, so every
-			// file in the fenced trees was unguarded against it.
+			// file in the fenced trees was unguarded against it. install_opencode.go is the
+			// same exemption for opencode.ConfigDir(): a cmd-side copy of that lookup missed
+			// XDG_CONFIG_HOME and wired OpenCode where it never reads.
 			switch filepath.Base(path) {
-			case "installers.go", "root.go", "install_codex.go":
+			case "installers.go", "root.go", "install_codex.go", "install_opencode.go":
 				return nil
 			}
 			src, err := os.ReadFile(path)

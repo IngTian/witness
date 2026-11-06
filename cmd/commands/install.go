@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
-	"github.com/IngTian/witness/internal/platform/opencode"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -440,7 +439,7 @@ func opencodeConfigPath() string {
 	if p := os.Getenv("OPENCODE_CONFIG"); strings.TrimSpace(p) != "" {
 		return p
 	}
-	dir := opencode.ConfigDir()
+	dir := opencodeDir()
 	jsonPath := filepath.Join(dir, "opencode.json")
 	if _, err := os.Stat(jsonPath); err == nil {
 		return jsonPath
@@ -798,7 +797,7 @@ func cmdInstallOpenCode() (wireOutcome, error) {
 	if err != nil {
 		return wireOutcome{}, err
 	}
-	dir := opencode.ConfigDir()
+	dir := opencodeDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return wireOutcome{}, err
 	}
@@ -1001,7 +1000,7 @@ func claudeCLIOutput(args ...string) (string, error) {
 // was present)" lines on every run, and to rewrite opencode.json even when witness was not in it —
 // which, for a .jsonc config, also dropped the user's comments.
 func cmdUninstallOpenCode() (removed bool, err error) {
-	dir := opencode.ConfigDir()
+	dir := opencodeDir()
 	config := opencodeConfigPath()
 	switch data, err := os.ReadFile(config); {
 	case err == nil:
