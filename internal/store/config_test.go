@@ -288,6 +288,7 @@ func TestInstallSequenceMatchesBindRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer st.Close()
 	if err := st.SetRunner("opencode"); err != nil {
 		t.Fatal(err)
 	}
@@ -381,9 +382,11 @@ func TestResolveRunnerLegacyActiveLineIsAdoptedAsBound(t *testing.T) {
 func TestResolveRunnerHonorsManualRunnerInNewTemplate(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "witness")
 	t.Setenv("WITNESS_HOME", home)
-	if _, err := Open(); err != nil { // lay down the template (runner commented)
+	first, err := Open() // lay down the template (runner commented)
+	if err != nil {
 		t.Fatal(err)
 	}
+	_ = first.Close()
 	data, err := os.ReadFile(filepath.Join(home, "config.toml"))
 	if err != nil {
 		t.Fatal(err)

@@ -335,7 +335,7 @@ func ingestInput(reader io.Reader, quiet bool) (res ingestResult, err error) {
 // keys. So: load existing keys, partition incoming (skip/update/append), and merge — NEVER
 // delete records the caller didn't mention.
 func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
-	stateKey := "file_import_keys:" + s.Session
+	stateKey := store.FileImportKeysNS + ":" + s.Session
 	oldKeys := parseImportKeysJSON(st.MetaString(stateKey))
 	rawCount := st.RawCount(s.Session)
 

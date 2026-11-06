@@ -223,9 +223,3 @@ func jsonOutputMode() bool {
 	}
 	return false
 }
-
-// The single-flight consumer's drain loop lives in distill.Worker.Drain now — it
-// owns the same contract (attempt each pending job once per run, pick up mid-run
-// arrivals, terminate on a stuck job, optional budget cap) plus the MAP/REDUCE
-// parallel split. The caller still holds the single-flight lock for the whole
-// drain, so only one runs at a time across the machine; extra triggers no-op.

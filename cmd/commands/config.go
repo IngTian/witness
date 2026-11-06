@@ -104,7 +104,7 @@ Canonical keys:
   mine_model    MINING model — L0 turns → L1 observations, per session (frequent, dominant cost). Empty = the runner's default.
   review_model  REVIEW model — L1 observations → L2 facets + L4 profile, batched. Empty = falls back to mine_model, so one setting covers the whole pipeline.
 
-Legacy synonyms (accepted in get/set):
+Also accepted in get/set — the names config.toml and lens.json use:
   triage_model → mine_model, distill_model → review_model, extract_model → mine_model.
 
 Precedence: per-lens › default › environment.`,

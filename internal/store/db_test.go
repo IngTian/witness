@@ -673,6 +673,71 @@ func TestStageObservationCap(t *testing.T) {
 	}
 }
 
+// The staged buffer needs a TOTAL bound, because the per-session one is keyed on an
+// AGENT-SUPPLIED session id. A runaway agent that varies the id (per-turn ids, a hallucinated
+// id, an incrementing counter) gets a fresh per-session budget on every call, so the
+// per-session cap alone bounds nothing — and each row is up to 2000 chars of observation plus
+// 2000 of evidence, durable in L1 and fed to the review model.
+func TestStagedTotalCapCannotBeEvadedByRotatingTheSession(t *testing.T) {
+	s := tempStore(t)
+
+	const perSession, total = 3, 7
+	staged := 0
+	for i := 0; i < 50; i++ { // 50 DISTINCT sessions, so the per-session cap never bites
+		ob := Observation{
+			ID:          "obs-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
+			Session:     "rotating-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
+			Observation: "o",
+		}
+		inserted, err := s.StageObservationCapped(ob, perSession, total)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inserted {
+			staged++
+		}
+	}
+	if staged != total {
+		t.Errorf("rotating the session id staged %d rows against a total cap of %d — the cap is "+
+			"evadable", staged, total)
+	}
+	if got := s.StagedTotal(); got != total {
+		t.Errorf("StagedTotal() = %d, want %d", got, total)
+	}
+}
+
+// Both caps disabled means unlimited — StageObservation relies on that.
+func TestStagedCapsDisabledMeansUnlimited(t *testing.T) {
+	s := tempStore(t)
+	for i := 0; i < 25; i++ {
+		ob := Observation{ID: "o" + string(rune('a'+i)), Session: "one", Observation: "x"}
+		inserted, err := s.StageObservationCapped(ob, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !inserted {
+			t.Fatalf("insert %d declined with both caps disabled", i)
+		}
+	}
+	if got := s.StagedTotal(); got != 25 {
+		t.Errorf("StagedTotal() = %d, want 25", got)
+	}
+}
+
+// A duplicate must still be a no-op rather than burning quota, under BOTH caps.
+func TestStagedDuplicateDoesNotBurnEitherCap(t *testing.T) {
+	s := tempStore(t)
+	ob := Observation{ID: "same", Session: "one", Observation: "x"}
+	for i := 0; i < 5; i++ {
+		if _, err := s.StageObservationCapped(ob, 3, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.StagedTotal(); got != 1 {
+		t.Errorf("a re-recorded observation staged %d rows, want 1", got)
+	}
+}
+
 func TestObservationDedupIdempotent(t *testing.T) {
 	s := tempStore(t)
 	o := Observation{ID: "obs_x", Lens: LensDefault, Observation: "thinks in systems", Poignancy: 4}
@@ -781,6 +846,22 @@ func TestStatsSnapshot(t *testing.T) {
 	_ = s.MarkDistilled("a", LensDefault, 2)
 	if st := s.Stats([]string{LensDefault}); st.Pending != 0 {
 		t.Fatalf("fully-distilled session should not be pending: %+v", st)
+	}
+}
+
+// Stats.Facets is the ACTIVE profile (what `facets` lists): a compaction that archives 449 → 244
+// must show as 244 in status/doctor/export, not stay at 449.
+func TestStatsCountsOnlyActiveFacets(t *testing.T) {
+	s := tempStore(t)
+	v := []FacetVersion{{Value: "v", Confidence: 0.5}}
+	if err := s.WriteFacets([]Facet{
+		{Lens: LensDefault, Dimension: "d", Key: "kept", Versions: v},
+		{Lens: LensDefault, Dimension: "d", Key: "gone", Versions: v, ArchivedAt: "2026-11-01T00:00:00Z", MergedInto: "d/kept"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Stats([]string{LensDefault}).Facets; got != 1 {
+		t.Fatalf("Stats.Facets = %d, want 1 (the archived facet is not part of the profile)", got)
 	}
 }
 

@@ -49,8 +49,9 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - `internal/distill/` — the worker: mines L0→L1 per lens, reviews L1→L2, and
   regenerates L4 via a headless runner (`claude -p` or `opencode serve`).
 - `internal/platform/{claude,opencode,codex,file}/` — the per-source adapters.
-  `registry.go` composes identity, rendering and import with optional capture/runner
-  capabilities; `cmd/commands/root.go` imports the adapters. Installers register
+  `registry.go` requires only identity; rendering, import, capture and runner are
+  optional capabilities (rendering falls back to the shared `RenderChunks`, import to
+  nothing); `cmd/commands/root.go` imports the adapters. Installers register
   separately: a cmd-local wire-target map (`cmd/commands/installers.go`) with cmd-side
   implementations.
   `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
@@ -103,7 +104,7 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
     every OS — a `runtime.GOOS == "windows"` check can only fail on Windows.
   - OpenCode's config dir is `~/.config/opencode` on Windows too (verified against
     OpenCode's own resolution: `XDG_CONFIG_HOME` else `~/.config`, no OS branch), so
-    `opencodeDir()` needs no GOOS split.
+    `opencode.ConfigDir()` (shared by `wire opencode` and the auth probe) needs no GOOS split.
 - **Hook name contract.** Installed hooks invoke `witness <session-start|capture|
   session-end>` (shell form) or the same tokens as exec-form `args`; the binary
   must keep cobra commands of exactly those names, and `isWitnessEntry` must
@@ -128,5 +129,10 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - New behavior needs a test. The CC capture path and the hook name-contract are
   guarded (`internal/platform/claude/capture_test.go`,
   `cmd/commands/hookcontract_test.go`) — keep them passing.
+- A `schemaVersion` bump adds that version's schema dump:
+  `WITNESS_DUMP_SCHEMA=1 go test -run TestUpgradedSchemaMatchesFresh ./internal/store/`
+  writes `internal/store/testdata/schema/v<N>.sql`; commit it. Every dump there is
+  migrated and compared to a fresh archive, so the previous version keeps guarding
+  the upgrade path and the new one catches a `schemaV1` change made without a bump.
 - Never commit anyone's actual archive data (see `.gitignore`); the repo ships
   the framework, schema, and prompts only.

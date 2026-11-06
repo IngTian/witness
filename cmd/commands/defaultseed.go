@@ -45,8 +45,7 @@ const defaultMigratedKey = "default_lens_migrated_v1a"
 
 // noDefaultLensEnv opts an archive OUT of the first-open auto-seed (a "declined marker",
 // #102): when set to a non-empty value the hook records the opt-out in the one-shot gate
-// and seeds nothing, so a library/service install (the future `witness init --data`,
-// slice 1b) — or anyone who simply doesn't want the person-growth starter — begins with
+// and seeds nothing, so a library/service archive (`witness install --path`) — or anyone who simply doesn't want the person-growth starter — begins with
 // no lenses. `witness lens load-default` remains the escape hatch to add it later.
 const noDefaultLensEnv = "WITNESS_NO_DEFAULT_LENS"
 

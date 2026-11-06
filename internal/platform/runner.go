@@ -128,7 +128,7 @@ func (n *NativeSession) Finalize() error {
 // pending session regardless of which platform produced it. It is the whole of
 // what the engine (internal/distill) knows about a runtime — distill calls Run and
 // never learns whether that shells to `claude -p` or talks to `opencode serve`.
-// This is the axis resolved by RunnerFor (by cfg.Runner), the counterpart to
+// This is the axis resolved by RunnerForName (by cfg.Runner), the counterpart to
 // ForSession (the per-session owning platform).
 type Runner interface {
 	// Open acquires whatever the engine needs to serve Run (OpenCode: a private
@@ -164,8 +164,8 @@ type Runner interface {
 	//   - The FENCE means what it says. WrapCorpus + CorpusNotice tell the model the user turn
 	//     is untrusted data. Inheriting that same material as the model's own context tells it
 	//     the opposite, in the same request.
-	//   - ConcurrentRunSafe (below) is justified by "an isolated session per call". Seeding a
-	//     context from somewhere else makes that justification false.
+	//   - The engine calls Run concurrently across sessions, which is safe because each call
+	//     gets an isolated session. Seeding a context from somewhere else makes that false.
 	//   - The reply must be FINDABLE. A runner that collects its answer by scanning a
 	//     conversation for its own request needs that request near the start; inherited history
 	//     pushed it out of the window and the poll then spun to the timeout — the real cause of
@@ -184,20 +184,11 @@ type Runner interface {
 	// InvocationHint is a short human string naming how this engine runs, for
 	// doctor/diagnostics (e.g. "claude -p" / "opencode serve").
 	InvocationHint() string
-	// ConcurrentRunSafe reports whether it is safe for the engine to call Run
-	// concurrently (several sessions mining at once) against this runner. This is a
-	// platform FACT (mechanism), NOT a policy: the engine owns the pool size and the
-	// ceiling; the platform only states whether overlap is safe at all. Both runtimes
-	// are true today: Claude — each Run is an independent `claude -p` process sharing
-	// nothing; OpenCode — Run holds its mutex only for a closed-check and drives an
-	// isolated session per call over the shared serve process, which a benchmark showed
-	// accepts many concurrent sessions (issue #22 narrowed the mutex to flip this true).
-	// "Isolated session per call" is load-bearing here, and is exactly the fresh-context
-	// invariant on Run: while native mining forked the user's conversation this claim was
-	// not true in its own stated terms, since the per-call session was not isolated from
-	// that conversation.
-	ConcurrentRunSafe() bool
 }
+
+// (ConcurrentRunSafe used to live here: "may the engine call Run concurrently?" Every runner has
+// answered true since #22 narrowed OpenCode's mutex, so the drain always runs its window wide. A
+// runner that ever needs serializing can hold its own lock inside Run.)
 
 // RunnerProvider is the Platform capability that builds this platform's Runner.
 // Kept separate from Runner so a Platform value (a stateless registry entry) mints
@@ -206,47 +197,22 @@ type RunnerProvider interface {
 	NewRunner(cfg store.Config) Runner
 }
 
-// (SweepsOnCloser / RunnerSweepsOnClose used to live here.)
-//
-// The capability asked "does closing this runner run a PROCESS-GLOBAL sweep that could disturb a
-// concurrently-running worker?", so that a read-only tool (`witness lens try`) could take the
-// machine-wide WorkerLock only when the answer was yes. It was TRUE when added in #72: OpenCode's
-// Close ran cleanupDistillSessions, a sweep of the SHARED OpenCode database that deleted
-// witness-distill sessions created before now+1s — which would delete a live worker's in-flight
-// session.
-//
-// Both halves of that premise are gone. v0.7.0 gave distillation its own private database, so
-// cleanupDistillSessions was deleted outright (the symbol no longer exists anywhere). The sweeps that
-// remain on the OpenCode Open path — reapPriorServe and procCtl.ReapOrphans — are ORPHAN-ONLY by
-// construction: reapPriorServe's first gate requires the owning witness process to be GONE, and
-// ReapOrphans gates on ppid==1, so neither can reach a live worker's state. That is why the only
-// implementation returned false, and it was CORRECT rather than stale.
-//
-// So the interface had exactly one implementation, hardcoded to the value that makes its guarded
-// branch unreachable. Deleted rather than kept "in case a future runner sweeps": a capability whose
-// single answer is no is not a seam, it is a comment. If a sweeping runner ever appears, the lock it
-// needs is three lines at the call site — and this note records what shape the problem took.
+// (SweepsOnCloser used to live here: "does Close sweep shared state a live worker needs?", so
+// `witness lens try` could take WorkerLock only then. True in #72, when OpenCode's Close swept the
+// SHARED database; v0.7.0's private database deleted that sweep, and the Open-path reapers are
+// orphan-only. A sweeping runner would need three lines of locking at the call site.)
 
-// RunnerFor resolves the default runner for a drain. It applies the store's runner
-// precedence (bound-meta > config line > WITNESS_RUNNER env > default — unchanged)
-// to get ONE name, then mints that platform's Runner. Fails closed on an unknown
-// name so a typo surfaces instead of silently defaulting.
+// RunnerForName mints the Runner for an explicit runner NAME: empty means the default
+// platform, and an unknown name fails closed so a typo surfaces instead of silently
+// defaulting. Callers resolve the name first — the store's precedence ladder
+// (store.ResolveRunner) for the default, then distill.RunnerFor for a lens's own runtime —
+// and mint by name. There is deliberately no store-taking variant: re-applying the ladder
+// after a lens has picked its runtime let an unbound store's WITNESS_RUNNER override the
+// lens, so `lens try` previewed on a different runtime than the drain used (F030).
 //
-// This is deliberately independent of ForSession: a Claude-runner user distilling
-// imported OpenCode sessions resolves RunnerFor=Claude (shells to claude -p) while
-// each session's ForSession=OpenCode still shapes its input. One engine, per-source
-// input shaping — the two axes never derive from each other.
-func RunnerFor(st store.RunnerResolver, cfg store.Config) (Runner, error) {
-	return RunnerForName(strings.TrimSpace(st.ResolveRunner(cfg)), cfg)
-}
-
-// RunnerForName mints the Runner for an explicit runner NAME, applying the same
-// empty→default + fail-closed-on-typo rules as RunnerFor. It is the per-lens-runner seam
-// (issue #75 slice 2): the worker resolves each active lens's runtime (distill.RunnerFor)
-// and mints one runner per distinct name via this, so lenses on different runtimes each
-// get their own Runner. cfg is passed through for the runner's model prewarm/validate; a
-// caller with per-lens models on this runtime should pass a cfg carrying the union (see
-// the worker's per-runtime open).
+// This is independent of ForSession: a Claude-runner user distilling imported OpenCode
+// sessions mints Claude (shells to claude -p) while each session's ForSession=OpenCode still
+// shapes its input. cfg is passed through for the runner's model prewarm/validate.
 func RunnerForName(name string, cfg store.Config) (Runner, error) {
 	name = strings.TrimSpace(name)
 	// An empty runner means "unset" — fall back to the default platform (Claude),

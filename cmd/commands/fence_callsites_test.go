@@ -107,11 +107,11 @@ func TestRunnerSetFencesEveryRun(t *testing.T) {
 func TestLensTryFencesEveryRun(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
 	resetFenceCalls(t)
-	previous := runnerForStore
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+	previous := runnerForName
+	runnerForName = func(string, store.Config) (platform.Runner, error) {
 		return fenceRecordingRunner{}, nil
 	}
-	t.Cleanup(func() { runnerForStore = previous })
+	t.Cleanup(func() { runnerForName = previous })
 
 	if err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1}); err != nil {
 		t.Fatalf("lens try: %v", err)

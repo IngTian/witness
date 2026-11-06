@@ -624,8 +624,6 @@ func arcSignature(lens string, members []store.Observation) string {
 	return hex.EncodeToString(h[:12])
 }
 
-func emergeSeenKey(lens, sig string) string { return "emerge_seen:" + lens + ":" + sig }
-
 type emergeSeen struct {
 	Outcome     string `json:"outcome"` // "accepted" | "rejected"
 	MemberCount int    `json:"members"` // for the membership-delta re-verify test
@@ -636,7 +634,7 @@ type emergeSeen struct {
 // grown cluster (more members than last time) is re-verified so an S1 append-only
 // recurrence joining the arc is folded in.
 func (r *EmergentReviewer) seenUnchanged(lens, sig string, c CandidateArc) bool {
-	raw := r.Store.MetaString(emergeSeenKey(lens, sig))
+	raw := r.Store.MetaString(store.EmergeSeenKey(lens, sig))
 	if raw == "" {
 		return false
 	}
@@ -656,7 +654,7 @@ func (r *EmergentReviewer) markSeen(lens, sig string, c CandidateArc, accepted b
 		outcome = "accepted"
 	}
 	b, _ := json.Marshal(emergeSeen{Outcome: outcome, MemberCount: len(c.Members)})
-	if err := r.Store.SetMetaString(emergeSeenKey(lens, sig), string(b)); err != nil {
+	if err := r.Store.SetMetaString(store.EmergeSeenKey(lens, sig), string(b)); err != nil {
 		slog.Warn("emergent: could not persist cluster signature", "lens", lens, "err", err)
 	}
 }

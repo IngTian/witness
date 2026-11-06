@@ -43,6 +43,20 @@ func cmdWorker(auto bool, since, until string) error {
 	return err
 }
 
+// The worker's liveness meta keys and worker_mode values. Named, because a misspelt key reads
+// as "unset": a typo'd stop key is "no stop requested", and the worker keeps making paid calls.
+const (
+	metaWorkerStopRequested = "worker_stop_requested"
+	metaWorkerMode          = "worker_mode"
+	metaWorkerPID           = "worker_pid"
+	metaWorkerHeartbeat     = "worker_heartbeat"
+	metaWorkerCurrent       = "worker_current"
+
+	workerModeAuto        = "auto"
+	workerModeManual      = "manual"
+	workerModeAutoPending = "auto-pending" // spawned by the auto gate, lock not yet claimed
+)
+
 // runWorker is the SILENT worker run: background wakeups, auto runs, and any caller that has not
 // asked for progress.
 func runWorker(auto bool) (bool, error) {
@@ -88,46 +102,42 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		return false, nil // a consumer already holds the lock; our jobs are on disk for it
 	}
 	defer unlock()
-	if auto && st.MetaString("worker_stop_requested") == "1" {
-		_ = st.SetMetaString("worker_mode", "")
+	if auto && st.MetaString(metaWorkerStopRequested) == "1" {
+		_ = st.SetMetaString(metaWorkerMode, "")
 		return true, nil
 	}
 	if !auto {
-		_ = st.SetMetaString("worker_stop_requested", "")
+		_ = st.SetMetaString(metaWorkerStopRequested, "")
 	}
 	started := time.Now().UTC().Format(time.RFC3339)
 	// No worker_status/worker_started_at: liveness is the flock (issue #75) and the
 	// running/stopping sub-state is DERIVED (see cmdDistillStatus) from the flock plus
 	// worker_stop_requested — storing it too was the redundant third source. The keys
-	// below are the ones still doing work: worker_pid is `distill stop`'s kill target,
-	// worker_mode drives `distill stop --auto-only`, and worker_current/heartbeat are
+	// below are the ones still doing work: worker_pid is `worker stop`'s kill target,
+	// worker_mode drives `worker stop --auto-only`, and worker_current/heartbeat are
 	// diagnostic display (read only while the flock says a worker is live).
-	_ = st.SetMetaString("worker_pid", strconv.Itoa(os.Getpid()))
+	_ = st.SetMetaString(metaWorkerPID, strconv.Itoa(os.Getpid()))
 	if auto {
-		_ = st.SetMetaString("worker_mode", "auto")
+		_ = st.SetMetaString(metaWorkerMode, workerModeAuto)
 	} else {
-		_ = st.SetMetaString("worker_mode", "manual")
+		_ = st.SetMetaString(metaWorkerMode, workerModeManual)
 	}
-	_ = st.SetMetaString("worker_heartbeat", started)
+	_ = st.SetMetaString(metaWorkerHeartbeat, started)
 	// Clear the diagnostic detail on graceful exit so the store doesn't carry a dead
 	// worker's pid/mode/current. Not required for correctness — cmdDistillStatus gates
 	// every read on WorkerActive(), and the next worker overwrites these on start — but
 	// it keeps an idle store clean.
 	defer func() {
-		_ = st.SetMetaString("worker_pid", "")
-		_ = st.SetMetaString("worker_mode", "")
-		_ = st.SetMetaString("worker_current", "")
-		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+		_ = st.SetMetaString(metaWorkerPID, "")
+		_ = st.SetMetaString(metaWorkerMode, "")
+		_ = st.SetMetaString(metaWorkerCurrent, "")
+		_ = st.SetMetaString(metaWorkerHeartbeat, time.Now().UTC().Format(time.RFC3339))
 	}()
 	if timeRange.empty() {
 		defer scheduleRetryWakeup(st)
 	}
 
-	lenses, err := activeLenses(st)
-	if err != nil {
-		slog.Error("load lenses", "err", err)
-		return true, err
-	}
+	lenses := activeLenses(st)
 	// The pending query cross-joins sessions against the ACTIVE lens set (#55). Use
 	// the same loaded lenses the drain will mine, so the queue only offers pairs the
 	// worker can actually process (a config-enabled-but-unloadable lens is excluded by
@@ -136,8 +146,8 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	for i, l := range lenses {
 		lensNames[i] = l.Name
 	}
-	// Cancel the drain context on SIGTERM/SIGINT so a `distill stop` (SIGTERM to the
-	// detached worker) or a Ctrl-C on a foreground `--all` backfill (SIGINT) tears
+	// Cancel the drain context on SIGTERM/SIGINT so a `worker stop` (SIGTERM to the
+	// detached worker) or a Ctrl-C on a foreground drain (SIGINT) tears
 	// down in-flight `claude -p` children too — the ctx threads worker→Drain→
 	// MineSession→Run→exec.CommandContext, and cancelling it sends the child a kill.
 	// Without this, stopping the parent left up to `conc` orphaned children to run to
@@ -158,7 +168,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// start --since ...` printed "nothing pending" with no hint that anything was skipped.
 	if !timeRange.empty() {
 		if n := st.SessionsWithNoUsableTimestamp(); n > 0 {
-			slog.Warn("range drain skips sessions whose raw timestamps are unreadable; an unranged `witness distill start` still mines them",
+			slog.Warn("range drain skips sessions whose raw timestamps are unreadable; an unranged `witness worker run` still mines them",
 				"skipped_sessions", n)
 		}
 	}
@@ -221,7 +231,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// pending without backing off (a commit/read error, not a mining timeout) is
 	// tried once total, so a persistent failure can't spin the loop or re-mine
 	// forever. We only loop again while a pass makes progress (commits > 0).
-	stopRequested := func() bool { return st.MetaString("worker_stop_requested") == "1" }
+	stopRequested := func() bool { return st.MetaString(metaWorkerStopRequested) == "1" }
 
 	// Lazily build the parallel-mining worker the first time there is mining to do;
 	// the embedder loads once and is shared across drain passes (its parsed weights
@@ -301,10 +311,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		if w == nil {
 			return
 		}
-		// Compute the session-window cap AFTER the runners are open: it must be safe for
-		// EVERY opened runtime (different sessions run in parallel and may each touch any
-		// runtime), so AND across the set. rs is non-nil here (getMiner ensured it).
-		conc := distill.EffectiveConcurrency(cfg.MineConcurrency, rs.concurrentRunSafe())
+		conc := distill.EffectiveConcurrency(cfg.MineConcurrency)
 		// Trace the drain boundary for the same reason getMiner traces startup: Drain can spend
 		// minutes inside one model call, and without this line a log that stops here is
 		// ambiguous between "never started draining" and "started and is waiting on a model".
@@ -315,8 +322,8 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 			Stop:      stopRequested,
 			Attempted: attempted,
 			OnCommit: func(session string) {
-				_ = st.SetMetaString("worker_current", session)
-				_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+				_ = st.SetMetaString(metaWorkerCurrent, session)
+				_ = st.SetMetaString(metaWorkerHeartbeat, time.Now().UTC().Format(time.RFC3339))
 			},
 		}
 		var progress distill.ProgressFunc
@@ -364,11 +371,8 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 				if progressWhere != "" {
 					sp = startSpinner("linking the profile to its sources…")
 				}
-				err := resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens) // best-effort: logged
-				if err == nil {
-					// Success: clear retry_after (post-review path ignores the gate but clears on success).
-					_ = st.SetMetaString("sources_retry_after", "")
-				}
+				// Ignores the self-heal's back-off gate, and lifts it on success.
+				_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens, ensureRunners) // best-effort: logged
 				sp.Stop()
 				reviewRan = true
 			}
@@ -382,50 +386,21 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// portrait regeneration from a prompt change) without forcing a review. Only opens runners
 	// when StaleSources returns work; an idle worker with everything current never pays the cost.
 	// Respects stop request and context cancellation: after a stop, do not start new model calls.
-	// Bounded retries: if sources_retry_after is set and not yet expired, skip the self-heal.
+	// Bounded retries: a failed self-heal stamps sourcesRetryKey = now+6h and this path skips until
+	// it expires (an unset or unparsable stamp is the zero time, so it proceeds). Any successful
+	// link — here or after a review, which ignores the gate — clears it.
 	if selfHealAllowed(reviewRan, stopRequested, ctx) {
-		// Check retry-after gate (only honored by self-heal path).
-		retryAfter := st.MetaString("sources_retry_after")
-		if retryAfter != "" {
-			if t, err := time.Parse(time.RFC3339, retryAfter); err == nil && time.Now().Before(t) {
-				slog.Info("profile: skipping source resolution self-heal until retry window expires", "retry_after", retryAfter)
-				// Skip the entire self-heal block below.
-			} else {
-				// Window expired or parse failed: proceed with self-heal.
-				retryAfter = "" // mark as expired
+		if until, _ := time.Parse(time.RFC3339, st.MetaString(sourcesRetryKey)); time.Now().Before(until) {
+			slog.Info("profile: skipping source resolution self-heal until retry window expires", "retry_after", until)
+		} else {
+			var sp *spinner
+			if progressWhere != "" {
+				sp = startSpinner("linking the profile to its sources…")
 			}
-		}
-
-		if retryAfter == "" {
-			lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
-			if err != nil {
-				slog.Warn("profile: source resolver prompts unavailable; self-heal skipped this run", "err", err)
-			} else {
-				// The no-model staleness gate, BEFORE ensureRunners: an idle worker with every
-				// portrait current never opens a runner.
-				rs := &distill.Resolver{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt}
-				stale, err := rs.StaleSources()
-				if err != nil {
-					slog.Warn("profile: failed to check stale sources; self-heal skipped this run", "err", err)
-				} else if len(stale) > 0 {
-					if ensureRunners() {
-						var sp *spinner
-						if progressWhere != "" {
-							sp = startSpinner("linking the profile to its sources…")
-						}
-						err := resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens)
-						if err != nil {
-							// Self-heal failed: set retry_after = now + 6h.
-							retryAt := time.Now().Add(6 * time.Hour).UTC().Format(time.RFC3339)
-							_ = st.SetMetaString("sources_retry_after", retryAt)
-						} else {
-							// Success: clear retry_after.
-							_ = st.SetMetaString("sources_retry_after", "")
-						}
-						sp.Stop()
-					}
-				}
+			if err := resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens, ensureRunners); err != nil {
+				_ = st.SetMetaString(sourcesRetryKey, time.Now().Add(6*time.Hour).UTC().Format(time.RFC3339))
 			}
+			sp.Stop()
 		}
 	}
 
@@ -542,27 +517,47 @@ func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, l
 	return nil
 }
 
+// sourcesRetryKey holds the time before which the end-of-run self-heal must not retry linking,
+// stamped 6h out when a self-heal fails.
+const sourcesRetryKey = "sources_retry_after"
+
 // resolvePortraitSources links portrait sentences to their source facets. Reads the resolver
 // prompts, builds a distill.Resolver, and calls ResolveSources(), which resolves every stale
 // portrait and writes the links to disk.
-// Failures are logged but never propagated: source resolution is auxiliary metadata that must
-// never break the review or worker run. Returns error only for logging; callers must not
-// propagate it into the review's or worker's exit status.
-func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc) error {
+// ensure opens the runner set and is called only when a portrait is stale — StaleSources is the
+// no-model gate — so an idle worker with everything current never pays for it; if it fails (and
+// logged why) nothing was attempted, so nothing is cleared or backed off. Once nothing is stale it
+// clears sourcesRetryKey — EVERY caller, because a review that relinks must lift a failed
+// self-heal's back-off, or the next portrait change waits up to 6h. Failures are logged but never
+// propagated: source resolution is auxiliary metadata that must never break the review or worker
+// run. Returns error only for logging and the self-heal's back-off; callers must not propagate it
+// into an exit status.
+func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc, ensure func() bool) error {
 	lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
 	if err != nil {
 		slog.Warn("profile: resolver prompts unavailable; skipping source linking", "err", err)
 		return err
 	}
 	rs := &distill.Resolver{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
-	resolved, err := rs.ResolveSources(ctx)
-	if len(resolved) > 0 {
-		slog.Info("profile: sources linked", "portraits", len(resolved))
-	}
+	stale, err := rs.StaleSources()
 	if err != nil {
-		slog.Warn("profile: source resolution failed", "err", err)
+		slog.Warn("profile: failed to check stale sources", "err", err)
 		return err
 	}
+	if len(stale) > 0 {
+		if !ensure() {
+			return nil
+		}
+		resolved, err := rs.ResolveSources(ctx)
+		if len(resolved) > 0 {
+			slog.Info("profile: sources linked", "portraits", len(resolved))
+		}
+		if err != nil {
+			slog.Warn("profile: source resolution failed", "err", err)
+			return err
+		}
+	}
+	_ = st.SetMetaString(sourcesRetryKey, "")
 	return nil
 }
 

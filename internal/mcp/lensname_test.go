@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -85,19 +83,7 @@ func TestEmptyUnifiedProfileDoesNotSayBackfill(t *testing.T) {
 // Lenses were never repo-scoped (AGENTS.md: lenses are global), and default has had no always-on
 // privilege since #44 slice 1a. An agent reads these strings to decide what to call.
 func TestToolTextMakesNoFalseLensClaims(t *testing.T) {
-	ctx := context.Background()
-	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(&fakeMCPStore{}, fakeEmbedder{}, testOptions).Connect(ctx, serverT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ss.Close()
-	cs, err := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "t", Version: "0"}, nil).Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
-	res, err := cs.ListTools(ctx, nil)
+	res, err := connect(t, &fakeMCPStore{}, testOptions).ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

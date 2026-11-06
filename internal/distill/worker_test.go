@@ -1,10 +1,12 @@
 package distill
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"math"
 	"strings"
 	"testing"
@@ -65,7 +67,7 @@ func testWorker(s *store.Store, m *fakeMiner) *Worker {
 	return &Worker{
 		Store:    s,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		Run:      m.run,
 	}
@@ -92,7 +94,7 @@ func TestWorkerRoutesMineToPerLensRunner(t *testing.T) {
 		Store:    s,
 		Embedder: fakeEmbedder{},
 		Lenses: []*lens.Lens{
-			{Name: "default", BuiltIn: true, Extract: "extract-default", Dimensions: []string{"thinking"}},
+			{Name: "default", Extract: "extract-default", Dimensions: []string{"thinking"}},
 			{Name: "cr", Extract: "extract-cr", Runner: "opencode", Dimensions: []string{"thinking"}},
 		},
 		Config: store.Config{Runner: "claude"},
@@ -211,8 +213,7 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	replaceRaw(t, s, sess, []string{"edited one", "edited two", "edited three"})
 
 	// REDUCE: commit the stale mining result.
-	existing, _ := s.ReadObservations("")
-	if err := w.CommitMining(mining, &existing); err != nil {
+	if err := w.CommitMining(mining); err != nil {
 		t.Fatal(err)
 	}
 
@@ -342,8 +343,7 @@ func TestCommitDoesNotWriteMinedObsWhenRawReplacedMidMine(t *testing.T) {
 	replaceRaw(t, s, sess, []string{"edited one", "edited two", "edited three"})
 
 	// REDUCE: commit the stale mining result.
-	existing, _ := s.ReadObservations("")
-	if err := w.CommitMining(mining, &existing); err != nil {
+	if err := w.CommitMining(mining); err != nil {
 		t.Fatal(err)
 	}
 
@@ -395,8 +395,7 @@ func TestCommitAdvancesWatermarkOnAppendOnlyPath(t *testing.T) {
 	// exists, so the guard passes and the watermark advances to the mined count.
 	capture(t, s, sess, "user", "three (arrived during mine)")
 
-	existing, _ := s.ReadObservations("")
-	if err := w.CommitMining(mining, &existing); err != nil {
+	if err := w.CommitMining(mining); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.DistilledCount(sess, "default"); got != 2 {
@@ -422,6 +421,7 @@ func newStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() }) // Windows: an open handle fails TempDir cleanup
 	return s
 }
 
@@ -487,6 +487,33 @@ func TestStagedActiveObsNotDuplicatedOnRedistill(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("active obs should appear exactly once after re-distill, got %d", n)
+	}
+}
+
+type failingEmbedder struct{}
+
+func (failingEmbedder) Embed(string) ([]float32, error) { return nil, fmt.Errorf("tokenizer panic") }
+
+// An observation that fails to embed is kept (mining is expensive) but is invisible to search and
+// long-arc clustering, and nothing re-embeds it — so the failure must at least reach witness.log.
+func TestEmbedFailureIsLoggedForActiveAndMinedObs(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := newStore(t)
+	w := testWorker(s, &fakeMiner{})
+	w.Embedder = failingEmbedder{}
+	if err := s.StageObservation(store.Observation{ID: store.ObservationID("s", "default", "af"), Session: "s", Lens: "default", Observation: "af"}); err != nil {
+		t.Fatal(err)
+	}
+	capture(t, s, "s", "user", "alpha")
+	if _, err := w.MineSession(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(buf.String(), "tokenizer panic"); got != 2 {
+		t.Errorf("want one warning per un-embedded obs (active + mined), got %d:\n%s", got, buf.String())
 	}
 }
 
@@ -843,7 +870,7 @@ func twoLensWorker(s *store.Store, r *lensRouter) *Worker {
 		Store:    s,
 		Embedder: fakeEmbedder{},
 		Lenses: []*lens.Lens{
-			{Name: "default", BuiltIn: true, Extract: "mine-default", Dimensions: []string{"thinking"}},
+			{Name: "default", Extract: "mine-default", Dimensions: []string{"thinking"}},
 			{Name: "codereview", Extract: "mine-codereview", Dimensions: []string{"thinking"}},
 		},
 		Config: store.Config{},

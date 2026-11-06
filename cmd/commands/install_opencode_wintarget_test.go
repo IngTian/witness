@@ -2,8 +2,6 @@ package commands
 
 import (
 	"encoding/json"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -130,64 +128,22 @@ func TestMergeOpenCodeMCPWithWindowsExe(t *testing.T) {
 	}
 }
 
-// resolveOpenCodeInstall must exist on BOTH platforms and return a path that the plugin can
-// spawn. On Unix it is the repo shim; asserting the shape here (rather than the value) keeps
-// the test meaningful on either OS.
-//
-// LOCALAPPDATA IS REDIRECTED FIRST, and that is not hygiene — without it this test DAMAGES a
-// Windows machine. On Windows resolveOpenCodeInstall is `return installSelf()`, whose
-// installBundle copies os.Executable() to <LOCALAPPDATA>\witness\witness.exe BEFORE it
-// validates anything (install_windows.go: MkdirAll then copyFile, then probeSrcTree). Under
-// `go test` os.Executable() is the TEST binary, and the os.SameFile short-circuit in copyFile
-// compares different directories so it does not fire. So running the suite on Windows would
-// overwrite the user's installed witness.exe with a test binary, and also put a temp dir on
-// their PATH. Same class as the test that once spawned 366 real `claude` children: a test must
-// never mutate the machine it runs on. installRoot() reads LOCALAPPDATA from the environment,
-// so a TempDir here is enough to contain it.
-func TestResolveOpenCodeInstallReturnsASpawnableTarget(t *testing.T) {
-	t.Setenv("LOCALAPPDATA", t.TempDir())
-
-	// On Unix, resolveOpenCodeInstall -> repoShim derives the shim from os.Executable(), which
-	// under `go test` is a binary in a build temp dir — so it can NEVER find hooks/witness.sh and
-	// this test used to skip on every Unix run. That mattered: combined with the Windows damage
-	// above, the test only ever executed on the one platform where it was harmful. Staging a shim
-	// beside a fake executable is not possible without an os.Executable seam, so instead assert
-	// the CONTRACT that is checkable here — the error must be the documented "not a built working
-	// copy" one, not any other failure — and let the shape assertions below run on Windows.
-	target, err := resolveOpenCodeInstall()
-	if err != nil {
-		if runtime.GOOS == "windows" {
-			t.Fatalf("resolveOpenCodeInstall: %v", err)
-		}
-		if !strings.Contains(err.Error(), "shim not found") {
-			t.Fatalf("on Unix the ONLY acceptable failure is the missing-shim contract (a test binary "+
-				"lives in a build temp dir, so repoShim cannot resolve); got a different error, which "+
-				"means the Unix path changed shape: %v", err)
-		}
-		// The message must stay actionable — it is what a user sees when they run from a
-		// non-built checkout.
-		if !strings.Contains(err.Error(), "make build") {
-			t.Errorf("the missing-shim error must tell the user how to fix it; got %v", err)
-		}
-		return
-	}
-	if !filepath.IsAbs(target) {
-		t.Errorf("the plugin bakes in an ABSOLUTE path (it spawns from OpenCode's cwd), got %q", target)
-	}
-	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(target), ".exe") {
-		t.Errorf("on Windows the target must be the installed witness.exe, got %q", target)
-	}
-	if runtime.GOOS != "windows" && !strings.HasSuffix(target, ".sh") {
-		t.Errorf("on Unix the target stays the shim, got %q", target)
+// Under `go test` the executable sits in a build temp dir, so repoShim fails on every OS — and its
+// error is what a user running from a non-built checkout sees, so it must say how to fix it.
+// (resolveOpenCodeInstall itself is not called: on Windows it is installSelf, which needs prompts/
+// beside the test binary and so could only ever t.Fatal there.)
+func TestRepoShimMissingErrorIsActionable(t *testing.T) {
+	if _, err := repoShim(); err == nil || !strings.Contains(err.Error(), "make build") {
+		t.Fatalf("want the missing-shim error naming `make build`, got %v", err)
 	}
 }
 
 // A SOURCE guard for the Windows branch, because nothing else can catch this off-Windows.
 //
 // The original #10 bug compiled cleanly for GOOS=windows and passed `go vet` — it was a
-// semantic mistake (returning the bash shim where no shell exists), not a type error. And the
-// behavioral assertion above is runtime.GOOS-gated, so on the maintainer's macOS and in Linux
-// CI it can never fail. Without this, reverting the fix would go completely undetected by the
+// semantic mistake (returning the bash shim where no shell exists), not a type error. And no
+// behavioral test reaches the Windows branch off Windows, so on the maintainer's macOS and in
+// Linux CI it can never fail. Without this, reverting the fix would go completely undetected by the
 // whole suite until someone ran it on real Windows.
 //
 // So: read install_windows.go and require that its resolveOpenCodeInstall does NOT hand back

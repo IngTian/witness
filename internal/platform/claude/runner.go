@@ -31,12 +31,6 @@ func (runner) ValidateModels(context.Context, ...string) error { return nil }
 
 func (runner) InvocationHint() string { return "claude -p" }
 
-// ConcurrentRunSafe is true: each Run is a fresh, isolated `claude -p` process
-// (--no-session-persistence, temp cwd, WITNESS_WORKER=1) that shares no in-process
-// state, so the engine may mine many sessions at once. The only shared resource is
-// the embedder, which the engine serializes on its own mutex during reduce.
-func (runner) ConcurrentRunSafe() bool { return true }
-
 // Run invokes `claude -p` headlessly and returns the model's text reply. systemPrompt
 // is witness's own instruction (a lens extract/review prompt); input is the corpus
 // being analyzed (transcript, prior observations, or facets). They are kept in
@@ -117,13 +111,6 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 	return cmd
 }
 
-// buildRunCmd assembles the isolated `claude -p` invocation, separating witness's
-// instructions from the corpus: the instructions become the system prompt; the
-// corpus is the user turn (stdin). Both arrive already fenced (distill.RunnerMine applies
-// platform.WrapCorpus + CorpusNotice for every runner), so the corpus cannot impersonate
-// witness's instructions — a hostile repo that induces record_observation(<payload>)
-// cannot have that payload reach the reviewer as instructions. Split out from Run so the
-// wiring is unit-testable. WITNESS_WORKER=1 is the recursion guard.
 // buildRunCmdFn is the test seam for the child process. It exists so the deadline-attribution
 // test can drive the REAL Run() — including its error classification, the part that was wrong —
 // against a stand-in that hangs, instead of spawning the user's actual `claude` CLI. Nothing in
@@ -134,6 +121,13 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 // stayed green while the production path leaked unbounded children.
 var buildRunCmdFn = buildRunCmd
 
+// buildRunCmd assembles the isolated `claude -p` invocation, separating witness's
+// instructions from the corpus: the instructions become the system prompt; the
+// corpus is the user turn (stdin). Both arrive already fenced (distill.RunnerMine applies
+// platform.WrapCorpus + CorpusNotice for every runner), so the corpus cannot impersonate
+// witness's instructions — a hostile repo that induces record_observation(<payload>)
+// cannot have that payload reach the reviewer as instructions. Split out from Run so the
+// wiring is unit-testable. WITNESS_WORKER=1 is the recursion guard.
 func buildRunCmd(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
 	cmd := newClaudeCmd(ctx, model)
 	cmd.Args = append(cmd.Args, "--append-system-prompt", systemPrompt)
