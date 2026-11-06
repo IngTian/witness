@@ -229,22 +229,3 @@ func jsonOutputMode() bool {
 // arrivals, terminate on a stuck job, optional budget cap) plus the MAP/REDUCE
 // parallel split. The caller still holds the single-flight lock for the whole
 // drain, so only one runs at a time across the machine; extra triggers no-op.
-
-// agentFlag parses a minimal --agent <name> argument list for the internal
-// capture command. Returns def when --agent is absent.
-func agentFlag(args []string, def string) (string, error) {
-	agent := def
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--agent":
-			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
-				return "", fmt.Errorf("--agent requires a value")
-			}
-			agent = strings.ToLower(strings.TrimSpace(args[i+1]))
-			i++
-		default:
-			return "", fmt.Errorf("unknown argument %q", args[i])
-		}
-	}
-	return agent, nil
-}

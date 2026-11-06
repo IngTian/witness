@@ -51,7 +51,7 @@ func codexRollouts(t *testing.T, ids ...string) {
 // it always printed, so a script parsing it sees no difference.
 func TestImportShowsProgressOnStderrOnly(t *testing.T) {
 	codexRollouts(t, "a", "b")
-	out, errOut, err := captureBoth(t, func() error { return cmdImport([]string{"--agent", "codex", "--no-kick"}) })
+	out, errOut, err := captureBoth(t, func() error { return cmdImport(importOpts{agent: "codex", noKick: true}) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestImportShowsProgressOnStderrOnly(t *testing.T) {
 // plugin's --quiet import, and the Codex capture hook, which must also still answer "{}".
 func TestImportProgressStaysOutOfBackgroundImports(t *testing.T) {
 	codexRollouts(t, "a", "b")
-	out, errOut, err := captureBoth(t, func() error { return cmdImport([]string{"--agent", "codex", "--quiet", "--no-kick"}) })
+	out, errOut, err := captureBoth(t, func() error { return cmdImport(importOpts{agent: "codex", quiet: true, noKick: true}) })
 	if err != nil || out != "" || errOut != "" {
 		t.Fatalf("--quiet: stdout %q, stderr %q, %v", out, errOut, err)
 	}
@@ -86,7 +86,7 @@ func TestImportProgressStaysOutOfBackgroundImports(t *testing.T) {
 func TestImportWithNothingToReadDrawsNothing(t *testing.T) {
 	codexRollouts(t)
 	for _, agent := range []string{"codex", "claude"} {
-		_, errOut, err := captureBoth(t, func() error { return cmdImport([]string{"--agent", agent, "--no-kick"}) })
+		_, errOut, err := captureBoth(t, func() error { return cmdImport(importOpts{agent: agent, noKick: true}) })
 		if err != nil || errOut != "" {
 			t.Fatalf("%s: stderr %q, %v", agent, errOut, err)
 		}
@@ -100,7 +100,7 @@ func TestImportClearsTheLineBeforeTheSummary(t *testing.T) {
 	codexRollouts(t, "a")
 	out, _, err := captureBoth(t, func() error {
 		onATerminal(t)
-		return cmdImport([]string{"--agent", "codex", "--no-kick"})
+		return cmdImport(importOpts{agent: "codex", noKick: true})
 	})
 	if err != nil {
 		t.Fatal(err)

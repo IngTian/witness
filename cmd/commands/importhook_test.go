@@ -34,7 +34,7 @@ func TestImportReportsPartialSuccessAndHookStaysJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(folder, "z-good.jsonl"), []byte(fixture), 0600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := captureStdoutErr(t, func() error { return cmdImport([]string{"--agent", "codex", "--no-kick"}) })
+	out, err := captureStdoutErr(t, func() error { return cmdImport(importOpts{agent: "codex", noKick: true}) })
 	if err != nil || !strings.HasPrefix(out, "[!] codex: imported 1 record from 1 session") || !strings.Contains(out, "skipped 1 source input with errors") {
 		t.Fatalf("partial result: %s, %v", out, err)
 	}

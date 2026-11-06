@@ -19,17 +19,8 @@ func newInternalWorkerCmd() *cobra.Command {
 	var auto bool
 	var since string
 	var until string
-	c := &cobra.Command{Use: "worker-run", Hidden: true, RunE: func(_ *cobra.Command, args []string) error {
-		if auto {
-			args = append(args, "--auto")
-		}
-		if since != "" {
-			args = append(args, "--since", since)
-		}
-		if until != "" {
-			args = append(args, "--until", until)
-		}
-		return cmdWorker(args)
+	c := &cobra.Command{Use: "worker-run", Hidden: true, Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+		return cmdWorker(auto, since, until)
 	}}
 	c.Flags().BoolVar(&auto, "auto", false, "run with automatic distillation limits")
 	c.Flags().StringVar(&since, "since", "", "only sessions updated at or after this time")
@@ -42,40 +33,14 @@ func newInternalWorkerCmd() *cobra.Command {
 // runs the reviewer if due. Triggers just spawn this; if a consumer is already
 // running, the new one no-ops immediately. The filesystem is the durable job
 // queue; this lock elects the single consumer that drains it.
-func cmdWorker(args []string) error {
-	auto, timeRange, err := workerFlags(args)
+func cmdWorker(auto bool, since, until string) error {
+	timeRange, err := parseSessionTimeRange(since, until, time.Now())
 	if err != nil {
 		return err
 	}
 	// Silent: this is the detached worker every trigger spawns.
 	_, err = runWorkerInRange(auto, timeRange, "")
 	return err
-}
-
-func workerFlags(args []string) (bool, sessionTimeRange, error) {
-	auto := false
-	since := ""
-	until := ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--auto":
-			auto = true
-		case "--since", "--until":
-			if i+1 >= len(args) {
-				return false, sessionTimeRange{}, fmt.Errorf("%s requires a value", args[i])
-			}
-			if args[i] == "--since" {
-				since = args[i+1]
-			} else {
-				until = args[i+1]
-			}
-			i++
-		default:
-			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker-run [--auto] [--since <time>] [--until <time>]")
-		}
-	}
-	timeRange, err := parseSessionTimeRange(since, until, time.Now())
-	return auto, timeRange, err
 }
 
 // runWorker is the SILENT worker run: background wakeups, auto runs, and any caller that has not

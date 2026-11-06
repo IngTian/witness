@@ -258,27 +258,27 @@ func TestMergeNamesAMissingSource(t *testing.T) {
 
 func TestImportSaysWhatItDidAndWhy(t *testing.T) {
 	codexRollouts(t)
-	out, err := captureStdoutErr(t, func() error { return cmdImport([]string{"--agent", "claude", "--no-kick"}) })
+	out, err := captureStdoutErr(t, func() error { return cmdImport(importOpts{agent: "claude", noKick: true}) })
 	if err != nil || !strings.HasPrefix(out, "[-] claude: nothing to import — it is captured live by its hooks") ||
 		!strings.Contains(out, "witness wire claude") {
 		t.Errorf("claude import is a no-op by design and must say so:\n%s (%v)", out, err)
 	}
-	out, err = captureStdoutErr(t, func() error { return cmdImport([]string{"--agent", "codex", "--no-kick"}) })
+	out, err = captureStdoutErr(t, func() error { return cmdImport(importOpts{agent: "codex", noKick: true}) })
 	if err != nil || !strings.HasPrefix(out, "[ok] codex: up to date — nothing new since the last import") {
 		t.Errorf("an empty codex import:\n%s (%v)", out, err)
 	}
 
 	agents := strings.Join(editorNames(), ", ")
 	for _, agent := range []string{"vscode", "file"} { // file is pushed in by `witness ingest`, never imported
-		if err := cmdImport([]string{"--agent", agent}); err == nil || err.Error() != `unknown agent "`+agent+`" — want one of: `+agents {
+		if err := cmdImport(importOpts{agent: agent}); err == nil || err.Error() != `unknown agent "`+agent+`" — want one of: `+agents {
 			t.Errorf("unknown agent %s: %v", agent, err)
 		}
 	}
-	if err := cmdImport(nil); err == nil || !strings.HasPrefix(err.Error(), "which agent? witness import --agent <") {
+	if err := cmdImport(importOpts{}); err == nil || !strings.HasPrefix(err.Error(), "which agent? witness import --agent <") {
 		t.Errorf("bare import: %v", err)
 	}
 	t.Setenv("WITNESS_CODEX_HOME", filepath.Join(t.TempDir(), "nocodex"))
-	if err := cmdImport([]string{"--agent", "codex"}); err == nil || !strings.Contains(err.Error(), "nocodex does not exist") ||
+	if err := cmdImport(importOpts{agent: "codex"}); err == nil || !strings.Contains(err.Error(), "nocodex does not exist") ||
 		!strings.Contains(err.Error(), "is codex installed here?") || strings.Contains(err.Error(), "stat ") {
 		t.Errorf("a missing Codex home: %v", err)
 	}
