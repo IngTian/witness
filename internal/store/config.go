@@ -457,10 +457,10 @@ func (c *configFile) EnsureConfigFile() error {
 		return err
 	}
 	tpl := `# witness configuration — all fields optional, shown with defaults.
-# Docs: https://github.com/IngTian/witness#configuration
+# Docs: https://github.com/IngTian/witness/blob/main/docs/cli.md#configuration
 
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
+# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness wire`" + ` also binds it.
 # runner = "claude"
 
 # Two distillation stages, two models:

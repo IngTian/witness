@@ -71,4 +71,4 @@ If you want to force a different binary, set `WITNESS_BIN` before starting OpenC
 export WITNESS_BIN=/absolute/path/to/witness
 ```
 
-If you already have your own `mcp.witness` entry, the plugin leaves it alone. The npm CLI deliberately does not support `witness install` / `witness uninstall`; those are source-checkout workflows, not the npm one.
+If you already have your own `mcp.witness` entry, the plugin leaves it alone. The npm CLI deliberately refuses `witness wire` / `witness unwire`; editor wiring is a source-checkout workflow, and here the plugin registers itself. `witness install` (archive provisioning) works as usual.
