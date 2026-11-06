@@ -155,21 +155,6 @@ func (rs *runnerSet) NativeFor(ln *lens.Lens) bool {
 	return ok && s.SupportsNativeSession()
 }
 
-// concurrentRunSafe is the AND across opened runners: the engine's single session-window
-// cap must be safe for EVERY runtime a session might touch (a session's lenses run
-// serially within one goroutine, but different sessions run in parallel and may each hit
-// any runtime). Both runtimes are true today, so this is 16-way as before; the AND keeps
-// it correct if a future runtime is added that isn't concurrency-safe.
-func (rs *runnerSet) concurrentRunSafe() bool {
-	safe := true
-	for _, or := range rs.byName {
-		if or.runner != nil && !or.runner.ConcurrentRunSafe() {
-			safe = false
-		}
-	}
-	return safe
-}
-
 // Close tears down every opened runner (each Close runs its own post-cleanup sweep). A
 // broken runtime (never opened) has nothing to close.
 func (rs *runnerSet) Close() {

@@ -26,7 +26,6 @@ func (limitedPreviewRunner) Run(context.Context, string, string, string) (string
 }
 func (limitedPreviewRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (limitedPreviewRunner) InvocationHint() string                          { return "fake opencode" }
-func (limitedPreviewRunner) ConcurrentRunSafe() bool                         { return true }
 
 // writeLensDir writes a candidate lens DIRECTORY (issue #75: lens.json + extract.md +
 // review.md) and returns its path. name/extract/review empty are simply omitted, so a

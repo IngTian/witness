@@ -46,7 +46,6 @@ func (leakFakeRunner) Run(_ context.Context, _, prompt, _ string) (string, error
 }
 func (leakFakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (leakFakeRunner) InvocationHint() string                          { return "fakeleak" }
-func (leakFakeRunner) ConcurrentRunSafe() bool                         { return true }
 
 // A lens routed to an UNKNOWN runner is circuit-broken (its RunFor returns a failing
 // MineFunc) while lenses on the healthy default runner get a working one — the per-runtime

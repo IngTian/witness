@@ -31,12 +31,6 @@ func (runner) ValidateModels(context.Context, ...string) error { return nil }
 
 func (runner) InvocationHint() string { return "claude -p" }
 
-// ConcurrentRunSafe is true: each Run is a fresh, isolated `claude -p` process
-// (--no-session-persistence, temp cwd, WITNESS_WORKER=1) that shares no in-process
-// state, so the engine may mine many sessions at once. The only shared resource is
-// the embedder, which the engine serializes on its own mutex during reduce.
-func (runner) ConcurrentRunSafe() bool { return true }
-
 // Run invokes `claude -p` headlessly and returns the model's text reply. systemPrompt
 // is witness's own instruction (a lens extract/review prompt); input is the corpus
 // being analyzed (transcript, prior observations, or facets). They are kept in

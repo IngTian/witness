@@ -338,10 +338,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		if w == nil {
 			return
 		}
-		// Compute the session-window cap AFTER the runners are open: it must be safe for
-		// EVERY opened runtime (different sessions run in parallel and may each touch any
-		// runtime), so AND across the set. rs is non-nil here (getMiner ensured it).
-		conc := distill.EffectiveConcurrency(cfg.MineConcurrency, rs.concurrentRunSafe())
+		conc := distill.EffectiveConcurrency(cfg.MineConcurrency)
 		// Trace the drain boundary for the same reason getMiner traces startup: Drain can spend
 		// minutes inside one model call, and without this line a log that stops here is
 		// ambiguous between "never started draining" and "started and is waiting on a model".

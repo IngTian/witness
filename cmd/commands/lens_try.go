@@ -239,9 +239,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	runFn := distill.RunnerMine(runner)
 
 	// Preview all sessions in parallel (bounded by the engine's concurrency policy), then
-	// render in sample order. Concurrency is clamped to the sample size (and to 1 for a
-	// single --session, or a hypothetical non-concurrent runner).
-	conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
+	// render in sample order. Concurrency is clamped to the sample size (so to 1 for a
+	// single --session).
+	conc := distill.EffectiveConcurrency(cfg.MineConcurrency)
 	if conc > len(sessions) {
 		conc = len(sessions)
 	}

@@ -687,7 +687,6 @@ func (selfHealFakeRunner) Run(_ context.Context, _, prompt, _ string) (string, e
 }
 func (selfHealFakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (selfHealFakeRunner) InvocationHint() string                          { return "selfheal" }
-func (selfHealFakeRunner) ConcurrentRunSafe() bool                         { return true }
 
 // TestWorkerSelfHealRetriesAreBounded verifies that a portrait whose resolve keeps failing
 // gets bounded retries: the first self-heal attempts once and sets sources_retry_after =
@@ -826,7 +825,6 @@ func (selfHealFailRunner) Run(_ context.Context, _, prompt, _ string) (string, e
 }
 func (selfHealFailRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (selfHealFailRunner) InvocationHint() string                          { return "selfhealfail" }
-func (selfHealFailRunner) ConcurrentRunSafe() bool                         { return true }
 
 // setupTestLens creates a minimal lens directory for testing.
 func setupTestLens(t *testing.T, root string) string {

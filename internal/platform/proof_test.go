@@ -68,7 +68,6 @@ func (fakeRunner) Open(context.Context) error                      { return nil 
 func (fakeRunner) Close() error                                    { return nil }
 func (fakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (fakeRunner) InvocationHint() string                          { return "fake-run" }
-func (fakeRunner) ConcurrentRunSafe() bool                         { return true }
 func (fakeRunner) Run(_ context.Context, _, _, _ string) (string, error) {
 	return `[{"dimension":"thinking","observation":"the fake platform was mined by the real engine","evidence":"proof","poignancy":5}]`, nil
 }
