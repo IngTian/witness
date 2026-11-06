@@ -82,11 +82,11 @@ func seedTryStore(t *testing.T, runner string) *store.Store {
 func TestLensTryOnOpenCodeIsLockFree(t *testing.T) {
 	s := seedTryStore(t, store.RunnerOpenCode)
 	opened := false
-	previous := runnerForStore
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+	previous := runnerForName
+	runnerForName = func(string, store.Config) (platform.Runner, error) {
 		return limitedPreviewRunner{opened: &opened}, nil
 	}
-	t.Cleanup(func() { runnerForStore = previous })
+	t.Cleanup(func() { runnerForName = previous })
 	unlock, ok := s.WorkerLock() // stand in for a running worker
 	if !ok {
 		t.Fatal("precondition: could not take the worker lock")
@@ -108,11 +108,11 @@ func TestLensTryOnOpenCodeIsLockFree(t *testing.T) {
 func TestLensTryReservedNamePreviewsAsCandidate(t *testing.T) {
 	seedTryStore(t, store.RunnerOpenCode)
 	opened := false
-	previous := runnerForStore
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+	previous := runnerForName
+	runnerForName = func(string, store.Config) (platform.Runner, error) {
 		return limitedPreviewRunner{opened: &opened}, nil
 	}
-	t.Cleanup(func() { runnerForStore = previous })
+	t.Cleanup(func() { runnerForName = previous })
 
 	out := captureStdout(t, func() {
 		if err := cmdLensTry(writeLensDir(t, "Unified", "mine", "synth"), lensTryOpts{nSessions: 1, asJSON: true}); err != nil {
@@ -404,5 +404,36 @@ func TestTryRunnerCfgClearsCrossRuntimeDefaults(t *testing.T) {
 	got3 := tryRunnerCfg(cfg, tuned)
 	if m := distill.ModelFor(got3, tuned, distill.PhaseExtract); m != "opencode/free" {
 		t.Fatalf("cross-runtime lens with a per-lens model must use it, got %q", m)
+	}
+}
+
+// The F030 probe: on an UNBOUND store the npm wrapper's WITNESS_RUNNER=opencode is the default,
+// but a lens that declares runner "claude" drains on claude -p — so its preview must too.
+// tryRunnerCfg already pointed cfg at claude; minting through the store's precedence ladder
+// re-resolved the env and previewed on opencode serve instead. Real resolution, not the seam:
+// the disable switch makes both runners fail before any CLI, and the error names which one ran.
+func TestLensTryPreviewsOnTheLensRunnerNotTheEnvFallback(t *testing.T) {
+	t.Setenv(platform.DisableExternalRunnersEnv, "1")
+	t.Setenv("WITNESS_RUNNER", "opencode")
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	s, err := store.Open() // never SetRunner: unbound, so the env fallback is live
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.AppendRaw(store.RawRecord{Session: "s1", Seq: 0, Role: "user", Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := validLensDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "lens.json"), []byte(`{"name":"cand","runner":"claude"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	got := captureStdout(t, func() { runErr = cmdLensTry(dir, lensTryOpts{nSessions: 1, asJSON: true}) })
+	if runErr != nil {
+		got += runErr.Error()
+	}
+	if strings.Contains(got, "opencode") || !strings.Contains(got, "claude runner disabled") {
+		t.Fatalf("a claude lens must preview on claude -p, not the WITNESS_RUNNER fallback:\n%s", got)
 	}
 }

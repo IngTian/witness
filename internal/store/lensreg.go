@@ -242,28 +242,13 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 			return err
 		}
 	}
-	// Move the OLD definition aside (not delete) so a swap fault can't leave the user with
-	// nothing: if the Rename below fails, we restore it. Only after the new dir is in place
-	// do we drop the backup. (A pre-swap failure here leaves the old lens untouched.)
+	// Swap with the OLD definition moved aside (not deleted) so a swap fault can't leave the
+	// user with nothing — see swapDir. On failure the staged copy is KEPT for manual recovery
+	// (the next register clears it), and the error says where the previous definition is.
 	_ = os.RemoveAll(bak)
-	hadOld := false
-	if _, statErr := os.Stat(dir); statErr == nil {
-		if err := os.Rename(dir, bak); err != nil {
-			_ = os.RemoveAll(tmp)
-			return err
-		}
-		hadOld = true
+	if err := swapDir(tmp, dir, bak); err != nil {
+		return fmt.Errorf("register lens %q: %w; new definition staged at %s", name, err, tmp)
 	}
-	if err := os.Rename(tmp, dir); err != nil {
-		// Swap failed: restore the previous definition and keep the staged copy for manual
-		// recovery, with a self-explanatory error (never silently leave the lens gone).
-		if hadOld {
-			_ = os.Rename(bak, dir)
-		}
-		return fmt.Errorf("register lens %q failed during swap; previous definition %s, new definition staged at %s: %w",
-			name, map[bool]string{true: "restored", false: "was absent"}[hadOld], tmp, err)
-	}
-	_ = os.RemoveAll(bak)
 	return nil
 }
 

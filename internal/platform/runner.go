@@ -105,7 +105,7 @@ func (n *NativeSession) Finalize() error {
 // pending session regardless of which platform produced it. It is the whole of
 // what the engine (internal/distill) knows about a runtime — distill calls Run and
 // never learns whether that shells to `claude -p` or talks to `opencode serve`.
-// This is the axis resolved by RunnerFor (by cfg.Runner), the counterpart to
+// This is the axis resolved by RunnerForName (by cfg.Runner), the counterpart to
 // ForSession (the per-session owning platform).
 type Runner interface {
 	// Open acquires whatever the engine needs to serve Run (OpenCode: a private
@@ -166,26 +166,17 @@ type RunnerProvider interface {
 // SHARED database; v0.7.0's private database deleted that sweep, and the Open-path reapers are
 // orphan-only. A sweeping runner would need three lines of locking at the call site.)
 
-// RunnerFor resolves the default runner for a drain. It applies the store's runner
-// precedence (bound-meta > config line > WITNESS_RUNNER env > default — unchanged)
-// to get ONE name, then mints that platform's Runner. Fails closed on an unknown
-// name so a typo surfaces instead of silently defaulting.
+// RunnerForName mints the Runner for an explicit runner NAME: empty means the default
+// platform, and an unknown name fails closed so a typo surfaces instead of silently
+// defaulting. Callers resolve the name first — the store's precedence ladder
+// (store.ResolveRunner) for the default, then distill.RunnerFor for a lens's own runtime —
+// and mint by name. There is deliberately no store-taking variant: re-applying the ladder
+// after a lens has picked its runtime let an unbound store's WITNESS_RUNNER override the
+// lens, so `lens try` previewed on a different runtime than the drain used (F030).
 //
-// This is deliberately independent of ForSession: a Claude-runner user distilling
-// imported OpenCode sessions resolves RunnerFor=Claude (shells to claude -p) while
-// each session's ForSession=OpenCode still shapes its input. One engine, per-source
-// input shaping — the two axes never derive from each other.
-func RunnerFor(st store.RunnerResolver, cfg store.Config) (Runner, error) {
-	return RunnerForName(strings.TrimSpace(st.ResolveRunner(cfg)), cfg)
-}
-
-// RunnerForName mints the Runner for an explicit runner NAME, applying the same
-// empty→default + fail-closed-on-typo rules as RunnerFor. It is the per-lens-runner seam
-// (issue #75 slice 2): the worker resolves each active lens's runtime (distill.RunnerFor)
-// and mints one runner per distinct name via this, so lenses on different runtimes each
-// get their own Runner. cfg is passed through for the runner's model prewarm/validate; a
-// caller with per-lens models on this runtime should pass a cfg carrying the union (see
-// the worker's per-runtime open).
+// This is independent of ForSession: a Claude-runner user distilling imported OpenCode
+// sessions mints Claude (shells to claude -p) while each session's ForSession=OpenCode still
+// shapes its input. cfg is passed through for the runner's model prewarm/validate.
 func RunnerForName(name string, cfg store.Config) (Runner, error) {
 	name = strings.TrimSpace(name)
 	// An empty runner means "unset" — fall back to the default platform (Claude),

@@ -43,13 +43,6 @@ type SessionPlatformReader interface {
 	SessionPlatform(session string) string
 }
 
-// RunnerResolver resolves the distillation runner NAME to use, applying the #71
-// bound-meta > config > WITNESS_RUNNER precedence. platform.RunnerFor needs only this
-// one method of the store to mint the right Runner.
-type RunnerResolver interface {
-	ResolveRunner(cfg Config) string
-}
-
 // CaptureStore is what a hook-fed capture adapter needs: append raw turns numbered by
 // the current count, and stamp the owning platform. It is the store slice threaded
 // through platform.Capturer.Capture.
@@ -135,7 +128,6 @@ type Queue interface {
 	// inputs
 	ReadRawSnapshot(session string) (recs []RawRecord, rawHighID int64, err error)
 	RawCount(session string) int
-	ReadObservations(lens string) ([]Observation, error)
 	DrainStaged(session string) (obs []Observation, throughID int64, err error)
 	// per-(session,lens) watermark / readiness
 	DistilledCount(session, lens string) int
@@ -243,6 +235,5 @@ var (
 	_ RawReader             = (*Store)(nil)
 	_ SessionClassifier     = (*Store)(nil)
 	_ SessionPlatformReader = (*Store)(nil)
-	_ RunnerResolver        = (*Store)(nil)
 	_ ActiveObservationSink = (*Store)(nil)
 )

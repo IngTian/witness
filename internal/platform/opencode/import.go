@@ -68,6 +68,22 @@ func DefaultDBPath() (string, error) {
 	return filepath.Join(home, ".local", "share", "opencode", "opencode.db"), nil
 }
 
+// ConfigDir returns the directory OpenCode reads its config (opencode.json, plugins/) from:
+// OPENCODE_CONFIG_DIR, else XDG_CONFIG_HOME/opencode, else ~/.config/opencode — on Windows
+// too. The XDG step mirrors OpenCode's own lookup (packages/opencode/src/global/index.ts joins
+// xdg-basedir's xdgConfig, which is $XDG_CONFIG_HOME else ~/.config, with "opencode"); the
+// wiring once skipped it and wrote where OpenCode never reads while reporting success.
+func ConfigDir() string {
+	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" {
+		return d
+	}
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return filepath.Join(d, "opencode")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "opencode")
+}
+
 // Import imports the requested OpenCode sessions. With no session ids, it imports
 // sessions updated since the last full sync; the first full sync imports all
 // existing OpenCode sessions.

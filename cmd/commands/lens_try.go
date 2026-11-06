@@ -78,7 +78,7 @@ type lensTryOpts struct {
 	asJSON      bool
 }
 
-var runnerForStore = platform.RunnerFor
+var runnerForName = platform.RunnerForName
 
 // tryProgress starts the preview's progress line on stderr. A seam so a test can read every
 // snapshot, which the line itself only prints once per Where when stderr is not a terminal.
@@ -211,7 +211,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 
 	ctx := context.Background()
 
-	runner, err := runnerForStore(st, cfg)
+	runner, err := runnerForName(cfg.Runner, cfg)
 	if err != nil {
 		return err
 	}
@@ -434,17 +434,17 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // when that runner differs from the resolved default. Those models belong to the default
 // runtime; on a different runtime they are a bad model name that would abort OpenCode's
 // Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
-// runtime's own default, mirroring production's clearCrossRuntimeModels. cfg.Runner must already be
-// the RESOLVED default runner. Pure (returns a modified copy) so it is unit-testable.
+// runtime's own default, through the same clearCrossRuntimeModels the drain's runnerSet uses.
+// cfg.Runner must already be the RESOLVED default runner, and the result's cfg.Runner is final:
+// mint it by name (RunnerForName), never through the store's precedence ladder again, which
+// would let an unbound store's WITNESS_RUNNER override the lens (F030). Pure (returns a
+// modified copy) so it is unit-testable.
 func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
 	defaultRunner := cfg.Runner
 	if r := distill.RunnerFor(cfg, ln); r != "" {
 		cfg.Runner = r
 	}
-	if strings.TrimSpace(cfg.Runner) != strings.TrimSpace(defaultRunner) {
-		cfg.TriageModel = ""
-		cfg.DistillModel = ""
-	}
+	clearCrossRuntimeModels(&cfg, cfg.Runner, defaultRunner)
 	return cfg
 }
 

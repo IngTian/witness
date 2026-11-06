@@ -14,7 +14,7 @@ import (
 // A platform whose Name() is non-lowercase/padded must still be resolvable —
 // Register and ByName must normalize identically, or a third-party platform (the
 // PR's headline extensibility) would register yet be unreachable via ForSession/
-// RunnerFor. Uses a throwaway name so it doesn't collide with the real platforms.
+// RunnerForName. Uses a throwaway name so it doesn't collide with the real platforms.
 func TestRegisterNormalizesNameLikeByName(t *testing.T) {
 	platform.Register(mixedCasePlatform{})
 	if _, ok := platform.ByName("mixedcaseplat"); !ok {

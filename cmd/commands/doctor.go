@@ -78,7 +78,7 @@ func cmdDoctor(asJSON bool) error {
 	var deferredErr error
 	runnerCmd := "unknown"
 	modelStatus := "unknown"
-	defaultRunner, rerr := platform.RunnerFor(st, cfg)
+	defaultRunner, rerr := platform.RunnerForName(cfg.Runner, cfg)
 	if rerr != nil {
 		modelStatus = "INVALID: " + rerr.Error()
 		deferredErr = rerr

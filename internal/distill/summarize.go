@@ -117,11 +117,8 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 	var portrait strings.Builder
 	// failures collects per-lens errors so ONE bad lens cannot starve the others (#148); they are
-	// joined and returned at the end. stalePortrait records that at least one section fell back to
-	// a prior summary, which is what suppresses the signature stamp below — otherwise a portrait
-	// built partly from stale sections would be vouched for as current and never rebuilt.
+	// joined and returned at the end.
 	var failures []error
-	stalePortrait := false
 	for _, p := range passes {
 		l := p.name
 		if p.prior != "" {
@@ -162,7 +159,6 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 			// the same state a brand-new lens is in.
 			if prev, ok, _ := sm.Store.ReadProfile(l); ok && prev != "" {
 				writeSection(&portrait, l, prev)
-				stalePortrait = true
 			}
 			continue
 		}
@@ -214,14 +210,11 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	if err := sm.Store.WriteProfile(store.ProfileUnified, umd); err != nil {
 		return errors.Join(append(failures, err)...)
 	}
-	// Stamp after the write succeeds (same crash-safety as the per-lens stamp) — but ONLY when
-	// every section is current. A portrait containing a fallback section is correct to serve and
-	// wrong to vouch for: stamping it would match the signature next pass and skip the rebuild, so
-	// a transient model failure would freeze the stale section in place until the facets happened
-	// to change again. Leaving the signature unstamped costs one regeneration and self-heals.
-	if !stalePortrait {
-		_ = sm.Store.SetMetaString(store.ProfileSigKey(store.ProfileUnified), unifiedSig)
-	}
+	// Stamp after the write succeeds (same crash-safety as the per-lens stamp) — even when a section
+	// fell back to a prior summary. The signature covers the portrait TEXT, so the pass after that
+	// lens heals sees a changed section and rebuilds; a freeze cannot happen. Withholding the stamp
+	// only re-ran this call on byte-identical input on every read while the lens stayed broken.
+	_ = sm.Store.SetMetaString(store.ProfileSigKey(store.ProfileUnified), unifiedSig)
 	// Report the per-lens failures now that everything that COULD be summarized has been. The
 	// caller logs this; the profiles that succeeded are already durable.
 	return errors.Join(failures...)

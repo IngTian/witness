@@ -849,6 +849,22 @@ func TestStatsSnapshot(t *testing.T) {
 	}
 }
 
+// Stats.Facets is the ACTIVE profile (what `facets` lists): a compaction that archives 449 → 244
+// must show as 244 in status/doctor/export, not stay at 449.
+func TestStatsCountsOnlyActiveFacets(t *testing.T) {
+	s := tempStore(t)
+	v := []FacetVersion{{Value: "v", Confidence: 0.5}}
+	if err := s.WriteFacets([]Facet{
+		{Lens: LensDefault, Dimension: "d", Key: "kept", Versions: v},
+		{Lens: LensDefault, Dimension: "d", Key: "gone", Versions: v, ArchivedAt: "2026-11-01T00:00:00Z", MergedInto: "d/kept"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Stats([]string{LensDefault}).Facets; got != 1 {
+		t.Fatalf("Stats.Facets = %d, want 1 (the archived facet is not part of the profile)", got)
+	}
+}
+
 // ResetLensWatermark drops ONLY the named lens's progress rows (the backfill path,
 // #55) — other lenses' watermarks must survive so they're never re-mined.
 func TestResetLensWatermark(t *testing.T) {
