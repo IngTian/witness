@@ -134,7 +134,7 @@ Or grab a binary from [releases](https://github.com/IngTian/witness/releases). W
 the self-contained `.zip` — see [Windows install](docs/windows.md).
 
 OpenCode users can install from npm instead: `npm i -g @witness-ai/opencode` — see
-[OpenCode support](docs/opencode.md).
+[the npm package README](npm/opencode/README.md).
 
 ## Connect your tools
 
