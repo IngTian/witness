@@ -89,8 +89,8 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	runFn := tap.wrap(untappedRunFn)      // wrapped for causeTap (mining + review)
 	runFor := tap.wrapFor(untappedRunFor) // wrapped for causeTap
 	// Progress on stderr: a fold is one model call per window, and a real archive's default
-	// lens had 109 windows waiting. This is the foreground path only — the drain (worker.go)
-	// builds its own Reviewer and leaves Progress nil.
+	// lens had 109 windows waiting. The drain (worker.go) builds its own Reviewer and draws the same
+	// line only for a foreground run (lens backfill, worker run); a detached worker stays silent.
 	fold := &phaseProgress{start: startProgress}
 	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runFor, Progress: fold.update}
 	err = r.Run(ctx, time.Now())
@@ -120,7 +120,7 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	profErr = regenerateProfile(ctx, st, cfg, lenses, runFn, runFor)
 	sp.Stop()
 	sp = startSpinner("linking the profile to its sources…")
-	_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunFor) // best-effort: logged
+	_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunFor, func() bool { return true }) // runners open; best-effort: logged
 	sp.Stop()
 	return true, profErr, nil
 }

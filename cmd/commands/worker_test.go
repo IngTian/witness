@@ -812,6 +812,54 @@ func TestWorkerSelfHealRetriesAreBounded(t *testing.T) {
 	// We can't test this here, but the existence of the gate is verified by the zero-calls check above.
 }
 
+// A failed self-heal stamps a 6h back-off; a later `witness worker review` that links the sources
+// must clear it, or the next portrait change waits up to 6h to be relinked. Only the worker's own
+// post-review path cleared it — the foreground review's copy of the same tail did not.
+func TestForegroundReviewClearsTheSourcesBackoff(t *testing.T) {
+	registerSelfHealOnce.Do(func() { platform.Register(selfHealFakePlatform{}) })
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "summarize"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"resolve.md": "RESOLVE", "resolve_unified.md": "RESOLVE_UNIFIED"} {
+		if err := os.WriteFile(filepath.Join(bundleDir, "summarize", name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("WITNESS_PROMPTS", bundleDir)
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetConfigString("runner", "selfheal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RegisterLens("test", setupTestLens(t, st.Root)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnableLens("test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteFacets([]store.Facet{{Lens: "test", Dimension: "traits", Key: "k",
+		Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteProfile("test", "Stale summary."); err != nil { // no sources row → stale
+		t.Fatal(err)
+	}
+	if err := st.SetMetaString("sources_retry_after", time.Now().Add(6*time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+		t.Fatalf("review: ran=%v err=%v", ran, err)
+	}
+	if got := st.MetaString("sources_retry_after"); got != "" {
+		t.Errorf("a review that linked the sources left the self-heal back-off at %s", got)
+	}
+}
+
 // selfHealFailPlatform is a runner that always fails, for testing retry bounds.
 var selfHealFailRuns int32
 
