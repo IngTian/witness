@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -71,6 +72,62 @@ import (
 //
 // Bumping this means adding testdata/schema/v<N>.sql (see TestUpgradedSchemaMatchesFresh).
 const schemaVersion = 15
+
+// ErrArchiveNewer means the archive's user_version is above schemaVersion: a newer witness wrote
+// it. Open still succeeds — capture keeps working, since raw is append-only and every release
+// reads it — but this binary must not rewrite L2. writeFacetsTx is a DELETE + INSERT with THIS
+// release's column list, so it silently drops whatever a newer schema added (reproduced: a v0.8.0
+// fold over a v15 archive brought an archived facet back and blanked claim and confidence_seq,
+// with no error). Stale installed binaries are a recorded pattern, and the capture hooks spawn the
+// auto worker, so this is not hypothetical.
+//
+// Every distillation entry point checks ArchiveNewer BEFORE any model call, so the refusal costs
+// nothing; writeFacetsTx checks again as the last line of defence. A check only there would turn
+// the silent corruption into a paid retry loop: review pays for the model call before it writes.
+// This protects from the next schema bump onward; binaries already shipped without it cannot be
+// fixed retroactively.
+var ErrArchiveNewer = errors.New("this archive was written by a newer witness")
+
+// userVersion reads PRAGMA user_version through a *sql.DB or a *sql.Tx. It is read live rather
+// than captured at Open, so a long-running worker also notices a newer binary migrating the
+// archive under it.
+func userVersion(q interface {
+	QueryRow(string, ...any) *sql.Row
+}) (int, error) {
+	var v int
+	err := q.QueryRow("PRAGMA user_version").Scan(&v)
+	return v, err
+}
+
+// refuseNewer is nil for an archive at or below this binary's schema, else ErrArchiveNewer
+// wrapped with both versions — the one message every refusal prints.
+func refuseNewer(archive int) error {
+	if archive <= schemaVersion {
+		return nil
+	}
+	return fmt.Errorf("%w (schema v%d; this binary writes up to v%d) — upgrade witness before distilling; capture keeps working",
+		ErrArchiveNewer, archive, schemaVersion)
+}
+
+// ArchiveNewer returns ErrArchiveNewer (wrapped with both versions) when a newer witness wrote
+// this archive, else nil. An unreadable version is returned as an error too: fail closed.
+func (s *Store) ArchiveNewer() error {
+	v, err := userVersion(s.db)
+	if err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	return refuseNewer(v)
+}
+
+// SchemaVersions reports the archive's on-disk schema and the one this binary writes (doctor).
+// archive is -1 when it cannot be read.
+func (s *Store) SchemaVersions() (archive, binary int) {
+	v, err := userVersion(s.db)
+	if err != nil {
+		return -1, schemaVersion
+	}
+	return v, schemaVersion
+}
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -15,28 +16,30 @@ import (
 // on a real archive before any verify budget is spent: are the proposed clusters
 // coherent, multi-session, and not-already-named? If the geometry is bad, we see it here
 // for free. This is the whole S3a slice's payoff.
-func cmdCandidates(lens string) error {
+func cmdCandidates(lensName string) error {
 	st, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	obs, err := st.ReadObservations(lens) // embeddings decoded — clustering needs the vectors
+	// Observations and facets carry the lens's MINED name, which a registered lens may override.
+	data := lens.DataName(st, lensName)
+	obs, err := st.ReadObservations(data) // embeddings decoded — clustering needs the vectors
 	if err != nil {
 		return err
 	}
 	total := 0
 	for _, o := range obs {
-		if o.Lens == lens {
+		if o.Lens == data {
 			total++
 		}
 	}
 	// A typo'd lens used to draw a clustering bar and report "0 observations → 0 candidate arc(s)"
 	// as if the lens existed. A lens that is not registered but still has observations (it was
 	// deregistered) is still worth inspecting, so refuse only when there is neither.
-	if total == 0 && !slices.Contains(st.RegisteredLenses(), lens) {
-		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", lens)
+	if total == 0 && !slices.Contains(st.RegisteredLenses(), lensName) {
+		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", lensName)
 	}
 	facets, err := st.ReadActiveFacets()
 	if err != nil {
@@ -46,11 +49,11 @@ func cmdCandidates(lens string) error {
 	// Progress on stderr: no model call here, but on a real 17,413-observation lens the clustering
 	// alone took 38 minutes, and it used to sit silent for all of it.
 	pl := startProgress()
-	cands := distill.Candidates(obs, facets, lens, func(done, total int) {
-		pl.update(distill.Progress{Where: lens, Stages: []distill.Stage{{Name: "clustering", Done: done, Total: total}}})
+	cands := distill.Candidates(obs, facets, data, func(done, total int) {
+		pl.update(distill.Progress{Where: lensName, Stages: []distill.Stage{{Name: "clustering", Done: done, Total: total}}})
 	})
 	pl.finish()
-	fmt.Printf("lens %s: %s → %s %s\n\n", bold(lens), countOf(total, "observation", "observations"),
+	fmt.Printf("lens %s: %s → %s %s\n\n", bold(lensName), countOf(total, "observation", "observations"),
 		countOf(len(cands), "candidate arc", "candidate arcs"), dim("(dry run — nothing written)"))
 	if len(cands) == 0 {
 		fmt.Println(dim("  no emergent arcs proposed (no dense cross-session cluster the current facets don't already cover)"))

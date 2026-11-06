@@ -14,7 +14,7 @@ import (
 func TestGetFacetsReportsDecayedConfidence(t *testing.T) {
 	f := store.Facet{Lens: "default", Dimension: "traits", Key: "satisfices",
 		Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9, ConfidenceSeq: 100}}}
-	out := renderFacets("default", []store.Facet{f}, 100+int64(store.FacetDecayHalfLifeObs), func() string { return "" })
+	out := renderFacets("default", "default", []store.Facet{f}, 100+int64(store.FacetDecayHalfLifeObs), func() string { return "" })
 	if !strings.Contains(out, "(confidence 0.45)") || strings.Contains(out, "(confidence 0.90)") {
 		t.Errorf("get_facets must report the decayed 0.45, not the stored 0.90:\n%s", out)
 	}
