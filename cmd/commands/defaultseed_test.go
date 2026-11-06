@@ -59,9 +59,9 @@ func TestFreshArchiveAutoSeedsDefault(t *testing.T) {
 		t.Fatal("auto-seed must ENABLE default so it distills")
 	}
 	// The seeded lens carries the person dimensions from bundled prompts/default/lens.json.
-	act, err := activeLenses(s)
-	if err != nil || len(act) != 1 || act[0].Name != store.LensDefault {
-		t.Fatalf("activeLenses after auto-seed = %v (err %v), want just default", act, err)
+	act := activeLenses(s)
+	if len(act) != 1 || act[0].Name != store.LensDefault {
+		t.Fatalf("activeLenses after auto-seed = %v, want just default", act)
 	}
 	if len(act[0].Dimensions) == 0 {
 		t.Fatal("auto-seeded default must carry its dimensions from the seeded lens.json")
@@ -175,10 +175,7 @@ func TestDefaultSeedMigratesPre1aArchive(t *testing.T) {
 	if !slices.Contains(s2.LoadConfig().EnabledLenses, store.LensDefault) {
 		t.Fatal("migration must ENABLE the default lens so the install keeps distilling it")
 	}
-	act, err := activeLenses(s2)
-	if err != nil {
-		t.Fatalf("activeLenses: %v", err)
-	}
+	act := activeLenses(s2)
 	var names []string
 	for _, l := range act {
 		names = append(names, l.Name)

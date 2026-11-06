@@ -80,9 +80,9 @@ func TestObservationRecordReachesTheReview(t *testing.T) {
 
 	// Drain it the way the worker does. The session has no raw turns, so nothing is mined and
 	// the runner must never be called; only the staged row moves into L1.
-	lenses, err := activeLenses(st)
-	if err != nil || len(lenses) != 1 {
-		t.Fatalf("active lenses %v (%v)", lenses, err)
+	lenses := activeLenses(st)
+	if len(lenses) != 1 {
+		t.Fatalf("active lenses %v", lenses)
 	}
 	w := &distill.Worker{Store: st, Embedder: fakeTestEmbedder{}, Lenses: lenses, Config: st.LoadConfig(),
 		Run: func(context.Context, string, string, string) (string, error) {

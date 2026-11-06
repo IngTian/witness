@@ -14,11 +14,6 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// profileSigKey is the meta key holding the content signature of the last summary
-// written for a lens (issue #73-S5). Namespaced per lens so the dirty check is
-// O(1) and independent per lens.
-func profileSigKey(lens string) string { return "profile_sig:" + lens }
-
 // summarySignature is the fingerprint of everything a per-lens summary depends on:
 // the model that produces it, the summarizer PROMPT, and the exact facet text fed
 // to it. If it matches the stored signature AND the prior profile file still exists,
@@ -169,7 +164,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		}
 		// Stamp the signature only AFTER the summary is safely on disk, so a crash
 		// between write and stamp just regenerates next time (never skips a stale file).
-		_ = sm.Store.SetMetaString(profileSigKey(l), p.sig)
+		_ = sm.Store.SetMetaString(store.ProfileSigKey(l), p.sig)
 		writeSection(&portrait, l, md)
 	}
 
@@ -219,7 +214,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// fell back to a prior summary. The signature covers the portrait TEXT, so the pass after that
 	// lens heals sees a changed section and rebuilds; a freeze cannot happen. Withholding the stamp
 	// only re-ran this call on byte-identical input on every read while the lens stayed broken.
-	_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), unifiedSig)
+	_ = sm.Store.SetMetaString(store.ProfileSigKey(store.ProfileUnified), unifiedSig)
 	// Report the per-lens failures now that everything that COULD be summarized has been. The
 	// caller logs this; the profiles that succeeded are already durable.
 	return errors.Join(failures...)
@@ -285,7 +280,7 @@ func (sm *Summarizer) planLenses() (map[string][]store.Facet, []lensPass, error)
 		// file (prev == "" || !ok) falls through to regenerate, so a deleted profile
 		// self-heals. Signature-read/-write is via meta (a config read error just means
 		// we don't skip — safe, only costs a call).
-		if sm.Store.MetaString(profileSigKey(l)) == p.sig {
+		if sm.Store.MetaString(store.ProfileSigKey(l)) == p.sig {
 			if prev, ok, _ := sm.Store.ReadProfile(l); ok && prev != "" {
 				p.prior = prev
 			}
@@ -315,7 +310,7 @@ func (sm *Summarizer) unifiedPass(portrait string) (model, sig string, current b
 	// signature, and every later pass matched and returned — permanently blank, no self-heal,
 	// while the per-lens path recovered from the identical input. Under read-time generation
 	// that is worse still, because the read IS the only generation path.
-	if sm.Store.MetaString(profileSigKey(store.ProfileUnified)) == sig {
+	if sm.Store.MetaString(store.ProfileSigKey(store.ProfileUnified)) == sig {
 		if prev, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok && prev != "" {
 			current = true
 		}
@@ -388,7 +383,7 @@ func (sm *Summarizer) deleteProfileAndSignature(lens string) {
 		slog.Warn("summarize: could not remove a stale profile", "lens", lens, "err", err)
 		return // leave the signature alone: the file is still there
 	}
-	_ = sm.Store.SetMetaString(profileSigKey(lens), "")
+	_ = sm.Store.SetMetaString(store.ProfileSigKey(lens), "")
 }
 
 // reapOrphanProfiles deletes per-lens summaries whose lens has no facets in THIS pass.

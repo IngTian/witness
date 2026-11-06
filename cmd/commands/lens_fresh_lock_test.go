@@ -185,7 +185,7 @@ func TestFreshHoldsTheLockNotJustAProbe(t *testing.T) {
 	// Find a release that is NOT the deferred safety net and sits before the drain.
 	explicit := -1
 	for _, idx := range allIndexes(fn, "releaseFresh()") {
-		if idx < drainIdx && !strings.Contains(fn[max0(idx-16):idx], "defer ") {
+		if idx < drainIdx && !strings.Contains(fn[max(idx-16, 0):idx], "defer ") {
 			explicit = idx
 			break
 		}
@@ -206,13 +206,6 @@ func allIndexes(s, sub string) []int {
 		out = append(out, off+i)
 		off += i + len(sub)
 	}
-}
-
-func max0(i int) int {
-	if i < 0 {
-		return 0
-	}
-	return i
 }
 
 // A plain (non---fresh) backfill must NOT take the lock: it deletes nothing, and a running

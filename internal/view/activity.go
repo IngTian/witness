@@ -3,9 +3,9 @@ package view
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -17,11 +17,11 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 	// Parse and bucket turns by local date
 	dayMap := make(map[string]*dayBuilder)
 	for _, t := range in.Turns {
-		if strings.HasPrefix(t.Session, "file:") {
+		if platform.IsCorpusSession(t.Session) {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, t.TS)
-		if err != nil {
+		ts, ok := parseTS(t.TS)
+		if !ok {
 			continue
 		}
 		local := ts.In(loc)
@@ -39,11 +39,11 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 
 	// Parse and bucket notes by local date
 	for _, n := range in.Notes {
-		if strings.HasPrefix(n.Session, "file:") {
+		if platform.IsCorpusSession(n.Session) {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, n.TS)
-		if err != nil {
+		ts, ok := parseTS(n.TS)
+		if !ok {
 			continue
 		}
 		local := ts.In(loc)
@@ -243,11 +243,11 @@ func buildWindow(kind string, start time.Time, first, last string, days []Day, d
 	// Count notes directly by parsed ts date (not sum over Days)
 	notesCount := 0
 	for _, n := range notes {
-		if strings.HasPrefix(n.Session, "file:") {
+		if platform.IsCorpusSession(n.Session) {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, n.TS)
-		if err != nil {
+		ts, ok := parseTS(n.TS)
+		if !ok {
 			continue
 		}
 		date := ts.In(loc).Format("2006-01-02")

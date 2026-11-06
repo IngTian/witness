@@ -30,7 +30,7 @@ die()  { printf '\n%s✗ %s%s\n' "$R" "$1" "$X" >&2; exit 1; }
 
 printf '\n%s╭───────────────────────────────────────────╮%s\n' "$C" "$X"
 printf '%s│%s  %switness%s · installer                      %s│%s\n' "$C" "$X" "$B" "$X" "$C" "$X"
-printf '%s│%s  %slet Claude Code witness your growth%s      %s│%s\n' "$C" "$X" "$D" "$X" "$C" "$X"
+printf '%s│%s  %slet your agent witness your growth%s       %s│%s\n' "$C" "$X" "$D" "$X" "$C" "$X"
 printf '%s╰───────────────────────────────────────────╯%s\n' "$C" "$X"
 
 # --- [1/4] preflight ----------------------------------------------------------

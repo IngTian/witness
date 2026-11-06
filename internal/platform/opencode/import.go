@@ -20,7 +20,7 @@ import (
 const (
 	SessionPrefix        = "opencode:"
 	syncMetaKey          = "opencode_sync_time_updated_ms"
-	importKeysMetaPrefix = "opencode_import_keys:"
+	importKeysMetaPrefix = store.OpenCodeImportKeysNS + ":"
 )
 
 // Importer mirrors OpenCode text messages into witness raw records. It treats

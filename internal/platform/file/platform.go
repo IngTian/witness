@@ -21,6 +21,9 @@ func (Platform) Name() string { return "file" }
 // claude: / opencode: (or the unmarked==claude default).
 func (Platform) SessionPrefix() string { return "file:" }
 
+// IsCorpus marks ingested sessions as documents, not conversations (platform.CorpusSource).
+func (Platform) IsCorpus() bool { return true }
+
 // RenderInputs shapes the session with the shared, source-agnostic policy — identical
 // to the Claude/OpenCode adapters. A file record's Text is flat prose.
 func (Platform) RenderInputs(raw []store.RawRecord, policy platform.ChunkPolicy) []string {

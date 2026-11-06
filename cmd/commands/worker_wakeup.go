@@ -140,7 +140,7 @@ func clearScheduledWakeup(st *store.Store, mode string) bool {
 }
 
 func workerWakeMode(st *store.Store) string {
-	if mode := st.MetaString("worker_mode"); mode != "" {
+	if mode := st.MetaString(metaWorkerMode); mode != "" {
 		return mode
 	}
 	return "manual"

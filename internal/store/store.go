@@ -249,9 +249,8 @@ func sanitize(id string) string {
 	return b.String()
 }
 
-// writeAtomic writes data to path via a temp file + rename (atomic on POSIX).
-// Used for config.toml rewrites; the data layers are transactional in SQLite.
-// writeAtomic publishes data to path via a UNIQUE temp file + rename.
+// writeAtomic publishes data to path via a UNIQUE temp file + rename. Used for config.toml
+// rewrites; the data layers are transactional in SQLite.
 //
 // The temp name must be per-writer, not path+".tmp": with a shared staging path two
 // concurrent processes collide destructively — B's os.WriteFile O_TRUNCs A's half-written

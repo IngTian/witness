@@ -127,5 +127,10 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - New behavior needs a test. The CC capture path and the hook name-contract are
   guarded (`internal/platform/claude/capture_test.go`,
   `cmd/commands/hookcontract_test.go`) — keep them passing.
+- A `schemaVersion` bump adds that version's schema dump:
+  `WITNESS_DUMP_SCHEMA=1 go test -run TestUpgradedSchemaMatchesFresh ./internal/store/`
+  writes `internal/store/testdata/schema/v<N>.sql`; commit it. Every dump there is
+  migrated and compared to a fresh archive, so the previous version keeps guarding
+  the upgrade path and the new one catches a `schemaV1` change made without a bump.
 - Never commit anyone's actual archive data (see `.gitignore`); the repo ships
   the framework, schema, and prompts only.

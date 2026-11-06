@@ -72,10 +72,7 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil {
-		return false, nil, err
-	}
+	lenses := activeLenses(st)
 	ctx := context.Background()
 	// Same runner lifecycle as the worker: open the set of runtimes the active lenses
 	// need, review through the per-lens resolver, then close each private runtime.
