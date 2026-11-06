@@ -1,7 +1,11 @@
 package vector
 
 import (
+	"fmt"
 	"math"
+	"math/rand/v2"
+	"reflect"
+	"slices"
 	"sort"
 	"testing"
 
@@ -132,7 +136,55 @@ func TestMutualKNNFiltersLensAndSkipsEmpty(t *testing.T) {
 	}
 }
 
+// KNNRanks ranks once and MutualAt reads each k off a prefix of that ranking, so the pair must
+// rebuild MutualKNNAdj's graph EXACTLY at every k it covers — the prefix argument holds only
+// because the order is total (cosine, then index). Exact cosine ties (repeated directions) are
+// where a looser tie-break would keep a different neighbour, so most of this input is ties.
+func TestMutualAtMatchesMutualKNNAdj(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	var obs []store.Observation
+	for i := range 90 {
+		dir := []float32{float32(i % 4), float32(i % 3), 1} // 12 directions, many exact ties
+		if i%3 == 0 {
+			dir = []float32{rng.Float32(), rng.Float32(), rng.Float32()}
+		}
+		obs = append(obs, obsAt(fmt.Sprint(i), "l", "s", dir))
+	}
+	obs = append(obs, store.Observation{ID: "noemb", Lens: "l"}, obsAt("other", "x", "s", []float32{1, 0, 0}))
+
+	const kMax = 9
+	nodes, ranks := KNNRanks(obs, "l", kMax, nil)
+	for k := 1; k <= kMax; k++ {
+		refNodes, ref := MutualKNNAdj(obs, "l", k)
+		if !reflect.DeepEqual(nodes, refNodes) {
+			t.Fatalf("k=%d: node slices differ", k)
+		}
+		if got := MutualAt(ranks, k); !reflect.DeepEqual(sortedAdj(got), sortedAdj(ref)) {
+			t.Fatalf("k=%d: adjacency differs from MutualKNNAdj\n got %v\nwant %v", k, sortedAdj(got), sortedAdj(ref))
+		}
+	}
+
+	// kMax past n-1 clamps like MutualKNNAdj's k, and fewer than two nodes have no edges.
+	_, ranks = KNNRanks(obs[:3], "l", 50, nil)
+	if _, ref := MutualKNNAdj(obs[:3], "l", 50); !reflect.DeepEqual(sortedAdj(MutualAt(ranks, 50)), sortedAdj(ref)) {
+		t.Fatalf("clamped k: got %v, want %v", MutualAt(ranks, 50), ref)
+	}
+	if n, ranks := KNNRanks(obs[:1], "l", 3, nil); len(n) != 1 || !reflect.DeepEqual(MutualAt(ranks, 3), [][]int{nil}) {
+		t.Fatalf("one node: nodes %d, adj %v", len(n), MutualAt(ranks, 3))
+	}
+}
+
 // --- test helpers ---
+
+// sortedAdj copies an adjacency with each list sorted: MutualKNNAdj builds its lists from a map,
+// so their order is not part of the graph.
+func sortedAdj(adj [][]int) [][]int {
+	out := make([][]int, len(adj))
+	for i, a := range adj {
+		out[i] = slices.Sorted(slices.Values(a))
+	}
+	return out
+}
 
 func normalizeComps(comps [][]int) [][]int {
 	out := make([][]int, 0, len(comps))

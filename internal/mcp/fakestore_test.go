@@ -24,9 +24,10 @@ type fakeMCPStore struct {
 	lastStaged        store.Observation
 	deletedIDs        []string
 	existsReturn      bool
-	// readCalls counts full-corpus reads, so a test can prove search short-circuits an
-	// oversized query BEFORE paying for one.
+	// readCalls counts observation reads, so a test can prove search short-circuits an
+	// oversized query BEFORE paying for one; readLens is the lens the last read asked for.
 	readCalls int
+	readLens  string
 	// stagedReturn is what StageObservationCapped reports. Defaults to false via the zero
 	// value, so tests that need a successful stage set it explicitly; the pre-existing
 	// TestServerRecordDeleteSearch sets it to true.
@@ -35,6 +36,8 @@ type fakeMCPStore struct {
 	// which is deliberate: an archive nothing is feeding is the case that used to be
 	// misreported as "the reviewer may not have run yet".
 	whyEmpty store.EmptyReason
+	// whyLens is the lens the last WhyEmpty asked about: the mined name, never the registered one.
+	whyLens string
 	// highWater is the decay clock's "now" for get_facets; 0 renders every confidence as stored.
 	highWater int64
 }
@@ -43,6 +46,7 @@ func (f *fakeMCPStore) ObservationHighWater() (int64, error) { return f.highWate
 
 func (f *fakeMCPStore) ReadObservations(lens string) ([]store.Observation, error) {
 	f.readCalls++
+	f.readLens = lens
 	return f.obs, nil
 }
 
@@ -76,7 +80,10 @@ func (f *fakeMCPStore) DeleteObservation(obsID string) (bool, error) {
 	f.deletedIDs = append(f.deletedIDs, obsID)
 	return true, nil
 }
-func (f *fakeMCPStore) WhyEmpty(lens string) store.EmptyReason { return f.whyEmpty }
+func (f *fakeMCPStore) WhyEmpty(lens string) store.EmptyReason {
+	f.whyLens = lens
+	return f.whyEmpty
+}
 
 // compile-time proof the fake satisfies the interface the server accepts.
 var _ store.MCPStore = (*fakeMCPStore)(nil)
@@ -90,7 +97,7 @@ func TestServerRunsAgainstFakeStore(t *testing.T) {
 	fake := &fakeMCPStore{profiles: map[string]string{"default": knownProfile}}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
+	ss, err := newServer(fake, fakeEmbedder{}, Options{Version: "v0.0.0-fake"}).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}
@@ -145,7 +152,7 @@ func TestServerRecordDeleteSearch(t *testing.T) {
 	}
 
 	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
+	ss, err := newServer(fake, fakeEmbedder{}, Options{Version: "v0.0.0-fake"}).Connect(ctx, serverT, nil)
 	if err != nil {
 		t.Fatalf("server connect: %v", err)
 	}

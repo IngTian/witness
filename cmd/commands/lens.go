@@ -290,6 +290,11 @@ func lensDisable(st *store.Store, name string) error {
 // nothing would happen — and for `--fresh` the pre-drop of obs+facets would then be
 // irrecoverable. We fail fast with a clear message rather than silently no-op / lose data.
 func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
+	// Before anything else: --fresh DELETES this lens's facets ahead of the re-mine, so the
+	// drain's own refusal of a newer archive would come too late.
+	if err := st.ArchiveNewer(); err != nil {
+		return err
+	}
 	// Resolve the CLI arg to the name the WORKER actually keys data under. A
 	// registered lens's mined observations/facets/progress are tagged with the lens's
 	// resolved name (its lens.json `name`, via lens.LoadRegistered), which can differ
@@ -664,35 +669,6 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 		fmt.Println(hint("clean up", "witness lens disable "+name))
 	}
 	fmt.Println(hint("inspect one", "witness lens show <name>"))
-}
-
-// lensDataName maps the name a lens is registered under (the one every command takes) to the name
-// the worker tags its observations, facets and profile with — the lens.json `name`, which may
-// differ: corpus-example mines as "regime". A name that is not registered, or does not load, is
-// returned as given, so data that outlived its lens's registration stays readable by its own name.
-func lensDataName(st *store.Store, name string) string {
-	if !slices.Contains(st.RegisteredLenses(), name) {
-		return name
-	}
-	if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil {
-		return l.Name
-	}
-	return name
-}
-
-// lensRegisteredName is lensDataName in reverse, for display: the registered name of the lens that
-// mines under `mined`, or `mined` itself when no registered lens does.
-func lensRegisteredName(st *store.Store, mined string) string {
-	reg := st.RegisteredLenses()
-	if slices.Contains(reg, mined) && lensDataName(st, mined) == mined {
-		return mined
-	}
-	for _, name := range reg {
-		if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil && l.Name == mined {
-			return name
-		}
-	}
-	return mined
 }
 
 // renderLensPrompts is the `--prompts` view: the two prompts verbatim, under plain

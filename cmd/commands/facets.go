@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -48,7 +49,7 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	// Facets are tagged with the lens's MINED name (its lens.json `name`), which can differ from
 	// the name it was registered under: `witness facets corpus-example` must find the facets the
 	// worker wrote as "regime", not report an empty lens.
-	dataName := lensDataName(st, lensName)
+	dataName := lens.DataName(st, lensName)
 	// The live profile by default: an archived facet is history, and listing it beside the
 	// active ones would misrepresent what witness currently claims about the person.
 	read := st.ReadActiveFacets
@@ -114,7 +115,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		lensName = strings.TrimSpace(args[0])
 	}
-	dataName := lensDataName(st, lensName)
+	dataName := lens.DataName(st, lensName)
 	dimension, key, ok := store.ParseFacetRef(strings.TrimSpace(ref))
 	if !ok {
 		return fmt.Errorf("--expand wants a facet as dimension/key (e.g. thinking/zooms_out), got %q", ref)

@@ -436,7 +436,7 @@ func cmdDistillStatus(asJSON bool) error {
 	switch {
 	case stat.Sessions == 0:
 		fmt.Println(warnGlyph() + " nothing captured yet — connect an editor")
-		fmt.Println(hint("connect", "witness wire claude"))
+		fmt.Println(hint("connect", wireCommand()))
 	case stat.BackedOff > 0:
 		fmt.Println(warnGlyph() + " " + pluralize(stat.BackedOff, "session", "sessions") + " backing off — mining is failing")
 		fmt.Println(hint("diagnose", "witness doctor"))

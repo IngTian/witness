@@ -61,8 +61,21 @@ func WrapCorpus(input string) string {
 // and summary call, the corpus can be hundreds of KB, and a case-insensitive regexp over that is
 // meaningfully slower than one pass. It replaces the ':' with '_' in-place, which is enough to break
 // the token while leaving the surrounding text (and any evidence quoted in it) legible to the model.
+//
+// The lowered copy folds ASCII A-Z ONLY, byte for byte, so its offsets ARE the input's offsets.
+// strings.ToLower changes the UTF-8 length of some runes (KELVIN SIGN 3→1 bytes, U+0130 2→1, U+023A
+// 2→3), which shifted every offset after them: a run of them before a closer left it intact, and a
+// growing run sliced past the end and panicked review/summary, which have no recover. Non-ASCII
+// look-alikes (`</wİtness:…>`, fullwidth letters, …) are OUT of scope: the old ToLower caught U+0130
+// only by accident, and no casefold closes the homoglyph space anyway — see issue #98.
 func defangFence(input string) string {
-	lower := strings.ToLower(input)
+	lb := []byte(input)
+	for k, c := range lb {
+		if 'A' <= c && c <= 'Z' {
+			lb[k] = c + ('a' - 'A')
+		}
+	}
+	lower := string(lb)
 	var b strings.Builder
 	b.Grow(len(input))
 	for i := 0; i < len(input); {

@@ -2,6 +2,7 @@ package vector
 
 import (
 	"math"
+	"slices"
 	"sort"
 
 	"github.com/IngTian/witness/internal/store"
@@ -22,22 +23,91 @@ import (
 // decision; requiring MUTUALITY (i in kNN(j) AND j in kNN(i)) drops one-way hub edges
 // that would otherwise chain unrelated arcs into a blob. See the S3 design spec.
 
+// lensNodes filters FIRST (like Search): lens match + a usable embedding.
+func lensNodes(obs []store.Observation, lens string) (nodes []store.Observation) {
+	for _, o := range obs {
+		if (lens == "" || o.Lens == lens) && len(o.Embedding) > 0 {
+			nodes = append(nodes, o)
+		}
+	}
+	return nodes
+}
+
+// KNNRanks ranks each node's kMax nearest other nodes ONCE, best first, by the same total order
+// MutualKNNAdj sorts by (cosine descending, then index). Because that order is total, the top k
+// for any k <= kMax is a prefix of the top kMax, so MutualAt(ranks, k) is MutualKNNAdj(obs, lens,
+// k) — and a band of k values pays for one O(n²) cosine pass and one sort per node instead of
+// one per k. kMax is clamped to [1, len(nodes)-1]. onNode, when non-nil, is called before the
+// first node and after each one: this pass is where the band's time goes.
+func KNNRanks(obs []store.Observation, lens string, kMax int, onNode func(done, total int)) (nodes []store.Observation, ranks [][]int) {
+	nodes = lensNodes(obs, lens)
+	n := len(nodes)
+	ranks = make([][]int, n)
+	kMax = min(max(kMax, 1), n-1) // 0 for a lone node: it has no neighbours to rank
+	if onNode != nil {
+		onNode(0, n)
+	}
+	for i := range nodes {
+		ranks[i] = topK(nodes, i, kMax)
+		if onNode != nil {
+			onNode(i+1, n)
+		}
+	}
+	return nodes, ranks
+}
+
+// topK is node i's k nearest other nodes, best first: cosine descending, index ascending on a
+// tie, so the ranking is deterministic regardless of input order.
+func topK(nodes []store.Observation, i, k int) []int {
+	type sc struct {
+		idx   int
+		score float64
+	}
+	scores := make([]sc, 0, len(nodes)-1)
+	for j := range nodes {
+		if j != i {
+			scores = append(scores, sc{j, Cosine(nodes[i].Embedding, nodes[j].Embedding)})
+		}
+	}
+	sort.Slice(scores, func(a, b int) bool {
+		if scores[a].score != scores[b].score {
+			return scores[a].score > scores[b].score
+		}
+		return scores[a].idx < scores[b].idx
+	})
+	top := make([]int, k)
+	for t := range top {
+		top[t] = scores[t].idx
+	}
+	return top
+}
+
+// MutualAt is the mutual-kNN adjacency at k from KNNRanks' output: an undirected edge (i,j) iff
+// each is among the other's top k. k must not exceed the kMax ranked (it is clamped to what was).
+func MutualAt(ranks [][]int, k int) [][]int {
+	adj := make([][]int, len(ranks))
+	top := func(i int) []int { return ranks[i][:min(max(k, 1), len(ranks[i]))] }
+	for i := range ranks {
+		for _, j := range top(i) {
+			if j > i && slices.Contains(top(j), i) {
+				adj[i] = append(adj[i], j)
+				adj[j] = append(adj[j], i)
+			}
+		}
+	}
+	return adj
+}
+
 // MutualKNNAdj builds a mutual-k-nearest-neighbor graph over the observations of one
 // lens. It returns the node slice (lens-filtered, empty-embedding rows dropped — same
 // filter-first discipline as Search) and an adjacency list indexed into that slice: an
 // undirected edge (i,j) exists iff j is among i's k nearest AND i is among j's k
 // nearest (by cosine, within the lens). k is clamped to [1, len(nodes)-1].
+//
+// It is the one-k reference KNNRanks+MutualAt are tested against: a band of k values goes
+// through those, which rank once instead of redoing this whole pass per k.
 func MutualKNNAdj(obs []store.Observation, lens string, k int) (nodes []store.Observation, adj [][]int) {
-	// Filter FIRST (like Search): lens match + a usable embedding.
-	for _, o := range obs {
-		if lens != "" && o.Lens != lens {
-			continue
-		}
-		if len(o.Embedding) == 0 {
-			continue
-		}
-		nodes = append(nodes, o)
-	}
+	nodes = lensNodes(obs, lens)
 	n := len(nodes)
 	adj = make([][]int, n)
 	if n < 2 {

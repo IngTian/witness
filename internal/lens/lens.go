@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/IngTian/witness/internal/bundle"
@@ -323,4 +324,35 @@ func LoadFromDir(dir string) (*Lens, error) {
 		return nil, fmt.Errorf("lens dir %q resolves to reserved name %q (the cross-lens 'unified' profile identity); rename it in lens.json", dir, l.Name)
 	}
 	return l, nil
+}
+
+// DataName maps the name a lens is registered under (the one every command and MCP tool takes)
+// to the name the worker tags its observations, facets and profile with — the lens.json `name`,
+// which may differ: corpus-example mines as "regime". Every surface that takes a lens name must
+// pass it through here before touching data, or it reads an empty lens — and a writer files rows
+// under a name no review reads. A name that is not registered, or does not load, is returned as
+// given, so data that outlived its lens's registration stays readable by its own name.
+func DataName(st *store.Store, name string) string {
+	if !slices.Contains(st.RegisteredLenses(), name) {
+		return name
+	}
+	if l, err := LoadRegistered(name, st.LensesDir()); err == nil {
+		return l.Name
+	}
+	return name
+}
+
+// RegisteredName is DataName in reverse, for display: the registered name of the lens that
+// mines under `mined`, or `mined` itself when no registered lens does.
+func RegisteredName(st *store.Store, mined string) string {
+	reg := st.RegisteredLenses()
+	if slices.Contains(reg, mined) && DataName(st, mined) == mined {
+		return mined
+	}
+	for _, name := range reg {
+		if l, err := LoadRegistered(name, st.LensesDir()); err == nil && l.Name == mined {
+			return name
+		}
+	}
+	return mined
 }

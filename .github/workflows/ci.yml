@@ -47,6 +47,56 @@ jobs:
       - name: test
         run: make test
 
+      # -race needs cgo on Linux, so this one step turns it on; the shipped binary stays
+      # CGO_ENABLED=0 (build-all below). Targeted at the two packages with concurrent passes,
+      # whose tests ask for -race and can't fail without it: TestProgressLineIsSafeForConcurrentUse
+      # passes with its mutex removed unless the race detector is watching.
+      - name: test (race detector)
+        env:
+          CGO_ENABLED: "1"
+          WITNESS_DISABLE_EXTERNAL_RUNNERS: "1"
+        run: go test -race ./cmd/commands ./internal/distill
+
+      # The rest of what a release ships. These ran only on the release event before, so a
+      # stale JS assertion passed PR CI and then blocked the v0.7.0 publish (release gotcha
+      # #1), and a manifest that drifted from the version surfaced only after the tag existed.
+      # Steps of THIS job, so they inherit its required-check status.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: opencode plugin tests
+        run: npm --prefix npm/opencode run check
+
+      - name: codex converter tests
+        run: python3 -I -m unittest discover -s scripts
+
+      - name: release manifests (versions + MCP Registry description cap)
+        run: ./scripts/check-release-manifests.sh
+
       # Prove the "one pure-Go binary" promise on every target we ship.
       - name: cross-compile (darwin/linux × amd64/arm64)
         run: make build-all
+
+  # Every Windows defect so far was found by hand. This job is NOT required and is
+  # continue-on-error until the native-Windows suite failures recorded on 67b837a are
+  # triaged (issue #199, F162) — it is expected red until then. Once it is green, drop
+  # continue-on-error and add "windows · test" to main's required checks.
+  windows:
+    name: windows · test
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      CGO_ENABLED: "0"
+      WITNESS_DISABLE_EXTERNAL_RUNNERS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # `go test` directly: the Makefile is POSIX-shell and the runner promises no make.
+      - name: test
+        run: go test ./...

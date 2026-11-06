@@ -66,6 +66,12 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	}
 	defer st.Close()
 	defer setupLogging(st)()
+	// Refuse a newer archive before the lock, the meta stamps and the retry wakeup: the capture
+	// hooks spawn this on every turn, and it should exit with the reason in witness.log, not try.
+	if err := st.ArchiveNewer(); err != nil {
+		slog.Error("worker refused", "err", err)
+		return false, err
+	}
 	// Resolved here, not just loaded: cfg.Runner is the runtime a lens with no explicit
 	// `# runner` rides, and the target the per-lens router (distill.RunnerFor) compares
 	// against. This is what lets an npm OpenCode user — who never ran `install`, so config

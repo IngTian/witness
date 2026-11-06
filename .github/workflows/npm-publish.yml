@@ -61,45 +61,18 @@ jobs:
           node-version: '22'                          # >= 22.14 required for trusted publishing
           registry-url: 'https://registry.npmjs.org'  # PUBLIC npm, not GitHub Packages
 
-      # Trusted publishing needs npm >= 11.5.1 (newer than what Node 22 bundles).
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm >= 11.5.1 (newer than what Node 22 bundles). A major,
+      # not @latest: this job holds id-token:write, so a new npm major should be a reviewed
+      # bump here, not something the next release silently runs with publish rights.
+      - run: npm install -g npm@11
 
-      # Fail fast if the release tag (vX.Y.Z) doesn't match the committed package
-      # version — 0.0.1 is already published and immutable, so the tag must bump it.
-      # Also guard the two Claude-plugin manifests: they carry their own version and
-      # silently drift from the tag if bumped separately (issue #54 minor). Checking
-      # them here keeps a single release surface consistent across npm + marketplace.
+      # Fail fast if the release tag (vX.Y.Z) doesn't match every committed manifest
+      # version — 0.0.1 is already published and immutable, so the tag must bump it —
+      # or server.json's description exceeds the MCP Registry's 100-char cap. PR CI
+      # runs the same script without a tag, so drift is normally caught before this.
       - name: Verify release tag matches package versions
         if: github.event_name == 'release'
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          check() {
-            local label="$1" got="$2"
-            if [ "$tag" != "$got" ]; then
-              echo "release tag ($tag) != $label version ($got)" >&2
-              echo "bump $label to $tag (or tag v$got) and re-release." >&2
-              exit 1
-            fi
-          }
-          check "npm/opencode/package.json" "$(node -p "require('./npm/opencode/package.json').version")"
-          check ".claude-plugin/plugin.json" "$(node -p "require('./.claude-plugin/plugin.json').version")"
-          check ".claude-plugin/marketplace.json" "$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].version")"
-          # server.json feeds the MCP Registry publish at the end of this job. Both its
-          # own version and the npm package reference must track the tag, or the registry
-          # would either reject a stale version or point at the wrong npm package.
-          check "server.json" "$(node -p "require('./server.json').version")"
-          check "server.json packages[0]" "$(node -p "require('./server.json').packages[0].version")"
-
-          # The MCP Registry caps server.json's description at 100 characters and rejects a longer
-          # one with a 422 — AFTER npm has already published, so the run fails with the packages live
-          # and the registry entry missing. That happened on v0.7.8 (186 chars). Fail HERE instead,
-          # before anything is published, where the fix is one edit and a re-tag.
-          desc_len="$(node -p "require('./server.json').description.length")"
-          if [ "$desc_len" -gt 100 ]; then
-            echo "server.json description is $desc_len chars; the MCP Registry rejects >100" >&2
-            node -p "require('./server.json').description" >&2
-            exit 1
-          fi
+        run: ./scripts/check-release-manifests.sh "${GITHUB_REF_NAME#v}"
 
       - name: Test and stage packages
         run: |
@@ -157,14 +130,18 @@ jobs:
             "@witness-ai/opencode-win32-x64"
             "@witness-ai/opencode-win32-arm64"
           )
+          # Up to 10 minutes per package. The old 60 s window failed attempt 1 of every release
+          # since v0.8.0 (9 in all), and each failure also skipped the MCP Registry publish; the
+          # successful reruns came 3-9 minutes after publish. A healthy run is no slower — the
+          # loop breaks on the first hit.
           for package in "${packages[@]}"; do
-            for attempt in {1..12}; do
+            for attempt in {1..60}; do
               published="$(npm view "$package@$version" version 2>/dev/null || true)"
               [ "$published" = "$version" ] && break
-              sleep 5
+              sleep 10
             done
             [ "$published" = "$version" ] || {
-              echo "$package@$version is not visible on npm after 60 seconds" >&2
+              echo "$package@$version is not visible on npm after 10 minutes" >&2
               exit 1
             }
           done
@@ -193,10 +170,16 @@ jobs:
       # --- MCP Registry publish (server.json) --------------------------------
       # Runs only after npm is confirmed live (ordering is load-bearing; see the
       # header comment). OIDC reuses the id-token:write grant — no stored token.
+      # Pinned and checksummed for the same reason: `releases/latest` executed whatever was
+      # uploaded last, unverified, with that grant in scope. runs-on is ubuntu-latest (x64),
+      # hence linux_amd64. To bump: change the tag and take the new hash from that release's
+      # registry_<version>_checksums.txt.
       - name: Install mcp-publisher
         if: github.event_name == 'release'
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          curl -fsSLo mcp-publisher.tar.gz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.7/mcp-publisher_linux_amd64.tar.gz
+          echo "00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
 
       - name: Publish server.json to the MCP Registry
         if: github.event_name == 'release'
