@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -124,18 +125,14 @@ func newDistillStartForWaitBackoffsTest(t *testing.T) error {
 	cmd := newWorkerCmd()
 	cmd.SetArgs([]string{"run", "--detach", "--wait-backoffs"})
 	// Silence cobra's own usage/error printing; we only inspect the returned error.
-	cmd.SetOut(nopWriter{})
-	cmd.SetErr(nopWriter{})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	for _, c := range cmd.Commands() {
 		c.SilenceUsage = true
 		c.SilenceErrors = true
 	}
 	return cmd.Execute()
 }
-
-type nopWriter struct{}
-
-func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // B4 self-heal: a session that's backed off but whose retry is soon (within maxWait)
 // must be waited out and re-drained until it clears. We model two backoff rounds that
