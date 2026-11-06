@@ -4,7 +4,6 @@ import (
 	"math"
 	"sort"
 
-	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -66,7 +65,7 @@ func MutualKNNAdj(obs []store.Observation, lens string, k int) (nodes []store.Ob
 			if j == i {
 				continue
 			}
-			scores = append(scores, sc{j, embed.Cosine(nodes[i].Embedding, nodes[j].Embedding)})
+			scores = append(scores, sc{j, Cosine(nodes[i].Embedding, nodes[j].Embedding)})
 		}
 		// Rank by score descending, then take the top k. n is bounded (brute-force design
 		// point); a full sort per node is fine. Tie-break on index so the graph is

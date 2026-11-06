@@ -10,11 +10,32 @@
 package vector
 
 import (
+	"math"
 	"sort"
 
-	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/store"
 )
+
+// Cosine returns cosine similarity of two equal-length vectors (0 on a length mismatch or a
+// zero vector). Embed L2-normalizes, so this is the dot product, but it normalizes
+// defensively in case a caller passes raw vectors. It lives here, not in embed, so a package
+// that only compares vectors never links the GoMLX embedder its Embedder interfaces exist to
+// keep out.
+func Cosine(a, b []float32) float64 {
+	if len(a) != len(b) {
+		return 0
+	}
+	var dot, na, nb float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		na += float64(a[i]) * float64(a[i])
+		nb += float64(b[i]) * float64(b[i])
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
 
 // Hit is one ranked observation.
 type Hit struct {
@@ -38,7 +59,7 @@ func Search(obs []store.Observation, query []float32, lens string, k int) []Hit 
 		if len(o.Embedding) == 0 {
 			continue
 		}
-		hits = append(hits, Hit{Obs: o, Score: embed.Cosine(query, o.Embedding)})
+		hits = append(hits, Hit{Obs: o, Score: Cosine(query, o.Embedding)})
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
 	if k > 0 && len(hits) > k {

@@ -12,6 +12,7 @@ import (
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
+	"github.com/IngTian/witness/internal/vector"
 	"github.com/spf13/cobra"
 )
 
@@ -103,8 +104,8 @@ func cmdDoctor(asJSON bool) error {
 		}
 		un, _ := emb.Embed("The quarterly revenue report is due Friday.")
 		embedDim = len(en)
-		enZh = embed.Cosine(en, zh)
-		enUnrelated = embed.Cosine(en, un)
+		enZh = vector.Cosine(en, zh)
+		enUnrelated = vector.Cosine(en, un)
 	}
 
 	lastReview := stat.LastReview

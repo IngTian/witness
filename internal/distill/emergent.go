@@ -210,7 +210,7 @@ func reexpand(members, all []store.Observation, lens string) []store.Observation
 		if len(m.Embedding) == 0 {
 			continue
 		}
-		if s := cosine(centroid, m.Embedding); s < radius {
+		if s := vector.Cosine(centroid, m.Embedding); s < radius {
 			radius = s
 		}
 	}
@@ -223,7 +223,7 @@ func reexpand(members, all []store.Observation, lens string) []store.Observation
 		if lens != "" && o.Lens != lens || have[o.ID] || len(o.Embedding) == 0 {
 			continue
 		}
-		if cosine(centroid, o.Embedding) >= radius {
+		if vector.Cosine(centroid, o.Embedding) >= radius {
 			expanded = append(expanded, o)
 			have[o.ID] = true
 		}
@@ -381,19 +381,6 @@ func dedupArcs(arcs []CandidateArc) []CandidateArc {
 		out = append(out, a)
 	}
 	return out
-}
-
-// cosine of two L2-normalized float32 vectors (dot product). Local helper mirroring
-// embed.Cosine's contract without importing it here (vector.go already re-normalizes).
-func cosine(a, b []float32) float64 {
-	if len(a) != len(b) {
-		return 0
-	}
-	var dot float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-	}
-	return dot
 }
 
 // --- S3b: verify + merge + idempotency -------------------------------------------
