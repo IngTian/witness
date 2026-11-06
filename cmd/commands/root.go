@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	// Register every platform with the registry (issue #21). These blank imports
@@ -27,13 +28,48 @@ const (
 	groupAdmin  = "admin"
 )
 
-// Build-time variables, injected via -ldflags by the Makefile (and install.sh).
-// Defaults render a runnable `go build` without ldflags as "dev".
+// Build-time variables, injected via -ldflags by the Makefile. install.sh, `go build` and
+// `go install` pass none, so init fills them from the VCS stamp Go writes into every build;
+// they stay "dev" only when there is nothing to read (`go test`, a build outside a checkout).
 var (
 	version   = "dev"
 	commit    = "none"
 	buildTime = "unknown"
 )
+
+func init() {
+	if version != "dev" {
+		return // ldflags win: a release build says exactly what the Makefile stamped
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		version, commit, buildTime = buildStamp(bi)
+	}
+}
+
+// buildStamp reads the version Go derives from the tag/commit (already "+dirty" when the tree
+// was), the short revision, and vcs.time. vcs.time is the COMMIT time, not the build time — the
+// closest thing a plain build records, and enough to tell two binaries apart.
+func buildStamp(bi *debug.BuildInfo) (v, c, at string) {
+	v, c, at = "dev", "none", "unknown"
+	if mv := bi.Main.Version; mv != "" && mv != "(devel)" {
+		v = mv
+	}
+	dirty := false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			c = s.Value[:min(7, len(s.Value))]
+		case "vcs.time":
+			at = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if dirty && c != "none" {
+		c += "+dirty"
+	}
+	return v, c, at
+}
 
 // Run is the CLI entry point used by cmd/witness/main.go. It owns the recursion
 // guard (never act inside a witness-driven agent subprocess), cobra execution,
