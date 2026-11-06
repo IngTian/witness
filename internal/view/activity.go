@@ -11,7 +11,9 @@ import (
 
 // buildActivity computes all activity metrics from ViewInput: days, cuts, windows and facts.
 // Only conversation sources count (Claude Code, OpenCode, Codex); file: sessions are excluded.
-func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location) Activity {
+// tally carries the trait-derived numbers (buildTraits) — NewTraits/Rewrites per window and
+// TotalTraits — already restricted to active traits and conversation notebooks.
+func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally traitTally) Activity {
 	// Parse and bucket turns by local date
 	dayMap := make(map[string]*dayBuilder)
 	for _, t := range in.Turns {
@@ -91,10 +93,10 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location) Activ
 	// Generate Windows
 	var windows []Window
 	if first != "" {
-		windows = generateWindows(first, last, days, dayMap, in.Notes, loc)
+		windows = generateWindows(first, last, days, dayMap, in.Notes, loc, tally)
 	} else {
 		// Empty archive: one window per kind, all containing now
-		windows = generateWindowsForEmpty(last, loc)
+		windows = generateWindowsForEmpty(last, loc, tally)
 	}
 
 	return Activity{
@@ -103,7 +105,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location) Activ
 		Days:        days,
 		Cuts:        cuts,
 		Windows:     windows,
-		TotalTraits: 0, // Task 4 will fill this
+		TotalTraits: tally.total,
 	}
 }
 
@@ -154,7 +156,7 @@ func computeCuts(days []Day) []int {
 }
 
 // generateWindows builds all windows from First's window to Last's window.
-func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location) []Window {
+func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location, tally traitTally) []Window {
 	firstDate := parseDate(first)
 	lastDate := parseDate(last)
 
@@ -162,40 +164,40 @@ func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuild
 
 	// Months
 	for ym := monthOf(firstDate); !ym.After(monthOf(lastDate)); ym = ym.AddDate(0, 1, 0) {
-		windows = append(windows, buildWindow("month", ym, last, days, dayMap, notes, loc))
+		windows = append(windows, buildWindow("month", ym, last, days, dayMap, notes, loc, tally))
 	}
 
 	// Quarters
 	for yq := quarterOf(firstDate); !yq.After(quarterOf(lastDate)); yq = yq.AddDate(0, 3, 0) {
-		windows = append(windows, buildWindow("quarter", yq, last, days, dayMap, notes, loc))
+		windows = append(windows, buildWindow("quarter", yq, last, days, dayMap, notes, loc, tally))
 	}
 
 	// Halves
 	for yh := halfOf(firstDate); !yh.After(halfOf(lastDate)); yh = yh.AddDate(0, 6, 0) {
-		windows = append(windows, buildWindow("half", yh, last, days, dayMap, notes, loc))
+		windows = append(windows, buildWindow("half", yh, last, days, dayMap, notes, loc, tally))
 	}
 
 	// Years
 	for y := yearOf(firstDate); !y.After(yearOf(lastDate)); y = y.AddDate(1, 0, 0) {
-		windows = append(windows, buildWindow("year", y, last, days, dayMap, notes, loc))
+		windows = append(windows, buildWindow("year", y, last, days, dayMap, notes, loc, tally))
 	}
 
 	return windows
 }
 
 // generateWindowsForEmpty returns one window per kind, all containing now (Last).
-func generateWindowsForEmpty(last string, loc *time.Location) []Window {
+func generateWindowsForEmpty(last string, loc *time.Location, tally traitTally) []Window {
 	lastDate := parseDate(last)
 	return []Window{
-		buildWindow("month", monthOf(lastDate), last, nil, nil, nil, loc),
-		buildWindow("quarter", quarterOf(lastDate), last, nil, nil, nil, loc),
-		buildWindow("half", halfOf(lastDate), last, nil, nil, nil, loc),
-		buildWindow("year", yearOf(lastDate), last, nil, nil, nil, loc),
+		buildWindow("month", monthOf(lastDate), last, nil, nil, nil, loc, tally),
+		buildWindow("quarter", quarterOf(lastDate), last, nil, nil, nil, loc, tally),
+		buildWindow("half", halfOf(lastDate), last, nil, nil, nil, loc, tally),
+		buildWindow("year", yearOf(lastDate), last, nil, nil, nil, loc, tally),
 	}
 }
 
 // buildWindow constructs a Window for the given kind and start date.
-func buildWindow(kind string, start time.Time, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location) Window {
+func buildWindow(kind string, start time.Time, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location, tally traitTally) Window {
 	var end time.Time
 	var label string
 
@@ -276,8 +278,8 @@ func buildWindow(kind string, start time.Time, last string, days []Day, dayMap m
 		Conversations: len(sessions),
 		Turns:         turns,
 		Notes:         notesCount,
-		NewTraits:     0, // Task 4
-		Rewrites:      0, // Task 4
+		NewTraits:     countDates(tally.arrivals, startStr, endStr),
+		Rewrites:      countDates(tally.rewrites, startStr, endStr),
 		ActiveDays:    activeDays,
 		SpanDays:      spanDays,
 		SoFar:         soFar,
@@ -366,4 +368,16 @@ func halfOf(t time.Time) time.Time {
 
 func yearOf(t time.Time) time.Time {
 	return time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location())
+}
+
+// countDates counts YYYY-MM-DD dates inside [start, end]. Plain string comparison is safe
+// here: both sides are local calendar dates in one fixed-width layout, not RFC3339 instants.
+func countDates(dates []string, start, end string) int {
+	n := 0
+	for _, d := range dates {
+		if d >= start && d <= end {
+			n++
+		}
+	}
+	return n
 }

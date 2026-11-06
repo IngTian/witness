@@ -20,8 +20,8 @@ import (
 type Model struct {
 	Snapshot  string     `json:"snapshot"` // now, RFC3339 in loc
 	Activity  Activity   `json:"activity"`
-	Notebooks []Notebook `json:"notebooks"` // Task 4
-	Traits    []Trait    `json:"traits"`    // Task 4; ACTIVE only; index = trait id used everywhere
+	Notebooks []Notebook `json:"notebooks"` // lenses with ≥1 active trait, by name
+	Traits    []Trait    `json:"traits"`    // ACTIVE only; index = trait id used everywhere
 	Portraits []Portrait `json:"portraits"` // Task 5
 }
 
@@ -65,9 +65,80 @@ type Window struct {
 	Busiest       *Day   `json:"busiest"`    // most turns; ties → earliest; nil if none
 }
 
-// Notebook, Trait, Portrait, PortraitFile are placeholders filled by later tasks.
-type Notebook struct{}
-type Trait struct{}
+// Notebook is one lens with ≥1 active trait, shown by its name. Notebooks sort by name.
+type Notebook struct {
+	Name   string  `json:"name"`
+	Corpus bool    `json:"corpus"` // every note of this lens comes from a file: session (and it has ≥1 note)
+	Topics []Topic `json:"topics"` // sorted by label
+}
+
+// Topic is one dimension of a notebook, under its plain-words label.
+type Topic struct {
+	Key       string `json:"key"`       // the dimension
+	Label     string `json:"label"`     // §3 vocabulary
+	Traits    []int  `json:"traits"`    // trait ids, by Arrival ascending, then Name
+	AxisStart string `json:"axisStart"` // YYYY-MM-01 of the topic's earliest Arrival
+}
+
+// Trait is one ACTIVE facet as page 2 shows it. Every number is computed here so the client
+// never re-derives one; see traits.go for how each is defined.
+type Trait struct {
+	Lens      string     `json:"lens"`
+	Dimension string     `json:"dim"`
+	Key       string     `json:"key"`
+	Name      string     `json:"name"`      // key, underscores → spaces, first rune upper-cased
+	Summary   string     `json:"summary"`   // current version's Claim ("" → client says "No short summary yet.")
+	Notes     int        `json:"notes"`     // distinct cited note ids that exist, over ALL versions
+	Arrival   string     `json:"arrival"`   // YYYY-MM-DD (loc) of the earliest cited existing note; else first version's ValidFrom
+	Today     float64    `json:"today"`     // Current().DecayedConfidence(in.HighWater) — what `witness facets` prints
+	Points    []Point    `json:"points"`    // solid confirmations, ascending
+	Spans     []Span     `json:"spans"`     // dashed "final value of this rewrite" segments, ascending
+	Trend     string     `json:"trend"`     // "up" | "down" | "level" | "only"
+	TrendFrom float64    `json:"trendFrom"` // the first confirmed value
+	Rewrites  int        `json:"rewrites"`  // review-written versions after the first
+	Changes   int        `json:"changes"`   // confirmed values that differ from the previous confirmed value
+	Formed    *Formed    `json:"formed"`    // non-nil iff ≥1 facet has MergedInto == this trait
+	Weeks     []Week     `json:"weeks"`     // sparse: weeks (Monday start, loc) with ≥1 cited note
+	Evidence  []Evidence `json:"evidence"`  // ≤3 strongest cited notes
+}
+
+// Point is one confirmed value on the solid confidence line.
+type Point struct {
+	At    string  `json:"at"` // YYYY-MM-DD (loc)
+	Value float64 `json:"v"`
+}
+
+// Span is a version from before the confidence log: only its final value is known, so it is
+// drawn dashed across its whole lifetime rather than as a point on a date it may not have held.
+type Span struct {
+	From  string  `json:"from"`
+	To    string  `json:"to"`
+	Value float64 `json:"v"`
+}
+
+// Formed says a trait was made by compaction: the earliest ArchivedAt among its direct
+// absorbers, and their count.
+type Formed struct {
+	Date   string `json:"date"`
+	Merged int    `json:"merged"`
+}
+
+// Week is one Monday-start local week with ≥1 cited note.
+type Week struct {
+	Week string `json:"w"`
+	N    int    `json:"n"`
+}
+
+// Evidence is THE note allow-list: the only note text in the snapshot is these three fields
+// of each active trait's ≤3 strongest notes. Adding a field here widens what leaves the
+// archive; TestEvidenceOrderAndAllowList pins the key set.
+type Evidence struct {
+	Date     string `json:"date"`
+	Evidence string `json:"evidence"`
+	Note     string `json:"note"`
+}
+
+// Portrait and PortraitFile are placeholders filled by Task 5.
 type Portrait struct{}
 
 // PortraitFile is filled by Task 5. Build accepts a slice of them.
@@ -75,13 +146,14 @@ type PortraitFile struct{}
 
 // Build constructs a complete Model from store.ViewInput, computing all activity metrics,
 // notebooks, traits and portraits. The snapshot is timestamped at `now` and bucketed by `loc`.
-// Later tasks fill Notebooks, Traits and Portraits; this task returns empty slices for them.
+// Traits come first because the activity windows count their arrivals and rewrites.
 func Build(in *store.ViewInput, portraits []PortraitFile, now time.Time, loc *time.Location) *Model {
+	notebooks, traits, tally := buildTraits(in, loc)
 	return &Model{
 		Snapshot:  now.In(loc).Format(time.RFC3339),
-		Activity:  buildActivity(in, now, loc),
-		Notebooks: []Notebook{},
-		Traits:    []Trait{},
+		Activity:  buildActivity(in, now, loc, tally),
+		Notebooks: notebooks,
+		Traits:    traits,
 		Portraits: []Portrait{},
 	}
 }
