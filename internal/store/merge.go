@@ -72,7 +72,7 @@ func (s *Store) Merge(ctx context.Context, incomingDB string, apply bool, now ti
 			incomingDB, from, schemaVersion)
 	}
 
-	rep := &MergeReport{Source: incomingDB, IncomingSchema: from}
+	rep := &MergeReport{IncomingSchema: from}
 	inc, err := readIncoming(ctx, copyPath, rep)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,6 @@ const mergeArchiveReasonPrefix = "the same key existed in a merged archive"
 // MergeReport is what a merge did, or — for a dry run — would do. Every count comes from the same
 // transaction the apply would commit, so the dry run cannot disagree with it.
 type MergeReport struct {
-	Source         string
 	IncomingSchema int      // incoming user_version BEFORE its temp copy was migrated
 	FirstTS        string   // incoming raw time range, so a stale or wrong export is obvious
 	LastTS         string   //
@@ -115,7 +114,6 @@ type MergeReport struct {
 
 // MergeSessions classifies every incoming session against this archive.
 type MergeSessions struct {
-	Incoming    int
 	New         int // not here at all
 	Equal       int // identical transcript already here
 	LongerThere int // the incoming transcript extends ours: its tail is appended
@@ -149,7 +147,6 @@ type MergeObservations struct {
 
 // MergeFacets counts L2.
 type MergeFacets struct {
-	Incoming      int
 	New           int // no facet here with that key or shared history
 	Shared        int // same history already here (a restore, or a re-run): nothing new
 	Updated       int // same history, but the other side's later judgement (a downgrade, a retirement, a claim) was adopted
@@ -490,7 +487,6 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	if err != nil {
 		return nil, err
 	}
-	rep.Sessions.Incoming = len(incoming)
 	family := map[string][]string{}
 	for _, o := range ours {
 		family[sessionFamily(o)] = append(family[sessionFamily(o)], o)
@@ -1120,7 +1116,6 @@ func mergeFacets(base, inc *mergeSide, mergedHead int64, arrivingForBase, arrivi
 	}
 	rebaseClocks(baseFacets, base.head, mergedHead, allTS, arrivingForBase)
 	rebaseClocks(incFacets, inc.head, mergedHead, allTS, arrivingForInc)
-	rep.Incoming = len(incFacets)
 
 	result := map[string]*Facet{}
 	fromBase := map[string]bool{}

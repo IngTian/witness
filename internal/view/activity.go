@@ -28,10 +28,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 		date := local.Format("2006-01-02")
 
 		if dayMap[date] == nil {
-			dayMap[date] = &dayBuilder{
-				date:     date,
-				sessions: make(map[string]struct{}),
-			}
+			dayMap[date] = &dayBuilder{sessions: make(map[string]struct{})}
 		}
 		dayMap[date].sessions[t.Session] = struct{}{}
 		dayMap[date].turns++
@@ -50,10 +47,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 		date := local.Format("2006-01-02")
 
 		if dayMap[date] == nil {
-			dayMap[date] = &dayBuilder{
-				date:     date,
-				sessions: make(map[string]struct{}),
-			}
+			dayMap[date] = &dayBuilder{sessions: make(map[string]struct{})}
 		}
 		dayMap[date].notes++
 	}
@@ -117,7 +111,6 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 }
 
 type dayBuilder struct {
-	date     string
 	sessions map[string]struct{}
 	turns    int
 	notes    int
