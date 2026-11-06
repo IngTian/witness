@@ -405,6 +405,7 @@ func TestActivityFirstCountsNotes(t *testing.T) {
 		Turns: []store.ViewTurn{{Session: "s1", TS: "2026-03-01T10:00:00-05:00"}},
 		Notes: []store.ViewNote{
 			{ID: "n1", Session: "s0", TS: "2026-01-10T10:00:00-05:00"},           // its turn was reclaimed
+			{ID: "n2", Session: "s0", TS: "2026-01-10T11:00:00-05:00"},           // two notes, one day
 			{ID: "f1", Session: "file:/doc.md", TS: "2025-12-01T10:00:00-05:00"}, // ingested: never First
 			{ID: "bad", Session: "s0", TS: "garbage"},
 		},
@@ -418,9 +419,13 @@ func TestActivityFirstCountsNotes(t *testing.T) {
 		t.Errorf("Days: got %+v, want %+v (only days with turns)", m.Activity.Days, want)
 	}
 	jan := windowByLabel(t, m, "Jan 2026")
-	if jan.Notes != 1 || jan.SpanDays != 22 || jan.Turns != 0 || jan.ActiveDays != 0 {
-		t.Errorf("Jan: Notes %d SpanDays %d Turns %d ActiveDays %d, want 1, 22 (Jan 10–31), 0, 0",
+	if jan.Notes != 2 || jan.SpanDays != 22 || jan.Turns != 0 || jan.ActiveDays != 0 {
+		t.Errorf("Jan: Notes %d SpanDays %d Turns %d ActiveDays %d, want 2, 22 (Jan 10–31), 0, 0",
 			jan.Notes, jan.SpanDays, jan.Turns, jan.ActiveDays)
+	}
+	// Notes counts notes, not dayMap dates: Mar 1 has a turn and no note.
+	if mar := windowByLabel(t, m, "Mar 2026"); mar.Notes != 0 {
+		t.Errorf("Mar: Notes %d, want 0 (a turn-only day holds no notes)", mar.Notes)
 	}
 	if len(m.Activity.Windows) == 0 || m.Activity.Windows[0].Label != "Jan 2026" {
 		t.Errorf("first window: want Jan 2026 (December's file: note must not open a window)")
