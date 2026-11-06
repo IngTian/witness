@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/IngTian/witness/internal/vector"
 	"github.com/spf13/cobra"
@@ -109,7 +110,7 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 		return err
 	}
 	// Observations carry the lens's mined name, which a registered lens may override.
-	dataName := lensDataName(st, lensName)
+	dataName := lens.DataName(st, lensName)
 	hits := vector.Search(obs, qv, dataName, k)
 	if asJSON {
 		out := observationSearchJSON{Lens: lensName, Query: query, Limit: k, Hits: []observationHitJSON{}}
