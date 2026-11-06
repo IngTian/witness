@@ -54,10 +54,13 @@ var exportInclude = []string{"config.toml", "lenses", "profile", "summarize"}
 //	runtime/                   OpenCode's PRIVATE runtime root (opencode.db, xdg/, the
 //	                          serve pidfile). A disposable cache that reconcile() rebuilds
 //	                          at Open, and large. Restoring it would restore a stale pid.
+//	view.html                 `witness view`'s page: rendered from the database and profile/,
+//	                          which the backup already holds, and rebuilt by running it again.
+//	                          Copying it would carry a second, frozen copy of trait notes.
 //
 // Lock files (.worker.lock and friends) and RegisterLens's .tmp/.bak staging dirs are
 // matched by shape rather than name — see classifyRootEntry.
-var exportSkip = []string{"witness.db", "witness.db-wal", "witness.db-shm", "witness.log", "runtime"}
+var exportSkip = []string{"witness.db", "witness.db-wal", "witness.db-shm", "witness.log", "runtime", "view.html"}
 
 // renameForExport is os.Rename, overridable so a test can fail the final swap-into-place
 // and prove the previous snapshot is put BACK rather than lost. A seam because that

@@ -8,7 +8,7 @@ The visible front door, exactly as `witness --help` groups it:
 
 | group | commands |
 |---|---|
-| Read your archive | `status` · `profile` · `facets` · `observations` · `ingest` |
+| Read your archive | `status` · `profile` · `view` · `facets` · `observations` · `ingest` |
 | Lenses | `lens` |
 | Configure | `config` |
 | Setup | `doctor` · `install` · `wire` · `unwire` |
@@ -19,6 +19,12 @@ Claude Code/OpenCode, not typed by hand. `witness import` and `witness worker �
 they exist for recovery and debugging, and everything they do also happens automatically.
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
+- `witness view [--no-open] [--out <path>]` — write the archive as one self-contained HTML page
+  (`view.html` in the data dir, or `--out`) and open it in your browser. A snapshot: run it again to
+  refresh. It changes nothing and never calls a model, so an out-of-date profile is marked on the
+  page rather than rebuilt (`witness profile` rebuilds it). The page includes the observations
+  behind each facet; keep it as private as the archive. `export --all` leaves it out, since it is
+  rebuilt from what the backup holds.
 - `witness facets [lens]` — print the active structured facets (CLI equivalent of MCP `get_facets`).
   `--all` also lists facets archived by compaction, saying where each one went; `--expand
   <dimension/key>` unfolds one facet into everything that was merged into it.

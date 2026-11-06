@@ -160,6 +160,9 @@ func seedFullArchive(t *testing.T, st *Store) (extract string) {
 	if err := os.WriteFile(st.LogPath(), []byte(`{"msg":"noise"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(st.Root, "view.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write view.html: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(st.Root, "runtime", "xdg"), 0o700); err != nil {
 		t.Fatalf("mkdir runtime: %v", err)
 	}

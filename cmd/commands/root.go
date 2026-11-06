@@ -88,6 +88,7 @@ The profile is collect-only and pull-only: witness never injects content into se
 	root.SetCompletionCommandGroupID(groupAdmin)
 	root.AddCommand(
 		newProfileCmd(),
+		newViewCmd(),
 		newStatusCmd(),
 		newFacetsCmd(),
 		newObservationsCmd(),

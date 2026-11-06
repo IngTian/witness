@@ -83,6 +83,18 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
   (passed through verbatim), capturing context a later reviewer would miss.
 - `delete_observation(obs_id)` — prune a wrong observation.
 
+## Seeing it
+
+`witness view` writes a self-contained HTML snapshot with two pages: **Overview** (your activity
+calendar, overall portrait, and the notebook portraits) and **How you've changed** (each notebook's
+topics and traits, with their trend line, confidence history, and evidence). Open it in a browser.
+It is a snapshot, not a live view — run it again to refresh. It never regenerates your portraits: if
+you want those updated first, run `witness profile`.
+
+The file lives at `<data dir>/view.html` by default, or at the path you give with `--out <path>`. It
+contains your archive's text and is written with owner-only permissions (mode 0600). Nothing listens
+on the network.
+
 ---
 
 [← back to the README](../README.md)

@@ -87,26 +87,14 @@ func (sm *Summarizer) runFor(ln *lens.Lens) SummarizeFunc {
 // summary change?" heuristic would. So an unchanged review costs 0 calls, and a
 // one-lens change costs 2 (that lens + unified), not N+1.
 func (sm *Summarizer) Summarize(ctx context.Context) error {
-	facets, err := sm.Store.ReadActiveFacets()
+	byLens, passes, err := sm.planLenses()
 	if err != nil {
-		return fmt.Errorf("read facets: %w", err)
+		return err
 	}
 	hw, err := sm.Store.ObservationHighWater()
 	if err != nil {
 		return fmt.Errorf("read observation high-water: %w", err)
 	}
-	byLens := map[string][]store.Facet{}
-	for _, f := range facets {
-		if f.Current() == nil {
-			continue // no active version -> nothing to say
-		}
-		byLens[f.Lens] = append(byLens[f.Lens], f)
-	}
-	lenses := make([]string, 0, len(byLens))
-	for l := range byLens {
-		lenses = append(lenses, l)
-	}
-	sort.Strings(lenses) // deterministic order
 
 	// Reap summaries whose lens no longer has facets, BEFORE the early return below.
 	//
@@ -124,20 +112,12 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// nothing vouches for the deleted file and it regenerates.
 	sm.reapOrphanProfiles(byLens)
 
-	if len(lenses) == 0 {
+	if len(passes) == 0 {
 		// No facets anywhere. The unified cleanup below is unreachable from here, so do it
 		// now — otherwise dropping the LAST lens's facets stranded a cross-lens portrait
 		// describing lenses that no longer have any.
 		sm.deleteProfileAndSignature(store.ProfileUnified)
 		return nil
-	}
-
-	// Index the active lenses by name so each per-lens summary uses that lens's own
-	// runner + review model (#75). A facet whose lens isn't in the active set (an orphan
-	// from a since-deregistered lens) maps to nil → default runner + default model.
-	byName := map[string]*lens.Lens{}
-	for _, l := range sm.Lenses {
-		byName[l.Name] = l
 	}
 
 	var portrait strings.Builder
@@ -147,30 +127,16 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// built partly from stale sections would be vouched for as current and never rebuilt.
 	var failures []error
 	stalePortrait := false
-	for _, l := range lenses {
-		ln := byName[l]
-		model := ModelFor(sm.Config, ln, PhaseReview)
-		// The model is shown CURRENT (decayed) confidence, but the change signature is taken over
-		// the STORED rendering. Decayed values drift by a hundredth every few dozen observations,
-		// so hashing them would regenerate every portrait — a model call per lens — after almost
-		// every session. The portrait is rebuilt when the facets really change, and on that
-		// rebuild it reads what the archive believes now.
-		rendered := renderFacetsForSummary(l, byLens[l], hw)
-		sig := summarySignature(model, sm.LensPrompt, renderFacetsForSummary(l, byLens[l], storedConfidence))
-
-		// Skip the LLM call when this lens's inputs are unchanged AND its prior summary
-		// is still on disk — reuse that summary for the portrait. A missing/failed prior
-		// file (prev == "" || !ok) falls through to regenerate, so a deleted profile
-		// self-heals. Signature-read/-write is via meta (a config read error just means
-		// we don't skip — safe, only costs a call).
-		if sm.Store.MetaString(profileSigKey(l)) == sig {
-			if prev, ok, _ := sm.Store.ReadProfile(l); ok && prev != "" {
-				fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, prev)
-				continue
-			}
+	for _, p := range passes {
+		l := p.name
+		if p.prior != "" {
+			writeSection(&portrait, l, p.prior) // signature skip: reuse the prior summary
+			continue
 		}
 
-		md, err := sm.runFor(ln)(ctx, model, sm.LensPrompt, rendered)
+		// The model is shown CURRENT (decayed) confidence; the signature (planLenses) is over
+		// the stored rendering.
+		md, err := sm.runFor(p.lens)(ctx, p.model, sm.LensPrompt, renderFacetsForSummary(l, p.facets, hw))
 		if err == nil && strings.TrimSpace(md) == "" {
 			// Never persist an empty summary (#148). The skip above tolerates an empty prior file
 			// (it regenerates), but nothing stopped this from WRITING one — replacing a good
@@ -200,15 +166,15 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 			// not. With no prior summary the lens is simply absent from this portrait, which is
 			// the same state a brand-new lens is in.
 			if prev, ok, _ := sm.Store.ReadProfile(l); ok && prev != "" {
-				fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, prev)
+				writeSection(&portrait, l, prev)
 				stalePortrait = true
 			}
 			continue
 		}
 		// Stamp the signature only AFTER the summary is safely on disk, so a crash
 		// between write and stamp just regenerates next time (never skips a stale file).
-		_ = sm.Store.SetMetaString(profileSigKey(l), sig)
-		fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, md)
+		_ = sm.Store.SetMetaString(profileSigKey(l), p.sig)
+		writeSection(&portrait, l, md)
 	}
 
 	// NO <2-LENS SKIP (issue #100). It used to return here when fewer than two lenses had
@@ -232,26 +198,9 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// generation answers staleness by itself. It does not: Summarize only ever visits lenses
 	// that HAVE facets, so a dropped lens is never revisited and its profile would keep being
 	// served. The reap is load-bearing; only the count gate was dead.)
-	// The unified portrait spans all lenses → no single lens → the default DistillModel
-	// (ModelFor with a nil lens).
-	unifiedModel := ModelFor(sm.Config, nil, PhaseReview)
-	// Sign the unified pass over its OWN inputs: the model, the unified prompt, and the
-	// whole portrait (which already embeds every per-lens summary, so any per-lens
-	// change, a dropped/added lens, or a prompt/model change all flow through here). This
-	// replaces an earlier "skip if no per-lens changed" heuristic that missed a unified-
-	// only prompt change, a DistillModel change under all-lens-overrides, and a removed
-	// lens (which would leave the portrait describing a lens that no longer exists).
-	unifiedSig := summarySignature(unifiedModel, sm.UnifiedPrompt, portrait.String())
-	// `prev != ""` matters as much as `ok`, and its absence here was a real bug (#148): the
-	// per-lens skip above required a NON-EMPTY prior file, this one checked existence only. So a
-	// runner returning "" (a refusal, a truncated reply) wrote a 0-byte portrait, stamped the
-	// signature, and every later pass matched and returned — permanently blank, no self-heal,
-	// while the per-lens path recovered from the identical input. Under read-time generation
-	// that is worse still, because the read IS the only generation path.
-	if sm.Store.MetaString(profileSigKey(store.ProfileUnified)) == unifiedSig {
-		if prev, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok && prev != "" {
-			return nil
-		}
+	unifiedModel, unifiedSig, current := sm.unifiedPass(portrait.String())
+	if current {
+		return nil
 	}
 	umd, err := sm.Run(ctx, unifiedModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {
@@ -281,6 +230,152 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// Report the per-lens failures now that everything that COULD be summarized has been. The
 	// caller logs this; the profiles that succeeded are already durable.
 	return errors.Join(failures...)
+}
+
+// lensPass is one lens's slot in a summary pass, decided before any model call.
+type lensPass struct {
+	name   string
+	lens   *lens.Lens // nil for an orphan (its lens isn't active) → default runner + model
+	facets []store.Facet
+	model  string
+	sig    string
+	prior  string // the summary the signature skip reuses; "" means Summarize calls the runner
+}
+
+// planLenses is the read-only prelude Summarize and Stale share, so "would Summarize call the
+// model for this lens?" has ONE answer and the two cannot drift. It only reads: the reap, the
+// no-lenses delete, every model call and every stamp stay in Summarize. Deciding every skip up
+// front is equivalent to deciding each inside the loop, because a lens's pass writes only its
+// own file and signature, and the reap touches only lenses NOT in byLens.
+//
+// byLens is every lens with an active facet version (the set the reap spares); passes is that
+// set in name order.
+func (sm *Summarizer) planLenses() (map[string][]store.Facet, []lensPass, error) {
+	facets, err := sm.Store.ReadActiveFacets()
+	if err != nil {
+		return nil, nil, fmt.Errorf("read facets: %w", err)
+	}
+	byLens := map[string][]store.Facet{}
+	for _, f := range facets {
+		if f.Current() == nil {
+			continue // no active version -> nothing to say
+		}
+		byLens[f.Lens] = append(byLens[f.Lens], f)
+	}
+	names := make([]string, 0, len(byLens))
+	for l := range byLens {
+		names = append(names, l)
+	}
+	sort.Strings(names) // deterministic order
+
+	// Index the active lenses by name so each per-lens summary uses that lens's own
+	// runner + review model (#75). A facet whose lens isn't in the active set (an orphan
+	// from a since-deregistered lens) maps to nil → default runner + default model.
+	byName := map[string]*lens.Lens{}
+	for _, l := range sm.Lenses {
+		byName[l.Name] = l
+	}
+
+	passes := make([]lensPass, 0, len(names))
+	for _, l := range names {
+		p := lensPass{name: l, lens: byName[l], facets: byLens[l]}
+		p.model = ModelFor(sm.Config, p.lens, PhaseReview)
+		// The model is shown CURRENT (decayed) confidence, but the change signature is taken over
+		// the STORED rendering. Decayed values drift by a hundredth every few dozen observations,
+		// so hashing them would regenerate every portrait — a model call per lens — after almost
+		// every session. The portrait is rebuilt when the facets really change, and on that
+		// rebuild it reads what the archive believes now.
+		p.sig = summarySignature(p.model, sm.LensPrompt, renderFacetsForSummary(l, p.facets, storedConfidence))
+
+		// Skip the LLM call when this lens's inputs are unchanged AND its prior summary
+		// is still on disk — reuse that summary for the portrait. A missing/failed prior
+		// file (prev == "" || !ok) falls through to regenerate, so a deleted profile
+		// self-heals. Signature-read/-write is via meta (a config read error just means
+		// we don't skip — safe, only costs a call).
+		if sm.Store.MetaString(profileSigKey(l)) == p.sig {
+			if prev, ok, _ := sm.Store.ReadProfile(l); ok && prev != "" {
+				p.prior = prev
+			}
+		}
+		passes = append(passes, p)
+	}
+	return byLens, passes, nil
+}
+
+// unifiedPass returns the unified portrait's model and signature over portrait, and whether
+// that signature lets Summarize skip the model call. Shared with Stale for the same reason as
+// planLenses.
+func (sm *Summarizer) unifiedPass(portrait string) (model, sig string, current bool) {
+	// The unified portrait spans all lenses → no single lens → the default DistillModel
+	// (ModelFor with a nil lens).
+	model = ModelFor(sm.Config, nil, PhaseReview)
+	// Sign the unified pass over its OWN inputs: the model, the unified prompt, and the
+	// whole portrait (which already embeds every per-lens summary, so any per-lens
+	// change, a dropped/added lens, or a prompt/model change all flow through here). This
+	// replaces an earlier "skip if no per-lens changed" heuristic that missed a unified-
+	// only prompt change, a DistillModel change under all-lens-overrides, and a removed
+	// lens (which would leave the portrait describing a lens that no longer exists).
+	sig = summarySignature(model, sm.UnifiedPrompt, portrait)
+	// `prev != ""` matters as much as `ok`, and its absence here was a real bug (#148): the
+	// per-lens skip required a NON-EMPTY prior file, this one checked existence only. So a
+	// runner returning "" (a refusal, a truncated reply) wrote a 0-byte portrait, stamped the
+	// signature, and every later pass matched and returned — permanently blank, no self-heal,
+	// while the per-lens path recovered from the identical input. Under read-time generation
+	// that is worse still, because the read IS the only generation path.
+	if sm.Store.MetaString(profileSigKey(store.ProfileUnified)) == sig {
+		if prev, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok && prev != "" {
+			current = true
+		}
+	}
+	return model, sig, current
+}
+
+// writeSection appends one lens's summary to the cross-lens portrait. One place for the format,
+// because Stale rebuilds the portrait text to check the unified signature: a format that
+// differed by a byte would mark the unified portrait stale forever.
+func writeSection(b *strings.Builder, lens, md string) {
+	fmt.Fprintf(b, "## %s\n\n%s\n\n", lens, md)
+}
+
+// Stale reports, per portrait, whether a Summarize now would call the model for it, keyed by
+// lens name plus store.ProfileUnified. It is `witness view`'s "run `witness profile` to
+// refresh" line, so it must be Summarize's own skip test and not a cruder "traits changed since
+// the file was written": a reinforcement touches traits without changing the portrait's
+// signature, so that test would keep nagging after the user had refreshed. It never calls a
+// runner (Run and RunFor may be nil) and never writes — no reap, no unified delete — because
+// `witness view` writes only its HTML.
+//
+// A lens whose facets are gone is absent: Summarize reaps its portrait, it does not refresh it.
+// One approximation, on the unified portrait only: while any notebook is stale its new summary
+// is unknowable without the model, so unified is reported stale too. Summarize can still skip it
+// (a regenerated summary that comes back byte-identical, or a failed one that falls back to the
+// prior), so the line may promise a portrait refresh that turns out to be a no-op.
+func (sm *Summarizer) Stale() (map[string]bool, error) {
+	_, passes, err := sm.planLenses()
+	if err != nil {
+		return nil, err
+	}
+	stale := map[string]bool{store.ProfileUnified: false}
+	if len(passes) == 0 {
+		return stale, nil // Summarize deletes the unified portrait here, it never calls the model
+	}
+	// With every notebook current, Summarize's portrait is exactly the prior files in pass order.
+	var portrait strings.Builder
+	anyStale := false
+	for _, p := range passes {
+		stale[p.name] = p.prior == ""
+		anyStale = anyStale || stale[p.name]
+		writeSection(&portrait, p.name, p.prior)
+	}
+	// anyStale is load-bearing, not a restatement of the signature check. A stale lens adds an
+	// EMPTY section here, and archives written before #148 can hold exactly that: an empty reply
+	// was written to <lens>.md, its signature stamped, and the unified signature stamped over a
+	// portrait containing "## <lens>\n\n\n\n". That signature still matches this rebuild, yet
+	// Summarize regenerates the lens and then the portrait. Without the guard, Stale would call
+	// the portrait current when a model call is coming.
+	_, _, current := sm.unifiedPass(portrait.String())
+	stale[store.ProfileUnified] = anyStale || !current
+	return stale, nil
 }
 
 // deleteProfileAndSignature removes a profile file that has stopped being applicable and

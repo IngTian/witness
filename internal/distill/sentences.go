@@ -43,9 +43,9 @@ func SplitSentences(md string) []string {
 			continue
 		}
 		// List item: flush current block, start new block with this item.
-		if isListItem(trimmed) {
+		if IsListItem(trimmed) {
 			flushBlock()
-			line = stripListMarker(trimmed)
+			line = StripListMarker(trimmed)
 			if line != "" {
 				currentBlock = []string{line}
 				flushBlock() // list item is its own block
@@ -71,8 +71,9 @@ func SplitSentences(md string) []string {
 	return allSentences
 }
 
-// isListItem checks if a line starts with a list marker.
-func isListItem(line string) bool {
+// IsListItem checks if a line starts with a list marker. Exported with StripListMarker so
+// internal/view rebuilds SplitSentences' blocks by the same rules, never a drifting copy.
+func IsListItem(line string) bool {
 	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
 		return true
 	}
@@ -193,9 +194,9 @@ func splitBlockIntoSentences(text string) []string {
 	return result
 }
 
-// stripListMarker removes list item markers from the start of a line.
+// StripListMarker removes list item markers from the start of a line.
 // Handles: "- ", "* ", and digit+". " (e.g., "1. ").
-func stripListMarker(line string) string {
+func StripListMarker(line string) string {
 	line = strings.TrimSpace(line)
 	if strings.HasPrefix(line, "- ") {
 		return strings.TrimSpace(line[2:])
