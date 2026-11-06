@@ -37,9 +37,11 @@ func TestMain(m *testing.M) {
 	// witness.exe and put a build temp dir on their PATH.
 	//
 	// Redirecting it here rather than per-test is deliberate: any FUTURE test that reaches
-	// installSelf/installBundle/ensureOnUserPath inherits the containment automatically. A
-	// per-test t.Setenv only protects the test that remembers to write it, and this hazard is
-	// invisible on the platform the tests are usually run on.
+	// installSelf/installBundle inherits the containment of the COPY automatically. A per-test
+	// t.Setenv only protects the test that remembers to write it, and this hazard is invisible on
+	// the platform the tests are usually run on. It does NOT contain the PATH half: installSelf
+	// then calls ensureOnUserPath, which writes HKCU\Environment, and no env var redirects that —
+	// so no test may let installSelf succeed on Windows.
 	_ = os.Setenv("LOCALAPPDATA", filepath.Join(root, "localappdata"))
 	code := m.Run()
 	_ = os.RemoveAll(root)
