@@ -14,6 +14,3 @@ func Source(shim string) string {
 	shimJSON, _ := json.Marshal(shim)
 	return "globalThis.WITNESS_SHIM = " + string(shimJSON) + "\n\n" + body
 }
-
-// Body returns the runtime-agnostic plugin JavaScript body for tests.
-func Body() string { return body }

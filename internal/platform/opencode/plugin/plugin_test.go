@@ -6,7 +6,7 @@ import (
 )
 
 func TestBodyExportsDefaultPlugin(t *testing.T) {
-	body := Body()
+	body := Source("")
 	if !strings.Contains(body, "export default plugin") {
 		t.Fatal("OpenCode package loading expects a default plugin export")
 	}
