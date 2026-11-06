@@ -80,47 +80,31 @@ func seedTryStore(t *testing.T, runner string) *store.Store {
 	return s
 }
 
-// OpenCode no longer sweeps the user's DB, so a preview may overlap a worker.
-// The injected runner keeps this concurrency contract test process-only.
-func TestLensTryOnOpenCodeIsLockFree(t *testing.T) {
-	s := seedTryStore(t, store.RunnerOpenCode)
-	opened := false
-	previous := runnerForStore
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
-		return limitedPreviewRunner{opened: &opened}, nil
-	}
-	t.Cleanup(func() { runnerForStore = previous })
-	unlock, ok := s.WorkerLock() // stand in for a running worker
-	if !ok {
-		t.Fatal("precondition: could not take the worker lock")
-	}
-	defer unlock()
+// A preview is read-only, so it must not take the worker lock on either runner: it may overlap a
+// running worker. The injected runner keeps this concurrency contract test process-only.
+func TestLensTryIsLockFree(t *testing.T) {
+	for _, runner := range []string{store.RunnerClaude, store.RunnerOpenCode} {
+		t.Run(runner, func(t *testing.T) {
+			s := seedTryStore(t, runner)
+			opened := false
+			previous := runnerForStore
+			runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+				return limitedPreviewRunner{opened: &opened}, nil
+			}
+			t.Cleanup(func() { runnerForStore = previous })
+			unlock, ok := s.WorkerLock() // stand in for a running worker
+			if !ok {
+				t.Fatal("precondition: could not take the worker lock")
+			}
+			defer unlock()
 
-	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1})
-	if err != nil {
-		t.Fatalf("opencode preview should proceed with a worker active: %v", err)
-	}
-	if !opened {
-		t.Fatal("lock-free opencode preview did not open its fake runner")
-	}
-}
-
-// On Claude (no shutdown sweep) a preview must NOT take the worker lock — it can safely
-// overlap a running worker. With the lock held, the command proceeds past the lock and
-// stops at the unknown --session validation (proving it never blocked on the lock).
-func TestLensTryOnClaudeIsLockFree(t *testing.T) {
-	s := seedTryStore(t, store.RunnerClaude)
-	unlock, ok := s.WorkerLock() // a worker is "running"
-	if !ok {
-		t.Fatal("precondition: could not take the worker lock")
-	}
-	defer unlock()
-
-	// Use an unknown --session so we hit the pre-mining validation error (no real claude
-	// call), which is only reachable if the lock did NOT block the claude path.
-	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
-	if err == nil || !strings.Contains(err.Error(), "no raw turns") {
-		t.Fatalf("claude preview should be lock-free and reach --session validation, got: %v", err)
+			if err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1}); err != nil {
+				t.Fatalf("%s preview should proceed with a worker active: %v", runner, err)
+			}
+			if !opened {
+				t.Fatalf("lock-free %s preview did not open its fake runner", runner)
+			}
+		})
 	}
 }
 
