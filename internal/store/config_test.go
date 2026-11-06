@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -90,6 +91,38 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 	c := st.LoadConfig()
 	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 || !c.AutoDistill || c.MineConcurrency != DefaultMineConcurrency {
 		t.Errorf("template defaults not loadable: %+v", c)
+	}
+}
+
+// The template must not PIN the defaults. An active `review_max_chars = 16000` line froze
+// the archive at its creation-time value — a v0.11.0 archive stayed at 16000 after the
+// constant was changed — because LoadConfig reads the file over DefaultConfig(). So every
+// value line ships commented and shows the CURRENT default (rendered from DefaultConfig, so
+// the text cannot drift from the constant either).
+func TestConfigTemplateDoesNotPinDefaults(t *testing.T) {
+	s := tempStore(t)
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") {
+			t.Errorf("template line is active, so it pins its value against future defaults: %q", line)
+		}
+	}
+	d := DefaultConfig()
+	for _, want := range []string{
+		fmt.Sprintf("# runner = %q", d.Runner),
+		fmt.Sprintf("# review_every = %d", d.ReviewEvery),
+		fmt.Sprintf("# review_poignancy = %d", d.ReviewPoignancy),
+		fmt.Sprintf("# auto_distill = %t", d.AutoDistill),
+		fmt.Sprintf("# mine_concurrency = %d", d.MineConcurrency),
+		fmt.Sprintf("# chunk_max_chars = %d", d.ChunkMaxChars),
+		fmt.Sprintf("# review_max_chars = %d", d.ReviewMaxChars),
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("template does not show the current default %q", want)
+		}
 	}
 }
 
