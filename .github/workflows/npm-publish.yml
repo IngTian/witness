@@ -128,14 +128,18 @@ jobs:
             "@witness-ai/opencode-win32-x64"
             "@witness-ai/opencode-win32-arm64"
           )
+          # Up to 10 minutes per package. The old 60 s window failed attempt 1 of every release
+          # since v0.8.0 (9 in all), and each failure also skipped the MCP Registry publish; the
+          # successful reruns came 3-9 minutes after publish. A healthy run is no slower — the
+          # loop breaks on the first hit.
           for package in "${packages[@]}"; do
-            for attempt in {1..12}; do
+            for attempt in {1..60}; do
               published="$(npm view "$package@$version" version 2>/dev/null || true)"
               [ "$published" = "$version" ] && break
-              sleep 5
+              sleep 10
             done
             [ "$published" = "$version" ] || {
-              echo "$package@$version is not visible on npm after 60 seconds" >&2
+              echo "$package@$version is not visible on npm after 10 minutes" >&2
               exit 1
             }
           done
