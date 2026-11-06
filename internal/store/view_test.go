@@ -72,21 +72,31 @@ func TestReadViewInputReadsEverything(t *testing.T) {
 		t.Fatalf("ReadViewInput: %v", err)
 	}
 
-	// Assert counts
+	// Assert Notes: every field, distinct values, ORDER BY seq
+	wantNotes := []ViewNote{
+		{ID: "obs1", TS: "2026-11-05T10:00:00Z", Session: "session1", Lens: "default", Dimension: "workstyle", Observation: "note 1", Evidence: "evidence 1", Poignancy: 5},
+		{ID: "obs2", TS: "2026-11-05T10:01:00Z", Session: "session1", Lens: "default", Dimension: "biases", Observation: "note 2", Evidence: "evidence 2", Poignancy: 3},
+		{ID: "obs3", TS: "2026-11-05T10:02:00Z", Session: "file:doc1", Lens: "corpus", Dimension: "topic1", Observation: "note 3", Evidence: "evidence 3", Poignancy: 4},
+	}
+	if !reflect.DeepEqual(in.Notes, wantNotes) {
+		t.Errorf("Notes mismatch:\ngot  %+v\nwant %+v", in.Notes, wantNotes)
+	}
+
+	// Assert Turns: every field, ORDER BY id
+	wantTurns := []ViewTurn{
+		{Session: "session1", TS: "2026-11-05T10:00:00Z"},
+		{Session: "session1", TS: "2026-11-05T10:01:00Z"},
+		{Session: "file:doc1", TS: "2026-11-05T09:00:00Z"},
+		{Session: "session2", TS: "2026-11-05T11:00:00Z"},
+	}
+	if !reflect.DeepEqual(in.Turns, wantTurns) {
+		t.Errorf("Turns mismatch:\ngot  %+v\nwant %+v", in.Turns, wantTurns)
+	}
+
+	// Assert facet count and archived facet present
 	if got, want := len(in.Facets), 2; got != want {
 		t.Errorf("facet count = %d, want %d", got, want)
 	}
-	if got, want := len(in.Notes), 3; got != want {
-		t.Errorf("note count = %d, want %d", got, want)
-	}
-	if got, want := len(in.Turns), 4; got != want {
-		t.Errorf("turn count = %d, want %d", got, want)
-	}
-	if got, want := len(in.Log), 2; got != want {
-		t.Errorf("log count = %d, want %d", got, want)
-	}
-
-	// Assert archived facet is present
 	foundArchived := false
 	for _, f := range in.Facets {
 		if f.Key == "archived_trait" && f.ArchivedAt != "" {
