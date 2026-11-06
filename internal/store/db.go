@@ -17,8 +17,7 @@ import (
 // a future binary can detect and migrate older databases instead of silently
 // misreading them. History: two earlier dev-only versions existed (the
 // staged-uniqueness index from v2 is folded into schemaV1 as a plain CREATE ... IF
-// NOT EXISTS, and the v2->v3 `l0`->`raw` rename is a guarded legacy step in
-// migrate()); v4 adds session_meta.platform (the per-session owning-platform axis,
+// NOT EXISTS); v4 adds session_meta.platform (the per-session owning-platform axis,
 // issue #21) via a guarded ADD COLUMN + one-time prefix backfill in migrate();
 // v5 re-keys the distillation watermark from PK(session) to PK(session, lens) so a
 // single lens can be backfilled without re-mining every lens (issue #55) — a
@@ -210,8 +209,8 @@ func (s *Store) Export(dst string, force bool) error {
 }
 
 // migrate brings the schema from the database's current user_version up to
-// schemaVersion: a guarded legacy rename (if needed) followed by the full current
-// schema applied idempotently.
+// schemaVersion: the full current schema applied idempotently, followed by the guarded
+// per-version steps.
 //
 // The whole thing plus the version bump runs in ONE transaction (PRAGMA
 // user_version is transactional in SQLite), so a crash mid-migration rolls back
@@ -290,34 +289,13 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
-	// 1. Legacy rename FIRST. A pre-rename DB has the raw layer under its old name
-	// `l0` and no `raw`; rename it in place (preserving the data) before step 2 would
-	// otherwise create an empty `raw` beside it. Guarded on `l0` present AND `raw`
-	// absent, so it's a no-op on fresh DBs and on any re-run. ALTER TABLE RENAME has
-	// no IF EXISTS form, hence the explicit existence checks.
-	var hasL0, hasRaw int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='l0'`).Scan(&hasL0); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("check legacy l0: %w", err)
-	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='raw'`).Scan(&hasRaw); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("check raw: %w", err)
-	}
-	if hasL0 > 0 && hasRaw == 0 {
-		if _, err := tx.Exec(legacyL0Rename); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("rename legacy l0 -> raw: %w", err)
-		}
-	}
-
 	// 2. Apply the full current schema UNCONDITIONALLY. Every statement is
 	// CREATE ... IF NOT EXISTS, so it creates everything on a fresh DB and is a
 	// harmless no-op on an existing one. Applying it regardless of the stored
 	// version means a DB at ANY prior version converges to the current schema —
 	// there is no "version landed between steps, so a CREATE got skipped" trap.
-	// Future additive changes extend schemaV1; future ALTER/data migrations go
-	// above this as their own guarded, idempotent step (like the rename).
+	// Future additive changes extend schemaV1; future ALTER/data migrations are
+	// their own guarded, idempotent steps (like those below).
 	if _, err := tx.Exec(schemaV1); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("apply schema: %w", err)
@@ -501,8 +479,7 @@ func addSessionPlatformColumn(tx *sql.Tx) error {
 // (session, lens) pair is deliberately left ABSENT so it reads as pending
 // (distilled defaults to 0 via the LEFT JOIN): a newly-enabled lens must NOT
 // inherit default's watermark, or it would falsely claim to have already mined
-// those turns. This mirrors the l0->raw rename discipline: one-time, in place,
-// data-preserving, idempotent.
+// those turns. One-time, in place, data-preserving, idempotent.
 func migrateProgressPerLens(tx *sql.Tx) error {
 	var hasLens int
 	if err := tx.QueryRow(
@@ -957,17 +934,6 @@ CREATE TABLE IF NOT EXISTS confidence_log (
   from_conf REAL NOT NULL DEFAULT 0, to_conf REAL NOT NULL, kind TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_confidence_log_facet ON confidence_log(lens, dimension, key, id);
-`
-
-// legacyL0Rename upgrades a pre-rename database (raw layer shipped as `l0`) to the
-// current `raw` name, in place, preserving the data. Applied by migrate() only
-// when a legacy `l0` exists and `raw` does not. ALTER TABLE RENAME carries the
-// data and the index's table reference; we drop+recreate the index so its NAME
-// follows the rename too.
-const legacyL0Rename = `
-ALTER TABLE l0 RENAME TO raw;
-DROP INDEX IF EXISTS idx_l0_session;
-CREATE INDEX IF NOT EXISTS idx_raw_session ON raw(session, id);
 `
 
 // encodeEmbedding packs a float32 vector into little-endian bytes for a BLOB

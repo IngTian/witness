@@ -39,50 +39,6 @@ func TestMigrateIdempotentAfterPartialApply(t *testing.T) {
 	}
 }
 
-// A pre-rename database has the raw layer under its old name `l0`. Opening it must
-// rename the table to `raw` in place, preserving the data, remove the legacy table,
-// and stamp the current version — so no deployed DB is bricked or loses history when
-// the on-disk names are modernized. (This migrates from a real v2 `l0` DB, not from
-// a fresh tempStore — the coverage gap that a prior collapse slipped through.)
-func TestMigrateRenamesLegacyL0(t *testing.T) {
-	s := tempStore(t) // fully migrated (has `raw`)
-	// Simulate a legacy v2 DB: replace `raw` with the old `l0` schema + a row.
-	for _, stmt := range []string{
-		`DROP TABLE raw`,
-		`CREATE TABLE l0 (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, seq INTEGER NOT NULL,
-			ts TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', effort TEXT NOT NULL DEFAULT '',
-			text TEXT NOT NULL DEFAULT '')`,
-		`CREATE INDEX idx_l0_session ON l0(session, id)`,
-		`INSERT INTO l0(session, seq, role, text) VALUES ('s', 0, 'user', 'hello')`,
-		`PRAGMA user_version=2`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil {
-			t.Fatalf("seed legacy schema (%q): %v", stmt, err)
-		}
-	}
-
-	if err := migrate(s.db); err != nil {
-		t.Fatalf("migrate legacy l0 -> raw: %v", err)
-	}
-
-	// Data survived into `raw`, reachable through the store API.
-	recs, err := s.ReadRaw("s")
-	if err != nil || len(recs) != 1 || recs[0].Text != "hello" {
-		t.Fatalf("data must survive the rename: err=%v recs=%+v", err, recs)
-	}
-	// The legacy table is gone and the version is current.
-	var hasLegacy int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='l0'`).Scan(&hasLegacy)
-	if hasLegacy != 0 {
-		t.Fatalf("legacy l0 table should be gone after migrate")
-	}
-	var v int
-	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
-	if v != schemaVersion {
-		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
-	}
-}
-
 // v3 -> v4 adds session_meta.platform. A pre-v4 DB has session_meta WITHOUT the
 // column; migrate() must ADD it and BACKFILL from the L0 session-id prefix
 // ("opencode:" => opencode, else claude), non-destructively and idempotently.

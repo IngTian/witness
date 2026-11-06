@@ -1378,7 +1378,7 @@ func peekUserVersion(path string) (int, error) {
 		return 0, err
 	}
 	var hasRaw int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('raw','l0')`).Scan(&hasRaw); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='raw'`).Scan(&hasRaw); err != nil {
 		return 0, err
 	}
 	if hasRaw == 0 {
