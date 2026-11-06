@@ -28,6 +28,10 @@ func TestParseJSONArrayReportsTruncationSeparatelyFromDrift(t *testing.T) {
 		{"cut after a complete element", `[{"observation":"a"},{"observation":"b"},`},
 		{"cut right after the bracket", `[{"observation":`},
 		{"inside a fence", "```json\n[\n  {\"observation\": \"a\"},\n  {\"observ"},
+		// An unclosed prose '[' that opens no element comes FIRST. It must be skipped, not
+		// decisive: if it ended the scan this reply would read as drift and lose its observations.
+		{"unclosed prose bracket before the cut-off array",
+			"I looked at [the user's session first. Here:\n" + `[{"observation":"a"},{"observation":"cut`},
 	}
 	for _, tc := range truncated {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,21 +168,39 @@ func TestParseJSONArrayPrefersARealArrayOverSurroundingProse(t *testing.T) {
 	}
 }
 
-// The last-wins and object-wrapped behaviors must survive the truncation check: a complete
-// array anywhere means no truncation error, whatever else the reply contains.
-func TestTruncationCheckDoesNotDisturbCompleteReplies(t *testing.T) {
+// A complete array is not the end of the truncation check: an unclosed array AFTER the winner,
+// whose next character opens an element, means the real answer was cut off. The winner is then an
+// echoed prompt example, and returning it put the example into L1 as evidence and advanced the
+// watermark past the truncated real observations — fabricated evidence and permanent loss at once.
+// Trailing prose with a stray '[' that opens no element must still return the array, or a
+// deterministic false positive stalls the lens in review.
+func TestTruncationCheckAfterACompleteArray(t *testing.T) {
 	cases := []struct {
 		name, reply string
-		want        string
+		want        string // "" = want ErrTruncatedJSONArray
 	}{
-		{"echoed example then the real answer",
-			`Format: [{"observation":"EXAMPLE"}]. Here are yours: [{"observation":"real"}]`, "real"},
-		{"object wrapped", `{"observations":[{"observation":"wrapped"}]}`, "wrapped"},
+		{"fenced prompt example, then the real array cut off",
+			"The format is:\n```json\n[{\"observation\":\"EXAMPLE\"}]\n```\nHere are mine:\n" +
+				`[{"observation":"real one"},{"observation":"real, cut`, ""},
+		{"unfenced prompt example, then the real array cut off",
+			`Format: [{"observation":"EXAMPLE"}]. Here are yours: [{"observation":"real, cut`, ""},
+		// Same, with an unclosed prose '[' between: skipping it must not stop the scan, or the
+		// echoed EXAMPLE is returned as the answer.
+		{"example, an unclosed prose bracket, then the real array cut off",
+			"Format: [{\"observation\":\"EXAMPLE\"}]. See [the notes. Mine:\n" + `[{"observation":"real, cut`, ""},
+		{"array then a stray bracket in prose", `[{"observation":"first"}] — see [the "x" message for why.`, "first"},
 		{"array then trailing prose", `[{"observation":"first"}] and that is all I found.`, "first"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ParseJSONArray[tobs](tc.reply)
+			if tc.want == "" {
+				if !errors.Is(err, ErrTruncatedJSONArray) {
+					t.Fatalf("want ErrTruncatedJSONArray, got (%+v, %v): the echoed example would be "+
+						"written to L1 and the cut-off real observations lost", got, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

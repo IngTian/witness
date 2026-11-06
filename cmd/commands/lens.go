@@ -280,6 +280,11 @@ func cmdLens(args []string) error {
 // nothing would happen — and for `--fresh` the pre-drop of obs+facets would then be
 // irrecoverable. We fail fast with a clear message rather than silently no-op / lose data.
 func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
+	// Before anything else: --fresh DELETES this lens's facets ahead of the re-mine, so the
+	// drain's own refusal of a newer archive would come too late.
+	if err := st.ArchiveNewer(); err != nil {
+		return err
+	}
 	// Resolve the CLI arg to the name the WORKER actually keys data under. A
 	// registered lens's mined observations/facets/progress are tagged with the lens's
 	// resolved name (its lens.json `name`, via lens.LoadRegistered), which can differ
