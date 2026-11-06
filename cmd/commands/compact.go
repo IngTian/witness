@@ -115,7 +115,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	// failed was only in witness.log.
 	tap := &causeTap{}
 	c := &distill.Compactor{
-		Store: st, Config: cfg,
+		Store: st, Lenses: lenses, Config: cfg,
 		Runner: tap.wrap(rs.RunFor(nil)), RunnerFor: tap.wrapFor(rs.RunFor),
 	}
 
