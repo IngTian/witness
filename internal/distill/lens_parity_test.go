@@ -18,7 +18,7 @@ import (
 // only in IDENTITY (always-on, built-in prompt source, reserved name) — never in
 // BEHAVIOR. These tests run the SAME input through the built-in "default" lens and
 // a synthetic registered lens ("parity") and assert identical engine behavior at
-// each stage (mine, watermark, dedup, review→facets, backoff). If a future change
+// each stage (mine, watermark, review→facets, backoff). If a future change
 // re-special-cases default behaviorally, one of these fails.
 //
 // The prompts are deliberately structural, not real — the fake miner routes on the
@@ -149,31 +149,8 @@ func TestParityWatermarkIndependence(t *testing.T) {
 	if d, p := s.DistilledCount("s", store.LensDefault), s.DistilledCount("s", parityLens); d != 2 || p != 2 {
 		t.Fatalf("both watermarks should end at 2: default=%d parity=%d", d, p)
 	}
-}
-
-// DEDUP self-scoping: dedup is per-lens, so a default observation never suppresses a
-// parity observation with identical text and vice-versa. Both lenses keep their obs.
-// TestParityLensesEachWriteTheirOwnObs: two lenses mining the same transcript into
-// identical text each write their own L1 row — obsID is lens-namespaced (sha1 includes
-// lens), so neither suppresses the other. (This once asserted "dedup is self-scoped";
-// with the embedding dedup gate deleted — L1 is now an append-only event log — there
-// is no cross-obs suppression at all, so the property it locks is now purely that each
-// lens's mined obs is written under its own namespaced obsID.)
-func TestParityLensesEachWriteTheirOwnObs(t *testing.T) {
-	s := newStore(t)
-	capture(t, s, "s", "user", "alpha")
-	capture(t, s, "s", "assistant", "reply")
-
-	// Both lenses produce "obs:<same transcript>" — identical text, different lens.
-	m := &parityMiner{}
-	if err := parityWorker(s, m).Process(context.Background(), "s"); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if d, _ := s.ReadObservations(store.LensDefault); len(d) != 1 {
-		t.Fatalf("default lens obs missing: got %d, want 1", len(d))
-	}
-	if p, _ := s.ReadObservations(parityLens); len(p) != 1 {
-		t.Fatalf("parity lens obs missing: got %d, want 1", len(p))
+	if obs, _ := s.ReadObservations(parityLens); len(obs) != 1 {
+		t.Fatalf("the backfilled lens should have 1 observation, got %d", len(obs))
 	}
 }
 
@@ -246,7 +223,9 @@ func assertFailingLensBlocksStamp(t *testing.T, failing string) {
 
 // BACKOFF parity: a transport failure produces a per-(session,lens) backoff row, and
 // the sequence is structurally identical whichever lens fails — the failed lens is
-// parked while the healthy sibling commits and advances.
+// parked while the healthy sibling commits and advances (#55: the old all-or-nothing
+// rule discarded the healthy lens too), and once its backoff elapses it catches up
+// without re-mining the sibling.
 func TestParityBackoffSymmetry(t *testing.T) {
 	for _, failing := range []string{parityLens, store.LensDefault} {
 		t.Run(failing, func(t *testing.T) {
@@ -277,12 +256,31 @@ func TestParityBackoffSymmetry(t *testing.T) {
 			if got := s.RetryCount("s", healthy); got != 0 {
 				t.Fatalf("healthy lens %q must not accrue retries, got %d", healthy, got)
 			}
+			if obs, _ := s.ReadObservations(healthy); len(obs) != 1 {
+				t.Fatalf("healthy lens %q's observation must be written, got %d", healthy, len(obs))
+			}
+			if obs, _ := s.ReadObservations(failing); len(obs) != 0 {
+				t.Fatalf("failed lens %q must write nothing, got %d", failing, len(obs))
+			}
 			// The failed lens is parked; the healthy one keeps the session pending.
 			if p, _ := s.PendingSessions([]string{failing}); contains(p, "s") {
 				t.Fatalf("failed lens %q alone should be backed off / not pending", failing)
 			}
 			if p, _ := s.PendingSessions([]string{healthy}); contains(p, "s") {
 				t.Fatalf("healthy lens %q is caught up → not pending", healthy)
+			}
+
+			// Recovery: once the backoff elapses, the failed lens catches up alone.
+			elapseBackoff(t, s, "s", failing)
+			m2 := &parityMiner{}
+			if err := parityWorker(s, m2).Process(context.Background(), "s"); err != nil {
+				t.Fatalf("recovery Process: %v", err)
+			}
+			if n := m2.callsByPrompt["extract-"+healthy]; n != 0 {
+				t.Fatalf("caught-up %q must not re-mine on recovery, got %d", healthy, n)
+			}
+			if got := s.DistilledCount("s", failing); got != 2 {
+				t.Fatalf("%q must catch up on recovery, got %d", failing, got)
 			}
 		})
 	}
