@@ -22,6 +22,10 @@ func TestMergeRenameCarriesConfidenceLog(t *testing.T) {
 		// Seed a facet with the same key "k" but in a DIFFERENT dimension (to catch missing dimension in WHERE)
 		behaviorFacet := mf("behavior", "k", "different dimension", 0.7, 1, "ob1")
 		behaviorFacet.LastSeen = "2026-02-01T00:00:00Z"
+		// Seed a facet in a DIFFERENT lens with the same dimension and key (to catch missing lens in WHERE)
+		otherLensFacet := Facet{Lens: "other-lens", Dimension: "thinking", Key: "k", LastSeen: "2026-02-01T00:00:00Z",
+			Versions: []FacetVersion{{Value: "other lens value", Confidence: 0.6, ConfidenceSeq: 1,
+				ValidFrom: "2026-02-01T00:00:00Z", RecordedAt: "2026-02-01T00:00:00Z", BecauseOf: []string{"ob1"}}}}
 		// Write all facets and events in one call (WriteFacetsLogged replaces the whole table)
 		baseEvents := []ConfidenceEvent{
 			{Lens: "default", Dimension: "thinking", Key: "k",
@@ -30,8 +34,10 @@ func TestMergeRenameCarriesConfidenceLog(t *testing.T) {
 				At: "2026-02-01T12:00:00Z", ClockSeq: 1, From: 0.0, To: 0.8, Kind: EventNew},
 			{Lens: "default", Dimension: "behavior", Key: "k",
 				At: "2026-02-01T12:00:00Z", ClockSeq: 1, From: 0.0, To: 0.7, Kind: EventNew},
+			{Lens: "other-lens", Dimension: "thinking", Key: "k",
+				At: "2026-02-01T12:00:00Z", ClockSeq: 1, From: 0.0, To: 0.6, Kind: EventNew},
 		}
-		if err := base.st.WriteFacetsLogged([]Facet{baseFacet, otherFacet, behaviorFacet}, baseEvents); err != nil {
+		if err := base.st.WriteFacetsLogged([]Facet{baseFacet, otherFacet, behaviorFacet, otherLensFacet}, baseEvents); err != nil {
 			t.Fatal(err)
 		}
 
@@ -52,21 +58,23 @@ func TestMergeRenameCarriesConfidenceLog(t *testing.T) {
 			t.Fatalf("ReadConfidenceLog: %v", err)
 		}
 
-		// Our thinking/k row must be under "k__m1"
-		var kEvents, otherEvs, behaviorEvs []ConfidenceEvent
+		// Our default/thinking/k row must be under "k__m1"
+		var kEvents, otherEvs, behaviorEvs, otherLensEvs []ConfidenceEvent
 		for _, ev := range events {
-			if ev.Dimension == "thinking" && ev.Key == "k__m1" {
+			if ev.Lens == "default" && ev.Dimension == "thinking" && ev.Key == "k__m1" {
 				kEvents = append(kEvents, ev)
-			} else if ev.Dimension == "thinking" && ev.Key == "other" {
+			} else if ev.Lens == "default" && ev.Dimension == "thinking" && ev.Key == "other" {
 				otherEvs = append(otherEvs, ev)
-			} else if ev.Dimension == "behavior" && ev.Key == "k" {
+			} else if ev.Lens == "default" && ev.Dimension == "behavior" && ev.Key == "k" {
 				behaviorEvs = append(behaviorEvs, ev)
-			} else if ev.Dimension == "thinking" && ev.Key == "k" {
-				t.Errorf("found thinking/k log row still under 'k' after rename: %+v", ev)
+			} else if ev.Lens == "other-lens" && ev.Dimension == "thinking" && ev.Key == "k" {
+				otherLensEvs = append(otherLensEvs, ev)
+			} else if ev.Lens == "default" && ev.Dimension == "thinking" && ev.Key == "k" {
+				t.Errorf("found default/thinking/k log row still under 'k' after rename: %+v", ev)
 			}
 		}
 		if len(kEvents) != 1 {
-			t.Errorf("want 1 event under thinking/k__m1, got %d: %+v", len(kEvents), kEvents)
+			t.Errorf("want 1 event under default/thinking/k__m1, got %d: %+v", len(kEvents), kEvents)
 		} else {
 			want := ConfidenceEvent{Lens: "default", Dimension: "thinking", Key: "k__m1",
 				At: "2026-02-01T12:00:00Z", ClockSeq: 1, From: 0.0, To: 0.9, Kind: EventNew}
@@ -76,10 +84,19 @@ func TestMergeRenameCarriesConfidenceLog(t *testing.T) {
 		}
 		// The unrelated rows must be unchanged
 		if len(otherEvs) != 1 {
-			t.Errorf("want 1 event under thinking/other, got %d: %+v", len(otherEvs), otherEvs)
+			t.Errorf("want 1 event under default/thinking/other, got %d: %+v", len(otherEvs), otherEvs)
 		}
 		if len(behaviorEvs) != 1 {
-			t.Errorf("want 1 event under behavior/k (unchanged), got %d: %+v", len(behaviorEvs), behaviorEvs)
+			t.Errorf("want 1 event under default/behavior/k (unchanged), got %d: %+v", len(behaviorEvs), behaviorEvs)
+		}
+		if len(otherLensEvs) != 1 {
+			t.Errorf("want 1 event under other-lens/thinking/k (unchanged), got %d: %+v", len(otherLensEvs), otherLensEvs)
+		} else {
+			want := ConfidenceEvent{Lens: "other-lens", Dimension: "thinking", Key: "k",
+				At: "2026-02-01T12:00:00Z", ClockSeq: 1, From: 0.0, To: 0.6, Kind: EventNew}
+			if !reflect.DeepEqual(otherLensEvs[0], want) {
+				t.Errorf("other-lens/thinking/k event changed:\n got %+v\nwant %+v", otherLensEvs[0], want)
+			}
 		}
 	})
 
