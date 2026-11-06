@@ -20,7 +20,7 @@ func desyncKeys(t *testing.T, session, keysJSON string) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.SetMetaString("file_import_keys:"+session, keysJSON); err != nil {
+	if err := st.SetMetaString(store.FileImportKeysNS+":"+session, keysJSON); err != nil {
 		t.Fatal(err)
 	}
 }

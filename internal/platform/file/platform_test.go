@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/IngTian/witness/internal/platform"
-	"github.com/IngTian/witness/internal/store"
 )
 
 func TestFilePlatformShape(t *testing.T) {
@@ -15,11 +14,18 @@ func TestFilePlatformShape(t *testing.T) {
 	if p.SessionPrefix() != "file:" {
 		t.Errorf("SessionPrefix() = %q, want file:", p.SessionPrefix())
 	}
-	// RenderInputs delegates to the shared shaper: one flat doc → one chunk.
-	raw := []store.RawRecord{{Session: "file:x", Seq: 0, Role: "document", Text: "hello"}}
-	got := p.RenderInputs(raw, platform.ChunkPolicy{})
-	if len(got) != 1 {
-		t.Fatalf("RenderInputs len = %d, want 1", len(got))
+}
+
+// Ingested sessions are the corpus `witness view` leaves out of conversation activity; any other
+// session is not.
+func TestFileSessionsAreTheCorpus(t *testing.T) {
+	if !platform.IsCorpusSession("file:/notes.md") {
+		t.Error("a file: session must be a corpus session")
+	}
+	for _, s := range []string{"opencode:ses", "codex:abc", "plain-claude-uuid"} {
+		if platform.IsCorpusSession(s) {
+			t.Errorf("%q is a conversation, not a corpus", s)
+		}
 	}
 }
 

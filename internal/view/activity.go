@@ -3,9 +3,9 @@ package view
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -17,7 +17,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 	// Parse and bucket turns by local date
 	dayMap := make(map[string]*dayBuilder)
 	for _, t := range in.Turns {
-		if strings.HasPrefix(t.Session, "file:") {
+		if platform.IsCorpusSession(t.Session) {
 			continue
 		}
 		ts, ok := parseTS(t.TS)
@@ -36,7 +36,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 
 	// Parse and bucket notes by local date
 	for _, n := range in.Notes {
-		if strings.HasPrefix(n.Session, "file:") {
+		if platform.IsCorpusSession(n.Session) {
 			continue
 		}
 		ts, ok := parseTS(n.TS)
@@ -98,7 +98,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 	if start == "" || start > last {
 		start = last
 	}
-	windows := generateWindows(start, last, days, dayMap, in.Notes, loc, tally)
+	windows := generateWindows(start, last, days, dayMap, tally)
 
 	return Activity{
 		First:       first,
@@ -156,7 +156,7 @@ func computeCuts(days []Day) []int {
 }
 
 // generateWindows builds all windows from First's window to Last's window.
-func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location, tally traitTally) []Window {
+func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuilder, tally traitTally) []Window {
 	firstDate := parseDate(first)
 	lastDate := parseDate(last)
 
@@ -164,22 +164,22 @@ func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuild
 
 	// Months
 	for ym := monthOf(firstDate); !ym.After(monthOf(lastDate)); ym = ym.AddDate(0, 1, 0) {
-		windows = append(windows, buildWindow("month", ym, first, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("month", ym, first, last, days, dayMap, tally))
 	}
 
 	// Quarters
 	for yq := quarterOf(firstDate); !yq.After(quarterOf(lastDate)); yq = yq.AddDate(0, 3, 0) {
-		windows = append(windows, buildWindow("quarter", yq, first, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("quarter", yq, first, last, days, dayMap, tally))
 	}
 
 	// Halves
 	for yh := halfOf(firstDate); !yh.After(halfOf(lastDate)); yh = yh.AddDate(0, 6, 0) {
-		windows = append(windows, buildWindow("half", yh, first, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("half", yh, first, last, days, dayMap, tally))
 	}
 
 	// Years
 	for y := yearOf(firstDate); !y.After(yearOf(lastDate)); y = y.AddDate(1, 0, 0) {
-		windows = append(windows, buildWindow("year", y, first, last, days, dayMap, notes, loc, tally))
+		windows = append(windows, buildWindow("year", y, first, last, days, dayMap, tally))
 	}
 
 	return windows
@@ -187,7 +187,7 @@ func generateWindows(first, last string, days []Day, dayMap map[string]*dayBuild
 
 // buildWindow constructs a Window for the given kind and start date. first is Activity's
 // First (or Last for an empty archive), not the first turn day: SpanDays clips to it.
-func buildWindow(kind string, start time.Time, first, last string, days []Day, dayMap map[string]*dayBuilder, notes []store.ViewNote, loc *time.Location, tally traitTally) Window {
+func buildWindow(kind string, start time.Time, first, last string, days []Day, dayMap map[string]*dayBuilder, tally traitTally) Window {
 	var end time.Time
 	var label string
 
@@ -220,10 +220,8 @@ func buildWindow(kind string, start time.Time, first, last string, days []Day, d
 	for _, d := range days {
 		if d.Date >= startStr && d.Date <= endStr {
 			activeDays++
-			if dayMap[d.Date] != nil {
-				for s := range dayMap[d.Date].sessions {
-					sessions[s] = struct{}{}
-				}
+			for s := range dayMap[d.Date].sessions {
+				sessions[s] = struct{}{}
 			}
 			turns += d.Turns
 
@@ -233,19 +231,12 @@ func buildWindow(kind string, start time.Time, first, last string, days []Day, d
 		}
 	}
 
-	// Count notes directly by parsed ts date (not sum over Days)
+	// Notes come from dayMap, not Days: Days holds only turn days, and a note can land on a
+	// day with no turns (or whose turns `witness cleanup` reclaimed).
 	notesCount := 0
-	for _, n := range notes {
-		if strings.HasPrefix(n.Session, "file:") {
-			continue
-		}
-		ts, ok := parseTS(n.TS)
-		if !ok {
-			continue
-		}
-		date := ts.In(loc).Format("2006-01-02")
+	for date, db := range dayMap {
 		if date >= startStr && date <= endStr {
-			notesCount++
+			notesCount += db.notes
 		}
 	}
 

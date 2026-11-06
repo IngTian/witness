@@ -93,8 +93,7 @@ func TestObservationRecordReachesTheReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var existing []store.Observation
-	if err := w.CommitMining(m, &existing); err != nil {
+	if err := w.CommitMining(m); err != nil {
 		t.Fatal(err)
 	}
 

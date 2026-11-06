@@ -39,7 +39,8 @@ var ErrTruncatedJSONArray = errors.New("reply began a JSON array but never close
 // wrap output in prose and/or a ```json fence, may emit a stray "[]" or
 // "[the user]" in the prose BEFORE the real array, and may put an example array
 // inside a leading object. So we search a series of candidate strings (each
-// fenced block — ```json first — then the whole reply) and, within each:
+// fenced block in document order, then the whole reply — see fencedBlocks for why
+// the blocks are scanned on their own) and, within each:
 //
 //  1. prefer a TOP-LEVEL, balanced, NON-EMPTY array. This skips an empty "[]"
 //     (which, if returned, would silently drop the session's observations and
@@ -290,34 +291,32 @@ func matchBracket(s string, start int) int {
 	return -1
 }
 
-// fencedBlocks returns the contents of every ```...``` code block in s, with
-// blocks tagged ```json (or ```jsonc) ordered first so the intended JSON wins
-// over an incidental ```sh/```text block elsewhere in the reply.
+// fencedBlocks returns the contents of every ```...``` code block in s, in document order, whatever
+// the tag. It is load-bearing, not a redundant first try: one stray straight quote in a preamble
+// (`27" monitor`) flips string parity for the whole-reply scan, hiding every array after it, and
+// only a per-block scan still finds the answer. Document order is what lets ParseJSONArray's
+// last-wins hold across blocks. Tagged json used to be ordered FIRST, which under last-wins made it
+// LOSE to an earlier ```text example; ordering it last instead would return an echoed ```json
+// example over an untagged answer (#133).
 func fencedBlocks(s string) []string {
-	var jsonBlocks, other []string
+	var blocks []string
 	for {
 		start := strings.Index(s, "```")
 		if start < 0 {
 			break
 		}
 		rest := s[start+3:]
-		nl := strings.IndexByte(rest, '\n')
+		nl := strings.IndexByte(rest, '\n') // skip the tag line
 		if nl < 0 {
 			break
 		}
-		tag := strings.ToLower(strings.TrimSpace(rest[:nl]))
 		body := rest[nl+1:]
 		end := strings.Index(body, "```")
 		if end < 0 {
 			break
 		}
-		block := body[:end]
-		if tag == "json" || tag == "jsonc" {
-			jsonBlocks = append(jsonBlocks, block)
-		} else {
-			other = append(other, block)
-		}
+		blocks = append(blocks, body[:end])
 		s = body[end+3:]
 	}
-	return append(jsonBlocks, other...)
+	return blocks
 }

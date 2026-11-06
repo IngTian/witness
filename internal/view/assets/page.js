@@ -631,8 +631,8 @@
     if (last) {
       // A point holds solid until the next point, or until a span starts on or after its day,
       // whichever comes first. A `witness merge` version can sit between two logged points,
-      // and drawing the earlier value through it would claim a value witness didn't hold then
-      // (spec §5). After a span the line starts again at the next point.
+      // and drawing the earlier value through it would claim a value witness didn't hold then.
+      // After a span the line starts again at the next point.
       const at = p => x(p.at).toFixed(1) + ',' + y(p.v).toFixed(1);
       const faded = pct(t.today) !== pct(last.v);
       let d = 'M' + at(P[0]);

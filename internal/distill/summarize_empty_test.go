@@ -72,6 +72,23 @@ func TestEmptySummaryNeverOverwritesOrIsVouchedFor(t *testing.T) {
 		if strings.TrimSpace(md) == "" {
 			t.Errorf("empty reply %q: a blank portrait was persisted", empty)
 		}
+
+		// Pass 3: the same facets, a healthy reply. The empty reply must not have been VOUCHED
+		// for: had pass 2 stamped its signature, this pass would match it and skip, and the
+		// stale pass-1 portrait would stand forever.
+		sm.Run = func(_ context.Context, _, prompt, input string) (string, error) {
+			if prompt == "UNIFIED" {
+				return "REBUILT PORTRAIT", nil
+			}
+			return "SUMMARY v2", nil
+		}
+		if err := sm.Summarize(context.Background()); err != nil {
+			t.Fatalf("empty reply %q: healthy pass 3: %v", empty, err)
+		}
+		if md, _, _ := s.ReadProfile(store.ProfileUnified); md != "REBUILT PORTRAIT" {
+			t.Errorf("empty reply %q: a healthy pass did not rebuild the portrait, got %q — the empty "+
+				"reply's signature was stamped", empty, md)
+		}
 	}
 }
 

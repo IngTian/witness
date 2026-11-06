@@ -40,7 +40,8 @@ jobs:
 
       # Reuse the Makefile so the CGO_ENABLED=0 + cross-compile invariant
       # lives in exactly one place. No model or `claude` CLI needed: tests
-      # inject fake embedders and nothing uses go:embed.
+      # inject fake embedders, and the only go:embed files (the OpenCode plugin
+      # JS, the view's page.js/page.css) are committed.
       - name: vet
         run: make vet
 

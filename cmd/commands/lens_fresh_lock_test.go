@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -97,8 +99,12 @@ func TestFreshRaceWouldStampPhantomProgress(t *testing.T) {
 	if err := st.MarkDistilled("s1", "default", 4); err != nil {
 		t.Fatal(err)
 	}
-	// What an in-flight worker already holds in memory.
-	workerTotal, workerHigh := 4, st.MaxRawID("s1")
+	// What an in-flight worker already holds in memory: the one snapshot read it mined from.
+	recs, workerHigh, err := st.ReadRawSnapshot("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerTotal := len(recs)
 
 	// --fresh's destructive section.
 	if _, _, err := st.DeleteLensData("default"); err != nil {
@@ -173,17 +179,17 @@ func TestFreshHoldsTheLockNotJustAProbe(t *testing.T) {
 	}
 	// The release must precede the drain, textually.
 	relIdx := strings.Index(fn, "releaseFresh()")
-	drainIdx := strings.Index(fn, "runWorkerInRange(false")
+	drainIdx := strings.Index(fn, "runWorkerTapped(false")
 	if relIdx < 0 {
 		t.Fatal("no releaseFresh() call found — the lock would be held into the drain")
 	}
 	if drainIdx < 0 {
-		t.Fatal("runWorkerInRange(false not found; this test's assumption about the drain call has drifted")
+		t.Fatal("runWorkerTapped(false not found; this test's assumption about the drain call has drifted")
 	}
 	// Find a release that is NOT the deferred safety net and sits before the drain.
 	explicit := -1
 	for _, idx := range allIndexes(fn, "releaseFresh()") {
-		if idx < drainIdx && !strings.Contains(fn[max0(idx-16):idx], "defer ") {
+		if idx < drainIdx && !strings.Contains(fn[max(idx-16, 0):idx], "defer ") {
 			explicit = idx
 			break
 		}
@@ -204,13 +210,6 @@ func allIndexes(s, sub string) []int {
 		out = append(out, off+i)
 		off += i + len(sub)
 	}
-}
-
-func max0(i int) int {
-	if i < 0 {
-		return 0
-	}
-	return i
 }
 
 // A plain (non---fresh) backfill must NOT take the lock: it deletes nothing, and a running
@@ -251,5 +250,58 @@ func TestLensBackfillWithoutFreshDoesNotRequireTheLock(t *testing.T) {
 	defer st2.Close()
 	if got := st2.DistilledCount("s1", "default"); got != 0 {
 		t.Errorf("a plain backfill should still reset the watermark, got %d", got)
+	}
+}
+
+// An unfinished backfill must name its cause, and its recovery must not be "re-run the backfill":
+// that resets the watermark and re-mines everything already done. The two real steps are finish
+// the drain, then review — the backfill returned before its review (and --fresh emptied the facets).
+// TestMain points WITNESS_ASSETS at an empty dir, so the embedder fails and s1 stays pending.
+func TestLensBackfillUnfinishedNamesTheCauseAndBothRecoverySteps(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendRaw(store.RawRecord{Session: "s1", Seq: 0, TS: "2026-08-01T00:00:00Z", Role: "user", Text: "turn"}); err != nil {
+		t.Fatal(err)
+	}
+	var err2 error
+	captureStdout(t, func() { err2 = lensBackfill(st, "default", false, true) })
+	if err2 == nil {
+		t.Fatal("a backfill that mined nothing must not succeed")
+	}
+	msg := err2.Error()
+	for _, want := range []string{"1 session still pending", "embed model not found", "witness worker run --wait-backoffs", "witness worker review"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("missing %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "lens backfill") {
+		t.Errorf("re-running the backfill re-mines everything; it is not a recovery step:\n%s", msg)
+	}
+}
+
+// A backfill whose review landed but whose profile regeneration failed must not say "profile
+// refreshed". A directory where the lens.md override belongs is a read error (not an absent
+// override), so LoadSummarizePrompts fails before any model call.
+func TestLensBackfillReportsAProfileThatWasNotRegenerated(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(st.Root, lens.SummarizeOverrideDir, "lens.md"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var err2 error
+	out := captureStdout(t, func() { err2 = lensBackfill(st, "default", false, true) })
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if strings.Contains(out, "profile refreshed") || !strings.Contains(out, "profile was NOT regenerated") {
+		t.Errorf("a failed profile regeneration must be reported, not claimed:\n%s", out)
 	}
 }

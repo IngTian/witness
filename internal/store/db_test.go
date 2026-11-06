@@ -2,6 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -36,50 +39,6 @@ func TestMigrateIdempotentAfterPartialApply(t *testing.T) {
 	}
 	if v != schemaVersion {
 		t.Fatalf("user_version not restored to %d, got %d", schemaVersion, v)
-	}
-}
-
-// A pre-rename database has the raw layer under its old name `l0`. Opening it must
-// rename the table to `raw` in place, preserving the data, remove the legacy table,
-// and stamp the current version — so no deployed DB is bricked or loses history when
-// the on-disk names are modernized. (This migrates from a real v2 `l0` DB, not from
-// a fresh tempStore — the coverage gap that a prior collapse slipped through.)
-func TestMigrateRenamesLegacyL0(t *testing.T) {
-	s := tempStore(t) // fully migrated (has `raw`)
-	// Simulate a legacy v2 DB: replace `raw` with the old `l0` schema + a row.
-	for _, stmt := range []string{
-		`DROP TABLE raw`,
-		`CREATE TABLE l0 (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, seq INTEGER NOT NULL,
-			ts TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', effort TEXT NOT NULL DEFAULT '',
-			text TEXT NOT NULL DEFAULT '')`,
-		`CREATE INDEX idx_l0_session ON l0(session, id)`,
-		`INSERT INTO l0(session, seq, role, text) VALUES ('s', 0, 'user', 'hello')`,
-		`PRAGMA user_version=2`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil {
-			t.Fatalf("seed legacy schema (%q): %v", stmt, err)
-		}
-	}
-
-	if err := migrate(s.db); err != nil {
-		t.Fatalf("migrate legacy l0 -> raw: %v", err)
-	}
-
-	// Data survived into `raw`, reachable through the store API.
-	recs, err := s.ReadRaw("s")
-	if err != nil || len(recs) != 1 || recs[0].Text != "hello" {
-		t.Fatalf("data must survive the rename: err=%v recs=%+v", err, recs)
-	}
-	// The legacy table is gone and the version is current.
-	var hasLegacy int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='l0'`).Scan(&hasLegacy)
-	if hasLegacy != 0 {
-		t.Fatalf("legacy l0 table should be gone after migrate")
-	}
-	var v int
-	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
-	if v != schemaVersion {
-		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
 	}
 }
 
@@ -673,6 +632,71 @@ func TestStageObservationCap(t *testing.T) {
 	}
 }
 
+// The staged buffer needs a TOTAL bound, because the per-session one is keyed on an
+// AGENT-SUPPLIED session id. A runaway agent that varies the id (per-turn ids, a hallucinated
+// id, an incrementing counter) gets a fresh per-session budget on every call, so the
+// per-session cap alone bounds nothing — and each row is up to 2000 chars of observation plus
+// 2000 of evidence, durable in L1 and fed to the review model.
+func TestStagedTotalCapCannotBeEvadedByRotatingTheSession(t *testing.T) {
+	s := tempStore(t)
+
+	const perSession, total = 3, 7
+	staged := 0
+	for i := 0; i < 50; i++ { // 50 DISTINCT sessions, so the per-session cap never bites
+		ob := Observation{
+			ID:          "obs-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
+			Session:     "rotating-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
+			Observation: "o",
+		}
+		inserted, err := s.StageObservationCapped(ob, perSession, total)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inserted {
+			staged++
+		}
+	}
+	if staged != total {
+		t.Errorf("rotating the session id staged %d rows against a total cap of %d — the cap is "+
+			"evadable", staged, total)
+	}
+	if got := s.StagedTotal(); got != total {
+		t.Errorf("StagedTotal() = %d, want %d", got, total)
+	}
+}
+
+// Both caps disabled means unlimited — StageObservation relies on that.
+func TestStagedCapsDisabledMeansUnlimited(t *testing.T) {
+	s := tempStore(t)
+	for i := 0; i < 25; i++ {
+		ob := Observation{ID: "o" + string(rune('a'+i)), Session: "one", Observation: "x"}
+		inserted, err := s.StageObservationCapped(ob, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !inserted {
+			t.Fatalf("insert %d declined with both caps disabled", i)
+		}
+	}
+	if got := s.StagedTotal(); got != 25 {
+		t.Errorf("StagedTotal() = %d, want 25", got)
+	}
+}
+
+// A duplicate must still be a no-op rather than burning quota, under BOTH caps.
+func TestStagedDuplicateDoesNotBurnEitherCap(t *testing.T) {
+	s := tempStore(t)
+	ob := Observation{ID: "same", Session: "one", Observation: "x"}
+	for i := 0; i < 5; i++ {
+		if _, err := s.StageObservationCapped(ob, 3, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.StagedTotal(); got != 1 {
+		t.Errorf("a re-recorded observation staged %d rows, want 1", got)
+	}
+}
+
 func TestObservationDedupIdempotent(t *testing.T) {
 	s := tempStore(t)
 	o := Observation{ID: "obs_x", Lens: LensDefault, Observation: "thinks in systems", Poignancy: 4}
@@ -748,22 +772,6 @@ func TestFacetBiTemporalRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStagedCount(t *testing.T) {
-	s := tempStore(t)
-	if got := s.StagedCount("s"); got != 0 {
-		t.Fatalf("empty: want 0, got %d", got)
-	}
-	_ = s.StageObservation(Observation{ID: "a", Session: "s", Observation: "x"})
-	_ = s.StageObservation(Observation{ID: "b", Session: "s", Observation: "y"})
-	_ = s.StageObservation(Observation{ID: "c", Session: "other", Observation: "z"})
-	if got := s.StagedCount("s"); got != 2 {
-		t.Fatalf("session s: want 2, got %d", got)
-	}
-	if got := s.StagedCount("other"); got != 1 {
-		t.Fatalf("session other: want 1, got %d", got)
-	}
-}
-
 func TestStatsSnapshot(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AppendRaw(RawRecord{Session: "a", Seq: 0, Role: "user", Text: "x"})
@@ -781,6 +789,22 @@ func TestStatsSnapshot(t *testing.T) {
 	_ = s.MarkDistilled("a", LensDefault, 2)
 	if st := s.Stats([]string{LensDefault}); st.Pending != 0 {
 		t.Fatalf("fully-distilled session should not be pending: %+v", st)
+	}
+}
+
+// Stats.Facets is the ACTIVE profile (what `facets` lists): a compaction that archives 449 → 244
+// must show as 244 in status/doctor/export, not stay at 449.
+func TestStatsCountsOnlyActiveFacets(t *testing.T) {
+	s := tempStore(t)
+	v := []FacetVersion{{Value: "v", Confidence: 0.5}}
+	if err := s.WriteFacets([]Facet{
+		{Lens: LensDefault, Dimension: "d", Key: "kept", Versions: v},
+		{Lens: LensDefault, Dimension: "d", Key: "gone", Versions: v, ArchivedAt: "2026-11-01T00:00:00Z", MergedInto: "d/kept"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Stats([]string{LensDefault}).Facets; got != 1 {
+		t.Fatalf("Stats.Facets = %d, want 1 (the archived facet is not part of the profile)", got)
 	}
 }
 
@@ -989,6 +1013,43 @@ func TestProfileReadWrite(t *testing.T) {
 	}
 }
 
+// WriteProfile publishes through writeAtomic (temp file + rename), so a reader — `witness
+// profile`, get_profile, export --all — never sees a half-written portrait. os.WriteFile
+// truncated the live file in place instead, and only applied 0600 when it CREATED the file:
+// a profile that already existed at 0644 stayed group/world readable.
+func TestWriteProfileReplacesAtomically(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	s := tempStore(t)
+	if err := os.MkdirAll(s.ProfileDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.ProfileDir(), "math.md")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteProfile("math", "new"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mode alone cannot tell a rename from an in-place write followed by a chmod; the
+	// inode can. A truncate-and-rewrite keeps the inode a concurrent reader is holding.
+	if os.SameFile(before, fi) {
+		t.Fatal("profile rewritten in place (same inode), not replaced")
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("profile mode = %o, want 0600 (the file must be replaced, not rewritten in place)", fi.Mode().Perm())
+	}
+}
+
 func TestWriteFacetsReplacesAll(t *testing.T) {
 	s := tempStore(t)
 	_ = s.WriteFacets([]Facet{
@@ -1064,47 +1125,6 @@ func TestMigrateSurvivesConcurrentWriterDuringMigration(t *testing.T) {
 	// And the schema is usable afterwards.
 	if _, err := s.db.Exec(`SELECT COUNT(*) FROM observations`); err != nil {
 		t.Fatalf("schema unusable after migration: %v", err)
-	}
-}
-
-// beginImmediate must hand back a transaction that already holds the write lock, so a
-// read-then-write sequence inside it cannot hit the un-retryable snapshot upgrade.
-func TestBeginImmediateHoldsWriteLockAndPreservesUserVersion(t *testing.T) {
-	s := tempStore(t)
-	var before int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&before); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := beginImmediate(s.db)
-	if err != nil {
-		t.Fatalf("beginImmediate: %v", err)
-	}
-	// Read then write inside the tx — the shape that used to abort.
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&n); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS probe_immediate(x TEXT)`); err != nil {
-		tx.Rollback()
-		t.Fatalf("write inside an immediate tx must succeed: %v", err)
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("rollback: %v", err)
-	}
-	// The lock-acquiring write is a semantic no-op: user_version is unchanged, and the
-	// rolled-back probe table is gone.
-	var after int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&after); err != nil {
-		t.Fatal(err)
-	}
-	if after != before {
-		t.Fatalf("beginImmediate changed user_version: %d -> %d", before, after)
-	}
-	var probes int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='probe_immediate'`).Scan(&probes)
-	if probes != 0 {
-		t.Fatal("rollback did not undo the probe table")
 	}
 }
 

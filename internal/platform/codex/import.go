@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,7 +20,7 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-const statePrefix = "codex_import_state:"
+const statePrefix = store.CodexImportStateNS + ":"
 
 type Importer struct {
 	Store store.ImportStore
@@ -96,15 +95,6 @@ func Home() (string, error) {
 	return filepath.Join(h, ".codex"), nil
 }
 
-func readOnlyURI(path string) string {
-	p, _ := filepath.Abs(path)
-	p = filepath.ToSlash(p)
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
-	return (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}).String()
-}
-
 // Import reads only supported conversation text, never credentials, config,
 // reasoning, tool arguments/results or compaction summaries. SQLite projection
 // cursors and file revisions avoid rescanning unchanged conversations. Keys and
@@ -127,7 +117,7 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 	}
 	wanted := map[string]bool{}
 	for _, id := range ids {
-		wanted[strings.TrimPrefix(id, "codex:")] = true
+		wanted[strings.TrimPrefix(id, SessionPrefix)] = true
 	}
 	seen := map[string]bool{}
 	entries, err := os.ReadDir(home)
@@ -214,10 +204,10 @@ func (im *Importer) Import(ctx context.Context, ids []string) (platform.ImportSt
 
 func (im *Importer) unchanged(id, source, revision string) bool {
 	var old importState
-	if json.Unmarshal([]byte(im.Store.MetaString(statePrefix+"codex:"+id)), &old) != nil {
+	if json.Unmarshal([]byte(im.Store.MetaString(statePrefix+SessionPrefix+id)), &old) != nil {
 		return false
 	}
-	return old.Version == 1 && old.Source == source && old.Revision == revision && im.Store.RawCount("codex:"+id) == len(old.Keys)
+	return old.Version == 1 && old.Source == source && old.Revision == revision && im.Store.RawCount(SessionPrefix+id) == len(old.Keys)
 }
 
 func (im *Importer) apply(meta store.SessionMeta, source, revision string, records []store.RawRecord, identities []string, stats *platform.ImportStats) error {
@@ -258,6 +248,10 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	}
 	return nil
 }
+
+// readOnlyURI opens a Codex history database read-only. It must go through
+// platform.SQLiteFileURI, never url.URL (issue #10 — see there); TestReadOnlyURIWindowsShape pins it.
+func readOnlyURI(path string) string { return platform.SQLiteFileURI(path, "mode=ro") }
 
 func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[string]bool, stats *platform.ImportStats, prog *progress) error {
 	db, err := sql.Open("sqlite", readOnlyURI(path))
@@ -352,7 +346,7 @@ func (im *Importer) importDB(ctx context.Context, path string, wanted, seen map[
 		if len(recs) == 0 {
 			continue
 		} // an unprojected legacy session may still have a rollout
-		meta := store.SessionMeta{Session: "codex:" + c.id, Started: recs[0].TS}
+		meta := store.SessionMeta{Session: SessionPrefix + c.id, Started: recs[0].TS}
 		if err := im.apply(meta, path, revision, recs, keys, stats); err != nil {
 			return err
 		}
@@ -424,7 +418,7 @@ func (im *Importer) importFile(ctx context.Context, path string, wanted, seen ma
 	if im.unchanged(id, path, revision) {
 		return nil
 	}
-	meta := store.SessionMeta{Session: "codex:" + id, Cwd: first.Payload.Cwd, Started: first.Payload.Timestamp}
+	meta := store.SessionMeta{Session: SessionPrefix + id, Cwd: first.Payload.Cwd, Started: first.Payload.Timestamp}
 	var recs []store.RawRecord
 	var keys []string
 	offset := int64(len(header))

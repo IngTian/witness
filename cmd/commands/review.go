@@ -10,7 +10,7 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// review.go holds cmdReviewFull and forceReview: the implementation functions for the
+// review.go holds cmdReviewFull and forceReviewTapped: the implementation functions for the
 // unconditional review pass. The old top-level `review` command was removed from the
 // visible front door (#102); the functionality migrated to the hidden `worker review`
 // subcommand, but the implementation functions remain here, called by worker_group.go
@@ -52,27 +52,15 @@ func cmdReviewFull(full bool) error {
 	return nil
 }
 
-// forceReview runs an L2 review from the current observations, updates facets, and
-// regenerates the L4 profiles — the unconditional review the `witness review` command
-// exposes, factored out so `lens backfill` can reuse it (a backfill re-mines a lens's
-// observations and must force a review afterwards to keep its facets from drifting —
-// and `--fresh` DELETES the facets outright, so they must be rebuilt from the freshly
-// re-mined observations; the periodic ReviewDue triggers may not fire on a small
-// archive, which would otherwise leave that lens with stale/empty facets + a stale
-// profile while the command reported success). Returns whether the review ran (false = another
-// worker holds the lock, so it will review as part of its own drain). The caller owns
-// st and setupLogging; this only borrows st for the review pass.
-func forceReview(st *store.Store) (bool, error) { return forceReviewOpts(st, false) }
-
-// forceReviewOpts is forceReview with an optional S3 emergent long-arc pass (full=true).
-func forceReviewOpts(st *store.Store, full bool) (bool, error) {
-	ran, _, err := forceReviewTapped(st, full, &causeTap{})
-	return ran, err
-}
-
-// forceReviewTapped is forceReviewOpts that notes the first model error in tap — a failed fold
-// names it under its headline — and returns the profile regeneration's own failure (profErr)
-// separately: the review's facets have landed by then, so it is not the review failing.
+// forceReviewTapped runs an L2 review from the current observations, updates facets, and
+// regenerates the L4 profiles — the unconditional review `worker review` exposes, shared with
+// `lens backfill` (a backfill re-mines a lens's observations and must force a review afterwards
+// to keep its facets from drifting — and `--fresh` DELETES the facets outright; the periodic
+// ReviewDue triggers may not fire on a small archive). full=true adds the S3 emergent long-arc
+// pass. It notes the first model error in tap — a failed fold names it under its headline — and
+// returns the profile regeneration's own failure (profErr) separately: the review's facets have
+// landed by then, so it is not the review failing, and every caller must report it. ran=false
+// means another worker holds the lock. The caller owns st and setupLogging.
 func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, profErr, err error) {
 	// Hold the same single-consumer lock the worker uses so foreground review and a
 	// background drain cannot race facet/profile commits or open duplicate runner sets.
@@ -98,8 +86,8 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	runFn := tap.wrap(untappedRunFn)      // wrapped for causeTap (mining + review)
 	runFor := tap.wrapFor(untappedRunFor) // wrapped for causeTap
 	// Progress on stderr: a fold is one model call per window, and a real archive's default
-	// lens had 109 windows waiting. This is the foreground path only — the drain (worker.go)
-	// builds its own Reviewer and leaves Progress nil.
+	// lens had 109 windows waiting. The drain (worker.go) builds its own Reviewer and draws the same
+	// line only for a foreground run (lens backfill, worker run); a detached worker stays silent.
 	fold := &phaseProgress{start: startProgress}
 	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runFor, Progress: fold.update}
 	err = r.Run(ctx, time.Now())
@@ -129,7 +117,7 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	profErr = regenerateProfile(ctx, st, cfg, lenses, runFn, runFor)
 	sp.Stop()
 	sp = startSpinner("linking the profile to its sources…")
-	_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunFor) // best-effort: logged
+	_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunFor, func() bool { return true }) // runners open; best-effort: logged
 	sp.Stop()
 	return true, profErr, nil
 }

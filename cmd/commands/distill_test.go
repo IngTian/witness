@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -104,7 +105,7 @@ func TestDistillBackfillFailsWhenWorkRemains(t *testing.T) {
 // The backed-off variant suggests --wait-backoffs — a flag that exists — and drops it once the
 // caller already waited.
 func TestBacklogUnfinishedHintsOnlyRealFlags(t *testing.T) {
-	err := backlogUnfinished(0, 4, false, "claude runner disabled by WITNESS_DISABLE_EXTERNAL_RUNNERS")
+	err := backlogUnfinished("", 0, 4, false, "claude runner disabled by WITNESS_DISABLE_EXTERNAL_RUNNERS")
 	if want := "backlog not finished: 4 sessions backed off"; !strings.HasPrefix(err.Error(), want) {
 		t.Fatalf("got %q, want prefix %q", err, want)
 	}
@@ -115,7 +116,7 @@ func TestBacklogUnfinishedHintsOnlyRealFlags(t *testing.T) {
 	if workerRunCmd(t).Flags().Lookup("wait-backoffs") == nil {
 		t.Fatal("the hint names `worker run --wait-backoffs`; that flag must exist")
 	}
-	if waited := backlogUnfinished(0, 4, true, "x"); strings.Contains(waited.Error(), "--wait-backoffs") {
+	if waited := backlogUnfinished("", 0, 4, true, "x"); strings.Contains(waited.Error(), "--wait-backoffs") {
 		t.Errorf("after waiting out the backoffs, retrying with the same flag is not a next step:\n%v", waited)
 	}
 }
@@ -140,18 +141,14 @@ func newDistillStartForWaitBackoffsTest(t *testing.T) error {
 	cmd := newWorkerCmd()
 	cmd.SetArgs([]string{"run", "--detach", "--wait-backoffs"})
 	// Silence cobra's own usage/error printing; we only inspect the returned error.
-	cmd.SetOut(nopWriter{})
-	cmd.SetErr(nopWriter{})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	for _, c := range cmd.Commands() {
 		c.SilenceUsage = true
 		c.SilenceErrors = true
 	}
 	return cmd.Execute()
 }
-
-type nopWriter struct{}
-
-func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // B4 self-heal: a session that's backed off but whose retry is soon (within maxWait)
 // must be waited out and re-drained until it clears. We model two backoff rounds that

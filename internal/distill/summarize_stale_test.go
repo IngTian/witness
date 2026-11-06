@@ -66,9 +66,25 @@ func TestSummarizeRemovesTheProfileOfALensThatLostItsFacets(t *testing.T) {
 	if md, ok, _ := s.ReadProfile("math"); !ok || md != "MATH SUMMARY" {
 		t.Fatalf("precondition: math profile should exist, got ok=%v md=%q", ok, md)
 	}
+	if s.MetaString(store.ProfileSigKey("math")) == "" {
+		t.Fatal("precondition: Summarize did not stamp math's profile_sig")
+	}
 
-	// Drop ONLY math's derived data, exactly as `lens backfill --fresh` does.
-	if _, _, err := s.DeleteLensData("math"); err != nil {
+	// math loses every current facet: all its versions are closed. Not DeleteLensData, which
+	// clears profile_sig itself and so would make the signature assertion below pass whatever
+	// Summarize does.
+	all, err := s.ReadFacets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range all {
+		if all[i].Lens == "math" {
+			for j := range all[i].Versions {
+				all[i].Versions[j].ValidTo = "2026-02-01T00:00:00Z"
+			}
+		}
+	}
+	if err := s.WriteFacets(all); err != nil {
 		t.Fatal(err)
 	}
 	if err := sm.Summarize(context.Background()); err != nil {
@@ -80,7 +96,7 @@ func TestSummarizeRemovesTheProfileOfALensThatLostItsFacets(t *testing.T) {
 		t.Errorf("the stale math profile survived and is still served to agents: %q", md)
 	}
 	// And its signature must not vouch for the deleted file.
-	if sig := s.MetaString("profile_sig:math"); sig != "" {
+	if sig := s.MetaString(store.ProfileSigKey("math")); sig != "" {
 		t.Errorf("profile_sig:math still vouches for a deleted profile: %q", sig)
 	}
 	// The lens that KEPT its facets must be untouched.
@@ -300,7 +316,7 @@ func profileSigs(t *testing.T, s *store.Store) map[string]string {
 	}
 	sigs := map[string]string{}
 	for k := range keys {
-		sigs[k] = s.MetaString(profileSigKey(k))
+		sigs[k] = s.MetaString(store.ProfileSigKey(k))
 	}
 	return sigs
 }
@@ -426,7 +442,7 @@ func TestStaleUnifiedOverALegacyEmptySection(t *testing.T) {
 	writeSection(&legacy, "default", "")
 	writeSection(&legacy, "math", mathPrior)
 	sig := summarySignature(ModelFor(store.Config{}, nil, PhaseReview), "UNIFIED", legacy.String())
-	if err := s.SetMetaString(profileSigKey(store.ProfileUnified), sig); err != nil {
+	if err := s.SetMetaString(store.ProfileSigKey(store.ProfileUnified), sig); err != nil {
 		t.Fatal(err)
 	}
 

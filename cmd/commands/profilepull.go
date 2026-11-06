@@ -39,7 +39,7 @@ import (
 // regeneration is fine; blocking minutes behind somebody else's backfill is not — and two
 // processes writing profiles concurrently would race the file and its signature. So a read that
 // cannot take the lock serves the cached profile instead of queueing. The lock is the same
-// single-consumer lock the worker and forceReview use, so pull can never race a push.
+// single-consumer lock the worker and forceReviewTapped use, so pull can never race a push.
 func ensureProfileFresh(st *store.Store) (bool, error) {
 	unlock, ok := st.WorkerLock()
 	if !ok {

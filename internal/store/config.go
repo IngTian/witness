@@ -40,7 +40,7 @@ type Config struct {
 	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
 	ReviewPoignancy int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
 	AutoDistill     bool   // whether hooks/plugins may start the worker automatically
-	MineConcurrency int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and to 1 when the runner is not ConcurrentRunSafe (issue #22). <=0 means DefaultMineConcurrency.
+	MineConcurrency int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and a memory-safe ceiling (issue #22). <=0 means DefaultMineConcurrency.
 	// ChunkMaxChars is the per-input character budget for shaping a session into model
 	// input (issue #57). 0 (the default) = NEVER chunk: mine each session whole, which
 	// the measured data shows is the best-quality path (splitting a session into
@@ -456,12 +456,19 @@ func (c *configFile) EnsureConfigFile() error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	tpl := `# witness configuration — all fields optional, shown with defaults.
+	// Every value line ships COMMENTED and rendered from DefaultConfig. An active line pins
+	// its value: LoadConfig reads the file over the defaults, so the archive would keep its
+	// creation-time value after the default changed (reproduced on a v0.11.0 archive by
+	// changing the constant). Commented, an archive tracks the built-in defaults until the
+	// user uncomments a line to pin it.
+	d := DefaultConfig()
+	tpl := `# witness configuration — all fields optional. Each commented line shows the current
+# built-in default; uncomment a line to pin your own value.
 # Docs: https://github.com/IngTian/witness#configuration
 
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
 # (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
-# runner = "claude"
+# runner = ` + strconv.Quote(d.Runner) + `
 
 # Two distillation stages, two models:
 #   triage_model  — MINING: L0 turns -> L1 observations, once per session (frequent).
@@ -472,26 +479,26 @@ func (c *configFile) EnsureConfigFile() error {
 # ambient interactive model, which may be heavy; set triage_model to pin a light one.
 # With runner = opencode, use OpenCode model names such as "openai/gpt-5.5".
 # (A lens may override these per-lens via its lens.json extract_model / review_model.)
-triage_model  = ""
-distill_model = ""
+# triage_model  = ` + strconv.Quote(d.TriageModel) + `
+# distill_model = ` + strconv.Quote(d.DistillModel) + `
 
 # Run the reviewer after this many distilled sessions since the last review.
-# Must be >= 1 (a value <= 0 is treated as the default, 5 — it does NOT disable
+# Must be >= 1 (a value <= 0 is treated as the default — it does NOT disable
 # review; to review less often, raise this number).
-review_every = 5
+# review_every = ` + strconv.Itoa(d.ReviewEvery) + `
 # ...or once accumulated observation poignancy crosses this threshold (0 = off).
-review_poignancy = 30
+# review_poignancy = ` + strconv.Itoa(d.ReviewPoignancy) + `
 
 # Automatic distillation is laptop-friendly without keeping the embed model
 # resident: hooks capture immediately, a single-flight lock ensures just one worker
 # runs, and it drains the whole queue (re-checking for new work as it goes) then
 # exits. Set false to distill only on demand via ` + "`witness worker run`" + ` (hidden).
-auto_distill = true
+# auto_distill = ` + strconv.FormatBool(d.AutoDistill) + `
 
 # Sessions mined in parallel per drain (backfill speed). The embedder loads once
 # and is shared; each concurrent distillation call adds ~0.35GB. Clamped to the
-# CPU count and to 1 for a runner that can't run concurrently. <=0 = default (4).
-mine_concurrency = 4
+# CPU count and to 1 for a runner that can't run concurrently. <=0 = default.
+# mine_concurrency = ` + strconv.Itoa(d.MineConcurrency) + `
 
 # Per-input character budget for mining. 0 (default) = mine each session WHOLE — the
 # best-quality path: splitting a session into independent windows loses most of the
@@ -500,7 +507,7 @@ mine_concurrency = 4
 # value (e.g. 200000) ONLY if you have giant sessions whose single whole-session call
 # times out; sessions that fit are unaffected, so this just splits the few offenders.
 # Applies equally to Claude Code and OpenCode sessions.
-chunk_max_chars = 0
+# chunk_max_chars = ` + strconv.Itoa(d.ChunkMaxChars) + `
 
 # Max observation characters folded into the profile in ONE review call. A SAFETY
 # CEILING (like the internal 10-min runner timeout), not a quality dial: a large review
@@ -508,7 +515,7 @@ chunk_max_chars = 0
 # freezes the profile forever. Larger = fewer, slower calls (and, well past this, timeout
 # risk); smaller = more, faster calls. <=0 restores the default. Splitting the fold does
 # not degrade the profile (observations are independent facts).
-review_max_chars = 16000
+# review_max_chars = ` + strconv.Itoa(d.ReviewMaxChars) + `
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math
@@ -553,11 +560,11 @@ func (c *configFile) StampReview() error {
 	}
 	upsert := `INSERT INTO meta(key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-	if _, err := tx.Exec(upsert, "review_obs_rowid", strconv.FormatInt(maxRow, 10)); err != nil {
+	if _, err := tx.Exec(upsert, reviewObsRowidKey, strconv.FormatInt(maxRow, 10)); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if _, err := tx.Exec(upsert, "review_ts", now); err != nil {
+	if _, err := tx.Exec(upsert, reviewTSKey, now); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -605,7 +612,7 @@ func (c *configFile) ReviewRowid(lens string) int64 {
 // Progress is per-(session,lens), so COUNT DISTINCT session — else a session mined
 // by N lenses would count N times and trip the review cadence N× too early.
 func (c *configFile) SessionsSinceReview() int {
-	last := metaGet(c.db, "review_ts")
+	last := metaGet(c.db, reviewTSKey)
 	var n int
 	_ = c.db.QueryRow(
 		`SELECT COUNT(DISTINCT session) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
@@ -616,7 +623,7 @@ func (c *configFile) SessionsSinceReview() int {
 // review. This is the salience signal: a few high-poignancy sessions can trigger
 // a review sooner than the plain session-count cap would.
 func (c *configFile) PoignancySinceReview() int {
-	off := metaGetInt(c.db, "review_obs_rowid")
+	off := metaGetInt(c.db, reviewObsRowidKey)
 	var sum int
 	_ = c.db.QueryRow(
 		`SELECT COALESCE(SUM(poignancy), 0) FROM observations WHERE seq > ?`, off).Scan(&sum)

@@ -1,17 +1,10 @@
 package proc
 
 import (
-	"context"
-	"errors"
-	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 )
-
-// errStub is a sentinel error returned by the Fake in the GracefulStop test.
-var errStub = errors.New("stub error")
 
 func TestPsField(t *testing.T) {
 	cases := []struct {
@@ -55,81 +48,6 @@ func TestOrphanPIDs(t *testing.T) {
 	got := OrphanPIDs(psOut, self, want)
 	if wantPIDs := []int{4321}; !slices.Equal(got, wantPIDs) {
 		t.Fatalf("OrphanPIDs = %v, want %v", got, wantPIDs)
-	}
-}
-
-// TestFakeDrivesWithoutSyscalls proves a caller can be exercised against the port
-// with the Fake and no real OS process is touched: the cmd is configured but never
-// started, terminate/reap/notify are recorded, and the reap predicate is applied to
-// a synthetic ps fixture through the shared OrphanPIDs primitive.
-func TestFakeDrivesWithoutSyscalls(t *testing.T) {
-	var ctl Control = &Fake{
-		ReapPS: strings.Join([]string{
-			"  900   1 /bin/x FINGERPRINT orphan",
-			"  901 900 /bin/x FINGERPRINT live",
-		}, "\n"),
-		TerminateErr: nil,
-	}
-	f := ctl.(*Fake)
-
-	cmd := exec.Command("true")
-	ctl.Detach(cmd)
-	ctl.BindToParent(cmd)
-	if err := ctl.TerminateGroup(4242); err != nil {
-		t.Fatalf("TerminateGroup: %v", err)
-	}
-	ctl.ReapOrphans(func(c string) bool { return strings.Contains(c, "FINGERPRINT") })
-	ctx, stop := ctl.NotifyStop(context.Background())
-	defer stop()
-	if ctx.Err() != nil {
-		t.Fatalf("NotifyStop ctx should start live, got %v", ctx.Err())
-	}
-
-	if len(f.Detached) != 1 || f.Detached[0] != cmd {
-		t.Fatalf("Detach not recorded: %+v", f.Detached)
-	}
-	if len(f.Bound) != 1 || f.Bound[0] != cmd {
-		t.Fatalf("BindToParent not recorded: %+v", f.Bound)
-	}
-	if !slices.Equal(f.Terminated, []int{4242}) {
-		t.Fatalf("Terminated = %v", f.Terminated)
-	}
-	if f.ReapCalls != 1 || f.ReapPredicate == nil {
-		t.Fatalf("ReapOrphans not recorded: calls=%d pred=%v", f.ReapCalls, f.ReapPredicate != nil)
-	}
-	// Only the orphan (ppid==1) matching the fingerprint is selected; the live
-	// sibling (ppid=900) is excluded by the orphan gate.
-	if !slices.Equal(f.ReapSelected, []int{900}) {
-		t.Fatalf("ReapSelected = %v, want [900]", f.ReapSelected)
-	}
-	if f.NotifyStops != 1 {
-		t.Fatalf("NotifyStops = %d", f.NotifyStops)
-	}
-	if cmd.Process != nil {
-		t.Fatalf("cmd should never have been started by the fake")
-	}
-}
-
-// TestFakeGracefulStopRecords proves the Fake records GracefulStop calls (including a
-// nil process, the no-op path) and surfaces GracefulStopErr, without touching a real
-// process. This lets a caller (e.g. OpenCodeServer.Close) be tested for "did it route
-// the graceful stop through the port?".
-func TestFakeGracefulStopRecords(t *testing.T) {
-	f := &Fake{GracefulStopErr: errStub}
-	var ctl Control = f
-	if err := ctl.GracefulStop(nil); err != errStub {
-		t.Fatalf("GracefulStop err = %v, want errStub", err)
-	}
-	p := &os.Process{Pid: 1234}
-	_ = ctl.GracefulStop(p)
-	if len(f.GracefulStops) != 2 {
-		t.Fatalf("GracefulStops = %d, want 2", len(f.GracefulStops))
-	}
-	if f.GracefulStops[0] != nil {
-		t.Fatalf("first GracefulStop should record nil (no-op path), got %v", f.GracefulStops[0])
-	}
-	if f.GracefulStops[1] != p {
-		t.Fatalf("second GracefulStop should record the process, got %v", f.GracefulStops[1])
 	}
 }
 

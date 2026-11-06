@@ -55,6 +55,11 @@ func TestImporterMirrorsOpenCodeTextParts(t *testing.T) {
 	if raw[1].Role != "assistant" || raw[1].Text != "first note\n\nfinal answer" {
 		t.Fatalf("assistant text parts not merged: %+v", raw[1])
 	}
+	// The dedup state must land in the namespace the store reaps and merges, or a merge drops it
+	// and the next import replaces and re-mines the session.
+	if st.MetaString(store.OpenCodeImportKeysNS+":"+SessionPrefix+"ses_test") == "" {
+		t.Fatalf("import state is not under the store's %q namespace", store.OpenCodeImportKeysNS)
+	}
 
 	stats, err = (&Importer{Store: st, DBPath: dbPath}).Import(context.Background(), nil)
 	if err != nil {
@@ -187,6 +192,13 @@ func TestImporterRebuildsWhenImportedTextChanges(t *testing.T) {
 	}
 }
 
+// openCodeSchema is the slice of OpenCode's database the importer reads, as an older OpenCode
+// created it (before session.agent was added).
+const openCodeSchema = `
+	CREATE TABLE session (id text PRIMARY KEY, directory text NOT NULL, title text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL);
+	CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
+	CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);`
+
 func seedOpenCodeDB(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "opencode.db")
@@ -195,10 +207,7 @@ func seedOpenCodeDB(t *testing.T) string {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`
-		CREATE TABLE session (id text PRIMARY KEY, directory text NOT NULL, title text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL);
-		CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
-		CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
+	_, err = db.Exec(openCodeSchema + `
 		INSERT INTO session VALUES ('ses_test', '/repo', 'normal work', 1000, 5000);
 		INSERT INTO message VALUES ('msg_user', 'ses_test', 1100, 1100, '{"role":"user"}');
 		INSERT INTO part VALUES ('prt_user', 'msg_user', 'ses_test', 1100, 1100, '{"type":"text","text":"help me debug this"}');
@@ -228,10 +237,7 @@ func seedMutableOpenCodeDB(t *testing.T) string {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, err = db.Exec(`
-		CREATE TABLE session (id text PRIMARY KEY, directory text NOT NULL, title text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL);
-		CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
-		CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);
+	_, err = db.Exec(openCodeSchema + `
 		INSERT INTO session VALUES ('ses_mutable', '/repo', 'mutable work', 1000, 6000);
 		INSERT INTO message VALUES ('msg_u1', 'ses_mutable', 1100, 1100, '{"role":"user"}');
 		INSERT INTO part VALUES ('prt_u1', 'msg_u1', 'ses_mutable', 1100, 1100, '{"type":"text","text":"USER-ONE"}');
@@ -274,7 +280,7 @@ func mutateOpenCodeDB(t *testing.T, path, stmt string) {
 // whose agent is NULL (all sessions predating OpenCode's ADD COLUMN) — real capture loss.
 func TestImportSkipsLegacyWitnessDistillSessions(t *testing.T) {
 	for _, tc := range []struct{ name, extraCol, agentVal string }{
-		{"agent column", `, agent text`, `'witness-distill'`},
+		{"agent column", `ALTER TABLE session ADD COLUMN agent text;`, `'witness-distill'`},
 		{"title fallback (older schema)", ``, ``},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,13 +289,7 @@ func TestImportSkipsLegacyWitnessDistillSessions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			schema := `CREATE TABLE session (id text PRIMARY KEY, directory text NOT NULL, title text NOT NULL,
-				time_created integer NOT NULL, time_updated integer NOT NULL` + tc.extraCol + `);
-				CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL,
-				time_updated integer NOT NULL, data text NOT NULL);
-				CREATE TABLE part (id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL,
-				time_created integer NOT NULL, time_updated integer NOT NULL, data text NOT NULL);`
-			if _, err := db.Exec(schema); err != nil {
+			if _, err := db.Exec(openCodeSchema + tc.extraCol); err != nil {
 				t.Fatal(err)
 			}
 			if tc.extraCol != "" {

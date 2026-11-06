@@ -25,9 +25,10 @@ func (o *obsIO) ObservationHighWater() (int64, error) {
 
 // --- active observation staging (in-session via MCP) ------------------------
 
-// StageObservation records an active (in-session) observation with no quantity
-// cap. The session's worker drains it at session end, passing it through verbatim
-// (authoritative). Duplicate (session, obs_id) rows collapse to one.
+// StageObservation is a TEST FIXTURE: StageObservationCapped with both caps off. Production
+// staging (the MCP record_observation handler) always passes its caps. Exported because tests
+// in other packages seed staged rows through it. Duplicate (session, obs_id) rows collapse
+// to one.
 func (o *obsIO) StageObservation(ob Observation) error {
 	_, err := o.StageObservationCapped(ob, 0, 0)
 	return err
@@ -105,14 +106,6 @@ func (o *obsIO) DrainStaged(session string) (obs []Observation, throughID int64,
 		}
 	}
 	return obs, throughID, rows.Err()
-}
-
-// StagedCount returns how many active observations are currently staged for a
-// session (used to bound how many an in-session agent can record).
-func (o *obsIO) StagedCount(session string) int {
-	var n int
-	_ = o.db.QueryRow(`SELECT COUNT(*) FROM staged WHERE session = ?`, session).Scan(&n)
-	return n
 }
 
 // StagedExists reports whether a specific (session, obs_id) is already staged. It

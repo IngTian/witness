@@ -435,14 +435,6 @@ func claudeDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-func opencodeDir() string {
-	if d := os.Getenv("OPENCODE_CONFIG_DIR"); d != "" {
-		return d
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "opencode")
-}
-
 func opencodeConfigPath() string {
 	if p := os.Getenv("OPENCODE_CONFIG"); strings.TrimSpace(p) != "" {
 		return p

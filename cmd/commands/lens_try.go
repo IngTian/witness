@@ -78,7 +78,7 @@ type lensTryOpts struct {
 	asJSON      bool
 }
 
-var runnerForStore = platform.RunnerFor
+var runnerForName = platform.RunnerForName
 
 // tryProgress starts the preview's progress line on stderr. A seam so a test can read every
 // snapshot, which the line itself only prints once per Where when stderr is not a terminal.
@@ -156,19 +156,16 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 		path, registered = resolved, true
 	}
 
-	// Load the candidate. Strict first; on a reserved-name collision fall back to the
-	// lenient loader (preview never writes, so an impersonating name is harmless) and
-	// mark it so the display makes the fallback obvious.
-	candidate := false
-	ln, err := lens.LoadFromDir(path)
+	// Load the candidate. A reserved resolved name still previews (preview never writes, so
+	// an impersonating name is harmless), but under "candidate" so the display makes the
+	// fallback obvious.
+	ln, err := lens.LoadFromDirUnchecked(path)
 	if err != nil {
-		var uErr error
-		if ln, uErr = lens.LoadFromDirUnchecked(path); uErr != nil {
-			return uErr // a genuine load error (missing dir / no extract.md) — surface it
-		}
-		// LoadFromDirUnchecked succeeded where LoadFromDir failed => reserved name.
+		return err // a genuine load error (missing dir / no extract.md)
+	}
+	candidate := store.ReservedLensName(ln.Name)
+	if candidate {
 		ln.Name = "candidate"
-		candidate = true
 	}
 	// --review needs a REVIEW section to run. Fail early (before any runner work) rather
 	// than silently skipping the half the user explicitly asked for.
@@ -214,7 +211,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 
 	ctx := context.Background()
 
-	runner, err := runnerForStore(st, cfg)
+	runner, err := runnerForName(cfg.Runner, cfg)
 	if err != nil {
 		return err
 	}
@@ -236,9 +233,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	runFn := distill.RunnerMine(runner)
 
 	// Preview all sessions in parallel (bounded by the engine's concurrency policy), then
-	// render in sample order. Concurrency is clamped to the sample size (and to 1 for a
-	// single --session, or a hypothetical non-concurrent runner).
-	conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
+	// render in sample order. Concurrency is clamped to the sample size (so to 1 for a
+	// single --session).
+	conc := distill.EffectiveConcurrency(cfg.MineConcurrency)
 	if conc > len(sessions) {
 		conc = len(sessions)
 	}
@@ -437,17 +434,17 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // when that runner differs from the resolved default. Those models belong to the default
 // runtime; on a different runtime they are a bad model name that would abort OpenCode's
 // Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
-// runtime's own default, mirroring production's clearCrossRuntimeModels. cfg.Runner must already be
-// the RESOLVED default runner. Pure (returns a modified copy) so it is unit-testable.
+// runtime's own default, through the same clearCrossRuntimeModels the drain's runnerSet uses.
+// cfg.Runner must already be the RESOLVED default runner, and the result's cfg.Runner is final:
+// mint it by name (RunnerForName), never through the store's precedence ladder again, which
+// would let an unbound store's WITNESS_RUNNER override the lens (F030). Pure (returns a
+// modified copy) so it is unit-testable.
 func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
 	defaultRunner := cfg.Runner
 	if r := distill.RunnerFor(cfg, ln); r != "" {
 		cfg.Runner = r
 	}
-	if strings.TrimSpace(cfg.Runner) != strings.TrimSpace(defaultRunner) {
-		cfg.TriageModel = ""
-		cfg.DistillModel = ""
-	}
+	clearCrossRuntimeModels(&cfg, cfg.Runner, defaultRunner)
 	return cfg
 }
 

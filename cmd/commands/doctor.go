@@ -32,6 +32,18 @@ func newDoctorCmd() *cobra.Command {
 	return c
 }
 
+// newDoctorEmbedder is the seam that lets a test drive doctor's SUCCESS path: the model is
+// gitignored and CI never fetches it, so the real-model test always skips there and nothing
+// else guarded that a healthy archive exits 0 (#136). It returns a nil INTERFACE on error, never
+// a typed-nil *embed.Embedder.
+var newDoctorEmbedder = func() (distill.Embedder, error) {
+	e, err := embed.New()
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
 func cmdDoctor(asJSON bool) error {
 	st, err := store.Open()
 	if err != nil {
@@ -66,7 +78,7 @@ func cmdDoctor(asJSON bool) error {
 	var deferredErr error
 	runnerCmd := "unknown"
 	modelStatus := "unknown"
-	defaultRunner, rerr := platform.RunnerFor(st, cfg)
+	defaultRunner, rerr := platform.RunnerForName(cfg.Runner, cfg)
 	if rerr != nil {
 		modelStatus = "INVALID: " + rerr.Error()
 		deferredErr = rerr
@@ -93,7 +105,7 @@ func cmdDoctor(asJSON bool) error {
 	embedderStatus := "OK"
 	var enZh, enUnrelated float64
 	var embedDim int
-	emb, embErr := embed.New()
+	emb, embErr := newDoctorEmbedder()
 	if embErr != nil {
 		embedderStatus = "UNAVAILABLE: " + embErr.Error()
 		deferredErr = embErr

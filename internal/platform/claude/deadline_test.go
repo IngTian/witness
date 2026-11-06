@@ -133,9 +133,10 @@ func TestClaudeRunDistinguishesCallerCancellationFromTimeout(t *testing.T) {
 // The disabled-runner guard must still fire before anything is spawned.
 //
 // Cheap, but it pins the ordering the new error handling could plausibly disturb: the kill switch
-// is checked before the child is built, so WITNESS_DISABLE_EXTERNAL_RUNNERS=1 spawns nothing.
+// is checked before the child is built, so WITNESS_DISABLE_EXTERNAL_RUNNERS=1 spawns nothing, and
+// the error names the switch so a disabled drain is diagnosable.
 func TestDisabledRunnerSpawnsNothing(t *testing.T) {
-	t.Setenv("WITNESS_DISABLE_EXTERNAL_RUNNERS", "1")
+	t.Setenv(platform.DisableExternalRunnersEnv, "1")
 	prev := buildRunCmdFn
 	spawned := false
 	buildRunCmdFn = func(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
@@ -144,8 +145,8 @@ func TestDisabledRunnerSpawnsNothing(t *testing.T) {
 	}
 	t.Cleanup(func() { buildRunCmdFn = prev })
 
-	if _, err := (runner{}).Run(context.Background(), "", "sys", "corpus"); err == nil {
-		t.Error("the disabled runner must return an error")
+	if _, err := (runner{}).Run(context.Background(), "", "sys", "corpus"); err == nil || !strings.Contains(err.Error(), platform.DisableExternalRunnersEnv) {
+		t.Errorf("the disabled runner must return an error naming %s, got %v", platform.DisableExternalRunnersEnv, err)
 	}
 	if spawned {
 		t.Error("the disable switch was checked AFTER building the child; it must short-circuit first")
