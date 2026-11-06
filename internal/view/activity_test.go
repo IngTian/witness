@@ -310,6 +310,76 @@ func TestActivityCuts(t *testing.T) {
 	// This is implicit in the cuts being correct; just verify no crash
 }
 
+func TestActivityNotesOnTurnlessDays(t *testing.T) {
+	loc := time.FixedZone("EST", -5*3600)
+	now := time.Date(2026, 3, 10, 0, 0, 0, 0, loc)
+
+	// P6: window notes are counted directly by parsed ts date, NOT sum over Days.
+	// One conversation note on 2026-03-05 with NO turn on that day, and one turn on 03-06.
+	in := &store.ViewInput{
+		Turns: []store.ViewTurn{
+			{Session: "s1", TS: "2026-03-06T10:00:00-05:00"}, // turn on 03-06
+		},
+		Notes: []store.ViewNote{
+			{Session: "s1", TS: "2026-03-05T10:00:00-05:00", Observation: "note on turnless day"}, // note on 03-05
+		},
+	}
+
+	m := Build(in, nil, now, loc)
+
+	// Days should have exactly one entry (03-06), whose Notes == 0
+	if len(m.Activity.Days) != 1 {
+		t.Fatalf("Days: got %d, want 1 (only 03-06 has turns)", len(m.Activity.Days))
+	}
+	if m.Activity.Days[0].Date != "2026-03-06" {
+		t.Errorf("Days[0].Date: got %s, want 2026-03-06", m.Activity.Days[0].Date)
+	}
+	if m.Activity.Days[0].Notes != 0 {
+		t.Errorf("Days[0].Notes: got %d, want 0 (note is on 03-05, not 03-06)", m.Activity.Days[0].Notes)
+	}
+
+	// March window's Notes should be 1 (counted directly from note's ts, not sum of Day.Notes)
+	for _, w := range m.Activity.Windows {
+		if w.Kind == "month" && w.Label == "Mar 2026" {
+			if w.Notes != 1 {
+				t.Errorf("March.Notes: got %d, want 1 (note on 03-05, even though no turn that day)", w.Notes)
+			}
+		}
+	}
+}
+
+func TestActivityCutsNearestRankCeil(t *testing.T) {
+	loc := time.FixedZone("EST", -5*3600)
+	now := time.Date(2026, 3, 10, 0, 0, 0, 0, loc)
+
+	// With n=9 days, nearest-rank ceil vs floor gives different results:
+	// - ceil(0.2·9)=2, ceil(3.6)=4, ceil(5.4)=6, ceil(7.2)=8 → turns at positions 2,4,6,8 (1-indexed) = [2,4,6,8]
+	// - floor would give positions 1,3,5,7 → [1,3,5,7]
+	in := &store.ViewInput{
+		Turns: []store.ViewTurn{},
+	}
+	for day := 1; day <= 9; day++ {
+		for turn := 1; turn <= day; turn++ {
+			ts := time.Date(2026, 3, day, 10, turn, 0, 0, loc).Format(time.RFC3339)
+			in.Turns = append(in.Turns, store.ViewTurn{Session: "s1", TS: ts})
+		}
+	}
+
+	m := Build(in, nil, now, loc)
+
+	// Nearest-rank with ceiling: [2,4,6,8]
+	want := []int{2, 4, 6, 8}
+	if len(m.Activity.Cuts) != len(want) {
+		t.Errorf("Cuts: got %v, want %v (n=9, nearest-rank ceil)", m.Activity.Cuts, want)
+	} else {
+		for i, c := range m.Activity.Cuts {
+			if c != want[i] {
+				t.Errorf("Cuts[%d]: got %d, want %d (nearest-rank ceil, not floor)", i, c, want[i])
+			}
+		}
+	}
+}
+
 func TestBuildEmptyArchive(t *testing.T) {
 	loc := time.FixedZone("EST", -5*3600)
 	now := time.Date(2026, 11, 5, 0, 0, 0, 0, loc)
