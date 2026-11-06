@@ -36,12 +36,6 @@ type Importer struct {
 	DBPath string
 }
 
-type ImportStats struct {
-	Sessions   int
-	Records    int
-	MaxUpdated int64
-}
-
 type sessionRow struct {
 	ID          string
 	Directory   string
@@ -76,8 +70,8 @@ func DefaultDBPath() (string, error) {
 // Import imports the requested OpenCode sessions. With no session ids, it imports
 // sessions updated since the last full sync; the first full sync imports all
 // existing OpenCode sessions.
-func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStats, error) {
-	var stats ImportStats
+func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.ImportStats, error) {
+	stats := platform.ImportStats{Agent: "opencode"}
 	if im.Store == nil {
 		return stats, fmt.Errorf("store is required")
 	}
@@ -106,6 +100,7 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 	// The whole session list is read before the first import, so the total is exact.
 	progress := platform.ImportProgressFrom(ctx)
 	progress(0, len(sessions))
+	var maxUpdated int64 // the incremental-sync watermark
 	for i, s := range sessions {
 		n, err := im.importSession(ctx, db, s)
 		progress(i+1, len(sessions))
@@ -116,12 +111,10 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (ImportStat
 			stats.Sessions++
 			stats.Records += n
 		}
-		if s.TimeUpdated > stats.MaxUpdated {
-			stats.MaxUpdated = s.TimeUpdated
-		}
+		maxUpdated = max(maxUpdated, s.TimeUpdated)
 	}
-	if len(sessionIDs) == 0 && stats.MaxUpdated > 0 {
-		if err := im.Store.SetMetaString(syncMetaKey, strconv.FormatInt(stats.MaxUpdated, 10)); err != nil {
+	if len(sessionIDs) == 0 && maxUpdated > 0 {
+		if err := im.Store.SetMetaString(syncMetaKey, strconv.FormatInt(maxUpdated, 10)); err != nil {
 			return stats, err
 		}
 	}

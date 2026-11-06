@@ -28,9 +28,8 @@ func (Platform) SessionPrefix() string { return SessionPrefix }
 func (Platform) SupportsNativeSessions() bool { return true }
 
 // Import reconciles OpenCode's SQLite store into L0. It takes the sync lock INSIDE
-// the method (so cmd need not know about it) and maps the internal stats onto the
-// shared platform.ImportStats. A held lock means another import is in flight —
-// return zero stats, not an error.
+// the method (so cmd need not know about it). A held lock means another import is
+// in flight — return zero stats, not an error.
 func (Platform) Import(ctx context.Context, st store.ImportStore, sessionIDs []string) (platform.ImportStats, error) {
 	// Same lock file as before (".opencode-sync.lock"); the store no longer names
 	// the platform — this package owns the "opencode" key.
@@ -39,14 +38,5 @@ func (Platform) Import(ctx context.Context, st store.ImportStore, sessionIDs []s
 		return platform.ImportStats{Agent: "opencode"}, nil
 	}
 	defer unlock()
-	s, err := (&Importer{Store: st}).Import(ctx, sessionIDs)
-	if err != nil {
-		return platform.ImportStats{Agent: "opencode"}, err
-	}
-	return platform.ImportStats{
-		Agent:      "opencode",
-		Sessions:   s.Sessions,
-		Records:    s.Records,
-		MaxUpdated: s.MaxUpdated,
-	}, nil
+	return (&Importer{Store: st}).Import(ctx, sessionIDs)
 }

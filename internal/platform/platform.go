@@ -13,11 +13,10 @@ const (
 )
 
 type ImportStats struct {
-	Agent      string
-	Sessions   int
-	Records    int
-	Failed     int // source inputs skipped after recoverable errors; successful imports are retained
-	MaxUpdated int64
+	Agent    string
+	Sessions int
+	Records  int
+	Failed   int // source inputs skipped after recoverable errors; successful imports are retained
 }
 
 // ImportProgress is told how many source inputs an import has finished out of the total it has
