@@ -2,6 +2,10 @@ package distill
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -246,5 +250,200 @@ func TestListProfilesEnumeratesWhatIsOnDisk(t *testing.T) {
 		if g == "math" {
 			t.Error("a deleted profile is still enumerated")
 		}
+	}
+}
+
+// portraitCaller is a fake runner that records which portrait each call was for, so a test can
+// compare the set Stale() marks true against the set Summarize() actually calls the model for.
+// Each summary echoes its input, so a changed facet changes the summary and therefore the
+// unified portrait's input — the real-model behaviour the unified signature depends on.
+func portraitCaller(called *[]string) SummarizeFunc {
+	return func(_ context.Context, _, prompt, input string) (string, error) {
+		if strings.HasPrefix(prompt, "UNIFIED") {
+			*called = append(*called, store.ProfileUnified)
+			return "PORTRAIT", nil
+		}
+		first, _, _ := strings.Cut(input, "\n")
+		*called = append(*called, strings.TrimPrefix(first, "LENS: "))
+		return "SUMMARY<" + input + ">", nil
+	}
+}
+
+// Stale() is the "run `witness profile` to refresh" line in `witness view`. Its contract is not
+// "something changed" but "a Summarize now would call the model for this portrait": a cruder
+// test would keep showing the line after the user ran `witness profile`. So each phase asserts
+// Stale(), then runs Summarize and checks it called the runner for EXACTLY the portraits Stale
+// marked true — no more, no fewer.
+func TestStaleMatchesSummarize(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s) // default + math
+	var called []string
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED",
+		Run: portraitCaller(&called)}
+
+	phase := func(name string, want map[string]bool) {
+		t.Helper()
+		got, err := sm.Stale()
+		if err != nil {
+			t.Fatalf("%s: Stale: %v", name, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: Stale() = %v, want %v", name, got, want)
+		}
+		var wantCalls []string
+		for p, stale := range got {
+			if stale {
+				wantCalls = append(wantCalls, p)
+			}
+		}
+		called = nil
+		if err := sm.Summarize(context.Background()); err != nil {
+			t.Fatalf("%s: Summarize: %v", name, err)
+		}
+		sort.Strings(wantCalls)
+		sort.Strings(called)
+		if !reflect.DeepEqual(called, wantCalls) {
+			t.Fatalf("%s: Summarize called the runner for %v, Stale() said %v", name, called, wantCalls)
+		}
+	}
+
+	phase("fresh archive", map[string]bool{"default": true, "math": true, store.ProfileUnified: true})
+	phase("just summarized", map[string]bool{"default": false, "math": false, store.ProfileUnified: false})
+
+	// Change ONE facet in math (WriteFacets is replace-all): math + unified, never default.
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "satisfices",
+			Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9}}},
+		{Lens: "math", Dimension: "resilience", Key: "trip_wire",
+			Versions: []store.FacetVersion{{Value: "recovers with CALCULUS now", Confidence: 0.87}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	phase("one lens changed", map[string]bool{"default": false, "math": true, store.ProfileUnified: true})
+	phase("refreshed", map[string]bool{"default": false, "math": false, store.ProfileUnified: false})
+
+	// A unified-only prompt change: every notebook is current, so only the unified signature
+	// itself can see it. A "stale if any notebook is stale" shortcut would miss this.
+	sm.UnifiedPrompt = "UNIFIED v2"
+	phase("unified prompt changed", map[string]bool{"default": false, "math": false, store.ProfileUnified: true})
+}
+
+// profileSigs snapshots every profile_sig:* a Summarize could touch: each lens with facets,
+// each portrait on disk, and the unified one.
+func profileSigs(t *testing.T, s *store.Store) map[string]string {
+	t.Helper()
+	keys := map[string]bool{store.ProfileUnified: true}
+	facets, err := s.ReadActiveFacets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range facets {
+		keys[f.Lens] = true
+	}
+	onDisk, err := s.ListProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range onDisk {
+		keys[p] = true
+	}
+	sigs := map[string]string{}
+	for k := range keys {
+		sigs[k] = s.MetaString(profileSigKey(k))
+	}
+	return sigs
+}
+
+// Stale() runs inside `witness view`, which must write nothing but its HTML. So it may never
+// reach a runner (Run and RunFor are nil here — a call would panic) and must skip Summarize's
+// write side effects: the orphan reap and the no-lenses unified delete both leave files and
+// signatures alone.
+func TestStaleNeverRuns(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	var called []string
+	if err := (&Summarizer{Store: s, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED",
+		Run: portraitCaller(&called)}).Summarize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sm := &Summarizer{Store: s, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED"} // no Run, no RunFor
+
+	// Drop math: its portrait is now an orphan Summarize would REAP, not regenerate — so it is
+	// not stale — and the one-lens archive still has a unified portrait to rebuild.
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "satisfices",
+			Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := profileSigs(t, s)
+	got, err := sm.Stale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]bool{"default": false, store.ProfileUnified: true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("one lens left: Stale() = %v, want %v", got, want)
+	}
+	if after := profileSigs(t, s); !reflect.DeepEqual(before, after) {
+		t.Errorf("Stale wrote signatures: before %v, after %v", before, after)
+	}
+	if _, ok, _ := s.ReadProfile("math"); !ok {
+		t.Error("Stale reaped the orphan math portrait; only Summarize may")
+	}
+
+	// No facets at all: Summarize would delete the unified portrait without a model call.
+	if err := s.WriteFacets(nil); err != nil {
+		t.Fatal(err)
+	}
+	before = profileSigs(t, s)
+	got, err = sm.Stale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]bool{store.ProfileUnified: false}; !reflect.DeepEqual(got, want) {
+		t.Errorf("no facets: Stale() = %v, want %v", got, want)
+	}
+	if after := profileSigs(t, s); !reflect.DeepEqual(before, after) {
+		t.Errorf("Stale wrote signatures: before %v, after %v", before, after)
+	}
+	if _, ok, _ := s.ReadProfile(store.ProfileUnified); !ok {
+		t.Error("Stale deleted the unified portrait; only Summarize may")
+	}
+}
+
+// A matching signature only vouches for a portrait that is still on disk and non-empty —
+// Summarize regenerates a deleted or blank file — so Stale must report both.
+func TestStaleMissingFileIsStale(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	var called []string
+	sm := &Summarizer{Store: s, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: portraitCaller(&called)}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(s.ProfileDir(), "math.md")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sm.Stale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]bool{"default": false, "math": true, store.ProfileUnified: true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("math.md deleted: Stale() = %v, want %v", got, want)
+	}
+
+	// A blank file counts as missing too (Summarize regenerates it, #148).
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteProfile("default", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err = sm.Stale()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]bool{"default": true, "math": false, store.ProfileUnified: true}; !reflect.DeepEqual(got, want) {
+		t.Errorf("default.md blank: Stale() = %v, want %v", got, want)
 	}
 }
