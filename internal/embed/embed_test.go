@@ -93,6 +93,9 @@ func TestEmbedHandlesNFDAndInvalidUTF8(t *testing.T) {
 	if !useRepoModel(t) {
 		t.Skip("no embedding model in this checkout (assets/e5-small); run scripts/fetch-model.sh")
 	}
+	// An inherited GOMLX_BACKEND=xla must not reach New's backend choice (#199 F002). With the
+	// model present, this is what proves New itself calls newBackend, not backends.New.
+	t.Setenv("GOMLX_BACKEND", "xla")
 	e, err := New()
 	if err != nil {
 		t.Fatalf("the model is present, so New() must succeed — a skip here would hide the "+
@@ -146,7 +149,9 @@ func TestEmbedHandlesNFDAndInvalidUTF8(t *testing.T) {
 // inherited GOMLX_BACKEND and PANICS on a name that is not compiled in ("xla" is not, by design:
 // CGO_ENABLED=0). The Unix shim used to set GOMLX_BACKEND=go, but Windows exec-form hooks, the npm
 // launcher and MCP-via-npx never run the shim, so a user's GOMLX_BACKEND=xla killed witness there.
-// Needs no model: the backend is chosen before any asset is read.
+// Needs no model: newBackend reads no asset. That alone does not prove New calls it — New
+// parses the model before choosing a backend — so TestEmbedHandlesNFDAndInvalidUTF8 drives the
+// same env through New (model machines), and TestNoEnvDrivenBackendInEmbed pins it in CI.
 func TestNewBackendIgnoresInheritedGomlxBackend(t *testing.T) {
 	t.Setenv("GOMLX_BACKEND", "xla")
 	b, err := newBackend()
@@ -156,5 +161,34 @@ func TestNewBackendIgnoresInheritedGomlxBackend(t *testing.T) {
 	defer b.Finalize()
 	if !strings.Contains(strings.ToLower(b.Name()), "go") {
 		t.Errorf("backend = %q, want the pure-Go simplego backend", b.Name())
+	}
+}
+
+// A source check, because CI has no model and so never runs New: reverting New to
+// backends.New() passed every model-free test (#199 F002). Any env-driven constructor in this
+// package's non-test code reopens the inherited-GOMLX_BACKEND panic on the shim-less paths.
+func TestNoEnvDrivenBackendInEmbed(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue // newBackend's own doc names backends.New() to say why it is avoided
+			}
+			for _, bad := range []string{"backends.New(", "backends.MustNew("} {
+				if strings.Contains(line, bad) {
+					t.Errorf("%s:%d calls %s, which obeys an inherited GOMLX_BACKEND; use newBackend()", f, i+1, bad)
+				}
+			}
+		}
 	}
 }
