@@ -29,7 +29,8 @@
   store, Codex's local history, or ingested files. Four sources, one archive, namespaced per source.
 - Distills L0 → observations (L1) → bi-temporal facets (L2) → a narrative profile (L4) using configurable, global, shareable **lenses**.
 - Bi-temporal facet history (valid_from/valid_to + provenance) is what captures *evolution*, not just a snapshot.
-- A background worker mines sessions in parallel; nothing leaves your machine (local embeddings, local model).
+- A background worker mines sessions in parallel. Embeddings run locally; distillation uses your own Claude Code or
+  OpenCode auth, whichever you bound, so session text goes only to the provider you already chose.
 
 ## Capabilities (MCP tools)
 
