@@ -1,7 +1,5 @@
 package distill
 
-import "strings"
-
 // The two compaction prompts, one per stage.
 //
 // WHY TWO. Measured on a real 105-facet dimension: one call asked to decide the grouping AND
@@ -21,20 +19,6 @@ import "strings"
 //
 // ponytail: one shared pair of prompts, no per-lens override. Add a lenses/<name>/compact.md
 // seam the first time a real lens needs different grouping judgment, not before.
-
-func (c *Compactor) groupPrompt() string {
-	if strings.TrimSpace(c.Prompt) != "" {
-		return c.Prompt // experiment/override seam, used by the strategy sweep
-	}
-	return compactGroupPrompt
-}
-
-func (c *Compactor) writePrompt() string {
-	if strings.TrimSpace(c.WritePrompt) != "" {
-		return c.WritePrompt
-	}
-	return compactWritePrompt
-}
 
 // STAGE 1 — grouping. Names only, so the reply stays small and the call stays fast.
 const compactGroupPrompt = `You are consolidating a behavioural profile. You are given every facet in ONE dimension of
