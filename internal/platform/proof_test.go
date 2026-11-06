@@ -42,20 +42,20 @@ func (fakePlatform) RenderInputs(raw []store.RawRecord, _ platform.ChunkPolicy) 
 }
 
 // Capture: write one L0 row from a trivial {session,text} payload + stamp platform.
-func (fakePlatform) Capture(st store.CaptureStore, data []byte, now time.Time) (bool, error) {
+func (fakePlatform) Capture(st store.CaptureStore, data []byte, now time.Time) error {
 	var ev struct {
 		Session string `json:"session"`
 		Text    string `json:"text"`
 	}
 	if err := json.Unmarshal(data, &ev); err != nil {
-		return false, err
+		return err
 	}
 	sid := fakePrefix + ev.Session
 	if err := st.AppendRaw(store.RawRecord{Session: sid, Seq: st.NextSeq(sid), Role: "user", Text: ev.Text, TS: now.UTC().Format(time.RFC3339)}); err != nil {
-		return false, err
+		return err
 	}
 	st.SetSessionPlatform(sid, "fake")
-	return true, nil
+	return nil
 }
 
 func (fakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
@@ -107,8 +107,8 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 	if !ok {
 		t.Fatal("fake platform should expose its optional capture capability")
 	}
-	if okCap, err := capturer.Capture(st, payload, time.Now()); err != nil || !okCap {
-		t.Fatalf("Capture: ok=%v err=%v", okCap, err)
+	if err := capturer.Capture(st, payload, time.Now()); err != nil {
+		t.Fatalf("Capture: %v", err)
 	}
 	session := fakePrefix + "s1"
 	if raw, _ := st.ReadRaw(session); len(raw) != 1 {

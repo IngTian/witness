@@ -85,7 +85,7 @@ type Platform interface {
 // break a session, so callers log the error and carry on. Reconcile-only
 // platforms such as OpenCode deliberately do not implement it.
 type Capturer interface {
-	Capture(st store.CaptureStore, data []byte, now time.Time) (ok bool, err error)
+	Capture(st store.CaptureStore, data []byte, now time.Time) error
 }
 
 // Importer pulls external native sessions into L0 (the reconcile path). An empty

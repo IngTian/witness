@@ -36,20 +36,20 @@ func (Platform) RenderInputs(raw []store.RawRecord, policy platform.ChunkPolicy)
 // Capture unmarshals the Claude Code hook payload and writes one L0 record. The
 // []byte signature is the uniform Capturer contract; the typed HookEvent is an
 // internal detail. On a successful write it stamps the session's owning platform
-// so ForSession is column-authoritative for it. Best-effort: a malformed payload
-// is not an error (returns ok=false) — capture must never break a session.
-func (Platform) Capture(st store.CaptureStore, data []byte, now time.Time) (bool, error) {
+// so ForSession is column-authoritative for it. A malformed payload returns its
+// decode error, which the caller only logs — capture must never break a session.
+func (Platform) Capture(st store.CaptureStore, data []byte, now time.Time) error {
 	var e HookEvent
 	if err := json.Unmarshal(data, &e); err != nil {
-		return false, err
+		return err
 	}
 	if err := Capture(st, e, now); err != nil {
-		return false, err
+		return err
 	}
 	if e.SessionID != "" {
 		st.SetSessionPlatform(e.SessionID, "claude")
 	}
-	return true, nil
+	return nil
 }
 
 // Import is a no-op: Claude Code is hook-fed (capture writes L0 live), so there is
