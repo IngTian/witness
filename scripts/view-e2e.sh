@@ -48,6 +48,12 @@ check_file() {
   shift
   local markers=("$@")
 
+  # ONLY="empty.html hostile.html" checks just those files (the rest are reported as skipped).
+  if [ -n "${ONLY:-}" ] && [[ " $ONLY " != *" $file "* ]]; then
+    echo "  - $file skipped (not in ONLY)"
+    return 0
+  fi
+
   echo "Checking $file..."
 
   # Create temp user-data-dir for this run under $tmpdir so EXIT trap cleans it.
