@@ -121,7 +121,8 @@ type serveRecord struct {
 // Three gates, all required, in cheapest-first order:
 //  1. the owning witness process must be GONE (else this is a live sibling's serve);
 //  2. the serve pid must still look like a witness private serve (isOurServePID — the same
-//     fingerprint the ps sweep uses);
+//     fingerprint the ps sweep uses, or on Windows its executable half when the OS will not
+//     give the command line; see serveProbeMatches);
 //  3. the serve must answer OUR password on its recorded port (proves it is the very serve
 //     that record describes, not a pid-reuse coincidence).
 //
@@ -1043,7 +1044,7 @@ func isStrayServeLine(cmdline string) bool {
 	if len(fields) == 0 {
 		return false
 	}
-	if !strings.Contains(filepath.Base(fields[0]), openCodeServeMarker) {
+	if !isOpenCodeExe(fields[0]) {
 		return false
 	}
 	// Require the full private-serve shape so a user's own `opencode serve` (or any
@@ -1055,6 +1056,24 @@ func isStrayServeLine(cmdline string) bool {
 		}
 	}
 	return true
+}
+
+// serveProbeMatches is gate 2's decision on Windows, kept apart from the OS calls so it is
+// testable off Windows. The command line carries the full fingerprint and, when readable, is
+// FINAL: a non-matching line must not be rescued by the looser check below. Only when the OS
+// refuses the command line does it fall back to the image name, which carries the executable half;
+// gate 3 (the password probe) stays the ownership proof either way.
+func serveProbeMatches(cmdline, image func() (string, error)) bool {
+	if line, err := cmdline(); err == nil {
+		return isStrayServeLine(line)
+	}
+	exe, err := image()
+	return err == nil && isOpenCodeExe(exe)
+}
+
+// isOpenCodeExe is the executable half of the fingerprint: the basename names opencode.
+func isOpenCodeExe(exe string) bool {
+	return exe != "" && strings.Contains(filepath.Base(exe), openCodeServeMarker)
 }
 
 func containsField(fields []string, want string) bool {

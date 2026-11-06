@@ -3,12 +3,11 @@
 package opencode
 
 import (
-	"context"
 	"errors"
-	"os/exec"
-	"strconv"
-	"strings"
 	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // isOurServePID reports whether pid is a live witness-private `opencode serve`.
@@ -18,59 +17,56 @@ import (
 // between a crash and an unbounded pile of servers. It still must not kill on the pid alone,
 // because pids are recycled.
 //
-// Corroboration uses WMIC's CommandLine for exactly that pid and applies the same
-// private-serve fingerprint as the Unix sweep (isStrayServeLine), so both platforms agree on
-// what counts as ours. Notes on the mechanics:
-//   - `wmic process where processid=N get commandline` prints a "CommandLine" header plus the
-//     value; we hand the whole output to the fingerprint, which scans fields, so the header is
-//     harmless. If the process is gone WMIC prints "No Instance(s) Available." and the
-//     fingerprint rejects it.
-//   - WMIC is deprecated on Windows 11+ but still present; PowerShell would be the successor
-//     and costs ~100x the startup. A missing WMIC yields an error here, which fails CLOSED
-//     (no kill) — the deliberate choice, since a leaked serve is recoverable and killing the
-//     user's editor is not.
-//   - The command runs with a hidden window like every other opencode-adjacent spawn.
+// It reads the process's own command line and applies the same private-serve fingerprint as the
+// Unix sweep (isStrayServeLine), so both platforms agree on what counts as ours; if the OS refuses
+// the command line it falls back to the image name (serveProbeMatches). This replaced `wmic`,
+// which Windows 11 24H2 removed: the probe then errored for every pid, gate 2 never passed, and
+// the reaper reaped nothing while the orphan of every `worker stop` (a TerminateProcess) leaked.
+// Both calls here are direct kernel queries, with no child process or service behind them that
+// could hang under the WorkerLock, so no timeout is needed. A pid that cannot be opened (gone, or
+// another user's) fails CLOSED — no kill.
 func isOurServePID(pid int) bool {
-	// BOUNDED. This runs inside reapPriorServe, which runs from StartOpenCodeServerIn while the
-	// caller holds the machine-wide WorkerLock — the exact hazard the file's own comment on
-	// openCodeProbeTimeout describes ("a hung `opencode` invocation blocked the worker
-	// indefinitely while holding the machine-WIDE WorkerLock"). WMIC is a service call and can
-	// hang on a sick machine, so an unbounded exec.Command here would wedge every drain.
-	ctx, cancel := context.WithTimeout(context.Background(), openCodeProbeTimeout)
-	defer cancel()
-
-	// LIST format, not the default table. `wmic ... get commandline` emits the column HEADER
-	// ("CommandLine") as its first line, and isStrayServeLine treats the first whitespace-separated
-	// field as the EXECUTABLE — so the header became the executable, failed the "opencode" check,
-	// and this function returned false for EVERY pid. Gate 2 of reapPriorServe could then never
-	// pass, meaning the Windows reaper silently reaped nothing at all, which is the one platform it
-	// exists for. `/value` emits `CommandLine=<value>`, which we split on the first '=' below.
-	cmd := exec.CommandContext(ctx, "wmic", "process", "where", "processid="+strconv.Itoa(pid),
-		"get", "commandline", "/value")
-	hideOpenCodeWindow(cmd)
-	out, err := cmd.Output()
+	if pid <= 1 {
+		return false
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	line := wmicValue(string(out), "CommandLine")
-	if line == "" {
-		return false // no such process, or WMIC said "No Instance(s) Available"
-	}
-	return isStrayServeLine(line)
+	defer windows.CloseHandle(h)
+	return serveProbeMatches(
+		func() (string, error) { return processCommandLine(h) },
+		func() (string, error) { return processImageName(h) },
+	)
 }
 
-// wmicValue extracts one `Key=value` field from WMIC /value output, which is CRLF-delimited and
-// padded with blank lines. Returns "" when the key is absent or its value is empty — both of which
-// mean "do not treat this pid as ours", the safe answer for a caller deciding whether to kill.
-func wmicValue(out, key string) string {
-	for _, raw := range strings.Split(out, "\n") {
-		l := strings.TrimSpace(raw)
-		if !strings.HasPrefix(l, key+"=") {
-			continue
-		}
-		return strings.TrimSpace(strings.TrimPrefix(l, key+"="))
+// processCommandLine returns h's full command line as its creator passed it
+// (NtQueryInformationProcess, ProcessCommandLineInformation; Windows 8.1+).
+//
+// The query writes a UNICODE_STRING header into buf whose Buffer points further into buf. Its
+// Length is a uint16 count of BYTES, so no command line exceeds 64 KiB and one fixed buffer always
+// fits — no grow-and-retry loop.
+func processCommandLine(h windows.Handle) (string, error) {
+	buf := make([]byte, unsafe.Sizeof(windows.NTUnicodeString{})+1<<16)
+	if err := windows.NtQueryInformationProcess(h, windows.ProcessCommandLineInformation,
+		unsafe.Pointer(&buf[0]), uint32(len(buf)), nil); err != nil {
+		return "", err
 	}
-	return ""
+	s := (*windows.NTUnicodeString)(unsafe.Pointer(&buf[0]))
+	if s.Buffer == nil {
+		return "", nil
+	}
+	return s.String(), nil
+}
+
+// processImageName returns the full Win32 path of h's executable.
+func processImageName(h windows.Handle) (string, error) {
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &n); err != nil {
+		return "", err
+	}
+	return windows.UTF16ToString(buf[:n]), nil
 }
 
 // processAlive reports whether pid names a live process.
