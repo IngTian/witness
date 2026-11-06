@@ -695,8 +695,8 @@
     pages.changed.append(el('main', {}, el('p', { class: 'nothing', text: 'No traits yet.' })));
   }
   document.body.append(header, pages.overview, pages.changed, tip);
-  drawActivity(true);
   if (M.portraits.length) setPortrait(0);
+  drawActivity(true);
   showPage(M.e2eStart === 'changed' ? 'changed' : 'overview');
   // Page 2 opens on the first notebook's first topic until a "see how it changed →" picks one.
   if (books.length) setTopic(books[0], books[0].topics[0]);

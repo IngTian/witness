@@ -117,7 +117,37 @@ check_file() {
 
 # Check each file with its expected markers.
 check_file "full.html" 'data-page="overview"' 'data-calendar' 'data-day' 'data-sentence' 'data-trait' 'data-chart="confidence"' 'data-chart="weeks"'
+
+# full.html: overview section must be visible (no hidden attribute on <section data-page="overview">).
+dom_full=$("$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check \
+  --user-data-dir="$tmpdir/profile-full-visible" --force-prefers-reduced-motion --virtual-time-budget=3000 \
+  --enable-logging=stderr --v=0 --dump-dom "file://$tmpdir/full.html" 2>/dev/null) || {
+  echo "FAIL: Chrome failed for full.html visibility check"
+  exit 1
+}
+if echo "$dom_full" | grep -q '<section[^>]*data-page="overview"[^>]*hidden'; then
+  echo "FAIL: full.html overview section has hidden attribute"
+  exit 1
+fi
+
 check_file "full-changed.html" 'data-page="changed"'
+
+# full-changed.html: changed section must be visible (no hidden attribute) and have a confidence point.
+dom_changed=$("$chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check \
+  --user-data-dir="$tmpdir/profile-changed-visible" --force-prefers-reduced-motion --virtual-time-budget=3000 \
+  --enable-logging=stderr --v=0 --dump-dom "file://$tmpdir/full-changed.html" 2>/dev/null) || {
+  echo "FAIL: Chrome failed for full-changed.html visibility check"
+  exit 1
+}
+if echo "$dom_changed" | grep -q '<section[^>]*data-page="changed"[^>]*hidden'; then
+  echo "FAIL: full-changed.html changed section has hidden attribute"
+  exit 1
+fi
+if ! echo "$dom_changed" | grep -q 'class="pt"'; then
+  echo "FAIL: full-changed.html missing confidence point (class=\"pt\")"
+  exit 1
+fi
+
 check_file "empty.html" 'data-page="overview"' 'data-calendar' 'data-day'
 check_file "hostile.html" 'data-page="overview"' 'data-calendar' 'data-day' 'data-sentence' 'data-trait'
 

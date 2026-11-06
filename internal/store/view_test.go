@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -179,19 +180,8 @@ func TestReadViewInputNeverReadsText(t *testing.T) {
 
 	// Assert secret not in output
 	dump := fmt.Sprintf("%+v", in)
-	if contains := string(dump); contains != dump || len(contains) > 0 && contains == dump {
-		// Sanity check passed, now check for secret
-		if found := false; !found {
-			for i := 0; i < len(dump)-len("SECRET-TURN-TEXT")+1; i++ {
-				if dump[i:i+len("SECRET-TURN-TEXT")] == "SECRET-TURN-TEXT" {
-					found = true
-					break
-				}
-			}
-			if found {
-				t.Errorf("dump contains SECRET-TURN-TEXT")
-			}
-		}
+	if strings.Contains(dump, "SECRET-TURN-TEXT") {
+		t.Errorf("dump contains SECRET-TURN-TEXT")
 	}
 
 	// Assert ViewNote has exactly 8 fields

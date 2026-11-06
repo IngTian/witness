@@ -22,8 +22,9 @@ var pageCSS []byte
 var errBundle = errors.New("embedded bundle violates guard")
 
 // bundleForbidden matches patterns forbidden in both JS and CSS: case-insensitive </script
-// and </style (would break single-file construction), HTML comments (could smuggle out data),
-// and carriage returns (would bypass other guards on a Windows checkout without .gitattributes).
+// and </style (would break single-file construction), HTML comments (change how the browser
+// parses the rest of the script), and carriage returns (the HTML parser normalises CRLF→LF,
+// which breaks the hash and blanks the page).
 var bundleForbidden = regexp.MustCompile(`(?i)</script|</style|<!--|` + "\r")
 
 // jsForbidden matches APIs forbidden in page.js: DOM APIs that bypass textContent (innerHTML

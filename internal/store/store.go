@@ -286,8 +286,8 @@ func writeAtomic(path string, data []byte) error {
 
 // WriteFileAtomic writes data to path atomically (temp file, explicit 0600, rename). It is
 // the exported wrapper for writeAtomic, used by commands that write files outside the
-// store's own data dir (e.g., `witness view` writing its HTML snapshot, `witness export`
-// writing a backup tarball). Inside the store, writeAtomic is called directly.
+// store's own data dir (e.g., `witness view` writing its HTML snapshot). Inside the store,
+// writeAtomic is called directly.
 func WriteFileAtomic(path string, data []byte) error {
 	return writeAtomic(path, data)
 }

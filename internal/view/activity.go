@@ -12,7 +12,7 @@ import (
 // buildActivity computes all activity metrics from ViewInput: days, cuts, windows and facts.
 // Only conversation sources count (Claude Code, OpenCode, Codex); file: sessions are excluded.
 // tally carries the trait-derived numbers (buildTraits) — NewTraits/Rewrites per window and
-// TotalTraits — already restricted to active traits and conversation notebooks.
+// TotalTraits (counting every notebook's active traits, not just conversation ones).
 func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally traitTally) Activity {
 	// Parse and bucket turns by local date
 	dayMap := make(map[string]*dayBuilder)
