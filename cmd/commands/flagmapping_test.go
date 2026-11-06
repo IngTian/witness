@@ -63,3 +63,70 @@ func TestWorkerRunSinceUntilMapToTheirBounds(t *testing.T) {
 		}
 	}
 }
+
+// worker-run's --auto must reach cmdWorker as auto. Every hook kick spawns `worker-run --auto`
+// (maybeSpawnAutoWorker), and only an auto run honours the `worker stop --auto-only` latch; a
+// manual run (the plain `worker-run` that import, ingest and distill spawn) clears it. So the
+// latch tells the two apart: mapped to false, a hook-spawned worker would clear the latch and
+// distil after the user stopped it; mapped to true, a manual kick would exit on the latch.
+// The --since range keeps the run from arming a retry wakeup.
+func TestWorkerRunAutoMapsToAuto(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	run := func(args ...string) string {
+		t.Helper()
+		st, err := store.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
+			t.Fatal(err)
+		}
+		c := newInternalWorkerCmd()
+		c.SetArgs(args)
+		c.SilenceUsage, c.SilenceErrors = true, true
+		if err := c.Execute(); err != nil {
+			t.Fatalf("worker-run %v: %v", args, err)
+		}
+		return st.MetaString("worker_stop_requested")
+	}
+	if got := run("--auto", "--since", "3650d"); got != "1" {
+		t.Fatalf("worker-run --auto cleared the stop latch (ran as manual): %q", got)
+	}
+	if got := run("--since", "3650d"); got != "" {
+		t.Fatalf("worker-run without --auto kept the stop latch (ran as auto): %q", got)
+	}
+}
+
+// import's hidden --auto routes the kick through the automatic gate, which clears the stop latch
+// and here declines (no embedding model) instead of spawning the plain manual worker.
+func TestImportAutoMapsToTheAutoGate(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.AppendRaw(store.RawRecord{Session: "pending", Seq: 0, Role: "user", Text: "keep this in L0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMetaString("worker_stop_requested", "1"); err != nil {
+		t.Fatal(err)
+	}
+	previous := importWorkerSpawner
+	spawns := 0
+	importWorkerSpawner = func() { spawns++ }
+	t.Cleanup(func() { importWorkerSpawner = previous })
+
+	c := newImportCmd()
+	c.SetArgs([]string{"--agent", "claude", "--quiet", "--auto"})
+	c.SilenceUsage, c.SilenceErrors = true, true
+	if _, err := captureStdoutErr(t, c.Execute); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.MetaString("worker_stop_requested"); spawns != 0 || got != "" {
+		t.Fatalf("import --auto: spawns=%d latch=%q, want the auto gate (no manual spawn, latch cleared)", spawns, got)
+	}
+}
