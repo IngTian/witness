@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // writeFakeSourceDB creates a minimal real SQLite file to stand in for the user's
@@ -91,6 +92,10 @@ func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 		case r.Method == http.MethodDelete:
 			if strings.HasPrefix(r.URL.Path, "/session/fork_") {
 				forkDeletes++
+			} else {
+				// Setup only ever deletes sessions it created. A DELETE for the user's own id
+				// was left over from the fork design (#143) and always 404'd in the private db.
+				t.Errorf("deleted %s, a session this runtime never created", r.URL.Path)
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -338,58 +343,8 @@ func TestNativeMalformedManifestIsRetainedError(t *testing.T) {
 	}
 }
 
-func TestReadOnlyURIConnectsEscapedAbsolutePathReadOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "witness#archive.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE marker(value TEXT); INSERT INTO marker VALUES ('correct database')`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	ro, err := sql.Open("sqlite", readOnlyURI(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ro.Close()
-	var value string
-	if err := ro.QueryRow(`SELECT value FROM marker`).Scan(&value); err != nil || value != "correct database" {
-		t.Fatalf("read correct database: value=%q err=%v", value, err)
-	}
-	if _, err := ro.Exec(`INSERT INTO marker VALUES ('must fail')`); err == nil {
-		t.Fatal("read-only URI allowed write")
-	}
-}
-
 func TestNativeReconcileCleansCommittedAndStaleGenerations(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "runtime")
-	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", filepath.Join(filepath.Dir(root), "witness.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`CREATE TABLE raw(id INTEGER PRIMARY KEY, session TEXT); CREATE TABLE progress(session TEXT,lens TEXT,distilled INTEGER); INSERT INTO raw VALUES(9,'opencode:s'); INSERT INTO progress VALUES('opencode:s','ok',2)`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	var deletes []string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			deletes = append(deletes, r.URL.Path)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		t.Fatalf("unexpected %s", r.Method)
-	}))
-	defer ts.Close()
-	n := newNativeRuntime(root, &OpenCodeServer{baseURL: ts.URL, client: ts.Client()})
-	if err := os.MkdirAll(n.dir(), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	n, deletesp := nativeReconcileFixture(t, 9, "ok")
 	current := nativeManifest{Session: "opencode:s", Lens: "pending", RawHigh: 9, Total: 2, Fork: "f1"}
 	committed := nativeManifest{Session: "opencode:s", Lens: "ok", RawHigh: 9, Total: 2, Fork: "f2"}
 	stale := nativeManifest{Session: "opencode:s", Lens: "stale", RawHigh: 8, Total: 2, Fork: "f3"}
@@ -410,6 +365,7 @@ func TestNativeReconcileCleansCommittedAndStaleGenerations(t *testing.T) {
 	if err := n.reconcile(); err != nil {
 		t.Fatal(err)
 	}
+	deletes := *deletesp
 	if len(deletes) != 2 {
 		t.Fatalf("deletes=%v", deletes)
 	}
@@ -476,25 +432,33 @@ func TestNativeCleanupFailureKeepsCommittedManifestForRetry(t *testing.T) {
 	}
 }
 
-// nativeReconcileFixture builds a runtime whose sibling witness.db has one session at
-// raw high id 9, plus a fake OpenCode server that records fork deletions.
-func nativeReconcileFixture(t *testing.T, extraSQL string) (*nativeRuntime, *[]string) {
+// nativeReconcileFixture builds a runtime whose sibling witness.db holds session opencode:s with
+// rawRows L0 rows (raw ids 1..rawRows), distilled through 2 records for distilledLens (none when
+// empty), plus a fake OpenCode server that records fork deletions. It is a REAL store, written
+// through the store's own API: reconcile reads witness.db with raw SQL, so a hand-rolled schema
+// here would keep passing after a store schema change silently broke that read (the #119 leak).
+func nativeReconcileFixture(t *testing.T, rawRows int, distilledLens string) (*nativeRuntime, *[]string) {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "runtime")
-	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", filepath.Join(filepath.Dir(root), "witness.db"))
+	home := t.TempDir()
+	root := filepath.Join(home, "runtime")
+	t.Setenv("WITNESS_HOME", home)
+	st, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stmt := `CREATE TABLE raw(id INTEGER PRIMARY KEY, session TEXT);
-		CREATE TABLE progress(session TEXT,lens TEXT,distilled INTEGER);
-		INSERT INTO raw VALUES(9,'opencode:s');` + extraSQL
-	if _, err = db.Exec(stmt); err != nil {
+	for i := 0; i < rawRows; i++ {
+		if err := st.AppendRaw(store.RawRecord{Session: "opencode:s", Seq: i, Role: "user", Text: fmt.Sprint("turn ", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if distilledLens != "" {
+		if err := st.MarkDistilled("opencode:s", distilledLens, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
 	deletes := &[]string{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -517,7 +481,7 @@ func nativeReconcileFixture(t *testing.T, extraSQL string) (*nativeRuntime, *[]s
 // because runner Open treated that error as fatal, one bad file could block all
 // OpenCode distillation. The bad entry is now reaped and the rest still processed.
 func TestNativeReconcileIsolatesUnreadableManifest(t *testing.T) {
-	n, deletes := nativeReconcileFixture(t, `INSERT INTO progress VALUES('opencode:s','ok',2)`)
+	n, deletes := nativeReconcileFixture(t, 9, "ok")
 	// "aaa" sorts BEFORE "zzz", so pre-fix the corrupt file aborted before zzz was seen.
 	bad := filepath.Join(n.dir(), "aaa.json")
 	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
@@ -556,7 +520,7 @@ func TestNativeReconcileIsolatesUnreadableManifest(t *testing.T) {
 // interrupted .tmp and a leftover disposable source-db copy. reconcile must sweep them,
 // while leaving a snapshot that a live manifest still owns.
 func TestNativeReconcileSweepsOrphanResidue(t *testing.T) {
-	n, _ := nativeReconcileFixture(t, "")
+	n, _ := nativeReconcileFixture(t, 9, "")
 	owned := filepath.Join(n.dir(), "owned.json")
 	if err := n.save(owned, nativeManifest{Session: "opencode:s", Lens: "pending", RawHigh: 9, Total: 2, Fork: "f1"}); err != nil {
 		t.Fatal(err)
@@ -594,8 +558,8 @@ func TestNativeReconcileSweepsOrphanResidue(t *testing.T) {
 // that keeps failing strands one manifest + full-session snapshot + live isolated fork
 // per drain, forever.
 func TestNativeReconcileReapsGenerationSupersededByNewerRaw(t *testing.T) {
-	// raw now holds id 9 AND a newer id 12 for the same session.
-	n, deletes := nativeReconcileFixture(t, `INSERT INTO raw VALUES(12,'opencode:s')`)
+	// raw now holds id 9 AND newer ids up to 12 for the same session.
+	n, deletes := nativeReconcileFixture(t, 12, "")
 	superseded := filepath.Join(n.dir(), "old.json")
 	if err := n.save(superseded, nativeManifest{Session: "opencode:s", Lens: "failing", RawHigh: 9, Total: 2, Fork: "f_old"}); err != nil {
 		t.Fatal(err)

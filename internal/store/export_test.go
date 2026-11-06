@@ -380,7 +380,7 @@ func TestExportAllKeepsPreviousSnapshotWhenExportFails(t *testing.T) {
 // TestExportAllRestoresPreviousSnapshotWhenSwapFails covers the other half of "don't
 // lose yesterday's backup": the staging test proves a failure BEFORE the swap is
 // harmless, and this one proves a failure DURING it is too — the previous snapshot is
-// moved aside, not deleted, so it can be put back. Injected through renameForExport
+// moved aside, not deleted, so it can be put back. Injected through renameDir
 // because a same-directory rename into a directory just written to cannot be made to
 // fail from outside the process.
 func TestExportAllRestoresPreviousSnapshotWhenSwapFails(t *testing.T) {
@@ -391,13 +391,13 @@ func TestExportAllRestoresPreviousSnapshotWhenSwapFails(t *testing.T) {
 		t.Fatalf("first export: %v", err)
 	}
 
-	orig := renameForExport
-	t.Cleanup(func() { renameForExport = orig })
+	orig := renameDir
+	t.Cleanup(func() { renameDir = orig })
 	// Keyed on the SOURCE so exactly one rename fails: staging -> destination. The
 	// move-aside (dst -> .witness-bak) and the recovery (.witness-bak -> dst) must both
 	// still work, or the test would be injecting a broken filesystem rather than the one
 	// failure whose handling it is checking.
-	renameForExport = func(from, to string) error {
+	renameDir = func(from, to string) error {
 		if from == dst+".witness-tmp" {
 			return fmt.Errorf("injected swap failure")
 		}
@@ -406,7 +406,7 @@ func TestExportAllRestoresPreviousSnapshotWhenSwapFails(t *testing.T) {
 	if _, err := st.ExportAll(dst, true); err == nil {
 		t.Fatal("export should fail when the swap-into-place fails")
 	}
-	renameForExport = orig
+	renameDir = orig
 
 	// The previous snapshot is back where it was, intact.
 	for _, rel := range []string{"witness.db", "config.toml", filepath.Join("lenses", "math", "extract.md"), filepath.Join("profile", "unified.md")} {

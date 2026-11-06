@@ -49,7 +49,7 @@ type Store struct {
 	profileFS  // L4 narrative profile files under <root>/profile/ (issue #73-C1)
 	procLocks  // cross-process advisory flocks (worker/import) (issue #73-C1)
 	lensReg    // on-disk lens registry under <root>/lenses/ (issue #73-C1)
-	facetIO    // L2 bi-temporal facets (written by review, long-arc, compaction, claims, merge) (issue #73-C1)
+	facetIO    // L2 bi-temporal facets (writers listed on WriteFacets) (issue #73-C1)
 	rawIO      // L0 append-only transcript + size/sample/prune helpers (issue #73-C1)
 	obsIO      // L1 observations + in-session staged buffer (issue #73-C1)
 	queue      // distillation queue: per-(session,lens) watermark/backoff (issue #73-C1)
@@ -249,9 +249,8 @@ func sanitize(id string) string {
 	return b.String()
 }
 
-// writeAtomic writes data to path via a temp file + rename (atomic on POSIX).
-// Used for config.toml rewrites; the data layers are transactional in SQLite.
-// writeAtomic publishes data to path via a UNIQUE temp file + rename.
+// writeAtomic publishes data to path via a UNIQUE temp file + rename. Used for config.toml
+// and the profile/ files; the data layers are transactional in SQLite.
 //
 // The temp name must be per-writer, not path+".tmp": with a shared staging path two
 // concurrent processes collide destructively — B's os.WriteFile O_TRUNCs A's half-written

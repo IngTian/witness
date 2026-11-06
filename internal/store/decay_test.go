@@ -17,44 +17,6 @@ func cv(conf float64, seq int64) FacetVersion {
 	return FacetVersion{Value: "v", Confidence: conf, ConfidenceSeq: seq}
 }
 
-// The decay clock has to survive the review write-back, like every other column: the reviewer
-// reads the whole profile and rewrites it each fold, so a column dropped on write would reset
-// every facet's clock on the next review — which reads as "just confirmed" and silently
-// disables decay entirely. Needs a REAL store; an in-memory fake cannot catch a missing column.
-func TestDecayClockSurvivesTheWriteBack(t *testing.T) {
-	s := lineageStore(t)
-	f := lf("default", "thinking", "clocked", "a value")
-	f.Versions[0].Confidence = 0.8
-	f.Versions[0].ConfidenceSeq = 4242
-	if err := s.WriteFacets([]Facet{f}); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 3; i++ { // three folds' worth of read-modify-write
-		all, err := s.ReadFacets()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.WriteFacets(all); err != nil {
-			t.Fatal(err)
-		}
-	}
-	all, _ := s.ReadFacets()
-	if len(all) != 1 {
-		t.Fatalf("want 1 facet, got %d", len(all))
-	}
-	cur := all[0].Current()
-	if cur.ConfidenceSeq != 4242 {
-		t.Errorf("the decay clock was lost across the write-back, got %d", cur.ConfidenceSeq)
-	}
-	if cur.Confidence != 0.8 {
-		t.Errorf("stored confidence should be untouched, got %v", cur.Confidence)
-	}
-	// With the clock intact, decay actually happens.
-	if got := cur.DecayedConfidence(4242 + int64(FacetDecayHalfLifeObs)); got >= 0.8 {
-		t.Errorf("a surviving clock should produce decay, got %v", got)
-	}
-}
-
 // The migration trap, pinned end to end. A facet that predates the column must be backfilled to
 // the CURRENT watermark — treated as confirmed as of the upgrade. Leaving it at 0 would date it
 // to the beginning of time; combined with any reading that treats 0 as "stale", an entire

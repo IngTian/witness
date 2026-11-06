@@ -34,7 +34,8 @@ func profileFileName(lens string) (string, error) {
 }
 
 // WriteProfile writes a lens's narrative summary (dir 0700, file 0600). The lens
-// "unified" holds the cross-lens portrait. Overwrites — regenerated each review.
+// "unified" holds the cross-lens portrait. Replaces atomically (writeAtomic), so a reader
+// never sees a half-written portrait — regenerated each review.
 func (p *profileFS) WriteProfile(lens, markdown string) error {
 	name, err := profileFileName(lens)
 	if err != nil {
@@ -43,13 +44,13 @@ func (p *profileFS) WriteProfile(lens, markdown string) error {
 	if err := os.MkdirAll(p.ProfileDir(), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(p.ProfileDir(), name), []byte(markdown), 0o600)
+	return writeAtomic(filepath.Join(p.ProfileDir(), name), []byte(markdown))
 }
 
 // DeleteProfile removes a lens's summary file so ReadProfile reports exists=false
 // again (the readers then show the friendly "not generated yet" message rather than a
-// blank/empty portrait). Used when a profile stops being applicable — e.g. the unified
-// portrait once <2 lenses remain (#44 slice 1a). A missing file is not an error
+// blank/empty portrait). Used when a profile stops being applicable — a lens whose facets
+// are gone, or the unified portrait once no lens has any. A missing file is not an error
 // (idempotent). Same path-safety as the other methods (rejects an escaping name).
 func (p *profileFS) DeleteProfile(lens string) error {
 	name, err := profileFileName(lens)

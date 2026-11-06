@@ -42,13 +42,12 @@ import (
 //   - Runner "" → the lens rides the default runner (the single runner a slice-1 install
 //     uses). A non-empty Runner ("claude"/"opencode") routes this lens's mine+review
 //     calls to that runtime instead — so a cheap free-model lens can run on OpenCode
-//     while the always-on default stays on the default runner (issue #75 slice 2).
+//     while the others stay on the default runner (issue #75 slice 2).
 //   - ExtractModel/ReviewModel "" → ride the default stage model for the RESOLVED runner,
 //     resolved by distill.ModelFor. A model name is only valid on its runtime, so these
 //     are meaningful only together with (or under a matching) Runner.
 type Lens struct {
 	Name         string // tag written onto observations/facets
-	BuiltIn      bool   // true=the always-on lens that ships in the binary (the "default" lens); registered lenses=false
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
@@ -185,22 +184,6 @@ func LoadResolvePrompts() (lensPrompt, unifiedPrompt string, err error) {
 	return string(l), string(u), nil
 }
 
-// DefaultDimensions is the person-growth dimension scaffold for the "default" lens.
-// Since #44 slice 1a the default lens is an ordinary registered lens whose dimensions
-// live in its seeded prompts/default/lens.json (this slice must be kept in sync with
-// that file). Facets within each dimension are emergent (named by the distiller), not
-// pre-enumerated. Retained in code as the canonical reference for the seed + tests.
-var DefaultDimensions = []string{
-	"thinking",  // decision frameworks, how problems get approached
-	"workstyle", // how work gets organized, paced, sequenced
-	"habits",    // recurring practices, defaults, rituals
-	"traits",    // stable dispositions (with evidence)
-	"biases",    // recurring cognitive traps + their triggers
-	"state",     // time-varying context that expires (mood, season, focus)
-	"goals",     // north star + how it evolves
-	"feedback",  // how corrections land; what the user asks of collaborators
-}
-
 // readPromptPair reads a lens directory's extract.md + review.md. Each whole file IS
 // the prompt — there is no parsing and no section splitting, so a prompt can never be
 // silently empty from a mis-parse: a missing extract.md is a hard, named error. review.md
@@ -284,7 +267,6 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	if store.ReservedLensName(l.Name) {
 		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its lens.json name impersonates the cross-lens 'unified' profile); rename it", name, l.Name)
 	}
-	l.BuiltIn = false
 	return l, nil
 }
 
@@ -293,11 +275,9 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 // the same way as a registered lens, but is intentionally LENIENT about identity: the
 // name falls back to the directory's basename, then the literal "candidate", so a
 // work-in-progress lens missing a lens.json name still previews. It does NOT apply the
-// reserved-name gate (see LoadFromDir for the strict variant) — a preview never writes
-// to the archive, so an impersonating name can't collide with anything. It still
-// requires a non-empty extract.md (that is the prompt being previewed). BuiltIn is
-// forced false — a candidate previewed from an arbitrary dir is never treated as the
-// seeded lens.
+// reserved-name gate — a preview never writes to the archive, so an impersonating name
+// can't collide with anything (`lens try` displays a reserved one as "candidate"). It still
+// requires a non-empty extract.md (that is the prompt being previewed).
 func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	base := strings.TrimSpace(filepath.Base(strings.TrimRight(dir, string(filepath.Separator))))
 	l, err := loadDir(dir, base)
@@ -306,24 +286,6 @@ func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	}
 	if strings.TrimSpace(l.Name) == "" {
 		l.Name = "candidate"
-	}
-	l.BuiltIn = false
-	return l, nil
-}
-
-// LoadFromDir is the STRICT arbitrary-path loader: LoadFromDirUnchecked plus the
-// reserved-name gate LoadRegistered enforces (a directory whose resolved name is the
-// reserved "unified" identity, case-folded, is rejected — "default" is an ordinary lens
-// since #44 slice 1a). Callers that only PREVIEW (never write) may catch the
-// reserved-name error and fall back to the Unchecked variant with a display name of
-// "candidate"; callers that would persist under the resolved name must use this one.
-func LoadFromDir(dir string) (*Lens, error) {
-	l, err := LoadFromDirUnchecked(dir)
-	if err != nil {
-		return nil, err
-	}
-	if store.ReservedLensName(l.Name) {
-		return nil, fmt.Errorf("lens dir %q resolves to reserved name %q (the cross-lens 'unified' profile identity); rename it in lens.json", dir, l.Name)
 	}
 	return l, nil
 }

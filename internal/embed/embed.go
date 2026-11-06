@@ -29,6 +29,14 @@ import (
 )
 
 const (
+	// ponytail: Dim is one face of an UNSTAMPED embedding contract: multilingual-e5-small at
+	// revision 614241f (scripts/fetch-model.sh, npm/opencode/bin/model.js), a "query: " prefix
+	// on every input, masked mean-pool, L2-normalize, maxLen 512 tokens. Every stored L1 vector
+	// was made under it and nothing records that. Changing any part needs a re-embed of all of
+	// L1; merge.go copies embedding blobs verbatim between archives, so both sides must agree;
+	// new vectors re-cluster, so every long-arc component gets a new signature and is
+	// re-verified (model calls); and vector.Search ranks a row of another dimension at 0
+	// (Cosine's length guard) instead of failing. Add a schema stamp when an upgrade is planned.
 	Dim               = 384 // e5-small hidden size
 	bosID             = 0   // XLM-R <s>
 	eosID             = 2   // XLM-R </s>
@@ -157,8 +165,8 @@ func sanitizeForTokenizer(text string) string {
 }
 
 // Embed returns the L2-normalized, masked-mean-pooled 384-d vector for one text.
-// Mirrors the verified reference pipeline exactly. It normalizes and sanitizes text before tokenizing, and converts a tokenizer panic
-// into an error.
+// Mirrors the verified reference pipeline exactly. It normalizes and sanitizes text before tokenizing, and converts a panic
+// anywhere in the embed (tokenizer or model exec) into an error.
 //
 // Both guards are load-bearing, not defensive noise. The tokenizer indexes the input by
 // byte offsets and PANICS (index/slice out of range) on two ordinary inputs: text in NFD
@@ -176,7 +184,7 @@ func (e *Embedder) Embed(text string) (vec []float32, err error) {
 	defer e.mu.Unlock()
 	defer func() {
 		if r := recover(); r != nil {
-			vec, err = nil, fmt.Errorf("embed: tokenizer panicked on this input: %v", r)
+			vec, err = nil, fmt.Errorf("embed: panicked on this input: %v", r)
 		}
 	}()
 

@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -46,7 +47,7 @@ func buildTraits(in *store.ViewInput, loc *time.Location) ([]Notebook, []Trait, 
 		n := &in.Notes[i]
 		notes[n.ID] = n
 		lensNotes[n.Lens]++
-		if !strings.HasPrefix(n.Session, "file:") {
+		if !platform.IsCorpusSession(n.Session) {
 			lensConv[n.Lens]++
 		}
 	}

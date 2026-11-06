@@ -7,8 +7,8 @@ import (
 
 // distillInputs is the source-specific L0 -> model-input seam. It resolves the
 // session's OWNING platform (persisted session_meta.platform, else id prefix, else
-// Claude) and delegates to that platform's InputRenderer under the config's chunk
-// policy. This replaces the old inline "opencode:" prefix check + the duplicated
+// Claude) and shapes by that platform's rule (platform.RenderInputsFor) under the
+// config's chunk policy. This replaces the old inline "opencode:" prefix check + the duplicated
 // chunker, so the shaping rule lives in exactly one place per platform (issue #21).
 // This is the PER-SESSION axis — independent of which runner (engine) does the mining.
 //
@@ -18,5 +18,5 @@ import (
 // shape identically and neither under-extracts a long session.
 func distillInputs(st store.SessionPlatformReader, cfg store.Config, session string, raw []store.RawRecord) []string {
 	policy := platform.ChunkPolicy{MaxChars: cfg.ChunkMaxChars}
-	return platform.ForSession(st, session).RenderInputs(raw, policy)
+	return platform.RenderInputsFor(platform.ForSession(st, session), raw, policy)
 }

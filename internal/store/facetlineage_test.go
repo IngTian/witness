@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -32,19 +33,44 @@ func lf(lens, dim, key, value string) Facet {
 	}
 }
 
-// The delayed-data-loss case. If WriteFacets drops these columns, compaction appears to work
-// and is silently reverted by the next review.
-func TestArchiveStateSurvivesTheReviewWriteBack(t *testing.T) {
+// EVERY facet column must survive the review write-back. The reviewer reads the whole profile and
+// rewrites it each fold, so a column WriteFacets drops is not lost at write time but erased on the
+// next review: compaction silently reverts (archived_at), claims vanish and the full prose goes back
+// into every review call (claim), decay is disabled (confidence_seq). The claim column was dropped
+// exactly this way once. Per-column tests caught 6 of 8 column-zeroing mutations; last_seen and
+// recorded_at survived repo-wide, though merge and view read them.
+//
+// Needs a REAL store: a fake holding the slice in memory cannot catch a missing SQL column.
+func TestFacetRoundTripsEveryField(t *testing.T) {
 	s := lineageStore(t)
-	absorbed := lf("default", "thinking", "absorbed", "narrow value")
-	absorbed.ArchivedAt = "2026-10-02T00:00:00Z"
-	absorbed.MergedInto = "thinking/survivor"
-	if err := s.WriteFacets([]Facet{lf("default", "thinking", "survivor", "broad value"), absorbed}); err != nil {
+	in := []Facet{
+		lf("default", "thinking", "survivor", "broad value"),
+		{
+			Lens: "default", Dimension: "thinking", Key: "absorbed", LastSeen: "2026-10-03T00:00:00Z",
+			ArchivedAt: "2026-10-04T00:00:00Z", MergedInto: "thinking/survivor", ArchiveReason: "one shared mechanism",
+			Versions: []FacetVersion{{
+				Value: "the full analysis, which is long", Claim: "He checks state before acting.",
+				ValidFrom: "2026-09-01T00:00:00Z", ValidTo: "2026-10-04T00:00:00Z", RecordedAt: "2026-10-02T00:00:00Z",
+				BecauseOf: []string{"obs-1", "obs-2"}, Confidence: 0.8, ConfidenceSeq: 4242,
+			}},
+		},
+	}
+	// Every field of the fixture must be set, or a column that is dropped round-trips its zero
+	// value and DeepEqual passes. A field added to Facet/FacetVersion fails here until it is.
+	nonZero := func(v reflect.Value, where string) {
+		for i := 0; i < v.NumField(); i++ {
+			if v.Field(i).IsZero() {
+				t.Fatalf("fixture leaves %s.%s zero, so a dropped column would go unnoticed", where, v.Type().Field(i).Name)
+			}
+		}
+	}
+	nonZero(reflect.ValueOf(in[1]), "Facet")
+	nonZero(reflect.ValueOf(in[1].Versions[0]), "FacetVersion")
+
+	if err := s.WriteFacets(in); err != nil {
 		t.Fatal(err)
 	}
-
-	// Simulate exactly what a review does: read everything, write it all back unchanged.
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 3; i++ { // three folds' worth of read-everything, write-it-all-back
 		all, err := s.ReadFacets()
 		if err != nil {
 			t.Fatal(err)
@@ -53,29 +79,27 @@ func TestArchiveStateSurvivesTheReviewWriteBack(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-
-	all, err := s.ReadFacets()
+	got, err := s.ReadFacets()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Fatalf("both facets must survive, got %d", len(all))
+	// ReadFacets orders by lens, dimension, key: "absorbed" sorts before "survivor".
+	want := []Facet{in[1], in[0]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("facets changed across the write-back:\n got %+v\nwant %+v", got, want)
 	}
-	var found bool
-	for _, f := range all {
-		if f.Key != "absorbed" {
-			continue
-		}
-		found = true
-		if f.Active() {
-			t.Error("archived_at was lost across the write-back — compaction would silently revert")
-		}
-		if f.MergedInto != "thinking/survivor" {
-			t.Errorf("merged_into was lost across the write-back, got %q", f.MergedInto)
-		}
+
+	// What the columns are FOR, read back through the accessors that consume them.
+	absorbed := got[0]
+	if absorbed.Active() {
+		t.Error("an archived facet reads as active — compaction would silently revert")
 	}
-	if !found {
-		t.Fatal("the archived facet disappeared entirely")
+	v := absorbed.Versions[0]
+	if v.Gist() != v.Claim {
+		t.Errorf("Gist should return the claim, got %q", v.Gist())
+	}
+	if d := v.DecayedConfidence(v.ConfidenceSeq + int64(FacetDecayHalfLifeObs)); d >= v.Confidence {
+		t.Errorf("a surviving decay clock should produce decay, got %v", d)
 	}
 }
 
@@ -291,69 +315,6 @@ func TestMigrationAddsALateColumnToAnAlreadyStampedVersion(t *testing.T) {
 	}
 	if all[0].ArchiveReason != "" {
 		t.Errorf("a migrated facet has no archive reason yet, got %q", all[0].ArchiveReason)
-	}
-}
-
-func TestArchiveReasonSurvivesTheWriteBack(t *testing.T) {
-	s := lineageStore(t)
-	f := lf("default", "thinking", "absorbed", "v")
-	f.ArchivedAt, f.MergedInto, f.ArchiveReason = "2026-10-02T00:00:00Z", "thinking/survivor", "one shared mechanism"
-	if err := s.WriteFacets([]Facet{lf("default", "thinking", "survivor", "v"), f}); err != nil {
-		t.Fatal(err)
-	}
-	// Same round-trip a review performs, which is where a dropped column would surface.
-	all, _ := s.ReadFacets()
-	if err := s.WriteFacets(all); err != nil {
-		t.Fatal(err)
-	}
-	all, _ = s.ReadFacets()
-	for _, got := range all {
-		if got.Key == "absorbed" && got.ArchiveReason != "one shared mechanism" {
-			t.Errorf("the merge reason was lost across the write-back, got %q", got.ArchiveReason)
-		}
-	}
-}
-
-// The claim has to survive the same review write-back the archive state does: the reviewer
-// reads the whole profile and rewrites it every fold, so a column dropped on write would erase
-// every claim on the next review rather than at claim time — a silent, delayed loss that would
-// quietly put the full prose back into every review call.
-//
-// Needs a REAL store: a fake that holds the slice in memory cannot catch a missing SQL column,
-// which is exactly how the first version of this passed while the column was being dropped.
-func TestClaimSurvivesTheWriteBack(t *testing.T) {
-	s := lineageStore(t)
-	f := lf("default", "thinking", "claimed", "the full analysis, which is long")
-	f.Versions[0].Claim = "He checks state before acting."
-	if err := s.WriteFacets([]Facet{f}); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 3; i++ { // three folds' worth of read-modify-write
-		all, err := s.ReadFacets()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.WriteFacets(all); err != nil {
-			t.Fatal(err)
-		}
-	}
-	all, err := s.ReadFacets()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all) != 1 {
-		t.Fatalf("want 1 facet, got %d", len(all))
-	}
-	cur := all[0].Current()
-	if cur.Claim != "He checks state before acting." {
-		t.Errorf("the claim was lost across the write-back, got %q", cur.Claim)
-	}
-	if cur.Value != "the full analysis, which is long" {
-		t.Errorf("the value must be preserved too, got %q", cur.Value)
-	}
-	// And Gist prefers the claim, which is what shrinks the review call.
-	if cur.Gist() != cur.Claim {
-		t.Errorf("Gist should return the claim, got %q", cur.Gist())
 	}
 }
 

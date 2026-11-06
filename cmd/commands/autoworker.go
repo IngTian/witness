@@ -44,15 +44,15 @@ func newInternalWorkerKickCmd() *cobra.Command {
 // review-only work.
 func maybeSpawnAutoWorker(st *store.Store) bool {
 	cfg := st.LoadConfig()
-	// Clear the durable stop flag FIRST, before the should-start gate. `distill stop
+	// Clear the durable stop flag FIRST, before the should-start gate. `worker stop
 	// --auto-only` (the OpenCode plugin's dispose) latches it, and an auto worker refuses
 	// to run while it is set — so it must be released by the mere ARRIVAL of a fresh
 	// auto-start intent, not by a successful spawn. Clearing it after the gate would leave
 	// a user frozen whenever the gate declines for a transient reason (no pending work
 	// yet, a worker already live, the embedding model still downloading): the flag would
 	// survive to block every later start too.
-	if st.MetaString("worker_stop_requested") == "1" {
-		_ = st.SetMetaString("worker_stop_requested", "")
+	if st.MetaString(metaWorkerStopRequested) == "1" {
+		_ = st.SetMetaString(metaWorkerStopRequested, "")
 	}
 	pending, _ := st.PendingSessions(activeLensNames(st))
 	modelReady := embed.ModelReady()
@@ -62,7 +62,7 @@ func maybeSpawnAutoWorker(st *store.Store) bool {
 		}
 		return false
 	}
-	_ = st.SetMetaString("worker_mode", "auto-pending")
+	_ = st.SetMetaString(metaWorkerMode, workerModeAutoPending)
 	spawnDetached("worker-run", "--auto")
 	return true
 }

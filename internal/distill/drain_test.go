@@ -39,24 +39,20 @@ func drainWorker(s *store.Store, run MineFunc) *Worker {
 	return &Worker{
 		Store:    s,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		Run:      run,
 	}
 }
 
 func TestEffectiveConcurrency(t *testing.T) {
-	// Not safe → always 1, whatever the ask.
-	if got := EffectiveConcurrency(8, false); got != 1 {
-		t.Fatalf("unsafe runner must clamp to 1, got %d", got)
-	}
-	// Safe, want<1 → floor at 1.
-	if got := EffectiveConcurrency(0, true); got != 1 {
+	// want<1 → floor at 1.
+	if got := EffectiveConcurrency(0); got != 1 {
 		t.Fatalf("want<1 must floor to 1, got %d", got)
 	}
-	// Safe, small want → honored (GOMAXPROCS on CI is >= 2).
-	if got := EffectiveConcurrency(2, true); got != 2 {
-		t.Fatalf("safe runner should honor want=2 (GOMAXPROCS>=2), got %d", got)
+	// Small want → honored (GOMAXPROCS on CI is >= 2).
+	if got := EffectiveConcurrency(2); got != 2 {
+		t.Fatalf("want=2 should be honored (GOMAXPROCS>=2), got %d", got)
 	}
 	// A huge want must be clamped to min(maxMineConcurrency, GOMAXPROCS) — never
 	// spawn hundreds of `claude -p` (memory, not cores, is the binding constraint).
@@ -64,7 +60,7 @@ func TestEffectiveConcurrency(t *testing.T) {
 	if n := runtime.GOMAXPROCS(0); n < ceiling {
 		ceiling = n
 	}
-	if got := EffectiveConcurrency(1000, true); got != ceiling {
+	if got := EffectiveConcurrency(1000); got != ceiling {
 		t.Fatalf("want=1000 must clamp to min(maxMineConcurrency=%d, GOMAXPROCS)=%d, got %d", maxMineConcurrency, ceiling, got)
 	}
 }

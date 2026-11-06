@@ -7,8 +7,8 @@ import (
 // rawIO is the L0 ground-truth concern: the append-only `raw` transcript plus the
 // read-side size/sampling/pruning helpers over it. A DB leaf — holds only the shared
 // *sql.DB. The distillation watermark that COUNTS raw records lives on the queue
-// concern; rawIO owns the transcript itself and the raw-generation id (MaxRawID) the
-// watermark CAS gates on.
+// concern; rawIO owns the transcript itself and the raw-generation id (ReadRawSnapshot's
+// high id) the watermark CAS gates on.
 type rawIO struct{ db *sql.DB }
 
 // --- raw capture --------------------------------------------------------------
@@ -236,18 +236,6 @@ func (r *rawIO) LastDistilledRawTS() string {
 // NextSeq returns the next per-session ordinal (== current record count).
 func (r *rawIO) NextSeq(session string) int { return r.RawCount(session) }
 
-// MaxRawID returns the highest raw.id for a session — the session's raw
-// "generation". raw.id is INTEGER PRIMARY KEY AUTOINCREMENT, so an id is NEVER
-// reused after its row is deleted (that's the AUTOINCREMENT guarantee); a replace-
-// import (DELETE + re-INSERT) therefore always yields a strictly higher max id
-// than what a worker read before the replace. That property is what makes the
-// watermark CAS below sound. Returns 0 for a session with no raw rows.
-func (r *rawIO) MaxRawID(session string) int64 {
-	var id int64
-	_ = r.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM raw WHERE session = ?`, session).Scan(&id)
-	return id
-}
-
 // RawPruneStats reports how many sessions and raw records PruneSessionsBefore
 // would remove for the given cutoff (an RFC3339 timestamp): every session whose
 // most recent L0 record predates it. Read-only — for the cleanup preview.
@@ -269,15 +257,18 @@ func (r *rawIO) RawPruneStats(cutoff string) (sessions, records int, err error) 
 // silently destructive — a wiped review watermark re-folds the whole L1 history into L2 —
 // whereas a namespace this list forgets merely leaks one dead row. Fail safe, not destructive.
 //
-// The store deliberately does not import the platform packages that own these constants (the
-// bottom of the stack imports nothing internal), so the strings are duplicated here; the paired
-// constants live at internal/platform/opencode/import.go and cmd/commands/ingest.go, and
-// prunemeta_lens_test.go pins that this list stays in sync with them.
-var PerSessionMetaNamespaces = []string{
-	"codex_import_state",   // Codex source revisions and message keys
-	"opencode_import_keys", // OpenCode import dedup state
-	"file_import_keys",     // `witness ingest` dedup state
-}
+// The store OWNS these spellings and every producer (the codex and opencode importers, `witness
+// ingest`) builds its key from the constants below, so a rename moves both sides at once. They
+// used to be duplicated literals checked against a third literal, so renaming a producer passed
+// every test while its rows silently stopped being reaped and merged — and a merge that drops a
+// session's import state makes the next import replace and re-mine it, appending its L1 twice.
+const (
+	CodexImportStateNS   = "codex_import_state"   // Codex source revisions and message keys
+	OpenCodeImportKeysNS = "opencode_import_keys" // OpenCode import dedup state
+	FileImportKeysNS     = "file_import_keys"     // `witness ingest` dedup state
+)
+
+var PerSessionMetaNamespaces = []string{CodexImportStateNS, OpenCodeImportKeysNS, FileImportKeysNS}
 
 // PruneSessionsBefore deletes the raw transcript (L0) plus the queue/meta rows of
 // every session whose most recent L0 record predates cutoff (RFC3339). Derived
