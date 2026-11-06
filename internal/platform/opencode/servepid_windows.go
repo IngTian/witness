@@ -21,10 +21,10 @@ import (
 // Corroboration uses WMIC's CommandLine for exactly that pid and applies the same
 // private-serve fingerprint as the Unix sweep (isStrayServeLine), so both platforms agree on
 // what counts as ours. Notes on the mechanics:
-//   - `wmic process where processid=N get commandline` prints a "CommandLine" header plus the
-//     value; we hand the whole output to the fingerprint, which scans fields, so the header is
-//     harmless. If the process is gone WMIC prints "No Instance(s) Available." and the
-//     fingerprint rejects it.
+//   - `wmic ... get commandline /value` prints `CommandLine=<value>`; wmicValue extracts the
+//     value for the fingerprint (the default table format's header is NOT harmless — see
+//     below). If the process is gone WMIC prints "No Instance(s) Available." and nothing
+//     matches.
 //   - WMIC is deprecated on Windows 11+ but still present; PowerShell would be the successor
 //     and costs ~100x the startup. A missing WMIC yields an error here, which fails CLOSED
 //     (no kill) — the deliberate choice, since a leaked serve is recoverable and killing the

@@ -9,17 +9,15 @@ import (
 	"strings"
 )
 
-// desktopShimMarker identifies the OpenCode DESKTOP app's bundled launcher directory.
-//
-// Installing the desktop app puts a launcher named `opencode` on PATH under a
-// `@opencode-aidesktop` package dir. That launcher starts the GUI; it is not the headless
-// CLI. witness only ever runs non-interactive subcommands (`serve --pure`, `models`,
-// `session export/import`), so resolving to the desktop launcher means the GUI opens (or the
-// process exits with output witness cannot parse) instead of the command running — which is
-// how a machine with both installed reported "native session isolation unavailable" while a
-// perfectly good CLI sat later on the same PATH.
 // desktopMarkers identify directories belonging to the OpenCode DESKTOP app rather than the
 // headless CLI. A match means "skip this PATH entry".
+//
+// Installing the desktop app puts a launcher named `opencode` on PATH. That launcher starts the
+// GUI; it is not the headless CLI. witness only ever runs non-interactive subcommands
+// (`serve --pure`, `models`, `export`, `--version`), so resolving to the desktop launcher means the GUI
+// opens (or the process exits with output witness cannot parse) instead of the command running —
+// which is how a machine with both installed reported "native session isolation unavailable"
+// while a perfectly good CLI sat later on the same PATH.
 //
 // More than one spelling is needed, from the Windows box's own reports: the npm-scoped package dir
 // is `@opencode-aidesktop`, while the app's own data lives under `ai.opencode.desktop` (its crash

@@ -9,7 +9,7 @@ import (
 
 // hideOpenCodeWindow suppresses the console window Windows creates for a child process.
 //
-// witness spawns `opencode` four ways (serve, models, session export, session import) and
+// witness spawns `opencode` several ways (serve, models, export, --version) and
 // every one flashed a blank console on the desktop — the worker is detached with
 // DETACHED_PROCESS, so its children have no console to inherit and Windows allocates a
 // fresh one. HideWindow tells the loader not to show it.
