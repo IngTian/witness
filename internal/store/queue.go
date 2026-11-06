@@ -399,6 +399,18 @@ func (q *queue) OrphanedL0ObservationCount(lens string) int {
 	return n
 }
 
+// ConfidenceLogCount reports how many recorded confidence changes a lens has. These are
+// the third class of data a `lens backfill --fresh` destroys irrecoverably: a re-mine
+// re-creates observations and facets from L0, but earlier confidence changes (what review
+// or compaction set a facet's confidence to, when) cannot be backfilled. Counting them
+// lets the CLI warn before an irreversible delete. Read-only; errors read as 0 like its
+// neighbours.
+func (q *queue) ConfidenceLogCount(lens string) int {
+	var n int
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM confidence_log WHERE lens = ?`, lens).Scan(&n)
+	return n
+}
+
 // SessionsWithNoUsableTimestamp counts sessions whose raw rows carry NO timestamp
 // julianday() can read — so they are invisible to any --since/--until drain.
 //
