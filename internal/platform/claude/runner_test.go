@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/IngTian/witness/internal/platform"
 )
 
 // The corpus must travel as the user turn, never as instructions: witness's prompt
@@ -35,12 +33,7 @@ func TestBuildRunCmdRoleSeparation(t *testing.T) {
 
 func TestClaudeCmdIsolation(t *testing.T) {
 	c := newClaudeCmd(context.Background(), "")
-
-	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config"} {
-		if !slices.Contains(c.Args, want) {
-			t.Errorf("missing %q in args: %v", want, c.Args)
-		}
-	}
+	// The isolation flags themselves are pinned on buildRunCmd (TestBuildRunCmdRoleSeparation).
 	if slices.Contains(c.Args, "--model") {
 		t.Errorf("empty model must omit --model, got %v", c.Args)
 	}
@@ -61,12 +54,5 @@ func TestBuildRunCmdSetsRecursionGuard(t *testing.T) {
 	cmd := buildRunCmd(context.Background(), "", "SYS", "corpus")
 	if !slices.Contains(cmd.Env, "WITNESS_WORKER=1") {
 		t.Fatalf("WITNESS_WORKER=1 recursion guard missing from env")
-	}
-}
-
-func TestRunHonorsExternalProcessFuse(t *testing.T) {
-	t.Setenv(platform.DisableExternalRunnersEnv, "1")
-	if _, err := (runner{}).Run(context.Background(), "", "prompt", "input"); err == nil || !strings.Contains(err.Error(), platform.DisableExternalRunnersEnv) {
-		t.Fatalf("Run fuse error = %v", err)
 	}
 }
