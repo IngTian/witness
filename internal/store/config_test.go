@@ -21,13 +21,13 @@ func TestRecordDriftAccumulates(t *testing.T) {
 	if ts, lens := s.DriftLast(); ts != "" || lens != "" {
 		t.Fatalf("absent last-stamp must be empty, got ts=%q lens=%q", ts, lens)
 	}
-	if err := s.RecordDrift(2, "s1", "codereview"); err != nil {
+	if err := s.RecordDrift(2, "codereview"); err != nil {
 		t.Fatalf("RecordDrift: %v", err)
 	}
 	if got := s.DriftTotal(); got != 2 {
 		t.Fatalf("after +2: want 2, got %d", got)
 	}
-	if err := s.RecordDrift(3, "s2", "math"); err != nil {
+	if err := s.RecordDrift(3, "math"); err != nil {
 		t.Fatalf("RecordDrift: %v", err)
 	}
 	if got := s.DriftTotal(); got != 5 {
@@ -38,7 +38,7 @@ func TestRecordDriftAccumulates(t *testing.T) {
 		t.Fatalf("last-stamp must reflect the most recent drift: ts=%q lens=%q", ts, lens)
 	}
 	// n<=0 is a no-op (never negatively adjusts or clobbers stamps).
-	if err := s.RecordDrift(0, "s3", "ignored"); err != nil {
+	if err := s.RecordDrift(0, "ignored"); err != nil {
 		t.Fatalf("RecordDrift(0): %v", err)
 	}
 	if got := s.DriftTotal(); got != 5 {

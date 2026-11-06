@@ -61,9 +61,11 @@ type RawRecord struct {
 	Text   string `json:"text"`             // verbatim content
 }
 
-// SessionMeta records non-content facts about a session that the worker needs —
-// chiefly the cwd, so it can resolve which repo (and thus which opted-in lens)
-// a session belongs to. Written once, on first capture of a session.
+// SessionMeta is the non-content facts an importer knows about a session: its working
+// directory and start time. ApplyRawImport upserts it (OpenCode, Codex and file imports);
+// Claude Code capture never writes cwd. Nothing on the distillation path reads it — lenses
+// are global, never resolved from a repo — and its one reader is `witness merge`, whose plan
+// names the incoming archive's most common directories ("mostly in ...").
 type SessionMeta struct {
 	Session string `json:"session"`
 	Cwd     string `json:"cwd"`

@@ -151,7 +151,7 @@ type Queue interface {
 	ResetRetry(session, lens string)
 	SetNextAttempt(session, lens string, at time.Time) error
 	SetDrift(session, lens string) error
-	RecordDrift(n int, session, lens string) error
+	RecordDrift(n int, lens string) error
 }
 
 // ReviewStore is the surface the Reviewer drives: read L1 (embeddings slimmed off),
