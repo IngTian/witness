@@ -78,6 +78,20 @@ func workerFlags(args []string) (bool, sessionTimeRange, error) {
 	return auto, timeRange, err
 }
 
+// The worker's liveness meta keys and worker_mode values. Named, because a misspelt key reads
+// as "unset": a typo'd stop key is "no stop requested", and the worker keeps making paid calls.
+const (
+	metaWorkerStopRequested = "worker_stop_requested"
+	metaWorkerMode          = "worker_mode"
+	metaWorkerPID           = "worker_pid"
+	metaWorkerHeartbeat     = "worker_heartbeat"
+	metaWorkerCurrent       = "worker_current"
+
+	workerModeAuto        = "auto"
+	workerModeManual      = "manual"
+	workerModeAutoPending = "auto-pending" // spawned by the auto gate, lock not yet claimed
+)
+
 // runWorker is the SILENT worker run: background wakeups, auto runs, and any caller that has not
 // asked for progress.
 func runWorker(auto bool) (bool, error) {
@@ -117,36 +131,36 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		return false, nil // a consumer already holds the lock; our jobs are on disk for it
 	}
 	defer unlock()
-	if auto && st.MetaString("worker_stop_requested") == "1" {
-		_ = st.SetMetaString("worker_mode", "")
+	if auto && st.MetaString(metaWorkerStopRequested) == "1" {
+		_ = st.SetMetaString(metaWorkerMode, "")
 		return true, nil
 	}
 	if !auto {
-		_ = st.SetMetaString("worker_stop_requested", "")
+		_ = st.SetMetaString(metaWorkerStopRequested, "")
 	}
 	started := time.Now().UTC().Format(time.RFC3339)
 	// No worker_status/worker_started_at: liveness is the flock (issue #75) and the
 	// running/stopping sub-state is DERIVED (see cmdDistillStatus) from the flock plus
 	// worker_stop_requested — storing it too was the redundant third source. The keys
-	// below are the ones still doing work: worker_pid is `distill stop`'s kill target,
-	// worker_mode drives `distill stop --auto-only`, and worker_current/heartbeat are
+	// below are the ones still doing work: worker_pid is `worker stop`'s kill target,
+	// worker_mode drives `worker stop --auto-only`, and worker_current/heartbeat are
 	// diagnostic display (read only while the flock says a worker is live).
-	_ = st.SetMetaString("worker_pid", strconv.Itoa(os.Getpid()))
+	_ = st.SetMetaString(metaWorkerPID, strconv.Itoa(os.Getpid()))
 	if auto {
-		_ = st.SetMetaString("worker_mode", "auto")
+		_ = st.SetMetaString(metaWorkerMode, workerModeAuto)
 	} else {
-		_ = st.SetMetaString("worker_mode", "manual")
+		_ = st.SetMetaString(metaWorkerMode, workerModeManual)
 	}
-	_ = st.SetMetaString("worker_heartbeat", started)
+	_ = st.SetMetaString(metaWorkerHeartbeat, started)
 	// Clear the diagnostic detail on graceful exit so the store doesn't carry a dead
 	// worker's pid/mode/current. Not required for correctness — cmdDistillStatus gates
 	// every read on WorkerActive(), and the next worker overwrites these on start — but
 	// it keeps an idle store clean.
 	defer func() {
-		_ = st.SetMetaString("worker_pid", "")
-		_ = st.SetMetaString("worker_mode", "")
-		_ = st.SetMetaString("worker_current", "")
-		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+		_ = st.SetMetaString(metaWorkerPID, "")
+		_ = st.SetMetaString(metaWorkerMode, "")
+		_ = st.SetMetaString(metaWorkerCurrent, "")
+		_ = st.SetMetaString(metaWorkerHeartbeat, time.Now().UTC().Format(time.RFC3339))
 	}()
 	if timeRange.empty() {
 		defer scheduleRetryWakeup(st)
@@ -160,11 +174,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// (runner_bound) still wins (see ResolveRunner). Per-lens runners layer on top via
 	// newRunnerSet below.
 	cfg.Runner = st.ResolveRunner(cfg)
-	lenses, err := activeLenses(st)
-	if err != nil {
-		slog.Error("load lenses", "err", err)
-		return true, err
-	}
+	lenses := activeLenses(st)
 	// The pending query cross-joins sessions against the ACTIVE lens set (#55). Use
 	// the same loaded lenses the drain will mine, so the queue only offers pairs the
 	// worker can actually process (a config-enabled-but-unloadable lens is excluded by
@@ -173,8 +183,8 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	for i, l := range lenses {
 		lensNames[i] = l.Name
 	}
-	// Cancel the drain context on SIGTERM/SIGINT so a `distill stop` (SIGTERM to the
-	// detached worker) or a Ctrl-C on a foreground `--all` backfill (SIGINT) tears
+	// Cancel the drain context on SIGTERM/SIGINT so a `worker stop` (SIGTERM to the
+	// detached worker) or a Ctrl-C on a foreground drain (SIGINT) tears
 	// down in-flight `claude -p` children too — the ctx threads worker→Drain→
 	// MineSession→Run→exec.CommandContext, and cancelling it sends the child a kill.
 	// Without this, stopping the parent left up to `conc` orphaned children to run to
@@ -195,7 +205,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// start --since ...` printed "nothing pending" with no hint that anything was skipped.
 	if !timeRange.empty() {
 		if n := st.SessionsWithNoUsableTimestamp(); n > 0 {
-			slog.Warn("range drain skips sessions whose raw timestamps are unreadable; an unranged `witness distill start` still mines them",
+			slog.Warn("range drain skips sessions whose raw timestamps are unreadable; an unranged `witness worker run` still mines them",
 				"skipped_sessions", n)
 		}
 	}
@@ -258,7 +268,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// pending without backing off (a commit/read error, not a mining timeout) is
 	// tried once total, so a persistent failure can't spin the loop or re-mine
 	// forever. We only loop again while a pass makes progress (commits > 0).
-	stopRequested := func() bool { return st.MetaString("worker_stop_requested") == "1" }
+	stopRequested := func() bool { return st.MetaString(metaWorkerStopRequested) == "1" }
 
 	// Lazily build the parallel-mining worker the first time there is mining to do;
 	// the embedder loads once and is shared across drain passes (its parsed weights
@@ -349,8 +359,8 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 			Stop:      stopRequested,
 			Attempted: attempted,
 			OnCommit: func(session string) {
-				_ = st.SetMetaString("worker_current", session)
-				_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+				_ = st.SetMetaString(metaWorkerCurrent, session)
+				_ = st.SetMetaString(metaWorkerHeartbeat, time.Now().UTC().Format(time.RFC3339))
 			},
 		}
 		var progress distill.ProgressFunc

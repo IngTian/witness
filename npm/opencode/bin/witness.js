@@ -33,10 +33,10 @@ if (!bin || (!override && !existsSync(bin))) {
 }
 
 // Default the model dir and the distillation runner for this OpenCode package, so
-// a manual `witness doctor` / `distill start` from the npm install behaves the
-// same as the plugin-kicked worker (OpenCode, not the template default claude).
-// Both are non-clobbering fallbacks; an explicit `witness install` still wins
-// (runner_bound), and an already-set env is respected.
+// a manual `witness doctor` / `worker run` from the npm install behaves the
+// same as the plugin-kicked worker (OpenCode, not the built-in default claude).
+// Both are non-clobbering fallbacks; an explicit `witness wire` or `config set runner`
+// still wins (runner_bound), and an already-set env is respected.
 const env = { ...process.env }
 env.WITNESS_ASSETS ||= modelDir()
 // The binary is in a separate per-platform package, so it can't self-locate the

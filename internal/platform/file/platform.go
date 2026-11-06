@@ -17,3 +17,6 @@ func (Platform) Name() string { return "file" }
 // SessionPrefix namespaces ingested sessions in L0 so they never collide with
 // claude: / opencode: (or the unmarked==claude default).
 func (Platform) SessionPrefix() string { return "file:" }
+
+// IsCorpus marks ingested sessions as documents, not conversations (platform.CorpusSource).
+func (Platform) IsCorpus() bool { return true }

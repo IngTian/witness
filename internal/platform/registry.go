@@ -326,6 +326,25 @@ func ForSession(st store.SessionPlatformReader, session string) Platform {
 	return forSessionByPrefix(session)
 }
 
+// CorpusSource is the optional capability of a platform whose sessions are ingested DOCUMENTS
+// (a corpus), not conversations with the user. `witness view` counts activity only from
+// conversations, and asks this rather than spelling an adapter's session prefix.
+type CorpusSource interface{ IsCorpus() bool }
+
+// IsCorpusSession reports whether session belongs to a corpus platform, by session-id prefix.
+// It needs no store and never falls back to Default(), so a caller (or a test) that registered
+// no adapters gets "not a corpus" rather than a panic — which is also why a test feeding it
+// corpus sessions must blank-import the adapter that owns them.
+func IsCorpusSession(session string) bool {
+	for _, p := range registry {
+		if pre := p.SessionPrefix(); pre != "" && strings.HasPrefix(session, pre) {
+			c, ok := p.(CorpusSource)
+			return ok && c.IsCorpus()
+		}
+	}
+	return false
+}
+
 // forSessionByPrefix is the prefix-only resolution (step 2+3), split out so it can
 // be used where no store is available and unit-tested directly.
 func forSessionByPrefix(session string) Platform {

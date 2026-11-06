@@ -29,14 +29,36 @@ func TestAsyncReplyWindowIsBigEnoughAndUsedEverywhere(t *testing.T) {
 		t.Errorf("asyncReplyWindow = %d; a fork carries the source conversation, so the window must "+
 			"comfortably exceed our request + the reply", asyncReplyWindow)
 	}
-	src := readFileForTest(t, "server.go")
-	// No poll site may hardcode a limit; both must derive it from the constant.
-	if strings.Contains(src, "message?limit=20") {
-		t.Error("a poll site still hardcodes ?limit=20 instead of using asyncReplyWindow")
+	// Both poll sites (waitForAsyncReply, replyForMessage) must request exactly that window. Asserted
+	// on the wire: a source count passed with a poll hardcoded to limit=5, because the identifier
+	// still appeared often enough.
+	var mu sync.Mutex
+	var limits []string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		limits = append(limits, r.URL.Query().Get("limit"))
+		mu.Unlock()
+		_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]},` +
+			`{"info":{"id":"a","role":"assistant","time":{"created":2,"completed":3}},"parts":[{"type":"text","text":"[]"}]}]`))
+	})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours"); err != nil {
+		t.Fatal(err)
 	}
-	// Both poll sites (waitForAsyncReply, replyForMessage) must reference the constant.
-	if n := strings.Count(src, "asyncReplyWindow"); n < 3 { // 1 declaration + 2 uses
-		t.Errorf("asyncReplyWindow appears %d times; both poll sites must use it", n)
+	if _, err := srv.replyForMessage(ctx, "sess", "msg_ours"); err != nil {
+		t.Fatal(err)
+	}
+	if len(limits) < 2 {
+		t.Fatalf("expected a poll from each site, got %d", len(limits))
+	}
+	for _, got := range limits {
+		if got != fmt.Sprint(asyncReplyWindow) {
+			t.Errorf("a poll requested limit=%q, want asyncReplyWindow=%d", got, asyncReplyWindow)
+		}
 	}
 }
 
@@ -275,40 +297,6 @@ func TestNoCodePathForksAConversation(t *testing.T) {
 	}
 	if scanned == 0 {
 		t.Fatal("scanned no files — the glob is wrong and this test is vacuous")
-	}
-}
-
-// The scratch session must be created, prompted and (after L1 is durable) deleted — the same
-// lifecycle the plain path uses. This pins that native mining calls createSession, so a future
-// change cannot quietly reintroduce a fork-shaped call under a different name.
-func TestNativeMiningCreatesItsOwnScratchSession(t *testing.T) {
-	src := readFileForTest(t, "native.go")
-	i := strings.Index(src, "func (n *nativeRuntime) run(")
-	if i < 0 {
-		t.Fatal("nativeRuntime.run not found")
-	}
-	end := strings.Index(src[i:], "\n}\n")
-	if end < 0 {
-		t.Fatal("could not delimit nativeRuntime.run")
-	}
-	fn := src[i : i+end]
-
-	if !strings.Contains(fn, "n.server.createSession(ctx, model)") {
-		t.Error("native mining must create a FRESH session (n.server.createSession) — the same call " +
-			"the plain OpenCode path, L2 review, L4 profile and `lens try` all already use")
-	}
-	if strings.Contains(fn, "n.server.fork(") {
-		t.Error("native mining forks the user's conversation again")
-	}
-	if strings.Contains(fn, "importSnapshot(") {
-		t.Error("the snapshot is imported again; that step existed only to give fork() a parent, and " +
-			"the digest check reads the exported BYTES, before any import")
-	}
-	// The export MUST remain: its digest is what refuses to distill a session the user changed
-	// after L0 capture. Dropping it silently would remove that guard.
-	if !strings.Contains(fn, "n.export(ctx, w, snap)") {
-		t.Error("the export was removed; validateExportDigest is the only check that L0 still " +
-			"matches the user's session (`opencode native session changed after L0 capture`)")
 	}
 }
 
@@ -650,6 +638,12 @@ func TestConcurrentRequestsSurviveASeriallyServingProvider(t *testing.T) {
 	prev := openCodeAsyncPollInterval
 	openCodeAsyncPollInterval = time.Millisecond
 	defer func() { openCodeAsyncPollInterval = prev }()
+	// Shrink the generation budget below the ~450ms the LAST waiter queues (3 heads x 150ms) but
+	// above one 150ms generation. Measured from when the provider STARTS, every request fits; measured
+	// from when witness SENT — the #143 bug — the back of the queue dies.
+	prevGen := generateTimeout
+	generateTimeout = 400 * time.Millisecond
+	defer func() { generateTimeout = prevGen }()
 
 	// Four concurrent waiters against the serial provider.
 	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
@@ -699,17 +693,24 @@ func TestGenerationDeadlineStillAppliesOnceStarted(t *testing.T) {
 	prevPoll := openCodeAsyncPollInterval
 	openCodeAsyncPollInterval = time.Millisecond
 	defer func() { openCodeAsyncPollInterval = prevPoll }()
+	prevGen := generateTimeout
+	generateTimeout = 100 * time.Millisecond
+	defer func() { generateTimeout = prevGen }()
 
-	// A ctx shorter than the generation budget stands in for it: the point is that a STARTED
-	// generation which never completes still terminates, rather than waiting the queue allowance.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The ctx is far longer than the shrunk generation budget, so whichever fires first tells us
+	// which mechanism bounded the request: the GENERATION phase must, not the ctx, and not the
+	// 30-minute queue allowance (which a turn never marked as started would fall through to).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	start := time.Now()
-	if _, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours"); err == nil {
+	_, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
+	if err == nil {
 		t.Fatal("a generation that starts and never completes must eventually fail")
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Errorf("took %s to give up on a started-but-never-completing generation", elapsed)
+	if ctx.Err() != nil {
+		t.Fatalf("ran to the context deadline instead of the generation budget: %v", err)
+	}
+	if !strings.Contains(err.Error(), "generation exceeded") {
+		t.Errorf("want the generation-phase error, got %v", err)
 	}
 }
 

@@ -123,6 +123,37 @@ func TestRunFullSuppressesAnAcceptedArcOnceItIsDurable(t *testing.T) {
 	}
 }
 
+// `backfill --fresh` (DeleteLensData) must make a deleted arc verifiable again. The store deletes
+// the emerge_seen keys distill writes, so the two must agree on the spelling: when they could
+// drift, a re-mined arc (identical member ids, so an identical signature) was skipped forever with
+// its facet already deleted (audit fix #8).
+func TestFreshBackfillReVerifiesADeletedArc(t *testing.T) {
+	s := newStore(t)
+	calls := 0
+	accept := func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		return `[{"dimension":"thinking","key":"k","value":"v","confidence":0.8}]`, nil
+	}
+	seedArc(t, s, "a", 6, []float32{1, 0, 0})
+	if err := emergentReviewer(s, accept).RunFull(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 {
+		t.Fatal("precondition: the arc was never verified")
+	}
+	if _, _, err := s.DeleteLensData("math"); err != nil {
+		t.Fatal(err)
+	}
+	seedArc(t, s, "a", 6, []float32{1, 0, 0}) // the re-mine reproduces the same observations
+	calls = 0
+	if err := emergentReviewer(s, accept).RunFull(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 {
+		t.Fatal("after --fresh the arc still reads as verified, so its deleted facet is never restored")
+	}
+}
+
 func facets(t *testing.T, s *store.Store) []store.Facet {
 	t.Helper()
 	f, err := s.ReadFacets()

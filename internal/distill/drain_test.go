@@ -39,7 +39,7 @@ func drainWorker(s *store.Store, run MineFunc) *Worker {
 	return &Worker{
 		Store:    s,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		Run:      run,
 	}

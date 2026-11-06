@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// LoadFromDirUnchecked reads an arbitrary directory, honors the lens.json name, and
-// forces BuiltIn=false.
+// LoadFromDirUnchecked reads an arbitrary directory and honors the lens.json name.
 func TestLoadFromDirUncheckedHonorsConfigName(t *testing.T) {
 	root := t.TempDir()
 	dir := writeLensDir(t, root, "whatever",
@@ -19,9 +18,6 @@ func TestLoadFromDirUncheckedHonorsConfigName(t *testing.T) {
 	}
 	if l.Name != "codereview" {
 		t.Fatalf("name should come from lens.json, got %q", l.Name)
-	}
-	if l.BuiltIn {
-		t.Fatalf("a candidate lens must never be the built-in default")
 	}
 	if len(l.Dimensions) != 2 || l.Extract == "" {
 		t.Fatalf("loaded lens wrong: %+v", l)
@@ -54,44 +50,5 @@ func TestLoadFromDirUncheckedRequiresExtract(t *testing.T) {
 	}
 	if _, err := LoadFromDirUnchecked(dir); err == nil {
 		t.Fatalf("a directory with no extract.md must error")
-	}
-}
-
-// LoadFromDir is STRICT: a lens.json name resolving to a reserved name is rejected. The
-// lenient LoadFromDirUnchecked accepts it (preview never writes). This split is what
-// lets `lens try` fall back to a "candidate" display while the shared strict loader
-// stays uncompromised.
-func TestLoadFromDirStrictRejectsReservedName(t *testing.T) {
-	// Only "unified" is reserved since #44 slice 1a; "default" is an ordinary lens.
-	for _, reserved := range []string{"unified", "UNIFIED", "Unified"} {
-		t.Run(reserved, func(t *testing.T) {
-			root := t.TempDir()
-			dir := writeLensDir(t, root, "innocent", &LensConfig{Name: reserved}, "mine", "synth")
-			// Strict loader rejects.
-			if _, err := LoadFromDir(dir); err == nil {
-				t.Fatalf("LoadFromDir must reject a lens.json name resolving to reserved %q", reserved)
-			}
-			// Lenient loader accepts (a preview can't collide with anything).
-			if _, err := LoadFromDirUnchecked(dir); err != nil {
-				t.Fatalf("LoadFromDirUnchecked must accept reserved %q (preview is read-only): %v", reserved, err)
-			}
-		})
-	}
-	// "default" now loads via the STRICT loader like any ordinary lens.
-	for _, name := range []string{"default", "Default"} {
-		t.Run("allowed/"+name, func(t *testing.T) {
-			root := t.TempDir()
-			dir := writeLensDir(t, root, "innocent", &LensConfig{Name: name}, "mine", "synth")
-			if _, err := LoadFromDir(dir); err != nil {
-				t.Fatalf("LoadFromDir must accept ordinary name %q since #44 slice 1a: %v", name, err)
-			}
-		})
-	}
-}
-
-// A missing directory surfaces the read error, not a nil-lens panic.
-func TestLoadFromDirMissing(t *testing.T) {
-	if _, err := LoadFromDir(filepath.Join(t.TempDir(), "nope")); err == nil {
-		t.Fatalf("expected an error for a missing directory")
 	}
 }

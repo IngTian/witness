@@ -158,7 +158,7 @@ func TestWorkerMinesAgainstFakeQueue(t *testing.T) {
 	w := &Worker{
 		Store:    q,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		Run:      miner.run,
 	}
@@ -242,7 +242,7 @@ func TestMineSessionPassesCapturedTranscriptDigestToNativeRunner(t *testing.T) {
 	w := &Worker{
 		Store:    q,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		NativeFor: func(*lens.Lens) bool {
 			return true

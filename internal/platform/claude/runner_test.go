@@ -2,9 +2,12 @@ package claude
 
 import (
 	"context"
+	"io"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/IngTian/witness/internal/platform"
 )
 
 // The corpus must travel as the user turn, never as instructions: witness's prompt
@@ -28,6 +31,13 @@ func TestBuildRunCmdRoleSeparation(t *testing.T) {
 	// The corpus must be fenced on stdin, not concatenated into the instructions.
 	if cmd.Stdin == nil {
 		t.Fatal("corpus must be passed on stdin")
+	}
+	stdin, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(stdin), platform.WrapCorpus("payload"); got != want {
+		t.Errorf("stdin = %q, want the fenced corpus %q", got, want)
 	}
 }
 

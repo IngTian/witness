@@ -65,7 +65,7 @@ func testWorker(s *store.Store, m *fakeMiner) *Worker {
 	return &Worker{
 		Store:    s,
 		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", BuiltIn: true, Extract: "mine", Dimensions: []string{"thinking"}}},
+		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
 		Config:   store.Config{},
 		Run:      m.run,
 	}
@@ -92,7 +92,7 @@ func TestWorkerRoutesMineToPerLensRunner(t *testing.T) {
 		Store:    s,
 		Embedder: fakeEmbedder{},
 		Lenses: []*lens.Lens{
-			{Name: "default", BuiltIn: true, Extract: "extract-default", Dimensions: []string{"thinking"}},
+			{Name: "default", Extract: "extract-default", Dimensions: []string{"thinking"}},
 			{Name: "cr", Extract: "extract-cr", Runner: "opencode", Dimensions: []string{"thinking"}},
 		},
 		Config: store.Config{Runner: "claude"},
@@ -843,7 +843,7 @@ func twoLensWorker(s *store.Store, r *lensRouter) *Worker {
 		Store:    s,
 		Embedder: fakeEmbedder{},
 		Lenses: []*lens.Lens{
-			{Name: "default", BuiltIn: true, Extract: "mine-default", Dimensions: []string{"thinking"}},
+			{Name: "default", Extract: "mine-default", Dimensions: []string{"thinking"}},
 			{Name: "codereview", Extract: "mine-codereview", Dimensions: []string{"thinking"}},
 		},
 		Config: store.Config{},
