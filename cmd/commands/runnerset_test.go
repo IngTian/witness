@@ -17,6 +17,11 @@ import (
 // registered platform can reach it; the test name-spaces the runtime as "fakeleak").
 var leakFakeCloses int32
 
+// leakFakeOpens counts Open() on this runner and on every fake that embeds it without
+// overriding Open (compactFakeRunner, downFakeRunner): the newer-archive test asserts it stays
+// flat, i.e. no runner set was opened before the refusal.
+var leakFakeOpens int32
+
 // registerLeakFake guards the registration: a second platform.Register panics, so a bare call
 // died under -count=2.
 var registerLeakFake sync.Once
@@ -39,7 +44,7 @@ func (leakFakePlatform) NewRunner(store.Config) platform.Runner { return leakFak
 
 type leakFakeRunner struct{}
 
-func (leakFakeRunner) Open(context.Context) error { return nil }
+func (leakFakeRunner) Open(context.Context) error { atomic.AddInt32(&leakFakeOpens, 1); return nil }
 func (leakFakeRunner) Close() error               { atomic.AddInt32(&leakFakeCloses, 1); return nil }
 func (leakFakeRunner) Run(context.Context, string, string, string) (string, error) {
 	return "[]", nil
