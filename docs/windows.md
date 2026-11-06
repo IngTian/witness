@@ -5,8 +5,9 @@ Windows has no guaranteed shell, so the install path differs from Unix: the bina
 ### Windows
 
 Windows uses a self-contained zip instead of the shell installer (there is no
-guaranteed shell to run the hook shim). Download `witness-windows-amd64.zip`
-(Intel/AMD) or `witness-windows-arm64.zip` from the releases page — each unpacks
+guaranteed shell to run the hook shim). Download `witness-v<version>-windows-amd64.zip`
+(Intel/AMD) or `witness-v<version>-windows-arm64.zip` from the
+[latest release](https://github.com/IngTian/witness/releases/latest) — each unpacks
 to a `witness\` folder holding `witness.exe` and the embedding model. Then, from
 inside that folder in PowerShell:
 
