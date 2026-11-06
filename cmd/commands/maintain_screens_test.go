@@ -436,7 +436,7 @@ func TestStatusRowsAndTheNextStep(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	out := captureStdout(t, func() { _ = cmdDistillStatus(false) })
 	for _, want := range []string{"witness status\n\n", "  worker        - idle\n", "  queue         0 pending · 0 backing off\n",
-		"[!] nothing captured yet — connect an editor\n", "witness wire claude"} {
+		"[!] nothing captured yet — connect an editor\n", wireCommand() + "\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
