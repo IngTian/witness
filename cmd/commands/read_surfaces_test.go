@@ -325,11 +325,11 @@ func TestLensTryFailsOnlyWhenEverySessionFailed(t *testing.T) {
 func TestLensTryTitlesARegisteredLensByItsRegisteredName(t *testing.T) {
 	s := seedTryStore(t, store.RunnerOpenCode)
 	opened := false
-	previous := runnerForStore
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) {
+	previous := runnerForName
+	runnerForName = func(string, store.Config) (platform.Runner, error) {
 		return limitedPreviewRunner{opened: &opened}, nil
 	}
-	t.Cleanup(func() { runnerForStore = previous })
+	t.Cleanup(func() { runnerForName = previous })
 	registerRenamedLens(t, s, "corpus-example", "regime")
 	var err error
 	out := captureStdout(t, func() { err = cmdLensTry("corpus-example", lensTryOpts{nSessions: 1}) })

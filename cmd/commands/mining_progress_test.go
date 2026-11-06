@@ -100,9 +100,9 @@ func lensTryProgress(t *testing.T, r *tryRunner, review bool) (snaps []distill.P
 			t.Fatal(err)
 		}
 	}
-	prevRunner, prevProgress := runnerForStore, tryProgress
-	t.Cleanup(func() { runnerForStore, tryProgress = prevRunner, prevProgress })
-	runnerForStore = func(store.RunnerResolver, store.Config) (platform.Runner, error) { return r, nil }
+	prevRunner, prevProgress := runnerForName, tryProgress
+	t.Cleanup(func() { runnerForName, tryProgress = prevRunner, prevProgress })
+	runnerForName = func(string, store.Config) (platform.Runner, error) { return r, nil }
 	var mu sync.Mutex
 	tryProgress = func() (distill.ProgressFunc, func()) {
 		return func(p distill.Progress) { mu.Lock(); snaps = append(snaps, p); mu.Unlock() },

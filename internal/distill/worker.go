@@ -63,7 +63,7 @@ type MineFunc func(ctx context.Context, model, prompt, input string) (string, er
 
 // RunnerMine adapts a platform.Runner into the MineFunc seam. This keeps the
 // injectable MineFunc for tests while routing production through the single Runner
-// (platform.RunnerFor) resolved once per drain. distill knows only platform.Runner
+// (platform.RunnerForName) resolved once per drain. distill knows only platform.Runner
 // — never which runtime it is.
 func RunnerMine(r platform.Runner) MineFunc {
 	return func(ctx context.Context, model, prompt, input string) (string, error) {

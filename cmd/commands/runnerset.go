@@ -97,10 +97,9 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 // The cfg it mints with carries only the models this runtime should validate at Open — the
 // configured defaults for the default runtime, none for a cross-runtime one.
 // st is currently UNREAD here, and that is a deliberate keep rather than an oversight: openRuntime
-// resolves via platform.RunnerForName (name + cfg), while the sibling entry point platform.RunnerFor
-// takes a store.RunnerResolver to apply the runner-precedence ladder. Any per-runtime resolution that
-// needs the store lands here. Dropping it would touch six call sites to save one parameter, and the
-// judgement is that the symmetry with RunnerFor is worth more than the line — unlike the lenses
+// resolves via platform.RunnerForName (name + cfg) because cfg.Runner was already resolved through
+// the store's precedence ladder once, by the caller. Any per-runtime resolution that needs the store
+// lands here. Dropping it would touch six call sites to save one parameter — unlike the lenses
 // parameter removed in #148, which advertised a model UNION that was never computed.
 func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name string) {
 	rcfg := rs.cfg
@@ -192,14 +191,6 @@ func (e *runnerDownError) Error() string {
 	return "runner " + e.name + " is unavailable this drain (open failed)"
 }
 
-// applyModelUnion sets rcfg's TriageModel/DistillModel to models valid on runtime `name`.
-// For the default runtime it keeps the configured default models (they belong to it). For a
-// NON-default runtime the configured default models are for the wrong runtime, so it clears them
-// (the runner uses its own default) — per-lens models are validated separately by the
-// runner's own Open against the union we pass via ValidateModels in doctor; here we only
-// need Open's prewarm to not choke on a wrong-runtime default model. The per-lens models
-// themselves are passed per-call (ModelFor), and OpenCode's server accepts any configured
-// model per-call, so prewarming the default models is sufficient for Open to succeed.
 // clearCrossRuntimeModels blanks the configured default stage models when minting a runner for a
 // NON-default runtime, because a model name is only valid on its own runtime: passing the
 // Claude-side default to an OpenCode runner would make its Open-time validation reject a name that

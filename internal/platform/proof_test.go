@@ -121,11 +121,11 @@ func TestFakeThirdPlatformDrivesRealEngineEndToEnd(t *testing.T) {
 		t.Fatalf("ForSession = %q, want fake", got)
 	}
 
-	// 3. RunnerFor resolves the fake ENGINE (global axis) — proves runner dispatch is
+	// 3. RunnerForName resolves the fake ENGINE (global axis) — proves runner dispatch is
 	// registry-driven, independent of the session's own platform.
-	runner, err := platform.RunnerFor(st, store.Config{Runner: "fake"})
+	runner, err := platform.RunnerForName("fake", store.Config{})
 	if err != nil {
-		t.Fatalf("RunnerFor(fake): %v", err)
+		t.Fatalf("RunnerForName(fake): %v", err)
 	}
 	if runner.InvocationHint() != "fake-run" {
 		t.Fatalf("resolved the wrong runner: %q", runner.InvocationHint())
