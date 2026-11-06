@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -60,5 +61,31 @@ func TestProfilePullLockHeldTouchesNothing(t *testing.T) {
 
 	if ran, err := ensureProfileFresh(st); ran || err == nil {
 		t.Errorf("control: without the lock the broken prompts should fail, got (%v, %v)", ran, err)
+	}
+}
+
+// `profile --json` still serves the cached profile when the refresh fails, but says so: it used
+// to drop the error, so a script read a stale profile as fresh. MCP get_profile already reports it.
+func TestProfileJSONReportsARefreshFailure(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts")) // seeds the default lens
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	t.Setenv("WITNESS_PROMPTS", t.TempDir()) // broken prompts: the refresh fails before any runner
+	t.Setenv("PATH", t.TempDir())
+
+	out, err := captureStdoutErr(t, func() error { return cmdProfile(nil, true) })
+	if err != nil {
+		t.Fatalf("a failed refresh must not fail the read: %v", err)
+	}
+	var got profileJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if got.RefreshError == "" {
+		t.Errorf("refresh_error is empty, so the failure is invisible to a script:\n%s", out)
 	}
 }
