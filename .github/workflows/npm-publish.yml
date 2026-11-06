@@ -61,8 +61,10 @@ jobs:
           node-version: '22'                          # >= 22.14 required for trusted publishing
           registry-url: 'https://registry.npmjs.org'  # PUBLIC npm, not GitHub Packages
 
-      # Trusted publishing needs npm >= 11.5.1 (newer than what Node 22 bundles).
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm >= 11.5.1 (newer than what Node 22 bundles). A major,
+      # not @latest: this job holds id-token:write, so a new npm major should be a reviewed
+      # bump here, not something the next release silently runs with publish rights.
+      - run: npm install -g npm@11
 
       # Fail fast if the release tag (vX.Y.Z) doesn't match every committed manifest
       # version — 0.0.1 is already published and immutable, so the tag must bump it —
@@ -168,10 +170,16 @@ jobs:
       # --- MCP Registry publish (server.json) --------------------------------
       # Runs only after npm is confirmed live (ordering is load-bearing; see the
       # header comment). OIDC reuses the id-token:write grant — no stored token.
+      # Pinned and checksummed for the same reason: `releases/latest` executed whatever was
+      # uploaded last, unverified, with that grant in scope. runs-on is ubuntu-latest (x64),
+      # hence linux_amd64. To bump: change the tag and take the new hash from that release's
+      # registry_<version>_checksums.txt.
       - name: Install mcp-publisher
         if: github.event_name == 'release'
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          curl -fsSLo mcp-publisher.tar.gz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.7/mcp-publisher_linux_amd64.tar.gz
+          echo "00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
 
       - name: Publish server.json to the MCP Registry
         if: github.event_name == 'release'
