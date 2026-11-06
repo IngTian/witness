@@ -37,13 +37,17 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 
 ## Architecture (where things live)
 
-- `cmd/witness/` — 15-line entry point; calls `commands.Run()`.
-- `cmd/commands/` — one cobra command per file (capture, session, worker, mcp,
-  install, doctor, profile, facets, observations, review, lens, import, distill,
-  cleanup). Shared helpers in `cli.go`; terminal styling in `style.go`.
-- `internal/store/` — SQLite data model + the filesystem/DB-as-queue. `raw`
+- `cmd/witness/` — tiny entry point; calls `commands.Run()`.
+- `cmd/commands/` — the cobra tree, mostly one command per file. The command list is
+  `witness --help`, grouped as in `newRootCmd` (`root.go`); don't copy it here. Hidden:
+  the hook entry points `capture`/`session-start`/`session-end`, `mcp`, `import`, the
+  worker plumbing `worker-run`/`worker-kick`/`worker-wakeup`, and the operator `worker`
+  group. `distill.go`/`review.go` keep the names of removed verbs; they back `worker run`,
+  `worker review` and `status`. Shared helpers in `cli.go`; terminal styling in `style.go`.
+- `internal/store/` — SQLite data model; the DB is the work queue. `raw`
   (L0), `observations` (L1), `facets`/`facet_versions` (L2, bi-temporal),
-  `progress` (distill watermark), `staged`, `meta`. `MaxOpenConns(1)` + WAL +
+  `progress` (per-(session, lens) distill watermark), `staged`, `confidence_log`,
+  `portrait_sources`, `meta`. `MaxOpenConns(1)` + WAL +
   `busy_timeout` is the deliberate concurrency model. `resolveRoot()` picks the
   data dir via `dataDirNames` (adopt-in-place, see invariants below).
 - `internal/distill/` — the worker: mines L0→L1 per lens, reviews L1→L2, and
@@ -58,6 +62,10 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   them, so a copied/installed binary self-locates its assets.
 - `internal/{embed,vector,lens,mcp}/` — embeddings (pure-Go GoMLX), cosine
   search, lens loading, the MCP server.
+- `internal/proc/` — the process-control port (detach, bind-to-parent, reap,
+  terminate) behind one interface with per-OS adapters and a `Fake`.
+- `internal/view/` — builds the read-only HTML snapshot `witness view` opens; Go
+  computes every number, the page only draws (`make view-e2e` checks it headless).
 
 ## Runtime model (important invariants)
 
@@ -66,7 +74,7 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   `codex:`, `file:`; Claude is unprefixed). Import state is source-namespaced.
   A capture source need not provide a distillation runner.
 - **Runners are resolved from the enabled-lens set (process-wide, never
-  repo-scoped).** A **default** `runner` (in `config.toml`, bound by `witness install
+  repo-scoped).** A **default** `runner` (in `config.toml`, bound by `witness wire
   <target>`) distills every session unless overridden, but a lens may declare its own
   `runner` in its `lens.json` (#75 slice 2) — so one drain can span both Claude
   and OpenCode, each lens routed to its runtime. The set of runtimes to open is
