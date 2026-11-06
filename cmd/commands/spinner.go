@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/mattn/go-isatty"
 )
 
 // A minimal spinner for the one place a witness command blocks on a model: read-time L4
@@ -29,9 +28,6 @@ import (
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 const spinnerInterval = 90 * time.Millisecond
-
-// stderrIsTerminal is where the frames go; a var so a test can pin the redirected case.
-var stderrIsTerminal = isatty.IsTerminal(os.Stderr.Fd())
 
 // spinner animates a one-line status until Stop is called. The zero value is not usable; call
 // startSpinner. A nil *spinner is safe to Stop, so callers need no nil check.
@@ -96,10 +92,4 @@ func (s *spinner) Stop() {
 	})
 }
 
-func spaces(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = ' '
-	}
-	return string(b)
-}
+func spaces(n int) string { return strings.Repeat(" ", n) }
