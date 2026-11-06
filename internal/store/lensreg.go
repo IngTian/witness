@@ -138,17 +138,6 @@ func ResolveLensName(dir, fallback string) (string, error) {
 	return fallback, nil
 }
 
-// RegisterLens copies a lens definition DIRECTORY into the registry under `name`,
-// creating/overwriting <root>/lenses/<name>/ with the source's lens.json (optional),
-// extract.md (required — the mining prompt), and review.md (optional). srcDir is the
-// user's authored directory (issue #75: a lens is a directory, not one parsed file);
-// only the LensFiles are copied, so stray files in the source dir are ignored.
-//
-// It is lossless under SELF-REGISTER (srcDir == the registry dir, i.e. the user edited
-// the registered copy in place and re-registered it): ALL source files are read into
-// memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
-// file. And it stages into a sibling .tmp dir then atomically renames into place, so a
-// concurrent worker read never sees a half-built lens directory.
 // ValidLensName is the lens-NAME rule, shared by RegisterLens and by `witness merge`, which
 // brings lens names in from another archive's data and must refuse the same names registration
 // would. A lens name ends up as a profile file name and a meta-key suffix, so an unchecked one
@@ -252,6 +241,17 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 	return nil
 }
 
+// RegisterLens copies a lens definition DIRECTORY into the registry under `name`,
+// creating/overwriting <root>/lenses/<name>/ with the source's LensFiles: extract.md
+// (required — the mining prompt) and the optional lens.json, review.md and emerge.md. srcDir
+// is the user's authored directory (issue #75: a lens is a directory, not one parsed file);
+// only the LensFiles are copied, so stray files in the source dir are ignored.
+//
+// It is lossless under SELF-REGISTER (srcDir == the registry dir, i.e. the user edited
+// the registered copy in place and re-registered it): ALL source files are read into
+// memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
+// file. And it stages into a sibling .tmp dir then atomically renames into place, so a
+// concurrent worker read never sees a half-built lens directory.
 func (r *lensReg) RegisterLens(name, srcDir string) error {
 	// Serialize registry mutations (this + SetLensModel) so two concurrent
 	// `witness lens register <same-name>` can't interleave through the shared staging

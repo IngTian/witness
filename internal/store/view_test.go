@@ -9,11 +9,13 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestReadViewInputReadsEverything seeds 2 facets (one archived), 3 notes, 4 raw rows across
 // 2 sessions (one file:) and 2 log rows. It asserts counts, the archived facet present,
-// HighWater equal to the max seq, and Log equal to ReadConfidenceLog().
+// HighWater equal to the max seq, and Log equal to the events written — not to
+// ReadConfidenceLog, which shares ReadViewInput's query and so would agree with any bug in it.
 func TestReadViewInputReadsEverything(t *testing.T) {
 	s := tempStore(t)
 
@@ -114,13 +116,9 @@ func TestReadViewInputReadsEverything(t *testing.T) {
 		t.Errorf("HighWater = %d, want %d", got, want)
 	}
 
-	// Assert Log matches ReadConfidenceLog()
-	expectedLog, err := s.ReadConfidenceLog()
-	if err != nil {
-		t.Fatalf("ReadConfidenceLog: %v", err)
-	}
-	if !reflect.DeepEqual(in.Log, expectedLog) {
-		t.Errorf("Log mismatch:\ngot  %+v\nwant %+v", in.Log, expectedLog)
+	// Assert Log is exactly what was written, in insertion order
+	if !reflect.DeepEqual(in.Log, events) {
+		t.Errorf("Log mismatch:\ngot  %+v\nwant %+v", in.Log, events)
 	}
 }
 
@@ -244,7 +242,9 @@ func TestWriteFileAtomicMode(t *testing.T) {
 
 // TestReadViewInputRollsBackOnError verifies that the transaction is rolled back when an
 // error occurs during ReadViewInput, leaving the store usable. This guards against a leaked
-// open tx that would hang every later call (with MaxOpenConns(1)).
+// open tx that would hang every later call (with MaxOpenConns(1)). The probe runs in a
+// goroutine with a 2s bound: run inline, a leak blocks it forever and the failure surfaces
+// only when `go test` kills the binary 10 minutes later.
 func TestReadViewInputRollsBackOnError(t *testing.T) {
 	s := tempStore(t)
 
@@ -259,8 +259,15 @@ func TestReadViewInputRollsBackOnError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	// The store should still be usable: re-initialize schema and verify a simple operation works
-	if err := s.db.QueryRow(`SELECT 1`).Scan(new(int)); err != nil {
-		t.Errorf("store unusable after ReadViewInput error: %v", err)
+	// The store should still be usable: the one connection must be free again
+	done := make(chan error, 1)
+	go func() { done <- s.db.QueryRow(`SELECT 1`).Scan(new(int)) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("store unusable after ReadViewInput error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("store still blocked 2s after ReadViewInput failed: its transaction leaked")
 	}
 }

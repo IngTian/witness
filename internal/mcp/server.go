@@ -82,7 +82,8 @@ const (
 )
 
 // normalizeRecord validates and clamps record_observation input. Pure (no IO) so
-// it is unit-testable; the quantity bound (StagedCount) is enforced in the handler.
+// it is unit-testable; the quantity bound is enforced atomically in the handler, by
+// StageObservationCapped.
 func normalizeRecord(in recordInput) (recordInput, error) {
 	in.Session = strings.TrimSpace(in.Session)
 	in.Observation = strings.TrimSpace(in.Observation)

@@ -2,6 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -36,50 +39,6 @@ func TestMigrateIdempotentAfterPartialApply(t *testing.T) {
 	}
 	if v != schemaVersion {
 		t.Fatalf("user_version not restored to %d, got %d", schemaVersion, v)
-	}
-}
-
-// A pre-rename database has the raw layer under its old name `l0`. Opening it must
-// rename the table to `raw` in place, preserving the data, remove the legacy table,
-// and stamp the current version — so no deployed DB is bricked or loses history when
-// the on-disk names are modernized. (This migrates from a real v2 `l0` DB, not from
-// a fresh tempStore — the coverage gap that a prior collapse slipped through.)
-func TestMigrateRenamesLegacyL0(t *testing.T) {
-	s := tempStore(t) // fully migrated (has `raw`)
-	// Simulate a legacy v2 DB: replace `raw` with the old `l0` schema + a row.
-	for _, stmt := range []string{
-		`DROP TABLE raw`,
-		`CREATE TABLE l0 (id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL, seq INTEGER NOT NULL,
-			ts TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', effort TEXT NOT NULL DEFAULT '',
-			text TEXT NOT NULL DEFAULT '')`,
-		`CREATE INDEX idx_l0_session ON l0(session, id)`,
-		`INSERT INTO l0(session, seq, role, text) VALUES ('s', 0, 'user', 'hello')`,
-		`PRAGMA user_version=2`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil {
-			t.Fatalf("seed legacy schema (%q): %v", stmt, err)
-		}
-	}
-
-	if err := migrate(s.db); err != nil {
-		t.Fatalf("migrate legacy l0 -> raw: %v", err)
-	}
-
-	// Data survived into `raw`, reachable through the store API.
-	recs, err := s.ReadRaw("s")
-	if err != nil || len(recs) != 1 || recs[0].Text != "hello" {
-		t.Fatalf("data must survive the rename: err=%v recs=%+v", err, recs)
-	}
-	// The legacy table is gone and the version is current.
-	var hasLegacy int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='l0'`).Scan(&hasLegacy)
-	if hasLegacy != 0 {
-		t.Fatalf("legacy l0 table should be gone after migrate")
-	}
-	var v int
-	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
-	if v != schemaVersion {
-		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
 	}
 }
 
@@ -813,22 +772,6 @@ func TestFacetBiTemporalRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStagedCount(t *testing.T) {
-	s := tempStore(t)
-	if got := s.StagedCount("s"); got != 0 {
-		t.Fatalf("empty: want 0, got %d", got)
-	}
-	_ = s.StageObservation(Observation{ID: "a", Session: "s", Observation: "x"})
-	_ = s.StageObservation(Observation{ID: "b", Session: "s", Observation: "y"})
-	_ = s.StageObservation(Observation{ID: "c", Session: "other", Observation: "z"})
-	if got := s.StagedCount("s"); got != 2 {
-		t.Fatalf("session s: want 2, got %d", got)
-	}
-	if got := s.StagedCount("other"); got != 1 {
-		t.Fatalf("session other: want 1, got %d", got)
-	}
-}
-
 func TestStatsSnapshot(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AppendRaw(RawRecord{Session: "a", Seq: 0, Role: "user", Text: "x"})
@@ -1070,6 +1013,43 @@ func TestProfileReadWrite(t *testing.T) {
 	}
 }
 
+// WriteProfile publishes through writeAtomic (temp file + rename), so a reader — `witness
+// profile`, get_profile, export --all — never sees a half-written portrait. os.WriteFile
+// truncated the live file in place instead, and only applied 0600 when it CREATED the file:
+// a profile that already existed at 0644 stayed group/world readable.
+func TestWriteProfileReplacesAtomically(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	s := tempStore(t)
+	if err := os.MkdirAll(s.ProfileDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.ProfileDir(), "math.md")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteProfile("math", "new"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mode alone cannot tell a rename from an in-place write followed by a chmod; the
+	// inode can. A truncate-and-rewrite keeps the inode a concurrent reader is holding.
+	if os.SameFile(before, fi) {
+		t.Fatal("profile rewritten in place (same inode), not replaced")
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("profile mode = %o, want 0600 (the file must be replaced, not rewritten in place)", fi.Mode().Perm())
+	}
+}
+
 func TestWriteFacetsReplacesAll(t *testing.T) {
 	s := tempStore(t)
 	_ = s.WriteFacets([]Facet{
@@ -1145,47 +1125,6 @@ func TestMigrateSurvivesConcurrentWriterDuringMigration(t *testing.T) {
 	// And the schema is usable afterwards.
 	if _, err := s.db.Exec(`SELECT COUNT(*) FROM observations`); err != nil {
 		t.Fatalf("schema unusable after migration: %v", err)
-	}
-}
-
-// beginImmediate must hand back a transaction that already holds the write lock, so a
-// read-then-write sequence inside it cannot hit the un-retryable snapshot upgrade.
-func TestBeginImmediateHoldsWriteLockAndPreservesUserVersion(t *testing.T) {
-	s := tempStore(t)
-	var before int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&before); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := beginImmediate(s.db)
-	if err != nil {
-		t.Fatalf("beginImmediate: %v", err)
-	}
-	// Read then write inside the tx — the shape that used to abort.
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&n); err != nil {
-		tx.Rollback()
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS probe_immediate(x TEXT)`); err != nil {
-		tx.Rollback()
-		t.Fatalf("write inside an immediate tx must succeed: %v", err)
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatalf("rollback: %v", err)
-	}
-	// The lock-acquiring write is a semantic no-op: user_version is unchanged, and the
-	// rolled-back probe table is gone.
-	var after int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&after); err != nil {
-		t.Fatal(err)
-	}
-	if after != before {
-		t.Fatalf("beginImmediate changed user_version: %d -> %d", before, after)
-	}
-	var probes int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='probe_immediate'`).Scan(&probes)
-	if probes != 0 {
-		t.Fatal("rollback did not undo the probe table")
 	}
 }
 

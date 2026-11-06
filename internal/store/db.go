@@ -17,8 +17,7 @@ import (
 // a future binary can detect and migrate older databases instead of silently
 // misreading them. History: two earlier dev-only versions existed (the
 // staged-uniqueness index from v2 is folded into schemaV1 as a plain CREATE ... IF
-// NOT EXISTS, and the v2->v3 `l0`->`raw` rename is a guarded legacy step in
-// migrate()); v4 adds session_meta.platform (the per-session owning-platform axis,
+// NOT EXISTS); v4 adds session_meta.platform (the per-session owning-platform axis,
 // issue #21) via a guarded ADD COLUMN + one-time prefix backfill in migrate();
 // v5 re-keys the distillation watermark from PK(session) to PK(session, lens) so a
 // single lens can be backfilled without re-mining every lens (issue #55) — a
@@ -268,8 +267,7 @@ func beginImmediateOn(ctx context.Context, b txBeginner) (*sql.Tx, error) {
 }
 
 // migrate brings the schema from the database's current user_version up to
-// schemaVersion: a guarded legacy rename (if needed), the full current schema applied
-// idempotently, then one guarded step per change schemaV1's CREATE ... IF NOT EXISTS
+// schemaVersion: the full current schema applied idempotently, then one guarded step per change schemaV1's CREATE ... IF NOT EXISTS
 // cannot make to an EXISTING table (added columns, rebuilt tables, indexes on added
 // columns, data repairs).
 //
@@ -282,16 +280,14 @@ func beginImmediateOn(ctx context.Context, b txBeginner) (*sql.Tx, error) {
 //
 // The steps run in code order, which is NOT version order. Only these rules constrain it:
 //
-//  1. The legacy l0 -> raw rename runs before schemaV1, or schemaV1 creates an empty
-//     `raw` beside the real one.
-//  2. schemaV1 runs before every other step, and must never reference a column a
+//  1. schemaV1 runs before every other step, and must never reference a column a
 //     later step adds: on an old archive its CREATE TABLE IF NOT EXISTS is a no-op, so
 //     an index there on such a column fails the whole migration (#171/#174). Those
 //     indexes live in the step that adds their column.
-//  3. A table REBUILD precedes every step that alters the same table, or its DROP
+//  2. A table REBUILD precedes every step that alters the same table, or its DROP
 //     TABLE discards their work: the progress rebuild (v5) before its indexes (v6) and
 //     drift_at (v7).
-//  4. A step precedes every step that reads what it creates: the observations rebuild
+//  3. A step precedes every step that reads what it creates: the observations rebuild
 //     (v8, which creates seq) before the confidence_seq backfill (v12) and the
 //     decay-clock repair (v13), which both read MAX(seq); v12 before v13, which writes
 //     the column v12 adds.
@@ -319,35 +315,14 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 
-	// v2 -> v3: legacy rename FIRST (rule 1). A pre-rename DB has the raw layer under its
-	// old name `l0` and no `raw`; rename it in place (preserving the data) before schemaV1
-	// would otherwise create an empty `raw` beside it. Guarded on `l0` present AND `raw`
-	// absent, so it's a no-op on fresh DBs and on any re-run. ALTER TABLE RENAME has
-	// no IF EXISTS form, hence the explicit existence checks.
-	var hasL0, hasRaw int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='l0'`).Scan(&hasL0); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("check legacy l0: %w", err)
-	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='raw'`).Scan(&hasRaw); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("check raw: %w", err)
-	}
-	if hasL0 > 0 && hasRaw == 0 {
-		if _, err := tx.Exec(legacyL0Rename); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("rename legacy l0 -> raw: %w", err)
-		}
-	}
-
-	// The full current schema, UNCONDITIONALLY (rule 2). Every statement is
+	// The full current schema, UNCONDITIONALLY (rule 1). Every statement is
 	// CREATE ... IF NOT EXISTS, so it creates everything on a fresh DB and is a
 	// harmless no-op on an existing one. Applying it regardless of the stored
 	// version means a DB at ANY prior version converges to the current schema —
 	// there is no "version landed between steps, so a CREATE got skipped" trap.
 	// Future additive changes extend schemaV1 (a new table, a column on a new
 	// table); a change to an existing table goes BELOW this as its own guarded,
-	// idempotent step. Only the legacy rename runs before it.
+	// idempotent step.
 	if _, err := tx.Exec(schemaV1); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("apply schema: %w", err)
@@ -378,7 +353,7 @@ func migrate(db *sql.DB) error {
 	}
 
 	// v5 -> v6: hot-path indexes on the (session, lens)-keyed progress table
-	// (issue #73-S3). MUST come after the v5 rebuild (rules 2, 3): they reference the
+	// (issue #73-S3). MUST come after the v5 rebuild (rules 1, 2): they reference the
 	// `lens` column, which on a pre-v5 DB only exists once migrateProgressPerLens has
 	// rebuilt the table (and that rebuild's DROP TABLE would drop indexes created earlier).
 	// Idempotent CREATE INDEX IF NOT EXISTS, so it's a no-op once they exist.
@@ -407,7 +382,7 @@ func migrate(db *sql.DB) error {
 	// NOT EXISTS won't reshape the existing table (PK change is not an ALTER), so rebuild
 	// explicitly, copying each old rowid INTO the new seq so review watermarks stay valid.
 	// Guarded on the seq column's absence, so it's a no-op on fresh DBs (schemaV1 shape)
-	// and on any re-run. MUST precede the v12 and v13 steps (rule 4): their MAX(seq) reads
+	// and on any re-run. MUST precede the v12 and v13 steps (rule 3): their MAX(seq) reads
 	// the column this rebuild creates.
 	if err := migrateObservationsSeq(tx); err != nil {
 		tx.Rollback()
@@ -428,7 +403,7 @@ func migrate(db *sql.DB) error {
 	}
 
 	// v12 -> v13: restart the decay clock on facet versions COMPACTION wrote without one.
-	// Must follow v12, which creates the column (rule 4). See repairCompactionDecayClock.
+	// Must follow v12, which creates the column (rule 3). See repairCompactionDecayClock.
 	if err := repairCompactionDecayClock(tx, v); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("v13 repair compaction decay clock: %w", err)
@@ -446,7 +421,7 @@ func migrate(db *sql.DB) error {
 	// history, so compaction can take a facet out of the active profile without destroying
 	// it. schemaV1's CREATE ... IF NOT EXISTS won't alter an existing facets table, so add
 	// the columns explicitly (guard on pragma_table_info like the v4/v7 steps), and the
-	// idx_facets_active index after them (rule 2). No backfill: the empty-string column
+	// idx_facets_active index after them (rule 1). No backfill: the empty-string column
 	// DEFAULT is exactly right for every pre-existing facet — all of them are active,
 	// because nothing could archive one before this version.
 	//
@@ -534,8 +509,7 @@ func addSessionPlatformColumn(tx *sql.Tx) error {
 // (session, lens) pair is deliberately left ABSENT so it reads as pending
 // (distilled defaults to 0 via the LEFT JOIN): a newly-enabled lens must NOT
 // inherit default's watermark, or it would falsely claim to have already mined
-// those turns. This mirrors the l0->raw rename discipline: one-time, in place,
-// data-preserving, idempotent.
+// those turns. One-time, in place, data-preserving, idempotent.
 func migrateProgressPerLens(tx *sql.Tx) error {
 	var hasLens int
 	if err := tx.QueryRow(
@@ -990,17 +964,6 @@ CREATE TABLE IF NOT EXISTS confidence_log (
   from_conf REAL NOT NULL DEFAULT 0, to_conf REAL NOT NULL, kind TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_confidence_log_facet ON confidence_log(lens, dimension, key, id);
-`
-
-// legacyL0Rename upgrades a pre-rename database (raw layer shipped as `l0`) to the
-// current `raw` name, in place, preserving the data. Applied by migrate() only
-// when a legacy `l0` exists and `raw` does not. ALTER TABLE RENAME carries the
-// data and the index's table reference; we drop+recreate the index so its NAME
-// follows the rename too.
-const legacyL0Rename = `
-ALTER TABLE l0 RENAME TO raw;
-DROP INDEX IF EXISTS idx_l0_session;
-CREATE INDEX IF NOT EXISTS idx_raw_session ON raw(session, id);
 `
 
 // encodeEmbedding packs a float32 vector into little-endian bytes for a BLOB

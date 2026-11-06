@@ -473,12 +473,19 @@ func (c *configFile) EnsureConfigFile() error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	tpl := `# witness configuration — all fields optional, shown with defaults.
+	// Every value line ships COMMENTED and rendered from DefaultConfig. An active line pins
+	// its value: LoadConfig reads the file over the defaults, so the archive would keep its
+	// creation-time value after the default changed (reproduced on a v0.11.0 archive by
+	// changing the constant). Commented, an archive tracks the built-in defaults until the
+	// user uncomments a line to pin it.
+	d := DefaultConfig()
+	tpl := `# witness configuration — all fields optional. Each commented line shows the current
+# built-in default; uncomment a line to pin your own value.
 # Docs: https://github.com/IngTian/witness#configuration
 
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
 # (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
-# runner = "claude"
+# runner = ` + strconv.Quote(d.Runner) + `
 
 # Two distillation stages, two models:
 #   triage_model  — MINING: L0 turns -> L1 observations, once per session (frequent).
@@ -489,26 +496,26 @@ func (c *configFile) EnsureConfigFile() error {
 # ambient interactive model, which may be heavy; set triage_model to pin a light one.
 # With runner = opencode, use OpenCode model names such as "openai/gpt-5.5".
 # (A lens may override these per-lens via its lens.json extract_model / review_model.)
-triage_model  = ""
-distill_model = ""
+# triage_model  = ` + strconv.Quote(d.TriageModel) + `
+# distill_model = ` + strconv.Quote(d.DistillModel) + `
 
 # Run the reviewer after this many distilled sessions since the last review.
-# Must be >= 1 (a value <= 0 is treated as the default, 5 — it does NOT disable
+# Must be >= 1 (a value <= 0 is treated as the default — it does NOT disable
 # review; to review less often, raise this number).
-review_every = 5
+# review_every = ` + strconv.Itoa(d.ReviewEvery) + `
 # ...or once accumulated observation poignancy crosses this threshold (0 = off).
-review_poignancy = 30
+# review_poignancy = ` + strconv.Itoa(d.ReviewPoignancy) + `
 
 # Automatic distillation is laptop-friendly without keeping the embed model
 # resident: hooks capture immediately, a single-flight lock ensures just one worker
 # runs, and it drains the whole queue (re-checking for new work as it goes) then
 # exits. Set false to distill only on demand via ` + "`witness worker run`" + ` (hidden).
-auto_distill = true
+# auto_distill = ` + strconv.FormatBool(d.AutoDistill) + `
 
 # Sessions mined in parallel per drain (backfill speed). The embedder loads once
 # and is shared; each concurrent distillation call adds ~0.35GB. Clamped to the
-# CPU count and to 1 for a runner that can't run concurrently. <=0 = default (4).
-mine_concurrency = 4
+# CPU count and to 1 for a runner that can't run concurrently. <=0 = default.
+# mine_concurrency = ` + strconv.Itoa(d.MineConcurrency) + `
 
 # Per-input character budget for mining. 0 (default) = mine each session WHOLE — the
 # best-quality path: splitting a session into independent windows loses most of the
@@ -517,7 +524,7 @@ mine_concurrency = 4
 # value (e.g. 200000) ONLY if you have giant sessions whose single whole-session call
 # times out; sessions that fit are unaffected, so this just splits the few offenders.
 # Applies equally to Claude Code and OpenCode sessions.
-chunk_max_chars = 0
+# chunk_max_chars = ` + strconv.Itoa(d.ChunkMaxChars) + `
 
 # Max observation characters folded into the profile in ONE review call. A SAFETY
 # CEILING (like the internal 10-min runner timeout), not a quality dial: a large review
@@ -525,7 +532,7 @@ chunk_max_chars = 0
 # freezes the profile forever. Larger = fewer, slower calls (and, well past this, timeout
 # risk); smaller = more, faster calls. <=0 restores the default. Splitting the fold does
 # not degrade the profile (observations are independent facts).
-review_max_chars = 16000
+# review_max_chars = ` + strconv.Itoa(d.ReviewMaxChars) + `
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math

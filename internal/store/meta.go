@@ -63,32 +63,6 @@ func (m *metaKV) MetaString(key string) string { return metaGet(m.db, key) }
 // SetMetaString stores a small scalar watermark under key.
 func (m *metaKV) SetMetaString(key, value string) error { return metaSet(m.db, key, value) }
 
-// RecordMeta writes session meta once (idempotent: only on first sight).
-//
-// NOTE: retained-but-currently-unused on the Claude Code path — CC capture never
-// calls this, so session_meta.cwd stays empty for CC sessions (only the OpenCode
-// import/capture path, via ApplyRawImport, populates it). The `cwd` column was
-// introduced for repo-scoped lenses ("which repo is this session in → apply that
-// repo's lens"), but that idea was deliberately dropped: lenses are global and
-// nothing is read from a repo, so a cloned repo can't inject a prompt (see
-// internal/lens/lens.go). Kept for the OpenCode writer + a possible future
-// consumer; nothing reads cwd downstream today (ReadMeta has no callers).
-func (m *metaKV) RecordMeta(sm SessionMeta) {
-	_, _ = m.db.Exec(
-		`INSERT OR IGNORE INTO session_meta(session, cwd, started) VALUES (?, ?, ?)`,
-		sm.Session, sm.Cwd, sm.Started)
-}
-
-// ReadMeta returns a session's meta (zero value if absent). Currently has no
-// callers — see the RecordMeta note above (cwd/session_meta is retained for the
-// OpenCode writer and possible future use, not read on any live path).
-func (m *metaKV) ReadMeta(session string) SessionMeta {
-	sm := SessionMeta{Session: session}
-	_ = m.db.QueryRow(`SELECT cwd, started FROM session_meta WHERE session = ?`, session).
-		Scan(&sm.Cwd, &sm.Started)
-	return sm
-}
-
 // SetSessionPlatform records which platform OWNS a session (the per-session axis,
 // issue #21) — distinct from the default distillation runner. Upsert, since a CC
 // session has no session_meta row until now: INSERT the row if absent, else set
@@ -121,18 +95,17 @@ func (m *metaKV) SessionPlatform(session string) string {
 // The total is monotonic across the archive's life; the last_* stamps give doctor a
 // "when/where" so a raised model reads as "0 recent", not "broken forever".
 const (
-	metaDriftTotal       = "mine_drift_total"
-	metaDriftLastTS      = "mine_drift_last_ts"
-	metaDriftLastSession = "mine_drift_last_session"
-	metaDriftLastLens    = "mine_drift_last_lens"
+	metaDriftTotal    = "mine_drift_total"
+	metaDriftLastTS   = "mine_drift_last_ts"
+	metaDriftLastLens = "mine_drift_last_lens"
 )
 
 // RecordDrift atomically adds n to the drift counter and stamps the most recent drift
-// (ts/session/lens), in ONE transaction so a concurrent reader never sees the counter
+// (ts/lens), in ONE transaction so a concurrent reader never sees the counter
 // bumped without its stamps. Called by the sole L1 writer (CommitMining), so there is
 // no cross-process race on the counter beyond what the single-writer model already
 // serializes. Best-effort at the call site: a failure here never fails the commit.
-func (m *metaKV) RecordDrift(n int, session, lens string) error {
+func (m *metaKV) RecordDrift(n int, lens string) error {
 	if n <= 0 {
 		return nil
 	}
@@ -152,7 +125,6 @@ func (m *metaKV) RecordDrift(n int, session, lens string) error {
 	}
 	stamps := [][2]string{
 		{metaDriftLastTS, time.Now().UTC().Format(time.RFC3339)},
-		{metaDriftLastSession, session},
 		{metaDriftLastLens, lens},
 	}
 	for _, kv := range stamps {

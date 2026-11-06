@@ -99,8 +99,12 @@ func TestFreshRaceWouldStampPhantomProgress(t *testing.T) {
 	if err := st.MarkDistilled("s1", "default", 4); err != nil {
 		t.Fatal(err)
 	}
-	// What an in-flight worker already holds in memory.
-	workerTotal, workerHigh := 4, st.MaxRawID("s1")
+	// What an in-flight worker already holds in memory: the one snapshot read it mined from.
+	recs, workerHigh, err := st.ReadRawSnapshot("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerTotal := len(recs)
 
 	// --fresh's destructive section.
 	if _, _, err := st.DeleteLensData("default"); err != nil {

@@ -562,7 +562,7 @@ func (w *Worker) CommitMining(m *SessionMining) error {
 	// (a drift over a since-replaced generation didn't really "happen" for the archive —
 	// the session will re-mine the new generation, so counting it would be misleading).
 	if driftCount > 0 && generationCurrent {
-		if err := w.Store.RecordDrift(driftCount, m.Session, lastDriftLens); err != nil {
+		if err := w.Store.RecordDrift(driftCount, lastDriftLens); err != nil {
 			// Surfacing is best-effort bookkeeping; a meta-write hiccup must never fail a
 			// commit whose L1/watermark writes already succeeded.
 			slog.Warn("distill: could not record drift counter", "session", m.Session, "err", err)
