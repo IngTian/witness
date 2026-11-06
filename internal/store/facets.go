@@ -113,6 +113,15 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 // write L2 in the same transaction as the L0/L1 rows the facets cite, or a crash between the two
 // leaves facets citing observations that never arrived.
 func writeFacetsTx(tx *sql.Tx, facets []Facet) error {
+	// Last line of defence (see ErrArchiveNewer): the INSERT below names only this release's
+	// columns, so on a newer archive the REPLACE would erase what that schema added.
+	v, err := userVersion(tx)
+	if err != nil {
+		return err
+	}
+	if err := refuseNewer(v); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM facets`); err != nil {
 		return err
 	}
