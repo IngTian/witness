@@ -341,10 +341,10 @@ func TestLoadOpenCodeModelsUsesTheCacheWithoutSpawning(t *testing.T) {
 	})
 	t.Cleanup(func() { openCodeModelsCache.Delete(provider) })
 
-	if err := ValidateOpenCodeModelsIn(context.Background(), "", provider+"/m1"); err != nil {
+	if err := ValidateOpenCodeModelsIn(context.Background(), t.TempDir(), provider+"/m1"); err != nil {
 		t.Errorf("a cached model must validate without spawning `opencode models`: %v", err)
 	}
-	err := ValidateOpenCodeModelsIn(context.Background(), "", provider+"/absent")
+	err := ValidateOpenCodeModelsIn(context.Background(), t.TempDir(), provider+"/absent")
 	if err == nil {
 		t.Fatal("a model absent from the cached list must be rejected")
 	}

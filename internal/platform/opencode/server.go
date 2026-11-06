@@ -68,15 +68,12 @@ type OpenCodeServer struct {
 
 	mu      sync.Mutex
 	closed  bool
-	pidFile string // where this serve's pid is recorded; "" = no tracking (no runtimeRoot)
+	pidFile string // where this serve's pid is recorded; "" only for a test-built server
 }
 
 // servePIDPath is where a private serve records its pid, inside the witness-owned OpenCode
-// runtime root. Empty runtimeRoot (the legacy shared-DB path) means no tracking.
+// runtime root.
 func servePIDPath(runtimeRoot string) string {
-	if runtimeRoot == "" {
-		return ""
-	}
 	return filepath.Join(runtimeRoot, ".witness-serve.pid")
 }
 
@@ -130,9 +127,6 @@ type serveRecord struct {
 // costs the user their work.
 func reapPriorServe(runtimeRoot string) {
 	pidFile := servePIDPath(runtimeRoot)
-	if pidFile == "" {
-		return
-	}
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return // no record: nothing to reap
@@ -221,12 +215,10 @@ func serveAnswersOurPassword(rec serveRecord) bool {
 // callers pass the root explicitly.
 func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...string) (*OpenCodeServer, error) {
 	if err := ValidateOpenCodeModelsIn(ctx, runtimeRoot, models...); err != nil {
-		return nil, err
+		return nil, err // also refuses an empty runtimeRoot
 	}
-	if runtimeRoot != "" {
-		if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
-			return nil, fmt.Errorf("mkdir opencode runtime: %w", err)
-		}
+	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir opencode runtime: %w", err)
 	}
 	// Best-effort reap of any orphaned serve from a previous worker that was
 	// SIGKILL'd/OOM-killed before its Go cleanup (Close/ctx-cancel) could run
@@ -839,14 +831,15 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 // ValidateOpenCodeModelsIn ensures configured OpenCode model names are available from
 // `opencode models`, running the probe against the witness-owned runtime root rather than the user's
 // database (the probe opens its OPENCODE_DB read-write). Empty model strings are valid and mean "use
-// OpenCode's default". runtimeRoot "" keeps the ambient env, for callers that have no runtime root
-// yet.
+// OpenCode's default".
 //
-// Its own doc used to say "prefer ValidateOpenCodeModelsIn" — advice printed on the very wrapper it
-// was steering people away from. That wrapper (ValidateOpenCodeModels, which passed "") had no
-// callers and is removed; a doc comment recommending against itself is a sign the shape was already
-// understood to be wrong.
+// runtimeRoot is MANDATORY. "" used to keep the ambient env — the user's own opencode.db — which
+// #152 called a trap when it deleted the wrappers that passed it; this refuses it instead, and
+// StartOpenCodeServerIn calls this first, so serve inherits the refusal.
 func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ...string) error {
+	if runtimeRoot == "" {
+		return fmt.Errorf("opencode isolated runtime root is unavailable")
+	}
 	if err := ValidateOpenCodeCapability(ctx); err != nil {
 		return err
 	}
@@ -938,14 +931,10 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	defer cancel()
 	cmd := openCodeCommand(ctx, "models", "--pure", provider)
 	cmd.Dir = os.TempDir()
-	// Isolated env when we have a runtime root: `opencode models` opens its OPENCODE_DB
-	// read-WRITE (and applies schema migrations), so inheriting the ambient env would
-	// reach into the USER's database from the hot Open/doctor paths — the one thing this
-	// package must never do.
-	cmd.Env = append(os.Environ(), "WITNESS_WORKER=1")
-	if runtimeRoot != "" {
-		cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
-	}
+	// Isolated env: `opencode models` opens its OPENCODE_DB read-WRITE (and applies schema
+	// migrations), so inheriting the ambient env would reach into the USER's database from
+	// the hot Open/doctor paths — the one thing this package must never do.
+	cmd.Env = replaceEnv(append(os.Environ(), "WITNESS_WORKER=1"), isolatedEnv(runtimeRoot))
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -1007,9 +996,7 @@ func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, 
 		"OPENCODE_SERVER_PASSWORD=" + password,
 		"OPENCODE_CONFIG_CONTENT=" + openCodeConfigContent(),
 	})
-	if runtimeRoot != "" {
-		cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
-	}
+	cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
 	// Bind the serve child's lifetime to the worker (issue #54 I2) through the
 	// process-control port: on Linux proc.BindToParent sets Pdeathsig=SIGKILL so the
 	// kernel kills this serve child the instant the worker dies, even on a SIGKILL/OOM
