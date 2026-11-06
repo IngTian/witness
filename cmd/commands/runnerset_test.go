@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,8 +17,14 @@ import (
 // registered platform can reach it; the test name-spaces the runtime as "fakeleak").
 var leakFakeCloses int32
 
-// leakFakeOpens and leakFakeRuns count Open() and Run() calls for testing the self-heal wiring.
-var leakFakeOpens, leakFakeRuns int32
+// leakFakeOpens counts Open() on this runner and on every fake that embeds it without
+// overriding Open (compactFakeRunner, downFakeRunner): the newer-archive test asserts it stays
+// flat, i.e. no runner set was opened before the refusal.
+var leakFakeOpens int32
+
+// registerLeakFake guards the registration: a second platform.Register panics, so a bare call
+// died under -count=2.
+var registerLeakFake sync.Once
 
 // leakFakePlatform is a minimal registered platform whose runner Opens successfully and
 // counts its Closes — used to prove newRunnerSet closes an already-opened non-default
@@ -37,17 +44,9 @@ func (leakFakePlatform) NewRunner(store.Config) platform.Runner { return leakFak
 
 type leakFakeRunner struct{}
 
-func (leakFakeRunner) Open(context.Context) error {
-	atomic.AddInt32(&leakFakeOpens, 1)
-	return nil
-}
-func (leakFakeRunner) Close() error { atomic.AddInt32(&leakFakeCloses, 1); return nil }
-func (leakFakeRunner) Run(_ context.Context, _, prompt, _ string) (string, error) {
-	atomic.AddInt32(&leakFakeRuns, 1)
-	// Return a minimal valid reply. If the prompt contains "RESOLVE", return valid JSON.
-	if strings.Contains(prompt, "RESOLVE") {
-		return `{"links":[],"keywords":[]}`, nil
-	}
+func (leakFakeRunner) Open(context.Context) error { atomic.AddInt32(&leakFakeOpens, 1); return nil }
+func (leakFakeRunner) Close() error               { atomic.AddInt32(&leakFakeCloses, 1); return nil }
+func (leakFakeRunner) Run(context.Context, string, string, string) (string, error) {
 	return "[]", nil
 }
 func (leakFakeRunner) ValidateModels(context.Context, ...string) error { return nil }
@@ -57,8 +56,9 @@ func (leakFakeRunner) ConcurrentRunSafe() bool                         { return 
 // A lens routed to an UNKNOWN runner is circuit-broken (its RunFor returns a failing
 // MineFunc) while lenses on the healthy default runner get a working one — the per-runtime
 // isolation of #75 slice 2. An unknown runner name resolves-fail without spawning any
-// process, so this exercises the breaker without a real runtime.
+// process, and the default runtime is the in-process fake, so no real runtime is touched.
 func TestRunnerSetCircuitBreaksUnknownRunner(t *testing.T) {
+	registerLeakFake.Do(func() { platform.Register(leakFakePlatform{}) })
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	st, err := store.Open()
 	if err != nil {
@@ -66,7 +66,7 @@ func TestRunnerSetCircuitBreaksUnknownRunner(t *testing.T) {
 	}
 	defer st.Close()
 
-	cfg := store.Config{Runner: "claude"} // default runner: claude (Open is a no-op)
+	cfg := store.Config{Runner: "fakeleak"} // default runner: the fake, which answers "[]"
 	lenses := []*lens.Lens{
 		{Name: "default"},                 // default runner → healthy
 		{Name: "bogus", Runner: "nosuch"}, // unknown runner → circuit-broken
@@ -77,20 +77,15 @@ func TestRunnerSetCircuitBreaksUnknownRunner(t *testing.T) {
 	}
 	defer rs.Close()
 
-	// The healthy default-runner lens gets a usable MineFunc (claude's RunnerMine — we don't
-	// call it, just assert it's not the broken sentinel by checking it doesn't error-tag).
 	// The broken lens's MineFunc must return an error without any real call.
 	brokenFn := rs.RunFor(lenses[1])
 	if _, err := brokenFn(context.Background(), "m", "p", "in"); err == nil {
 		t.Fatalf("a lens on an unknown runner must get a failing MineFunc (circuit-broken)")
 	}
 
-	// A lens on the healthy runner must NOT get the broken sentinel — its MineFunc is the
-	// real claude one. We can't invoke claude here, so assert identity: the two lenses
-	// resolve to DIFFERENT MineFuncs (healthy vs broken).
-	healthyFn := rs.RunFor(lenses[0])
-	if healthyFn == nil {
-		t.Fatalf("the healthy default-runner lens must get a non-nil MineFunc")
+	// And the breaker must not spread: the lens on the healthy runtime still MINES.
+	if _, err := rs.RunFor(lenses[0])(context.Background(), "m", "p", "in"); err != nil {
+		t.Fatalf("a broken per-lens runner circuit-broke the healthy default runtime too: %v", err)
 	}
 }
 
@@ -126,7 +121,7 @@ func TestRunnerSetClosesOpenedRunnersWhenDefaultFails(t *testing.T) {
 	}
 	defer st.Close()
 
-	platform.Register(leakFakePlatform{}) // registry is process-global; unique name avoids clashes
+	registerLeakFake.Do(func() { platform.Register(leakFakePlatform{}) })
 	atomic.StoreInt32(&leakFakeCloses, 0)
 
 	cfg := store.Config{Runner: "nosuch-default"}           // default runner is bogus → fatal
