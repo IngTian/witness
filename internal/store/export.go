@@ -122,10 +122,9 @@ func (s *Store) ExportAll(dstDir string, force bool) ([]ExportItem, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("export: stat %s: %w", dstDir, err)
 	}
-	if parent := filepath.Dir(dstDir); parent != "" {
-		if err := os.MkdirAll(parent, 0o700); err != nil {
-			return nil, fmt.Errorf("export: mkdir %s: %w", parent, err)
-		}
+	parent := filepath.Dir(dstDir)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return nil, fmt.Errorf("export: mkdir %s: %w", parent, err)
 	}
 	// Siblings of dstDir, so the swap is a same-filesystem rename (atomic).
 	tmp, bak := dstDir+".witness-tmp", dstDir+".witness-bak"

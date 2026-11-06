@@ -242,12 +242,11 @@ func resolveLink(link TraitLink, facetMap map[facetKey]*Facet) *TraitLink {
 // (direct > partial), and returns them with direct first, then partial, preserving insertion
 // order within each strength. Exported for use by both store and distill packages.
 func DedupeLinks(links []TraitLink) []TraitLink {
-	type lk struct{ lens, dimension, key string }
-	seen := make(map[lk]int) // key -> index in deduped slice
+	seen := make(map[facetKey]int) // key -> index in deduped slice
 	var deduped []TraitLink
 
 	for _, link := range links {
-		k := lk{link.Lens, link.Dimension, link.Key}
+		k := facetKey{link.Lens, link.Dimension, link.Key}
 		idx, exists := seen[k]
 		if !exists {
 			// First occurrence: append and record index.
