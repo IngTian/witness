@@ -82,8 +82,7 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	}
 	defer unlock()
 
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	lenses, err := activeLenses(st)
 	if err != nil {
 		return false, nil, err

@@ -77,8 +77,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	}
 	defer unlock()
 
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	lenses, err := activeLenses(st)
 	if err != nil {
 		return err

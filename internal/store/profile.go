@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // The L4 profile layer: human-readable narrative summaries distilled from the
@@ -98,6 +99,23 @@ func (p *profileFS) ListProfiles() ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// ProfileModTime is when a lens's narrative summary was last written, and whether it exists
+// (missing is exists=false, not an error, as with ReadProfile).
+func (p *profileFS) ProfileModTime(lens string) (time.Time, bool, error) {
+	name, err := profileFileName(lens)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	info, err := os.Stat(filepath.Join(p.ProfileDir(), name))
+	if os.IsNotExist(err) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return info.ModTime(), true, nil
 }
 
 // ReadProfile returns a lens's narrative summary and whether it exists yet (a

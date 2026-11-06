@@ -179,8 +179,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 		return fmt.Errorf("--review needs a REVIEW section in %q, but the lens has none", path)
 	}
 
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
 	// (a single candidate = one runner) and clear the wrong-runtime default models. See
 	// tryRunnerCfg.

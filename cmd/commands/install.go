@@ -596,7 +596,7 @@ func cmdInstall(args []string) error {
 		// The runner it leaves alone is the EFFECTIVE one (ResolveRunner), not the raw config field.
 		using := "the configured runner"
 		if st, err := store.Open(); err == nil {
-			using = st.ResolveRunner(st.LoadConfig())
+			using = st.ResolvedConfig().Runner
 			st.Close()
 		}
 		fmt.Println(resultRow(skipGlyph(), "runner", "unchanged", target+" runs no model; lenses use "+using))
@@ -684,7 +684,7 @@ func bindRunner(target string) error {
 	defer st.Close()
 	// "unchanged" only when an earlier wire or `config set runner` had already bound this runner:
 	// a fresh archive resolves to the template's "claude" without anyone having chosen it.
-	unchanged := st.MetaString("runner_bound") == "1" && st.ResolveRunner(st.LoadConfig()) == target
+	unchanged := st.RunnerBound() && st.ResolvedConfig().Runner == target
 	if err := st.SetRunner(target); err != nil {
 		return fmt.Errorf("write runner to config: %w", err)
 	}

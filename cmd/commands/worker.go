@@ -101,7 +101,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	}
 	defer st.Close()
 	defer setupLogging(st)()
-	cfg := st.LoadConfig()
+	// Resolved here, not just loaded: cfg.Runner is the runtime a lens with no explicit
+	// `# runner` rides, and the target the per-lens router (distill.RunnerFor) compares
+	// against. This is what lets an npm OpenCode user — who never ran `install`, so config
+	// says the default "claude" — distill via OpenCode: their plugin passes
+	// WITNESS_RUNNER=opencode. An explicit `install` choice (runner_bound) still wins (see
+	// ResolveRunner). Per-lens runners layer on top via newRunnerSet below.
+	cfg := st.ResolvedConfig()
 	if auto && !cfg.AutoDistill {
 		return false, nil
 	}
@@ -146,14 +152,6 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		defer scheduleRetryWakeup(st)
 	}
 
-	// Resolve the effective default runner ONCE and overwrite cfg.Runner: it is the runtime
-	// a lens with no explicit `# runner` rides, and the target the per-lens router
-	// (distill.RunnerFor) compares against. This is what lets an npm OpenCode user — who
-	// never ran `install`, so config says the default "claude" — distill via OpenCode:
-	// their plugin passes WITNESS_RUNNER=opencode. An explicit `install` choice
-	// (runner_bound) still wins (see ResolveRunner). Per-lens runners layer on top via
-	// newRunnerSet below.
-	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
 		slog.Error("load lenses", "err", err)

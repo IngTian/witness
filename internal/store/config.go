@@ -247,13 +247,43 @@ const runnerBoundKey = "runner_bound"
 // adoptRunnerBound (at Open) is what stamps the flag for a config that already
 // carries a deliberate runner choice.
 func (c *configFile) ResolveRunner(cfg Config) string {
-	if metaGet(c.db, runnerBoundKey) == "1" {
-		return cfg.Runner
-	}
-	if env := strings.TrimSpace(os.Getenv("WITNESS_RUNNER")); env != "" {
-		return env
+	if c.RunnerOrigin() == RunnerFromEnv {
+		return strings.TrimSpace(os.Getenv("WITNESS_RUNNER"))
 	}
 	return cfg.Runner
+}
+
+// Where ResolveRunner's answer comes from, as RunnerOrigin reports it to a person.
+const (
+	RunnerFromConfig  = "config.toml"
+	RunnerFromEnv     = "$WITNESS_RUNNER"
+	RunnerFromDefault = "built-in default"
+)
+
+// RunnerOrigin is ResolveRunner's precedence ladder itself, so a surface that says where the
+// runner came from can never disagree with the runner that resolved.
+func (c *configFile) RunnerOrigin() string {
+	switch {
+	case c.RunnerBound():
+		return RunnerFromConfig
+	case strings.TrimSpace(os.Getenv("WITNESS_RUNNER")) != "":
+		return RunnerFromEnv
+	}
+	return RunnerFromDefault
+}
+
+// RunnerBound reports whether a runner was bound explicitly (install / wire / `config set
+// runner`), which is what makes config.toml win over $WITNESS_RUNNER.
+func (c *configFile) RunnerBound() bool { return metaGet(c.db, runnerBoundKey) == "1" }
+
+// ResolvedConfig is LoadConfig with Runner already resolved through ResolveRunner — what
+// every caller that will run a model wants. Loading without resolving is the silent bug for
+// an unbound npm OpenCode user: config says the template's "claude", WITNESS_RUNNER says
+// opencode, and a caller that forgot the second step spawns a `claude` they do not have.
+func (c *configFile) ResolvedConfig() Config {
+	cfg := c.LoadConfig()
+	cfg.Runner = c.ResolveRunner(cfg)
+	return cfg
 }
 
 // adoptRunnerBound is a one-time reconciliation run at Open: if the bound flag is
@@ -271,7 +301,7 @@ func (c *configFile) ResolveRunner(cfg Config) string {
 // dead disk, which fail Open outright) simply retries on the next Open, so a legacy
 // active-line archive self-heals to bound — no persistent misresolution.
 func (c *configFile) adoptRunnerBound() {
-	if metaGet(c.db, runnerBoundKey) == "1" {
+	if c.RunnerBound() {
 		return // already bound (via install/config set, or a prior adoption)
 	}
 	data, err := os.ReadFile(c.configPath())

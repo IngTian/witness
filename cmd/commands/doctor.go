@@ -38,11 +38,10 @@ func cmdDoctor(asJSON bool) error {
 		return err
 	}
 	defer st.Close()
-	cfg := st.LoadConfig()
 	// Report the EFFECTIVE runner, resolving the WITNESS_RUNNER env fallback so an
 	// npm OpenCode user (who never bound a runner via install) sees "opencode",
 	// not the misleading template default "claude". Matches what the worker uses.
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	stat := st.Stats(activeLensNames(st))
 	// prose_drift surfacing (#57): a monotonic count of passes where a lens's model
 	// returned no JSON array (likely a below-floor triage model), with the last event's
