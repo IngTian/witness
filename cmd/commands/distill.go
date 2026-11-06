@@ -61,9 +61,8 @@ func cmdDistillStartWith(quiet bool, sinceValue, untilValue string, spawn func(.
 // still single-flight — if a background worker already holds the lock this no-ops
 // with a message rather than running a second concurrent drain.
 //
-// --all is deliberately incompatible with --since/--until: a bounded backfill is
-// just `distill start --since ...` (which the background path already supports);
-// "all" means all.
+// The foreground drain is deliberately incompatible with --since/--until: a bounded drain
+// is `worker run --detach --since ...`; the foreground means the whole backlog.
 //
 // Contract (issue #22 review #2): a foreground backfill MUST NOT report success
 // when the backlog was not actually drained. runWorkerInRange swallows an
@@ -75,7 +74,7 @@ func cmdDistillStartWith(quiet bool, sinceValue, untilValue string, spawn func(.
 //
 // waitBackoffs (issue #56 B4) opts into self-healing transient mining failures: a
 // timed-out/rate-limited session backs off 5m, 10m, ... and drops out of the READY
-// queue, so a plain `--all` returns "backfill incomplete" the instant the queue is
+// queue, so a plain foreground drain returns "backfill incomplete" the instant the queue is
 // momentarily empty even though the session would succeed on retry. With the flag we
 // sleep to the soonest NextBackoffAttempt and re-drain, looping until the backlog is
 // clean OR the soonest retry is further out than backfillMaxWait (a session still
@@ -202,7 +201,7 @@ func backlogUnfinished(pending, backedOff int, waited bool, cause string) error 
 		errRow("cause", cause), retry, errHint("diagnose", "witness doctor"))
 }
 
-// backfillMaxWait bounds how far out a mining backoff the foreground `--all
+// backfillMaxWait bounds how far out a mining backoff the foreground `worker run
 // --wait-backoffs` loop will wait between re-drains. Mining backoff doubles (5m, 10m,
 // 20m, ... — backoffDelay in internal/distill), so 15m waits out the first two retries
 // (attempt 1 → 5m, attempt 2 → 10m: transient outages) but stops once the soonest

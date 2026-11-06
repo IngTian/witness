@@ -44,7 +44,7 @@ func newInternalWorkerKickCmd() *cobra.Command {
 // review-only work.
 func maybeSpawnAutoWorker(st *store.Store) bool {
 	cfg := st.LoadConfig()
-	// Clear the durable stop flag FIRST, before the should-start gate. `distill stop
+	// Clear the durable stop flag FIRST, before the should-start gate. `worker stop
 	// --auto-only` (the OpenCode plugin's dispose) latches it, and an auto worker refuses
 	// to run while it is set — so it must be released by the mere ARRIVAL of a fresh
 	// auto-start intent, not by a successful spawn. Clearing it after the gate would leave

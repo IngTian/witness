@@ -136,10 +136,8 @@ type lensTryJSON struct {
 }
 
 // cmdLensTry runs the read-only preview. It opens its OWN store (independent of cmdLens)
-// and reads only — PreviewMine writes nothing (see distill.PreviewMine). On an OpenCode
-// runner it holds the single-flight WorkerLock for the runner's whole lifetime because
-// OpenCode's Close() runs a process-global sweep that would delete a concurrent worker's
-// in-flight distill session; on Claude (no sweep) it stays lock-free.
+// and reads only — PreviewMine writes nothing (see distill.PreviewMine). It takes no
+// WorkerLock on either runner (see the note at runner.Open below for why).
 func cmdLensTry(file string, opts lensTryOpts) error {
 	st, err := store.Open()
 	if err != nil {
@@ -351,9 +349,8 @@ func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Con
 // `lens try codereview` instead of typing the archive path. It matches only a name with
 // no path separator or extension (so an actual "./foo" or "dir/lens" always stays a
 // directory path the user typed), and only when that name is in RegisteredLenses. Returns
-// ok=false to fall through to path handling. `default` isn't in RegisteredLenses (it's the
-// built-in), so `lens try default` stays a path arg — previewing the built-in isn't the
-// point here.
+// ok=false to fall through to path handling. `default` is an ordinary registered lens once
+// seeded, so `lens try default` previews it like any other.
 func registeredLensPath(st *store.Store, arg string) (string, bool) {
 	if strings.ContainsRune(arg, filepath.Separator) || strings.Contains(arg, "/") || filepath.Ext(arg) != "" {
 		return "", false
@@ -440,7 +437,7 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // when that runner differs from the resolved default. Those models belong to the default
 // runtime; on a different runtime they are a bad model name that would abort OpenCode's
 // Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
-// runtime's own default, mirroring production's applyModelUnion. cfg.Runner must already be
+// runtime's own default, mirroring production's clearCrossRuntimeModels. cfg.Runner must already be
 // the RESOLVED default runner. Pure (returns a modified copy) so it is unit-testable.
 func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
 	defaultRunner := cfg.Runner

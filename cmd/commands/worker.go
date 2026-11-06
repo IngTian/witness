@@ -142,8 +142,8 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// No worker_status/worker_started_at: liveness is the flock (issue #75) and the
 	// running/stopping sub-state is DERIVED (see cmdDistillStatus) from the flock plus
 	// worker_stop_requested — storing it too was the redundant third source. The keys
-	// below are the ones still doing work: worker_pid is `distill stop`'s kill target,
-	// worker_mode drives `distill stop --auto-only`, and worker_current/heartbeat are
+	// below are the ones still doing work: worker_pid is `worker stop`'s kill target,
+	// worker_mode drives `worker stop --auto-only`, and worker_current/heartbeat are
 	// diagnostic display (read only while the flock says a worker is live).
 	_ = st.SetMetaString(metaWorkerPID, strconv.Itoa(os.Getpid()))
 	if auto {
@@ -183,8 +183,8 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	for i, l := range lenses {
 		lensNames[i] = l.Name
 	}
-	// Cancel the drain context on SIGTERM/SIGINT so a `distill stop` (SIGTERM to the
-	// detached worker) or a Ctrl-C on a foreground `--all` backfill (SIGINT) tears
+	// Cancel the drain context on SIGTERM/SIGINT so a `worker stop` (SIGTERM to the
+	// detached worker) or a Ctrl-C on a foreground drain (SIGINT) tears
 	// down in-flight `claude -p` children too — the ctx threads worker→Drain→
 	// MineSession→Run→exec.CommandContext, and cancelling it sends the child a kill.
 	// Without this, stopping the parent left up to `conc` orphaned children to run to

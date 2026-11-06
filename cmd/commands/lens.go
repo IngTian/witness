@@ -436,7 +436,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		// success: report the exact state and the recovery step.
 		return fmt.Errorf("backfill %q --fresh incomplete: dropped this lens's observations + facets and reset its watermark, but another distillation worker is already running so the re-mine + review could not run here — once it finishes, run `witness worker review` to rebuild the facets/profile (or re-run `witness lens backfill %s --fresh`)", name, name)
 	}
-	// End-state check (mirrors `distill start --all`): the RESET lens must be caught
+	// End-state check (mirrors the foreground `worker run`): the RESET lens must be caught
 	// up. runWorker swallows per-session failures, so a nil error alone isn't "done".
 	// Scope the check to JUST this lens (not every active lens): a DIFFERENT lens being
 	// pending or backed off is unrelated to whether THIS single-lens backfill finished,
@@ -481,10 +481,6 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	return nil
 }
 
-// lensShow prints a lens's settings + its two prompts. Both a registered lens and the
-// built-in `default` render the same way (default's settings are hardcoded, not a
-// lens.json, but the view is identical), so the output is a consistent, copyable
-// definition regardless of source.
 // newLensShowCmd builds `witness lens show <name> [--prompts]`. By DEFAULT it prints a
 // compact card (settings + a one-line excerpt and line count of each prompt) so the
 // common "what is this lens" glance is scannable, not a 120-line wall. --prompts prints
