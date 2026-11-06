@@ -65,8 +65,8 @@ ok "$LABEL registered"
 
 # --- optional: put `witness` on PATH for the human subcommands ----------------
 # (profile, doctor, lens, cleanup). Hooks + MCP invoke the shim directly and don't
-# need this; the launcher execs the shim by its real path so GOMLX_BACKEND +
-# CLAUDE_PLUGIN_ROOT resolve. Skipped non-interactively / when already on PATH.
+# need this; the launcher execs the shim by its real path so CLAUDE_PLUGIN_ROOT
+# resolves. Skipped non-interactively / when already on PATH.
 ROOT="$PWD"
 if command -v witness >/dev/null 2>&1; then
   info "witness already on PATH ($(command -v witness)) — leaving it"
@@ -97,7 +97,7 @@ fi
 
 # --- done ---------------------------------------------------------------------
 printf '\n%s%s✓ Installed.%s\n' "$G" "$B" "$X"
-printf '  %switness doctor%s   %s# verify (or: GOMLX_BACKEND=go %s doctor)%s\n' "$B" "$X" "$D" "$BIN" "$X"
+printf '  %switness doctor%s   %s# verify (or: %s doctor)%s\n' "$B" "$X" "$D" "$BIN" "$X"
 case "$TARGET" in
   claude)   printf '  %sthen restart Claude Code (or open /hooks) so the hooks load%s\n\n' "$D" "$X" ;;
   opencode) printf '  %sthen restart OpenCode so the plugin and MCP server load%s\n\n' "$D" "$X" ;;

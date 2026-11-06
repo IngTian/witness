@@ -141,3 +141,20 @@ func TestEmbedHandlesNFDAndInvalidUTF8(t *testing.T) {
 		}
 	}
 }
+
+// The backend is pinned in code, not by the shim's environment. GoMLX's backends.New() obeys an
+// inherited GOMLX_BACKEND and PANICS on a name that is not compiled in ("xla" is not, by design:
+// CGO_ENABLED=0). The Unix shim used to set GOMLX_BACKEND=go, but Windows exec-form hooks, the npm
+// launcher and MCP-via-npx never run the shim, so a user's GOMLX_BACKEND=xla killed witness there.
+// Needs no model: the backend is chosen before any asset is read.
+func TestNewBackendIgnoresInheritedGomlxBackend(t *testing.T) {
+	t.Setenv("GOMLX_BACKEND", "xla")
+	b, err := newBackend()
+	if err != nil {
+		t.Fatalf("newBackend with GOMLX_BACKEND=xla: %v", err)
+	}
+	defer b.Finalize()
+	if !strings.Contains(strings.ToLower(b.Name()), "go") {
+		t.Errorf("backend = %q, want the pure-Go simplego backend", b.Name())
+	}
+}

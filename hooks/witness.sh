@@ -40,8 +40,8 @@ if [ ! -x "$BIN" ]; then
     BIN="$(command -v witness)"
     export WITNESS_VIA_SHIM=1
   elif command -v go >/dev/null 2>&1 && [ -f "${PLUGIN_ROOT}/go.mod" ]; then
-    # Dev fallback. GOMLX_BACKEND=go keeps it pure-Go (no XLA/CGo).
-    exec env GOMLX_BACKEND=go go -C "$PLUGIN_ROOT" run ./cmd/witness "$@"
+    # Dev fallback for a checkout that was never built.
+    exec go -C "$PLUGIN_ROOT" run ./cmd/witness "$@"
   elif [ -t 0 ]; then
     # A person typed this (hooks always pipe stdin): say why nothing happened rather than
     # block on `cat` waiting for a terminal EOF.
@@ -55,4 +55,4 @@ if [ ! -x "$BIN" ]; then
   fi
 fi
 
-exec env GOMLX_BACKEND=go "$BIN" "$@"
+exec "$BIN" "$@"
