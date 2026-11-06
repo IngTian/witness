@@ -24,9 +24,14 @@ import (
 // archive renders to about 8 MiB. A var only so a test can trip it without writing 50 MiB.
 var viewWarnSize = 50 << 20
 
-// openInBrowser opens a file in the default browser. A var so a test can count calls; browse
-// never reaches it under go test.
-var openInBrowser = openPath
+// openInBrowser opens a file in the default browser. Inert under go test, because no test may
+// launch a browser; a test that needs to see the call installs its own fake here.
+var openInBrowser = func(path string) error {
+	if underTest() {
+		return nil
+	}
+	return openPath(path)
+}
 
 func newViewCmd() *cobra.Command {
 	var noOpen bool
@@ -93,7 +98,7 @@ func cmdView(noOpen bool, out string) error {
 		fmt.Println(hint("open it", fileURL(path)))
 		return nil
 	}
-	reportOpen(path, browse(path))
+	reportOpen(path, openInBrowser(path))
 	return nil
 }
 
@@ -134,15 +139,6 @@ func viewPortraits(st *store.Store) ([]view.PortraitFile, error) {
 			Stale: stale[id], Sources: src, SourcesOK: srcOK})
 	}
 	return out, nil
-}
-
-// browse is openInBrowser made inert under go test: no test may launch a browser, whatever it
-// installed in the var.
-func browse(path string) error {
-	if underTest() {
-		return nil
-	}
-	return openInBrowser(path)
 }
 
 // reportOpen ends the screen with how the open went. Any failure means "here is the path": the

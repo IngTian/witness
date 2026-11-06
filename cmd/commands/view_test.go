@@ -149,22 +149,112 @@ func TestViewOutFlag(t *testing.T) {
 	}
 }
 
-// No test may launch a browser: without --no-open the opener is still never reached under go
-// test, whatever a test installed in the var.
+// No test may launch a browser, so the opener's DEFAULT is inert under go test. Proved without
+// risking a launch: PATH is empty and there is no display, so if the guard were gone, openPath
+// could not find `open`/`xdg-open` and the screen would say "could not open a browser".
 func TestViewNeverOpensUnderTest(t *testing.T) {
 	home := seedViewArchive(t)
-	calls := 0
-	prev := openInBrowser
-	openInBrowser = func(string) error { calls++; return nil }
-	t.Cleanup(func() { openInBrowser = prev })
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("DISPLAY", "")
+	t.Setenv("WAYLAND_DISPLAY", "")
 
-	runView(t)
+	out := runView(t) // the real default openInBrowser
 
-	if calls != 0 {
-		t.Errorf("openInBrowser was called %d times under go test", calls)
+	if !strings.Contains(out, "in your browser") || strings.Contains(out, "could not open") {
+		t.Errorf("the default opener should be a successful no-op under go test:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(home, "view.html")); err != nil {
 		t.Errorf("the file must still be written: %v", err)
+	}
+}
+
+// The opener runs once per view, with the written file, and never under --no-open. The path is
+// on screen either way: it is the answer when the browser does not come up.
+func TestViewCallsTheOpener(t *testing.T) {
+	home := seedViewArchive(t)
+	path := filepath.Join(home, "view.html")
+	var calls []string
+	var fail error
+	prev := openInBrowser
+	openInBrowser = func(p string) error { calls = append(calls, p); return fail }
+	t.Cleanup(func() { openInBrowser = prev })
+
+	out := runView(t)
+	if len(calls) != 1 || calls[0] != path {
+		t.Errorf("opener calls = %q, want exactly [%s]", calls, path)
+	}
+	if !strings.Contains(out, tildePath(path)) || !strings.Contains(out, "in your browser") {
+		t.Errorf("an opened view should name the file and say it is opening:\n%s", out)
+	}
+
+	out = runView(t, "--no-open")
+	if len(calls) != 1 {
+		t.Errorf("--no-open called the opener: %q", calls)
+	}
+	if !strings.Contains(out, tildePath(path)) {
+		t.Errorf("--no-open should name the file:\n%s", out)
+	}
+
+	fail = errors.New("no display")
+	out = runView(t)
+	if !strings.Contains(out, "no display") || !strings.Contains(out, fileURL(path)) {
+		t.Errorf("an opener error should give the cause and the file URL:\n%s", out)
+	}
+}
+
+// The page replaces whatever sits at the path; it never writes THROUGH it. A symlink planted at
+// view.html (pointing anywhere) must not have its target overwritten with the archive's notes —
+// which an in-place os.WriteFile would do, mode fix-up or not.
+func TestViewReplacesASymlinkInsteadOfFollowingIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	home := seedViewArchive(t)
+	target := filepath.Join(t.TempDir(), "elsewhere.txt")
+	if err := os.WriteFile(target, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "view.html")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+
+	runView(t, "--no-open")
+
+	if b, err := os.ReadFile(target); err != nil || string(b) != "keep me" {
+		t.Errorf("the symlink's target was written through: %q (err %v)", b, err)
+	}
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		t.Errorf("view.html should now be a regular file, got %v (err %v)", info.Mode(), err)
+	}
+}
+
+// If staleness cannot be computed (here the portrait prompts are unreadable), the page still
+// renders and every portrait reads as current. The control run shows this seed's portraits DO
+// read stale when the check works (they carry no signatures), so the assertion discriminates.
+func TestViewStaleErrorReadsCurrent(t *testing.T) {
+	home := seedViewArchive(t)
+	path := filepath.Join(home, "view.html")
+	runView(t, "--no-open")
+	anyStale := false
+	for _, p := range viewModel(t, path).Portraits {
+		anyStale = anyStale || p.Stale
+	}
+	if !anyStale {
+		t.Fatal("precondition: with working prompts some portrait should read stale")
+	}
+
+	t.Setenv("WITNESS_PROMPTS", t.TempDir()) // no summarize/ prompts: Stale cannot be computed
+	runView(t, "--no-open")
+
+	ps := viewModel(t, path).Portraits
+	if len(ps) != 2 {
+		t.Fatalf("want both portraits, got %d", len(ps))
+	}
+	for _, p := range ps {
+		if p.Stale {
+			t.Errorf("portrait %s reads stale although staleness could not be computed", p.ID)
+		}
 	}
 }
 
@@ -316,6 +406,9 @@ func TestViewWarnsWhenTheFileIsLarge(t *testing.T) {
 	prev := viewWarnSize
 	viewWarnSize = 1
 	t.Cleanup(func() { viewWarnSize = prev })
+	if err := os.Remove(filepath.Join(home, "view.html")); err != nil { // so only the large run can write it
+		t.Fatal(err)
+	}
 
 	out := runView(t, "--no-open")
 
