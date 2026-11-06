@@ -13,8 +13,8 @@ Writing a lens is prompt-tuning, and there is a command for iterating without to
 archive:
 
 ```sh
-cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/corpus-example" ./regime   # start from a working lens
-$EDITOR regime/extract.md                                          # change what it notices
+cp -R prompts/lens/corpus-example ./regime   # from your witness checkout: a working lens
+$EDITOR regime/extract.md                    # change what it notices
 
 witness lens try ./regime                      # mine REAL sessions through it, write nothing
 witness lens try ./regime --review             # ...and preview the facets it would synthesize
@@ -78,7 +78,7 @@ dimensions and prose for your domain:
   stops being a person.
 
 ```sh
-cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/example" ./math   # edit the files, then:
+cp -R prompts/lens/example ./math   # from your witness checkout; edit the files, then:
 witness lens register math ./math      # copies the definition into your store (a snapshot)
 witness lens enable  math               # start running it on every session
 ```
