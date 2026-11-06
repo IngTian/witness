@@ -2,6 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -926,6 +929,34 @@ func TestProfileReadWrite(t *testing.T) {
 	}
 	if got, _, _ := s.ReadProfile("math"); got != "# Math v2\n" {
 		t.Fatalf("overwrite failed: got %q", got)
+	}
+}
+
+// WriteProfile publishes through writeAtomic (temp file + rename), so a reader — `witness
+// profile`, get_profile, export --all — never sees a half-written portrait. os.WriteFile
+// truncated the live file in place instead, and only applied 0600 when it CREATED the file:
+// a profile that already existed at 0644 stayed group/world readable.
+func TestWriteProfileReplacesAtomically(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	s := tempStore(t)
+	if err := os.MkdirAll(s.ProfileDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.ProfileDir(), "math.md")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteProfile("math", "new"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("profile mode = %o, want 0600 (the file must be replaced, not rewritten in place)", fi.Mode().Perm())
 	}
 }
 

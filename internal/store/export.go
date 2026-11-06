@@ -11,10 +11,10 @@ import (
 // Complete-archive export. The database-only snapshot (Export) lives in db.go,
 // next to the connection it vacuums; this file adds the everything-else half.
 //
-// Why a second mode exists: witness's data root holds FOUR things it owns (see the
+// Why a second mode exists: witness's data root holds FIVE things it owns (see the
 // Store doc comment) and only one of them is the database. `witness export <file>`
 // snapshots that one, which the README presented as "back up the archive" — so an
-// export was silently missing three pieces, two of which are NOT derivable from the
+// export was silently missing four pieces, three of which are NOT derivable from the
 // database:
 //
 //   - config.toml — enabled lenses, runner binding, models. Restore without it and
@@ -80,8 +80,8 @@ type ExportItem struct {
 }
 
 // ExportAll writes a COMPLETE archive snapshot into dstDir: the database (via the
-// same consistent VACUUM INTO that Export uses) plus config.toml, lenses/ and
-// profile/. Absent pieces are skipped, not errors — a fresh archive exports just a
+// same consistent VACUUM INTO that Export uses) plus config.toml, lenses/, profile/
+// and summarize/. Absent pieces are skipped, not errors — a fresh archive exports just a
 // database.
 //
 // The snapshot directory has the SAME LAYOUT as the live data root, which is the
@@ -99,8 +99,8 @@ type ExportItem struct {
 // yesterday's backup intact, instead of replacing a good backup with a partial one.
 //
 // Like Export, it needs no worker stop: the database read is a consistent VACUUM
-// INTO, and the three file pieces are written atomically by their owners
-// (writeAtomic for config.toml, temp-dir+rename for lenses/).
+// INTO, and witness writes each file piece atomically (writeAtomic for config.toml
+// and profile/, temp-dir+rename for lenses/); summarize/ is only ever written by the user.
 func (s *Store) ExportAll(dstDir string, force bool) ([]ExportItem, error) {
 	dstDir = strings.TrimSpace(dstDir)
 	if dstDir == "" {
