@@ -3,6 +3,7 @@ package view
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -440,38 +441,25 @@ func TestBuildEmptyArchive(t *testing.T) {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 	s := string(data)
-	if !contains(s, `"days":[]`) {
+	if !strings.Contains(s, `"days":[]`) {
 		t.Errorf("JSON days: want [], got something else")
 	}
-	if !contains(s, `"notebooks":[]`) {
+	if !strings.Contains(s, `"notebooks":[]`) {
 		t.Errorf("JSON notebooks: want [], got something else")
 	}
-	if !contains(s, `"traits":[]`) {
+	if !strings.Contains(s, `"traits":[]`) {
 		t.Errorf("JSON traits: want [], got something else")
 	}
-	if !contains(s, `"portraits":[]`) {
+	if !strings.Contains(s, `"portraits":[]`) {
 		t.Errorf("JSON portraits: want [], got something else")
 	}
 	// Verify slice fields in activity are not null (busiest is a pointer and can be null per spec)
-	if contains(s, `"cuts":null`) {
+	if strings.Contains(s, `"cuts":null`) {
 		t.Errorf("JSON cuts: want [], got null")
 	}
-	if contains(s, `"windows":null`) {
+	if strings.Contains(s, `"windows":null`) {
 		t.Errorf("JSON windows: want [], got null")
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && search(s, substr))
-}
-
-func search(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func windowByLabel(t *testing.T, m *Model, label string) Window {
