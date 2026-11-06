@@ -72,12 +72,12 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 			// ctx is already done the worker is shutting down, which is not a provider signal and
 			// must not narrow the window.
 			if ctx.Err() != nil {
-				return "", fmt.Errorf("claude -p canceled: %w (stderr: %s)", ctx.Err(), stderrExcerpt(errb.String()))
+				return "", fmt.Errorf("claude -p canceled: %w (stderr: %s)", ctx.Err(), childOutput(errb.String(), out.String()))
 			}
 			return "", fmt.Errorf("claude -p exceeded %s and was killed: %w (stderr: %s)",
-				claudeRunTimeout, de, stderrExcerpt(errb.String()))
+				claudeRunTimeout, de, childOutput(errb.String(), out.String()))
 		}
-		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", err, stderrExcerpt(errb.String()))
+		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", err, childOutput(errb.String(), out.String()))
 	}
 	return out.String(), nil
 }
@@ -106,6 +106,17 @@ func stderrExcerpt(s string) string {
 		return s
 	}
 	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
+}
+
+// childOutput is a failed child's stderr excerpt plus, when there is any, a bounded tail of its
+// stdout — which is where `claude -p` prints its own errors. Reporting stderr alone logged the
+// default-lens stall 322 times as `exit status 1 (stderr: )`.
+func childOutput(stderr, stdout string) string {
+	s := stderrExcerpt(stderr)
+	if o := stderrExcerpt(stdout); o != "" {
+		s += "; stdout: " + o
+	}
+	return s
 }
 
 // newClaudeCmd builds the isolated `claude -p` invocation used for distillation:
