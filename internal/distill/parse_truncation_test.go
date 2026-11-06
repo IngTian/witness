@@ -28,6 +28,10 @@ func TestParseJSONArrayReportsTruncationSeparatelyFromDrift(t *testing.T) {
 		{"cut after a complete element", `[{"observation":"a"},{"observation":"b"},`},
 		{"cut right after the bracket", `[{"observation":`},
 		{"inside a fence", "```json\n[\n  {\"observation\": \"a\"},\n  {\"observ"},
+		// An unclosed prose '[' that opens no element comes FIRST. It must be skipped, not
+		// decisive: if it ended the scan this reply would read as drift and lose its observations.
+		{"unclosed prose bracket before the cut-off array",
+			"I looked at [the user's session first. Here:\n" + `[{"observation":"a"},{"observation":"cut`},
 	}
 	for _, tc := range truncated {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,6 +184,10 @@ func TestTruncationCheckAfterACompleteArray(t *testing.T) {
 				`[{"observation":"real one"},{"observation":"real, cut`, ""},
 		{"unfenced prompt example, then the real array cut off",
 			`Format: [{"observation":"EXAMPLE"}]. Here are yours: [{"observation":"real, cut`, ""},
+		// Same, with an unclosed prose '[' between: skipping it must not stop the scan, or the
+		// echoed EXAMPLE is returned as the answer.
+		{"example, an unclosed prose bracket, then the real array cut off",
+			"Format: [{\"observation\":\"EXAMPLE\"}]. See [the notes. Mine:\n" + `[{"observation":"real, cut`, ""},
 		{"array then a stray bracket in prose", `[{"observation":"first"}] — see [the "x" message for why.`, "first"},
 		{"array then trailing prose", `[{"observation":"first"}] and that is all I found.`, "first"},
 	}
