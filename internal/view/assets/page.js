@@ -39,11 +39,16 @@
     ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
   const num = n => Math.round(n).toLocaleString('en-US');
   const count = (n, word) => num(n) + ' ' + word + (n === 1 ? '' : 's');
+  const pct = v => Math.round(v * 100) + '%';
+  const arrow = t => t.trend === 'up' ? ' ↑' : t.trend === 'down' ? ' ↓' : '';
   const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // source says where a note came from. A corpus notebook's notes come from ingested files,
+  // not conversations, so "your session" would be untrue for them (ruling P23).
+  const corpusLens = new Set(M.notebooks.filter(n => n.corpus).map(n => n.name));
+  const source = (t, date) => (corpusLens.has(t.lens) ? 'from a document dated ' : 'from your session on ') + dateText(date);
 
   // ---- Pages: the header switches between them; state is in memory only.
 
-  const state = { page: 'overview', trait: null };
   const tabs = {};
   const header = el('header', { class: 'top' }, el('span', { class: 'brand', text: 'witness' }),
     el('nav', { class: 'tabs' }, ...[['overview', 'Overview'], ['changed', "How you've changed"]].map(([p, label]) => {
@@ -56,17 +61,17 @@
     changed: el('section', { 'data-page': 'changed', class: 'page changed' }),
   };
   function showPage(p) {
-    state.page = p;
     for (const k in pages) {
       pages[k].hidden = k !== p;
       tabs[k].classList.toggle('on', k === p);
     }
     window.scrollTo(0, 0);
   }
-  // openTrait is page 1's door into page 2 ("see how it changed →"): page 2 draws state.trait,
-  // the trait it opens with, under that trait's topic.
+  // openTrait is page 1's door into page 2 ("see how it changed →"): that trait's topic, with
+  // the trait open.
   function openTrait(id) {
-    state.trait = id;
+    const t = M.traits[id];
+    for (const nb of books) for (const tp of nb.topics) if (nb.name === t.lens && tp.key === t.dim) setTopic(nb, tp, id);
     showPage('changed');
   }
 
@@ -127,13 +132,13 @@
 
   // tween counts a number from what it showed to its new value (ease-out). Reduced motion and
   // the first draw set it outright; a newer tween on the same node stops an older one.
-  function tween(node, from, to) {
+  function tween(node, from, to, show = num) {
     const gen = node.tween = (node.tween || 0) + 1, t0 = performance.now();
-    if (calm || from == null || from === to) { node.textContent = num(to); return; }
+    if (calm || from == null || from === to) { node.textContent = show(to); return; }
     const step = now => {
       if (node.tween !== gen) return;
       const k = Math.min(1, (now - t0) / 550);
-      node.textContent = num(from + (to - from) * (1 - Math.pow(1 - k, 3)));
+      node.textContent = show(from + (to - from) * (1 - Math.pow(1 - k, 3)));
       if (k < 1) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
@@ -213,15 +218,18 @@
     }
     cal.replaceChildren(...kids);
   }
-  cal.addEventListener('mousemove', e => {
-    const s = e.target.getAttribute('data-day');
-    if (!s) { tip.classList.remove('on'); return; }
-    tip.textContent = tips.get(s);
+  function showTip(e, text) {
+    tip.textContent = text;
     tip.style.left = Math.min(e.clientX + 12, innerWidth - tip.offsetWidth - 8) + 'px';
     tip.style.top = e.clientY - 34 + 'px';
     tip.classList.add('on');
+  }
+  const hideTip = () => tip.classList.remove('on');
+  cal.addEventListener('mousemove', e => {
+    const s = e.target.getAttribute('data-day');
+    if (s) showTip(e, tips.get(s)); else hideTip();
   });
-  cal.addEventListener('mouseleave', () => tip.classList.remove('on'));
+  cal.addEventListener('mouseleave', hideTip);
 
   const act = el('section', { class: 'act' },
     el('div', { class: 'acthead' },
@@ -353,22 +361,345 @@
     const meta = [t.lens, topicOf.get(t.lens + '\n' + t.dim), count(t.notes, 'note'), Math.round(t.today * 100) + '% sure'];
     return el('div', { class: 'tcard', 'data-trait': id },
       el('div', { class: 'cn', text: t.name }),
-      el('div', { class: 'cm', text: meta.join(' · ') + (t.trend === 'up' ? ' ↑' : t.trend === 'down' ? ' ↓' : '') }),
+      el('div', { class: 'cm', text: meta.join(' · ') + arrow(t) }),
       t.summary ? el('p', { class: 'cs', text: t.summary }) : el('p', { class: 'cs none', text: 'No short summary yet.' }),
       ev && ev.evidence ? el('blockquote', { class: 'quote', text: ev.evidence }) : null,
-      ev && ev.evidence ? el('div', { class: 'qd', text: 'from your session on ' + dateText(ev.date) }) : null,
+      ev && ev.evidence ? el('div', { class: 'qd', text: source(t, ev.date) }) : null,
       go);
   }
+
+  // ---- How you've changed: a menu of topics, the topic's traits over time, and its list of
+  // traits beside the sticky panel for the open one. Every chart shares the topic's months
+  // axis, from the first of its earliest month to the snapshot.
+
+  const ROWS = 18; // rows before "show all N"
+  const SNAP = M.snapshot.slice(0, 10);
+  // Conversation notebooks first, then corpus ones under "Other notebooks", as on page 1.
+  const books = [...M.notebooks.filter(n => !n.corpus), ...M.notebooks.filter(n => n.corpus)];
+  // Hover text is kept here, never in an attribute: a trait's name is archive text, and only
+  // textContent may carry archive text into the page.
+  const tipOf = new WeakMap();
+
+  const menu2 = el('nav', { class: 'menu' });
+  const topicBtns = [];
+  books.forEach((nb, i) => {
+    if (nb.corpus && (i === 0 || !books[i - 1].corpus)) menu2.append(el('div', { class: 'grp', text: 'Other notebooks' }));
+    menu2.append(el('b', i ? { class: 'group', text: nb.name } : { text: nb.name }));
+    for (const tp of nb.topics) {
+      const b = el('button', { type: 'button', class: 'mi', text: tp.label });
+      b.addEventListener('click', () => setTopic(nb, tp));
+      topicBtns.push([tp, b]);
+      menu2.append(b);
+    }
+  });
+
+  const tKicker = el('div', { class: 'kicker' });
+  const tTitle = el('h1', { class: 'topic' });
+  const tLede = el('p', { class: 'lede' });
+  const tchart = svg('svg', { class: 'chart', 'data-chart': 'topic' });
+  const SORTS = [['evidence', 'most evidence'], ['newest', 'newest'], ['changed', 'most changed']];
+  const sortBtns = SORTS.map(([k, label]) => {
+    const b = el('button', { type: 'button', text: label });
+    b.addEventListener('click', () => { sort = k; render(); });
+    return b;
+  });
+  const search = el('input', { type: 'search', placeholder: 'search', 'aria-label': 'search traits', spellcheck: 'false' });
+  search.addEventListener('input', render);
+  const rowsBox = el('div', { class: 'rows' });
+  const more = el('button', { type: 'button', class: 'more' });
+  more.addEventListener('click', () => { showAll = true; render(); });
+  const panel = el('aside', { class: 'side trait' });
+
+  let TP = null, ax0 = 0, ax1 = 0, open = null, hotId = null, sort = 'evidence', showAll = false, shownPct = null;
+  let topicW = 0, panelW = 0, dotG = null, confSvg = null, weekSvg = null;
+  const rowEls = new Map(), dots = new Map();
+  const frac = t => Math.min(1, Math.max(0, (t - ax0) / (ax1 - ax0)));
+  // nice rounds down to 1, 2 or 5 times a power of ten.
+  const nice = v => { const p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p; return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * p; };
+
+  function setTopic(nb, tp, pick) {
+    TP = tp;
+    topicBtns.forEach(([t, b]) => b.classList.toggle('on', t === tp));
+    tKicker.textContent = 'Topic · ' + nb.name;
+    tTitle.textContent = tp.label;
+    tLede.textContent = count(tp.traits.length, 'trait') + ', each placed on the day of its earliest supporting note.';
+    ax0 = ms(tp.axisStart || SNAP.slice(0, 8) + '01');
+    ax1 = Math.max(ms(SNAP), ax0 + DAY);
+    search.value = '';
+    showAll = false;
+    hotId = null;
+    // Without a pick, the trait with the most notes (the earliest of them on a tie).
+    open = pick != null ? pick : tp.traits.reduce((a, b) => M.traits[b].notes > M.traits[a].notes ? b : a);
+    drawTopic(true);
+    render();
+    showTrait();
+  }
+
+  // months labels the first of each month on the axis; January says its year when the axis
+  // crosses one. A label within 30 px of the last one is skipped.
+  function months(kids, x, y) {
+    const years = new Date(ax0).getUTCFullYear() !== new Date(ax1).getUTCFullYear();
+    let last = -1e9;
+    for (const m = new Date(ax0); m.getTime() <= ax1; m.setUTCMonth(m.getUTCMonth() + 1)) {
+      const s = iso(m.getTime()), px = x(s);
+      if (px - last < 30) continue;
+      last = px;
+      kids.push(svg('text', { x: px, y, class: 'tick' }, years && !m.getUTCMonth() ? String(m.getUTCFullYear()) : fmt(s, { month: 'short' })));
+    }
+  }
+
+  // The topic chart: how many of its traits had arrived by each day (a step line with a light
+  // fill), and under it one dot per trait on its arrival day, over three rows so dots don't
+  // stack. A hidden page has no width; it is drawn when it shows (the ResizeObserver below).
+  function drawTopic(animate) {
+    const W = topicW = tchart.clientWidth;
+    dots.clear();
+    if (!W) { tchart.replaceChildren(); return; }
+    animate = animate && !calm;
+    const L = 30, H = 70, x = s => L + frac(ms(s)) * (W - L);
+    const ids = TP.traits.filter(id => M.traits[id].arrival); // already by arrival
+    const n = Math.max(1, ids.length), y = v => H - v / n * (H - 8);
+    const kids = [];
+    const step = Math.max(1, nice(n / 2)); // 50 and 100 for 101 traits
+    for (let v = step; v <= n; v += step) {
+      kids.push(svg('line', { x1: L, x2: W, y1: y(v), y2: y(v), class: 'grid' }),
+        svg('text', { x: L - 6, y: y(v) + 4, class: 'tick', 'text-anchor': 'end' }, num(v)));
+    }
+    let d = 'M' + L + ',' + H;
+    ids.forEach((id, k) => { d += ' H' + x(M.traits[id].arrival).toFixed(1) + ' V' + y(k + 1).toFixed(1); });
+    d += ' H' + W;
+    kids.push(svg('path', { d: d + ' V' + H + ' Z', class: 'area' + (animate ? ' fadein' : '') }),
+      svg('path', { d, class: 'line' + (animate ? ' draw' : ''), pathLength: 1 }));
+    dotG = svg('g', {});
+    ids.forEach((id, k) => {
+      const c = svg('circle', { cx: x(M.traits[id].arrival), cy: H + 12 + (k % 3) * 5, r: 2.6, class: 'dot', 'data-trait': id });
+      // Every dot has started by 540 ms, so its 300 ms pop ends inside the motion budget.
+      if (animate) { c.classList.add('pop'); c.style.animationDelay = Math.round(120 + k * Math.min(45, 420 / n)) + 'ms'; }
+      tipOf.set(c, M.traits[id].name);
+      c.addEventListener('mouseenter', () => hot(id));
+      c.addEventListener('mouseleave', () => hot(null));
+      c.addEventListener('click', () => openRow(id, true));
+      dots.set(id, c);
+      dotG.append(c);
+    });
+    kids.push(dotG);
+    months(kids, x, H + 42);
+    tchart.setAttribute('viewBox', '0 0 ' + W + ' 124');
+    tchart.setAttribute('height', 124);
+    tchart.replaceChildren(...kids);
+    markDots();
+  }
+
+  function markDots() {
+    dots.forEach((c, id) => {
+      c.classList.toggle('sel', id === open);
+      c.classList.toggle('hot', id === hotId);
+      c.setAttribute('r', id === open || id === hotId ? 5 : 2.6);
+    });
+    if (dotG) dotG.classList.toggle('dimmed', hotId != null);
+  }
+  // hot links a dot and its row while either is hovered.
+  function hot(id) {
+    hotId = id;
+    rowEls.forEach((r, k) => r.classList.toggle('hot', k === id));
+    markDots();
+  }
+
+  // render lays out the list for the sort and the search. The open trait always stays in it:
+  // pinned to the top when the first rows or the search would leave it out.
+  function render() {
+    sortBtns.forEach((b, i) => b.classList.toggle('on', SORTS[i][0] === sort));
+    const q = search.value.trim().toLowerCase();
+    const list = TP.traits.filter(id => !q || (M.traits[id].name + '\n' + M.traits[id].summary).toLowerCase().includes(q));
+    const by = {
+      evidence: (a, b) => b.notes - a.notes,
+      newest: (a, b) => (b.arrival > a.arrival) - (b.arrival < a.arrival),
+      changed: (a, b) => b.changes - a.changes || b.notes - a.notes,
+    }[sort];
+    list.sort((a, b) => by(M.traits[a], M.traits[b])); // stable: ties keep arrival order
+    let shown = showAll || q ? list : list.slice(0, ROWS);
+    if (open != null && !shown.includes(open)) shown = [open, ...shown];
+    rowEls.clear();
+    rowsBox.replaceChildren(...shown.map(row), list.length ? '' : el('p', { class: 'fine', text: 'No trait matches that search.' }));
+    more.textContent = 'show all ' + num(list.length);
+    more.hidden = showAll || !!q || list.length <= ROWS;
+    fitMore();
+  }
+
+  function row(id) {
+    const t = M.traits[id], on = id === open;
+    const head = el('button', { type: 'button', class: 'head', 'aria-expanded': String(on) },
+      el('span', { class: 'nm', text: t.name }),
+      el('span', { class: 'mt', text: num(t.notes) + ' · ' + pct(t.today) + arrow(t) }));
+    const r = el('div', { class: 'row' + (on ? ' open' : '') + (id === hotId ? ' hot' : ''), 'data-trait': id },
+      head, el('div', { class: 'detail' }, el('div')));
+    head.addEventListener('click', () => openRow(id, false));
+    r.addEventListener('mouseenter', () => hot(id));
+    r.addEventListener('mouseleave', () => hot(null));
+    if (on) fill(r, t);
+    rowEls.set(id, r);
+    return r;
+  }
+
+  // fill writes a row's summary the first time it opens: five lines, then "more".
+  function fill(r, t) {
+    const box = r.lastChild.firstChild;
+    if (box.firstChild) return;
+    if (!t.summary) { box.append(el('p', { class: 'none', text: 'No short summary yet.' })); return; }
+    const c = el('p', { class: 'summary', text: t.summary });
+    const tog = el('button', { type: 'button', class: 'tog', text: 'more' });
+    tog.addEventListener('click', () => { tog.textContent = c.classList.toggle('full') ? 'less' : 'more'; });
+    box.append(c, tog);
+  }
+  // fitMore hides the open row's "more" when its summary already fits in five lines. A hidden
+  // page can't measure, so the button stays until it can (the ResizeObserver calls this again).
+  function fitMore() {
+    const c = rowEls.has(open) && rowEls.get(open).querySelector('.summary');
+    if (c && c.clientHeight && !c.classList.contains('full')) c.nextSibling.hidden = c.scrollHeight <= c.clientHeight + 1;
+  }
+
+  // openRow opens a trait in place, or closes it when it is already open; a dot only opens.
+  function openRow(id, fromDot) {
+    open = open === id && !fromDot ? null : id;
+    if (open != null && !rowEls.has(open)) render(); // a dot can pick a trait the list leaves out
+    rowEls.forEach((r, k) => {
+      if (k === open) fill(r, M.traits[k]);
+      r.classList.toggle('open', k === open);
+      r.firstChild.setAttribute('aria-expanded', String(k === open));
+    });
+    fitMore();
+    markDots();
+    showTrait();
+    if (fromDot) rowEls.get(id).scrollIntoView({ block: 'nearest', behavior: calm ? 'auto' : 'smooth' });
+  }
+
+  // showTrait fills the sticky panel for the open trait; its parts rise in one after another.
+  function showTrait() {
+    if (open == null) {
+      confSvg = weekSvg = null;
+      panel.replaceChildren(el('p', { class: 'fine', text: 'Pick a trait to see how sure witness is and the notes behind it.' }));
+      return;
+    }
+    const t = M.traits[open], big = el('span', { class: 'big' });
+    // Confirmed values only, never decayed ones (trend, trendFrom): decay alone would put a
+    // "down" on almost every trait.
+    const since = t.trend === 'only' ? "only today's value was saved"
+      : (t.trend === 'up' ? 'up from ' + pct(t.trendFrom) : t.trend === 'down' ? 'down from ' + pct(t.trendFrom) : 'about level') +
+        (t.rewrites ? ' · ' + count(t.rewrites, 'rewrite') : '');
+    confSvg = svg('svg', { class: 'chart', 'data-chart': 'confidence' });
+    weekSvg = svg('svg', { class: 'chart', 'data-chart': 'weeks' });
+    const parts = [
+      el('div', { class: 'sub', text: 'How sure witness is' }),
+      el('div', { class: 'hero' }, big, el('span', { class: 'since', text: since })),
+      t.formed ? el('p', { class: 'formed', text: 'formed ' + (t.formed.date ? dateText(t.formed.date) + ' ' : '') +
+        'by merging ' + count(t.formed.merged, 'trait') }) : null,
+      el('div', { class: 'charts' }, confSvg, weekSvg),
+      t.evidence.length ? el('div', { class: 'sub ev', text: 'Evidence' }) : null,
+      ...t.evidence.map(ev => el('div', { class: 'qt' },
+        ev.evidence ? el('blockquote', { class: 'quote', text: ev.evidence }) : null,
+        el('div', { class: 'cap', text: source(t, ev.date) + (ev.note ? ' · ' + ev.note : '') }))),
+    ].filter(Boolean);
+    // At most eight parts, 65 ms apart, with a 400 ms rise: done by about 855 ms.
+    parts.forEach((p, i) => { p.classList.add('rise'); p.style.animationDelay = i * 65 + 'ms'; });
+    panel.replaceChildren(...parts);
+    tween(big, shownPct, Math.round(t.today * 100), v => Math.round(v) + '%');
+    shownPct = Math.round(t.today * 100);
+    drawTrait(true);
+  }
+
+  // drawTrait draws the open trait's charts on the topic's months axis: how sure witness was
+  // (steps through each review; dashed where only a rewrite's final value is known; dashed down
+  // to today's faded value), then, in a band of its own below, the notes per week.
+  function drawTrait(animate) {
+    if (!confSvg) return;
+    const W = panelW = confSvg.clientWidth;
+    if (!W) { confSvg.replaceChildren(); weekSvg.replaceChildren(); return; }
+    animate = animate && !calm;
+    const t = M.traits[open], R = W - 44, x = s => frac(ms(s)) * R, end = x(SNAP);
+    const tipped = (node, text) => { tipOf.set(node, text); return node; };
+    const fade = animate ? ' fadein' : '';
+    // Fitted to the trait: a 0–100% scale would flatten a 65% → 91% climb.
+    const lo = Math.max(0, Math.min(0.5, Math.min(t.today, ...t.points.map(p => p.v), ...t.spans.map(s => s.v)) - 0.1));
+    const H = 150, y = v => 14 + (1 - (v - lo) / (1 - lo)) * (H - 24);
+    const c = [];
+    for (const v of [0.25, 0.5, 0.75, 1]) {
+      if (v > lo) c.push(svg('line', { x1: 0, x2: R, y1: y(v), y2: y(v), class: 'grid' }), svg('text', { x: 0, y: y(v) - 4, class: 'tick' }, pct(v)));
+    }
+    const dashed = (a, text) => c.push(svg('line', Object.assign({ class: 'dash' + fade }, a)), tipped(svg('line', Object.assign({ class: 'hit' }, a)), text));
+    for (const s of t.spans) dashed({ x1: x(s.from), x2: x(s.to), y1: y(s.v), y2: y(s.v) }, 'final value of this rewrite');
+    const P = t.points, last = P[P.length - 1];
+    if (last) {
+      let d = 'M' + x(P[0].at).toFixed(1) + ',' + y(P[0].v).toFixed(1);
+      for (const p of P.slice(1)) d += ' H' + x(p.at).toFixed(1) + ' V' + y(p.v).toFixed(1);
+      // Nothing has faded when today's value is still the last one confirmed: the step just holds.
+      if (pct(t.today) !== pct(last.v)) dashed({ x1: x(last.at), y1: y(last.v), x2: end, y2: y(t.today) }, 'fading since last confirmed');
+      else d += ' H' + end.toFixed(1);
+      if (d.includes('H')) c.push(svg('path', { d, class: 'line' + (animate ? ' draw' : ''), pathLength: 1 }));
+      P.forEach((p, k) => {
+        const dot = tipped(svg('circle', { cx: x(p.at), cy: y(p.v), r: 3.5, class: 'pt' }), 'reviewed ' + dateText(p.at) + ' · ' + pct(p.v));
+        if (animate) { dot.classList.add('pop'); dot.style.animationDelay = Math.round(200 + k * Math.min(45, 300 / P.length)) + 'ms'; }
+        c.push(dot);
+      });
+    } else c.push(svg('circle', { cx: end, cy: y(t.today), r: 3.5, class: 'pt' }));
+    c.push(svg('text', { x: end + 8, y: y(t.today) + 4, class: 'now' }, pct(t.today)));
+    confSvg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    confSvg.setAttribute('height', H);
+    confSvg.replaceChildren(...c);
+
+    // Notes per week, zero in the weeks between those that have any, each at its midweek.
+    const WH = 66, top = 20, base = 46, per = new Map(t.weeks.map(w => [w.w, w.n]));
+    const pts = [];
+    for (let m = ax0 - ((new Date(ax0).getUTCDay() + 6) % 7) * DAY; m <= ax1; m += 7 * DAY) {
+      pts.push([frac(m + 3.5 * DAY) * R, per.get(iso(m)) || 0]);
+    }
+    const peak = Math.max(...pts.map(p => p[1])), ny = n => base - (peak ? n / peak : 0) * (base - top);
+    const line = 'M' + pts.map(([px, n]) => px.toFixed(1) + ',' + ny(n).toFixed(1)).join(' L');
+    const w = [svg('text', { x: 0, y: 10, class: 'tick' }, 'notes per week'),
+      svg('path', { d: line + ' L' + pts[pts.length - 1][0].toFixed(1) + ',' + base + ' L' + pts[0][0].toFixed(1) + ',' + base + ' Z', class: 'warea' + fade }),
+      svg('path', { d: line, class: 'wline' + (animate ? ' draw' : ''), pathLength: 1 })];
+    if (peak) { // labelled; moved clear of the band's own label when it sits under it
+      const px = pts.find(p => p[1] === peak)[0], left = px < 100;
+      w.push(svg('text', { x: left ? Math.max(px + 6, 92) : px, y: ny(peak) - 5, class: 'tick', 'text-anchor': left ? 'start' : px > R - 16 ? 'end' : 'middle' }, num(peak)));
+    }
+    months(w, x, WH - 2);
+    weekSvg.setAttribute('viewBox', '0 0 ' + W + ' ' + WH);
+    weekSvg.setAttribute('height', WH);
+    weekSvg.replaceChildren(...w);
+  }
+
+  pages.changed.addEventListener('mousemove', e => {
+    const s = tipOf.get(e.target);
+    if (s) showTip(e, s); else hideTip();
+  });
+  pages.changed.addEventListener('mouseleave', hideTip);
 
   // ---- Assemble, then draw. The calendar needs its box laid out to size its squares.
 
   pages.overview.append(menu, el('main', {}, act, who));
+  if (books.length) {
+    pages.changed.append(menu2, el('main', {}, tKicker, tTitle, tLede, tchart,
+      el('div', { class: 'split' },
+        el('div', {}, el('div', { class: 'controls' }, ...sortBtns, search), rowsBox, more),
+        panel)));
+  } else {
+    pages.changed.classList.add('bare');
+    pages.changed.append(el('main', {}, el('p', { class: 'nothing', text: 'No traits yet.' })));
+  }
   document.body.append(header, pages.overview, pages.changed, tip);
   drawActivity(true);
   if (M.portraits.length) setPortrait(0);
   showPage(M.e2eStart === 'changed' ? 'changed' : 'overview');
-  // Redraw on a WIDTH change only: a redraw driven by height can loop.
+  // Page 2 opens on the first notebook's first topic until a "see how it changed →" picks one.
+  if (books.length) setTopic(books[0], books[0].topics[0]);
+  // Redraw on a WIDTH change only: a redraw driven by height can loop. A page that was hidden
+  // drew nothing, so its first visible draw is its first draw, and moves.
   new ResizeObserver(() => {
     if (calbox.clientWidth !== drawnWidth) drawCalendar(byKind[kind][wi], false);
   }).observe(calbox);
+  new ResizeObserver(() => {
+    if (!TP) return;
+    if (tchart.clientWidth && tchart.clientWidth !== topicW) drawTopic(!topicW);
+    if (confSvg && confSvg.clientWidth && confSvg.clientWidth !== panelW) drawTrait(!panelW);
+    fitMore();
+  }).observe(pages.changed);
 })();

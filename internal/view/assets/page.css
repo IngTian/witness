@@ -23,12 +23,14 @@ code { font: .92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; col
 .brand { font-weight: 600; }
 .tabs button { margin-left: 22px; color: var(--mut); }
 .tabs button.on { color: var(--ink); }
-.overview { display: grid; grid-template-columns: minmax(0, 180px) minmax(0, 1fr); min-height: calc(100vh - 51px); }
-.overview.bare { grid-template-columns: minmax(0, 1fr); }
+.page { display: grid; grid-template-columns: minmax(0, 180px) minmax(0, 1fr); min-height: calc(100vh - 51px); }
+.page.bare { grid-template-columns: minmax(0, 1fr); }
 .bare .menu { display: none; }
 .menu { padding: 24px 16px 24px 28px; border-right: 1px solid var(--line); font-size: 13px; }
 .menu b { display: block; font-weight: 600; margin: 0 0 6px; }
 .menu b.group { margin-top: 18px; }
+.menu .grp { font-size: 10.5px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--faint); margin: 22px 0 8px; }
+.menu .grp + b { margin-top: 0; }
 .menu .mi { display: block; padding: 3px 0; color: var(--mut); text-align: left; overflow-wrap: anywhere; }
 .menu .mi:hover { color: var(--ink); }
 .menu .mi.on { color: var(--ink); }
@@ -118,6 +120,68 @@ h1 { font: 400 34px/1.15 var(--serif); margin: 4px 0 14px; overflow-wrap: anywhe
   .lower { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 40px; }
 }
 
+/* How you've changed: the topic's chart, then the list beside the sticky panel for the open trait. */
+.changed h1 { font-size: 28px; margin: 2px 0 0; }
+h1.topic::first-letter { text-transform: uppercase; }
+.lede { color: var(--mut); font-size: 13px; margin: 0 0 8px; }
+.chart { display: block; width: 100%; overflow: visible; }
+.grid { stroke: #2a2a28; }
+.area { fill: var(--acc); opacity: .09; }
+.line { fill: none; stroke: var(--acc); stroke-width: 2; }
+.dot { fill: var(--acc); opacity: .55; cursor: pointer; transition: opacity .2s; }
+.dimmed .dot { opacity: .15; }
+.dimmed .dot.hot, .dot.sel { opacity: 1; }
+.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 40px; margin-top: 16px; align-items: start; }
+.controls { display: flex; gap: 16px; align-items: center; color: var(--mut); font-size: 12.5px; margin: 0 0 6px; }
+.controls button { border-bottom: 1px solid transparent; white-space: nowrap; }
+.controls button:hover { color: var(--ink); }
+.controls button.on { color: var(--ink); border-bottom-color: var(--acc); }
+.controls input { margin-left: auto; flex: 0 1 150px; min-width: 70px; background: #1b1b1a; border: 1px solid #2a2a28;
+  color: var(--ink); border-radius: 6px; padding: 4px 9px; font: inherit; }
+.row { border-top: 1px solid #1f1f1e; border-left: 2px solid transparent; transition: background .15s, border-color .15s; }
+.row.hot { background: #191918; }
+.row.open { border-left-color: var(--acc); background: #171716; }
+.head { display: flex; gap: 12px; align-items: baseline; width: 100%; padding: 8px 12px; text-align: left; }
+.head:hover { background: #1b1b1a; }
+.nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.open .nm { white-space: normal; overflow-wrap: anywhere; font: 18px/1.3 var(--serif); }
+.mt { color: var(--mut); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* A row opens by growing its one grid row from 0fr to 1fr; the clipped box keeps all vertical
+   spacing inside it, since padding on it would show while closed. */
+.detail { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .35s cubic-bezier(.3, .7, .2, 1); }
+.open .detail { grid-template-rows: 1fr; }
+.detail > div { overflow: hidden; min-height: 0; padding: 0 12px; }
+.summary { font: 15px/1.5 var(--serif); color: #d9d8d2; margin: 0 0 14px; overflow-wrap: anywhere; overflow: hidden;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
+.summary.full { display: block; }
+.tog { display: block; color: var(--acc); font-size: 12.5px; margin: -12px 0 14px; }
+.detail .none { color: var(--mut); font-style: italic; font-size: 13px; margin: 0 0 14px; }
+.rows .fine { padding-left: 14px; }
+.more { margin-top: 8px; color: var(--acc); font-size: 13px; padding: 4px 12px; }
+.trait { max-width: none; min-height: 420px; }
+.hero { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 4px; }
+.big { font: 40px/1 var(--serif); font-variant-numeric: tabular-nums; }
+.since, .formed { color: var(--mut); font-size: 13px; }
+.formed { margin: 0; }
+.charts { margin-top: 14px; }
+.dash { stroke: var(--acc); stroke-width: 2; stroke-dasharray: 5 4; }
+.hit { stroke: transparent; stroke-width: 12; }
+.pt { fill: var(--acc); stroke: var(--bg); stroke-width: 1.5; }
+.now { fill: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; }
+.warea { fill: var(--mut); opacity: .1; }
+.wline { fill: none; stroke: #8a8983; stroke-width: 1.5; stroke-linejoin: round; }
+.ev { margin-top: 22px; }
+.qt { margin: 0 0 18px; overflow-wrap: anywhere; }
+.qt .quote { font-size: 15px; color: var(--ink); margin-bottom: 5px; }
+.cap { color: var(--mut); font-size: 12.5px; padding-left: 14px; }
+/* Lines draw in (pathLength="1", so any length finishes together), dots pop, fills fade. Each
+   only while its class is set, and JS sets none of them under reduced motion. */
+.draw { stroke-dasharray: 1; animation: wvdraw .7s cubic-bezier(.3, .7, .2, 1) .1s both; }
+.pop { transform-box: fill-box; transform-origin: center; animation: wvpop .3s cubic-bezier(.3, .7, .2, 1) both; }
+.fadein { animation: wvfade .5s ease-out .2s both; }
+
+@keyframes wvdraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes wvpop { from { opacity: 0; transform: scale(0); } }
 @keyframes wvup { from { opacity: 0; transform: translateY(8px); } }
 @keyframes wvin { from { opacity: 0; } }
 @keyframes wvfade { from { opacity: 0; } }

@@ -69,7 +69,7 @@ func TestWriteE2EFixtures(t *testing.T) {
 				},
 			},
 			{
-				Lens: "default", Dimension: "habits", Key: "merged_into_formed", LastSeen: "2026-10-12T00:00:00Z", ArchivedAt: "2026-10-12T00:00:00Z", MergedInto: "formed_trait",
+				Lens: "default", Dimension: "habits", Key: "merged_into_formed", LastSeen: "2026-10-12T00:00:00Z", ArchivedAt: "2026-10-12T00:00:00Z", MergedInto: "habits/formed_trait",
 				Versions: []store.FacetVersion{
 					{ValidFrom: "2026-10-01T10:00:00Z", Confidence: 0.5},
 				},
@@ -94,6 +94,7 @@ func TestWriteE2EFixtures(t *testing.T) {
 		},
 		HighWater: 3000,
 	}
+	addAttentionTopic(fullIn)
 
 	// Three portraits: the overall one, `default` (sources not recorded) and `corpus`. Every
 	// note of the corpus lens (n4, n6) comes from a file: session, so its portrait is kind
@@ -230,4 +231,91 @@ func TestWriteE2EFixtures(t *testing.T) {
 	}
 
 	t.Logf("wrote 4 e2e fixtures to %s", *e2eOut)
+}
+
+// addAttentionTopic adds a 24-trait topic to the full fixture. Page 2 needs it: the list shows
+// 18 rows and then "show all 24", the dots stagger over three rows, and the trait the page
+// opens on (the most notes) has a dashed span from before the log, logged points, a line
+// fading to today and "formed by merging 2 traits", all at once. Every word is synthetic.
+func addAttentionTopic(in *store.ViewInput) {
+	day0 := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	ts := func(d int) string { return day0.AddDate(0, 0, d).Format(time.RFC3339) }
+	long := "A synthetic quote (%d), long on purpose: it runs past one line so the page shows " +
+		"evidence in full and never clamps it, the way a real note of two or three hundred " +
+		"characters reads in the panel beside the charts."
+	// cite adds n notes, one every `every` days from day `start`, each with a conversation
+	// turn, and returns their ids.
+	cite := func(n, start, every int) []string {
+		var ids []string
+		for j := 0; j < n; j++ {
+			d := min(start+j*every, 120) // day 120 is Nov 3, two days before the snapshot
+			id, sess := fmt.Sprintf("a%d", len(in.Notes)), fmt.Sprintf("a%d", d)
+			ev := fmt.Sprintf("Synthetic evidence %d.", j+1)
+			if j%9 == 8 {
+				ev = fmt.Sprintf(long, j+1)
+			}
+			in.Notes = append(in.Notes, store.ViewNote{ID: id, TS: ts(d), Session: sess, Lens: "default",
+				Dimension: "attention", Observation: fmt.Sprintf("Synthetic note %d.", j+1), Evidence: ev, Poignancy: 1 + j%9})
+			in.Turns = append(in.Turns, store.ViewTurn{Session: sess, TS: ts(d)})
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	summary := "A synthetic summary, written long so the open row clamps it at five lines and " +
+		"offers more. It says nothing about anyone. It only fills the space a real summary " +
+		"would, sentence after sentence, until the row has to cut it short and wait for the " +
+		"reader to ask for the rest of it, which is the behaviour this fixture exists to show. " +
+		"One more sentence makes sure of it at every window width the page is checked at."
+
+	rich := "checks_claims_against_the_source_before_trusting_them"
+	ids := append(cite(30, 2, 4), cite(10, 44, 0)...) // ten notes on one day: the peak week
+	in.Facets = append(in.Facets,
+		store.Facet{
+			Lens: "default", Dimension: "attention", Key: rich, LastSeen: ts(118),
+			Versions: []store.FacetVersion{
+				{Value: "First wording.", ValidFrom: ts(14), ValidTo: ts(50), BecauseOf: ids[:8], Confidence: 0.55},
+				{Value: "Current wording.", Claim: summary, ValidFrom: ts(50), BecauseOf: ids, Confidence: 0.82, ConfidenceSeq: 2400},
+			},
+		},
+		store.Facet{Lens: "default", Dimension: "attention", Key: "reads_the_source_first", LastSeen: ts(58),
+			ArchivedAt: ts(58), MergedInto: "attention/" + rich, Versions: []store.FacetVersion{{ValidFrom: ts(20), Confidence: 0.5}}},
+		store.Facet{Lens: "default", Dimension: "attention", Key: "verifies_before_repeating", LastSeen: ts(58),
+			ArchivedAt: ts(58), MergedInto: "attention/" + rich, Versions: []store.FacetVersion{{ValidFrom: ts(24), Confidence: 0.5}}},
+	)
+	for k, v := range []float64{0.65, 0.72, 0.78, 0.82} {
+		in.Log = append(in.Log, store.ConfidenceEvent{Lens: "default", Dimension: "attention", Key: rich,
+			At: ts(66 + 17*k), To: v, Kind: "review"})
+	}
+
+	for i := 1; i < 24; i++ {
+		key := fmt.Sprintf("synthetic_pattern_%02d", i)
+		if i%5 == 0 {
+			key += "_with_a_longer_name_so_the_row_cuts_it_with_an_ellipsis"
+		}
+		n, start := 1+(i*7)%19, (i*5)%100
+		ids := cite(n, start, 2)
+		claim := fmt.Sprintf("Synthetic summary of pattern %d.", i)
+		switch {
+		case i%7 == 0:
+			claim = ""
+		case i%4 == 1:
+			claim = summary
+		}
+		conf := float64(50+10*(i%5)) / 100
+		var vs []store.FacetVersion
+		from := ts(start + 1)
+		if i%3 == 0 { // a rewrite: the first wording's value is a dashed span; ↑ when i is even, ↓ when odd
+			was := float64(30+10*(i%5)) / 100
+			if i%2 == 1 {
+				was = min(1, float64(65+10*(i%5))/100)
+			}
+			vs = append(vs, store.FacetVersion{Value: "Earlier wording.", ValidFrom: from,
+				ValidTo: ts(start + n + 1), BecauseOf: ids[:1], Confidence: was})
+			from = ts(start + n + 1)
+		}
+		vs = append(vs, store.FacetVersion{Value: "Wording.", Claim: claim, ValidFrom: from, BecauseOf: ids,
+			Confidence: conf, ConfidenceSeq: int64(2000 + 30*i)})
+		in.Facets = append(in.Facets, store.Facet{Lens: "default", Dimension: "attention", Key: key,
+			LastSeen: ts(min(start+2*(n-1), 120)), Versions: vs})
+	}
 }
