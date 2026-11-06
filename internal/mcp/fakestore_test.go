@@ -36,6 +36,8 @@ type fakeMCPStore struct {
 	// which is deliberate: an archive nothing is feeding is the case that used to be
 	// misreported as "the reviewer may not have run yet".
 	whyEmpty store.EmptyReason
+	// whyLens is the lens the last WhyEmpty asked about: the mined name, never the registered one.
+	whyLens string
 	// highWater is the decay clock's "now" for get_facets; 0 renders every confidence as stored.
 	highWater int64
 }
@@ -78,7 +80,10 @@ func (f *fakeMCPStore) DeleteObservation(obsID string) (bool, error) {
 	f.deletedIDs = append(f.deletedIDs, obsID)
 	return true, nil
 }
-func (f *fakeMCPStore) WhyEmpty(lens string) store.EmptyReason { return f.whyEmpty }
+func (f *fakeMCPStore) WhyEmpty(lens string) store.EmptyReason {
+	f.whyLens = lens
+	return f.whyEmpty
+}
 
 // compile-time proof the fake satisfies the interface the server accepts.
 var _ store.MCPStore = (*fakeMCPStore)(nil)

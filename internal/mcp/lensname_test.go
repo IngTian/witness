@@ -55,6 +55,23 @@ func TestToolsMapTheRegisteredLensName(t *testing.T) {
 	}
 }
 
+// The empty hint must ask WhyEmpty about the MINED name: asked about "corpus-example", a lens with
+// observations but no facets (or no embeddings) is told nothing was mined and to re-mine it.
+func TestEmptyHintAsksAboutTheMinedName(t *testing.T) {
+	arg := map[string]any{"lens": "corpus-example"}
+	for tool, args := range map[string]map[string]any{
+		"search_observations": {"query": "rates", "lens": "corpus-example"},
+		"get_facets":          arg,
+		"get_profile":         arg,
+	} {
+		fake := &fakeMCPStore{whyEmpty: store.NoFacets}
+		callText(t, fake, renamed, tool, args)
+		if fake.whyLens != "regime" {
+			t.Errorf("%s asked why %q is empty, want the mined name \"regime\"", tool, fake.whyLens)
+		}
+	}
+}
+
 // The unified portrait is not a lens: nothing is mined into it, so `witness lens backfill unified`
 // (a reserved name) is a command that can only fail.
 func TestEmptyUnifiedProfileDoesNotSayBackfill(t *testing.T) {
