@@ -62,13 +62,41 @@ var exportInclude = []string{"config.toml", "lenses", "profile", "summarize"}
 // matched by shape rather than name — see classifyRootEntry.
 var exportSkip = []string{"witness.db", "witness.db-wal", "witness.db-shm", "witness.log", "runtime", "view.html"}
 
-// renameForExport is os.Rename, overridable so a test can fail the final swap-into-place
-// and prove the previous snapshot is put BACK rather than lost. A seam because that
-// failure is otherwise unreachable: the rename is same-directory and immediately follows
-// a successful write into that same directory, so nothing external can provoke it — and
-// an untested recovery branch in a backup command is exactly the kind of code that turns
-// out not to work on the one day it runs.
-var renameForExport = os.Rename
+// renameDir is os.Rename, overridable so a test can fail a swapDir rename and prove the
+// previous directory is put BACK rather than lost. A seam because that failure is otherwise
+// unreachable: the rename is same-directory and immediately follows a successful write into
+// that same directory, so nothing external can provoke it — and an untested recovery branch
+// is exactly the kind of code that turns out not to work on the one day it runs.
+var renameDir = os.Rename
+
+// swapDir moves the fully built tmp into dir's place — the staged swap behind ExportAll and
+// RegisterLens. An existing dir is moved aside to bak FIRST (not deleted) so a failed swap
+// can put it back, and bak is dropped only once tmp is in place. The error says what became
+// of the previous dir: unchanged, restored, absent, or left at bak — never "restored" when
+// the restore itself failed (on Windows a rename can fail while a file is open). tmp is the
+// caller's to clean up or keep.
+func swapDir(tmp, dir, bak string) error {
+	existing := false
+	if _, err := os.Stat(dir); err == nil {
+		if err := renameDir(dir, bak); err != nil {
+			return fmt.Errorf("move %s aside (it is unchanged): %w", dir, err)
+		}
+		existing = true
+	}
+	if err := renameDir(tmp, dir); err != nil {
+		previous := "was absent"
+		if existing {
+			if rerr := renameDir(bak, dir); rerr == nil {
+				previous = "restored"
+			} else {
+				previous = "left at " + bak
+			}
+		}
+		return fmt.Errorf("swap into %s (previous %s): %w", dir, previous, err)
+	}
+	_ = os.RemoveAll(bak)
+	return nil
+}
 
 // ExportItem is one top-level entry ExportAll wrote into the snapshot directory, so
 // callers can report what was ACTUALLY captured rather than the fixed list they hoped
@@ -113,12 +141,10 @@ func (s *Store) ExportAll(dstDir string, force bool) ([]ExportItem, error) {
 	if sameDir(dstDir, s.Root) {
 		return nil, fmt.Errorf("export: %s IS the live data directory; export to a different path", dstDir)
 	}
-	existing := false
 	if _, err := os.Stat(dstDir); err == nil {
 		if !force {
 			return nil, fmt.Errorf("export: %s already exists (use --force to overwrite)", dstDir)
 		}
-		existing = true
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("export: stat %s: %w", dstDir, err)
 	}
@@ -171,25 +197,9 @@ func (s *Store) ExportAll(dstDir string, force bool) ([]ExportItem, error) {
 		}
 		items = append(items, ExportItem{Name: name, Files: 1})
 	}
-	// Swap: move any previous snapshot aside FIRST so a failed rename can put it back,
-	// and only drop it once the new one is in place.
-	if existing {
-		if err := renameForExport(dstDir, bak); err != nil {
-			return fail(fmt.Errorf("export: move existing %s aside: %w", dstDir, err))
-		}
+	if err := swapDir(tmp, dstDir, bak); err != nil {
+		return fail(fmt.Errorf("export: %w", err))
 	}
-	if err := renameForExport(tmp, dstDir); err != nil {
-		restored := "was absent"
-		if existing {
-			if rerr := renameForExport(bak, dstDir); rerr == nil {
-				restored = "restored"
-			} else {
-				restored = "left at " + bak
-			}
-		}
-		return fail(fmt.Errorf("export: swap snapshot into %s (previous snapshot %s): %w", dstDir, restored, err))
-	}
-	_ = os.RemoveAll(bak)
 	return items, nil
 }
 
