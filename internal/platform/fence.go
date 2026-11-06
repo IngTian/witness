@@ -13,13 +13,13 @@ import "strings"
 // (a hostile repo can put text into a session, or induce a record_observation with
 // an injection payload), so it must never reach the model as instructions.
 //
-// It lives in the leaf platform package (not per-runner) so both the `claude -p`
-// path and the OpenCode-serve path fence identically from a single source — a
-// future runner gets the same defense for free, and the rule can't silently
-// diverge between runtimes. The channel ASSIGNMENT (which arg is the system prompt
-// vs the corpus turn) stays per-runner, since `--append-system-prompt`+stdin and a
-// JSON {system, parts} body are different mechanisms; only the fencing text +
-// delimiter defang are shared here.
+// It is APPLIED in exactly one place: distill.RunnerMine, the seam every production
+// Runner.Run goes through, appends CorpusNotice to the system prompt and wraps the corpus
+// with WrapCorpus before any runner sees them. So every runtime (`claude -p`, OpenCode
+// serve, a future one) fences identically and a new runner gets the defense without
+// doing anything; it cannot forget it. A runner owns only the channel ASSIGNMENT —
+// which arg is the system prompt vs the corpus turn — since `--append-system-prompt`+stdin
+// and a JSON {system, parts} body are different mechanisms; it must never fence again.
 
 // CorpusNotice is appended to witness's system prompt. It tells the model the user
 // message is corpus to analyze — delimited by the fence below — and must never be

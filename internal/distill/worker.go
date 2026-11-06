@@ -64,9 +64,13 @@ type MineFunc func(ctx context.Context, model, prompt, input string) (string, er
 // injectable MineFunc for tests while routing production through the single Runner
 // (platform.RunnerFor) resolved once per drain. distill knows only platform.Runner
 // — never which runtime it is.
+//
+// It is also where the prompt-injection fence is applied, ONCE for every runtime: every
+// production Run goes through here, so the runner receives CorpusNotice already on the system
+// prompt and the corpus already fenced and defanged, and a new runner cannot ship without it.
 func RunnerMine(r platform.Runner) MineFunc {
 	return func(ctx context.Context, model, prompt, input string) (string, error) {
-		return r.Run(ctx, model, prompt, input)
+		return r.Run(ctx, model, prompt+"\n\n"+platform.CorpusNotice, platform.WrapCorpus(input))
 	}
 }
 

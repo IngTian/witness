@@ -113,8 +113,21 @@ type Runner interface {
 	// no work; Close must tolerate an unopened runner.
 	Open(ctx context.Context) error
 	// Run performs one mining/review/summarize pass. systemPrompt is witness's own
-	// instruction; input is the corpus being analyzed — the platform fences it with
-	// WrapCorpus so it cannot impersonate instructions.
+	// instruction; input is the corpus being analyzed. Both arrive ALREADY FENCED:
+	// distill.RunnerMine, the seam every production Run goes through, appends CorpusNotice to
+	// systemPrompt and wraps input with WrapCorpus. A runner must pass them through verbatim,
+	// systemPrompt as the system/instruction channel and input as the user turn, and must not
+	// fence again.
+	//
+	// Two more rules every runner must follow, because nothing else enforces them:
+	//
+	//   - Its OWN timeout must surface as an error that errors.Is(err, context.DeadlineExceeded).
+	//     distill reads that as provider backpressure and narrows the drain window. os/exec does
+	//     not do it for you: a CommandContext kill returns "signal: killed", which is NOT
+	//     DeadlineExceeded. That silently disabled backpressure on the Claude path once; check
+	//     the run context's Err() and wrap it (see the claude runner).
+	//   - It must refuse to spawn anything when ExternalRunnersDisabled() is true (`make test`
+	//     sets it), so a test can never start a real model CLI.
 	//
 	// FRESH-CONTEXT INVARIANT. The context a Run executes in must be seeded EXCLUSIVELY by
 	// witness's own turns: systemPrompt plus the fenced corpus, and nothing else. A runner may

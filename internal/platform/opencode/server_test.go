@@ -181,12 +181,14 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			if body["agent"] != "witness" {
 				t.Fatalf("bad agent: %#v", body["agent"])
 			}
-			if system := body["system"].(string); !strings.Contains(system, "EXTRACT") || !strings.Contains(system, "UNTRUSTED") {
-				t.Fatalf("system prompt missing trusted/untrusted split: %q", system)
+			// The trusted/untrusted split: instructions on `system`, corpus as the text part, each
+			// VERBATIM — distill.RunnerMine has already fenced both, so the runner must not again.
+			if system := body["system"].(string); system != "EXTRACT" {
+				t.Fatalf("system prompt not passed verbatim: %q", system)
 			}
 			parts := body["parts"].([]any)
 			part := parts[0].(map[string]any)
-			if part["type"] != "text" || !strings.Contains(part["text"].(string), "<witness:untrusted>") || !strings.Contains(part["text"].(string), "DATA") {
+			if part["type"] != "text" || part["text"] != "DATA" {
 				t.Fatalf("bad parts: %#v", body["parts"])
 			}
 			model := body["model"].(map[string]any)

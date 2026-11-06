@@ -436,10 +436,12 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	body := map[string]any{
 		"messageID": messageID,
 		"agent":     "witness",
-		"system":    systemPrompt + "\n\n" + platform.CorpusNotice,
+		// Both already fenced by distill.RunnerMine (CorpusNotice on the system prompt, the
+		// corpus wrapped and defanged), the one place every runner's fence is applied.
+		"system": systemPrompt,
 		"parts": []map[string]any{{
 			"type": "text",
-			"text": platform.WrapCorpus(input),
+			"text": input,
 		}},
 	}
 	if provider, modelID, ok, err := splitOpenCodeModel(model); err != nil {
