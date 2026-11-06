@@ -583,7 +583,7 @@
     const t = M.traits[open], big = el('span', { class: 'big' });
     // Confirmed values only, never decayed ones (trend, trendFrom): decay alone would put a
     // "down" on almost every trait.
-    const since = t.trend === 'only' ? "only today's value was saved"
+    const since = t.trend === 'only' ? "only one value was saved"
       : (t.trend === 'up' ? 'up from ' + pct(t.trendFrom) : t.trend === 'down' ? 'down from ' + pct(t.trendFrom) : 'about level') +
         (t.rewrites ? ' · ' + count(t.rewrites, 'rewrite') : '');
     confSvg = svg('svg', { class: 'chart', 'data-chart': 'confidence' });
