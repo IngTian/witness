@@ -74,8 +74,8 @@ use; 'witness lens load-default' brings it back if you removed it.`),
 	return lensCmd
 }
 
-// groupRunE is the RunE of a command group (lens, config, observations). A group with no RunE
-// printed its help for ANY argument and exited 0 — cobra checks unknown subcommands only on the
+// groupRunE is the RunE of a command group (lens, config, observations, worker). A group with no
+// RunE printed its help for ANY argument and exited 0 — cobra checks unknown subcommands only on the
 // root — so `witness lens enabel x` looked like success to a person and to a script. Bare, it still
 // prints help; with an argument it is the same "unknown command" error the root gives, suggestion
 // included. (Checked here rather than with Args: cobra.NoArgs, which would also reject the
