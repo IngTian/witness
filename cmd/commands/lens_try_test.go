@@ -3,8 +3,10 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -209,34 +211,46 @@ func TestLensTryReportsResolvedPerLensModel(t *testing.T) {
 	}
 }
 
+// A t.Fatal inside fn ends the goroutine with runtime.Goexit; the stream must still be put back,
+// or every later test's output goes into a pipe nobody reads.
+func TestCaptureStdoutRestoresAfterGoexit(t *testing.T) {
+	orig := os.Stdout
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		captureStdout(t, func() { runtime.Goexit() })
+	}()
+	<-done
+	if os.Stdout != orig {
+		os.Stdout = orig
+		t.Fatal("captureStdout left os.Stdout pointing at its pipe after fn exited via Goexit")
+	}
+}
+
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns what it wrote.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
-	orig := os.Stdout
+	return captureStream(t, &os.Stdout, fn)
+}
+
+// captureStream is the one capture helper (captureStdout, captureStdoutErr and captureBoth wrap
+// it): it points *f at a pipe for fn and returns what fn wrote. The restore is deferred, so a
+// t.Fatal inside fn still puts the real stream back.
+func captureStream(t *testing.T, f **os.File, fn func()) string {
+	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stdout = w
-	done := make(chan string, 1)
-	go func() {
-		var b strings.Builder
-		buf := make([]byte, 4096)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				b.Write(buf[:n])
-			}
-			if err != nil {
-				break
-			}
-		}
-		done <- b.String()
+	out := make(chan string, 1)
+	go func() { b, _ := io.ReadAll(r); _ = r.Close(); out <- string(b) }()
+	prev := *f
+	*f = w
+	func() {
+		defer func() { *f = prev; _ = w.Close() }()
+		fn()
 	}()
-	fn()
-	_ = w.Close()
-	os.Stdout = orig
-	return <-done
+	return <-out
 }
 
 // registeredLensPath maps a registered lens NAME to its on-disk DIRECTORY, and leaves a
