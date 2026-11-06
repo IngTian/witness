@@ -13,14 +13,16 @@
 //	<name>/lens.json    structured settings (name, dimensions, per-lens models)
 //	<name>/extract.md   the mining (L0→L1) prompt — read whole, no parsing
 //	<name>/review.md    the review (L1→L2) prompt — read whole, no parsing
+//	<name>/emerge.md    OPTIONAL long-arc verify prompt; absent → review.md is used
 //
-// Settings live in JSON (mutated safely by `witness lens set` via a struct round-trip
-// — no text surgery, unlike the old `# key:` header directives that were the #71 bug
-// class) and prompts live in their own files (a missing prompt is a missing FILE, a
-// loud error, never a silently-empty section — the failure the old `## EXTRACT`/
-// `## REVIEW` split-parser could produce). The built-in `default` lens ships in the
-// SAME shape under prompts/default/ (extract.md + review.md + a lens.json carrying its
-// dimensions), so the seed and every registered lens are one mental model.
+// Settings live in JSON (mutated safely by `witness config set --lens` via a map
+// round-trip that keeps every other key — no text surgery, unlike the old `# key:`
+// header directives that were the #71 bug class) and prompts live in their own files
+// (a missing prompt is a missing FILE, a loud error, never a silently-empty section —
+// the failure the old `## EXTRACT`/`## REVIEW` split-parser could produce). The
+// built-in `default` lens ships in the SAME shape under prompts/default/ (extract.md +
+// review.md + a lens.json carrying its dimensions), so the seed and every registered
+// lens are one mental model.
 package lens
 
 import (
@@ -58,7 +60,7 @@ type Lens struct {
 
 // LensConfig is the on-disk lens.json schema — the structured settings half of a lens
 // directory. Prompts are NOT here (they are the sibling extract.md/review.md files);
-// this holds only what a CLI (`witness lens set`) round-trips safely as struct fields.
+// this holds only the settings `witness config set --lens` edits.
 // omitempty keeps a freshly-scaffolded file terse and a model-less lens from carrying
 // empty model keys.
 type LensConfig struct {

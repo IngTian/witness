@@ -197,7 +197,7 @@ func buildTrait(f *store.Facet, cur *store.FacetVersion, notes map[string]*store
 	// long review Run interleaves with a compaction Apply. The open version owns the rows at or
 	// after its ValidFrom. Its stored value gets a point of its own (at LastSeen, when it was
 	// last set) unless the latest owned row already says that value: `witness merge` adopts
-	// the other side's newer confidence WITHOUT logging (spec §7.1), and today's stored value
+	// the other side's newer confidence WITHOUT logging, and today's stored value
 	// must still be the last confirmation drawn.
 	pts := append([]stamped(nil), rows...)
 	openFrom, openOK := parseTS(cur.ValidFrom)
@@ -354,7 +354,8 @@ func traitName(key string) string {
 	return string(unicode.ToUpper(r)) + s[n:]
 }
 
-// topicLabel is the on-screen topic (spec §3).
+// topicLabel is a dimension's plain-words name on the page: the two default-lens keys that read
+// as jargon get a phrase, every other key shows with its underscores as spaces.
 func topicLabel(dim string) string {
 	switch dim {
 	case "biases":
