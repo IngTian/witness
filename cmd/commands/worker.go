@@ -205,7 +205,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// start --since ...` printed "nothing pending" with no hint that anything was skipped.
 	if !timeRange.empty() {
 		if n := st.SessionsWithNoUsableTimestamp(); n > 0 {
-			slog.Warn("range drain skips sessions whose raw timestamps are unreadable; an unranged `witness distill start` still mines them",
+			slog.Warn("range drain skips sessions whose raw timestamps are unreadable; an unranged `witness worker run` still mines them",
 				"skipped_sessions", n)
 		}
 	}

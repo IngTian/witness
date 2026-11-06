@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,6 +27,12 @@ func (r sessionTimeRange) empty() bool {
 }
 
 func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
+	return cmdDistillStartWith(quiet, sinceValue, untilValue, spawnDetachedOK)
+}
+
+// cmdDistillStartWith takes the spawner so a test can make it fail (spawnDetachedOK always
+// succeeds under `go test`).
+func cmdDistillStartWith(quiet bool, sinceValue, untilValue string, spawn func(...string) bool) error {
 	r, err := parseSessionTimeRange(sinceValue, untilValue, time.Now())
 	if err != nil {
 		return err
@@ -37,7 +44,9 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 	if !r.until.IsZero() {
 		args = append(args, "--until", r.until.UTC().Format(time.RFC3339Nano))
 	}
-	spawnDetached(args...)
+	if !spawn(args...) {
+		return errors.New("the background worker did not start")
+	}
 	if !quiet {
 		fmt.Println(bgGlyph() + " worker started in the background")
 		fmt.Println(hint("watch it", "witness status"))

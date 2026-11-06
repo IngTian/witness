@@ -32,7 +32,7 @@ use; 'witness lens load-default' brings it back if you removed it.`),
 		&cobra.Command{
 			Use:   "register <name> <dir>",
 			Short: "Register or replace a lens definition.",
-			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models with `witness config --lens <name>`.",
+			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models with `witness config set <key> <value> --lens <name>`.",
 			Args:  cobra.ExactArgs(2),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"register"}, args...)) },
 		},

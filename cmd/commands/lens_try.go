@@ -42,8 +42,7 @@ func newLensTryCmd() *cobra.Command {
 			"This is the prompt-tuning loop: edit the EXTRACT prompt, run `try`, see what " +
 			"changes. Sessions are sampled largest-first by default (deterministic, and the meatiest " +
 			"sessions are the ones a prompt is most likely to mishandle); use --recent for the latest.\n\n" +
-			"Works on both runners. On an OpenCode runner it briefly holds the worker lock while it runs " +
-			"(its shutdown sweep would otherwise disrupt a running worker); on Claude it needs no lock. " +
+			"Works on both runners and takes no lock, so it can run beside a live worker. " +
 			"Sessions are previewed in parallel (bounded by mine_concurrency).\n\n" +
 			"With --review, it also runs the lens's REVIEW prompt over the observations just mined and " +
 			"prints the profile facets it would synthesize — so you can tune both halves of a lens in one " +
