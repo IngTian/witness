@@ -235,8 +235,11 @@ func TestWriteE2EFixtures(t *testing.T) {
 
 // addAttentionTopic adds a 24-trait topic to the full fixture. Page 2 needs it: the list shows
 // 18 rows and then "show all 24", the dots stagger over three rows, and the trait the page
-// opens on (the most notes) has a dashed span from before the log, logged points, a line
-// fading to today and "formed by merging 2 traits", all at once. Every word is synthetic.
+// opens on (the most notes) has logged points, a line fading to today and "formed by merging
+// 2 traits", all at once. It also has the merge_between shape (traits_test.go): a logged point,
+// then a version `witness merge` appended with no log row (a dashed span), then later logged
+// points. The solid line must break around that span, never hold the first value through it.
+// Every word is synthetic.
 func addAttentionTopic(in *store.ViewInput) {
 	day0 := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
 	ts := func(d int) string { return day0.AddDate(0, 0, d).Format(time.RFC3339) }
@@ -273,7 +276,8 @@ func addAttentionTopic(in *store.ViewInput) {
 		store.Facet{
 			Lens: "default", Dimension: "attention", Key: rich, LastSeen: ts(118),
 			Versions: []store.FacetVersion{
-				{Value: "First wording.", ValidFrom: ts(14), ValidTo: ts(50), BecauseOf: ids[:8], Confidence: 0.55},
+				{Value: "First wording.", ValidFrom: ts(14), ValidTo: ts(30), BecauseOf: ids[:8], Confidence: 0.55},
+				{Value: "Merged wording.", ValidFrom: ts(30), ValidTo: ts(50), BecauseOf: ids[:12], Confidence: 0.62},
 				{Value: "Current wording.", Claim: summary, ValidFrom: ts(50), BecauseOf: ids, Confidence: 0.82, ConfidenceSeq: 2400},
 			},
 		},
@@ -282,6 +286,8 @@ func addAttentionTopic(in *store.ViewInput) {
 		store.Facet{Lens: "default", Dimension: "attention", Key: "verifies_before_repeating", LastSeen: ts(58),
 			ArchivedAt: ts(58), MergedInto: "attention/" + rich, Versions: []store.FacetVersion{{ValidFrom: ts(24), Confidence: 0.5}}},
 	)
+	in.Log = append(in.Log, store.ConfidenceEvent{Lens: "default", Dimension: "attention", Key: rich,
+		At: ts(14), To: 0.55, Kind: "new"})
 	for k, v := range []float64{0.65, 0.72, 0.78, 0.82} {
 		in.Log = append(in.Log, store.ConfidenceEvent{Lens: "default", Dimension: "attention", Key: rich,
 			At: ts(66 + 17*k), To: v, Kind: "review"})

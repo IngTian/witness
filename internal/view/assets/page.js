@@ -629,11 +629,20 @@
     for (const s of t.spans) dashed({ x1: x(s.from), x2: x(s.to), y1: y(s.v), y2: y(s.v) }, 'final value of this rewrite');
     const P = t.points, last = P[P.length - 1];
     if (last) {
-      let d = 'M' + x(P[0].at).toFixed(1) + ',' + y(P[0].v).toFixed(1);
-      for (const p of P.slice(1)) d += ' H' + x(p.at).toFixed(1) + ' V' + y(p.v).toFixed(1);
-      // Nothing has faded when today's value is still the last one confirmed: the step just holds.
-      if (pct(t.today) !== pct(last.v)) dashed({ x1: x(last.at), y1: y(last.v), x2: end, y2: y(t.today) }, 'fading since last confirmed');
-      else d += ' H' + end.toFixed(1);
+      // A point holds solid until the next point, or until a span starts on or after its day,
+      // whichever comes first. A `witness merge` version can sit between two logged points,
+      // and drawing the earlier value through it would claim a value witness didn't hold then
+      // (spec §5). After a span the line starts again at the next point.
+      const at = p => x(p.at).toFixed(1) + ',' + y(p.v).toFixed(1);
+      const faded = pct(t.today) !== pct(last.v);
+      let d = 'M' + at(P[0]);
+      P.forEach((p, k) => {
+        const nx = P[k + 1], cut = t.spans.find(s => s.from >= p.at && (!nx || s.from <= nx.at));
+        if (cut) d += ' H' + x(cut.from).toFixed(1) + (nx ? ' M' + at(nx) : '');
+        else if (nx) d += ' H' + x(nx.at).toFixed(1) + ' V' + y(nx.v).toFixed(1);
+        else if (!faded) d += ' H' + end.toFixed(1); // nothing has faded: the last step just holds
+      });
+      if (faded) dashed({ x1: x(last.at), y1: y(last.v), x2: end, y2: y(t.today) }, 'fading since last confirmed');
       if (d.includes('H')) c.push(svg('path', { d, class: 'line' + (animate ? ' draw' : ''), pathLength: 1 }));
       P.forEach((p, k) => {
         const dot = tipped(svg('circle', { cx: x(p.at), cy: y(p.v), r: 3.5, class: 'pt' }), 'reviewed ' + dateText(p.at) + ' · ' + pct(p.v));
