@@ -176,28 +176,36 @@ func TestPortraitUnlocatableSentence(t *testing.T) {
 }
 
 func TestPortraitLinksMapAndCap(t *testing.T) {
-	md := "First sentence here. Second sentence here."
+	md := "First sentence here. Second sentence here. Third sentence here. Fourth sentence here."
 	p := onePortrait(t, portraitInput(), PortraitFile{ID: "default", Markdown: md, SourcesOK: true,
 		Sources: store.PortraitSources{Sentences: []store.SourcedSentence{
-			// The archived trait is dropped and frees its slot; c (direct) moves ahead of a, b.
+			// The archived trait is dropped; the live direct c is shown, its partials are not.
 			{Text: "First sentence here.", Links: []store.TraitLink{
 				link("a", store.LinkPartial), link("gone", store.LinkDirect),
 				link("b", store.LinkPartial), link("c", store.LinkDirect)}},
-			// Five live links: direct c, d first, then the first partial; the panel shows three.
+			// Two live directs: both, and none of the three partials.
 			{Text: "Second sentence here.", Links: []store.TraitLink{
 				link("a", store.LinkPartial), link("b", store.LinkPartial), link("c", store.LinkDirect),
 				link("d", store.LinkDirect), link("e", store.LinkPartial)}},
+			// No direct link: the live partials show, three of four (the dead one never).
+			{Text: "Third sentence here.", Links: []store.TraitLink{
+				link("a", store.LinkPartial), link("gone", store.LinkPartial), link("b", store.LinkPartial),
+				link("d", store.LinkPartial), link("e", store.LinkPartial)}},
+			// The only direct link is dead: it must not hide the live partials.
+			{Text: "Fourth sentence here.", Links: []store.TraitLink{
+				link("gone", store.LinkDirect), link("b", store.LinkPartial), link("e", store.LinkPartial)}},
 		}}})
 	if !p.Sources {
 		t.Fatalf("Sources: got false, want true")
 	}
-	if want := [][]int{{2, 0, 1}, {2, 3, 0}}; !reflect.DeepEqual(p.Links, want) {
+	if want := [][]int{{2}, {2, 3}, {0, 1, 3}, {1, 4}}; !reflect.DeepEqual(p.Links, want) {
 		t.Errorf("links: got %v, want %v", p.Links, want)
 	}
 }
 
 func TestPortraitWithoutSources(t *testing.T) {
-	md := "# Default\n\nFirst sentence here. Second sentence here."
+	// A mid-portrait heading (a leading one is dropped) so the JSON shows a heading's [].
+	md := "First sentence here.\n\n## Later\n\nSecond sentence here."
 	full := store.PortraitSources{
 		Sentences: []store.SourcedSentence{
 			{Text: "First sentence here.", Links: []store.TraitLink{link("a", store.LinkDirect)}},
@@ -205,15 +213,19 @@ func TestPortraitWithoutSources(t *testing.T) {
 		},
 		Keywords: []store.Keyword{{Word: "first", Sentences: []int{0}}},
 	}
-	short := full
-	short.Sentences = full.Sentences[:1] // written against a different split of this text
+	// Both written against a different split of this text: one fewer sentence, one more.
+	short, long := full, full
+	short.Sentences = full.Sentences[:1]
+	long.Sentences = append(append([]store.SourcedSentence{}, full.Sentences...),
+		store.SourcedSentence{Text: "Third.", Links: []store.TraitLink{link("c", store.LinkDirect)}})
 	for _, c := range []struct {
 		name string
 		src  store.PortraitSources
 		ok   bool
 	}{
 		{"not recorded", full, false},
-		{"sentence count differs", short, true},
+		{"fewer sentences stored", short, true},
+		{"more sentences stored", long, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := onePortrait(t, portraitInput(), PortraitFile{ID: "default", Markdown: md, Sources: c.src, SourcesOK: c.ok})
@@ -232,6 +244,48 @@ func TestPortraitWithoutSources(t *testing.T) {
 				t.Errorf("JSON must use [] for every empty list: %s", s)
 			}
 		})
+	}
+}
+
+// Only a LEADING heading is a title: a later one is a section and stays, for every kind.
+func TestPortraitLeadingHeading(t *testing.T) {
+	h := func(text string) Block { return Block{Kind: "h", Text: text, Sentences: []Sentence{}} }
+	para := func(n int, text string) Block {
+		return Block{Kind: "p", Sentences: []Sentence{{N: n, Runs: []Run{{text, false}}}}}
+	}
+	for _, c := range []struct {
+		name, id, md, title string
+		blocks              []Block
+	}{
+		{"notebook drops its leading heading", "default",
+			"# Default lens\n\nText here.\n\n## Section\n\nMore here.",
+			"default", []Block{para(0, "Text here."), h("Section"), para(1, "More here.")}},
+		{"overall opening with a paragraph keeps its later heading", store.ProfileUnified,
+			"Opening words here.\n\n# Later heading\n\nMore here.",
+			"", []Block{para(0, "Opening words here."), h("Later heading"), para(1, "More here.")}},
+		{"overall's leading heading is its title", store.ProfileUnified,
+			"# Who you are\n\nText here.\n\n## Section\n\nMore here.",
+			"Who you are", []Block{para(0, "Text here."), h("Section"), para(1, "More here.")}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := onePortrait(t, portraitInput(), PortraitFile{ID: c.id, Markdown: c.md})
+			if p.Title != c.title {
+				t.Errorf("Title: got %q, want %q", p.Title, c.title)
+			}
+			wantBlocks(t, p.Blocks, c.blocks)
+			wantSplit(t, p, c.md)
+		})
+	}
+}
+
+// A single-digit numbered item straight after a paragraph line starts its own block, exactly
+// as SplitSentences reads it (the view uses distill's own list rules, not a copy).
+func TestPortraitNumberedItemAfterParagraph(t *testing.T) {
+	md := "Intro line\n1. Item."
+	p := onePortrait(t, portraitInput(), PortraitFile{ID: "default", Markdown: md})
+	wantSplit(t, p, md)
+	if len(p.Blocks) != 2 || p.Blocks[0].Kind != "p" || p.Blocks[1].Kind != "li" {
+		t.Errorf("blocks: got %+v, want a paragraph then a list item", p.Blocks)
 	}
 }
 
@@ -293,10 +347,11 @@ func TestPortraitKinds(t *testing.T) {
 	if u := m.Portraits[0]; u.Written != "2026-03-04" || !u.Stale || len(u.Blocks) != 1 || u.Blocks[0].Kind != "p" {
 		t.Errorf("overall: written %q stale %v blocks %+v; want 2026-03-04, true, its heading lifted into Title", u.Written, u.Stale, u.Blocks)
 	}
-	// A notebook's own heading stays in the column: its Title is just the notebook's name.
-	if d := m.Portraits[1]; len(d.Blocks) != 2 ||
-		!reflect.DeepEqual(d.Blocks[0], Block{Kind: "h", Text: "Default lens", Sentences: []Sentence{}}) {
-		t.Errorf("notebook blocks: got %+v, want its heading kept", d.Blocks)
+	// Every kind loses its leading heading: notebooks and corpora get a plain one of their name.
+	for _, p := range m.Portraits {
+		if len(p.Blocks) != 1 || p.Blocks[0].Kind != "p" {
+			t.Errorf("%s blocks: got %+v, want only its paragraph", p.ID, p.Blocks)
+		}
 	}
 
 	// The overall portrait is written from notebook portraits: with no notebook, it backs nothing.

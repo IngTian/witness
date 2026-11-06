@@ -155,12 +155,12 @@ type PortraitFile struct {
 type Portrait struct {
 	ID       string    `json:"id"`
 	Kind     string    `json:"kind"`    // "overall" (unified) | "notebook" | "other" (a corpus notebook)
-	Title    string    `json:"title"`   // overall: text of its first heading; else the lens name
+	Title    string    `json:"title"`   // overall: its leading heading ("" if none); else the lens name
 	Written  string    `json:"written"` // YYYY-MM-DD (loc) of the file mtime
 	Stale    bool      `json:"stale"`
 	Sources  bool      `json:"sources"`  // false → "Sources for this portrait aren't recorded yet."
 	Blocks   []Block   `json:"blocks"`   // in file order
-	Links    [][]int   `json:"links"`    // one per sentence: ≤3 active trait ids, direct first
+	Links    [][]int   `json:"links"`    // one per sentence: ≤3 active trait ids, direct ones, else partial ones
 	Keywords []Keyword `json:"keywords"` // ≤8; [] without sources
 }
 

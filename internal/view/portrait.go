@@ -57,15 +57,17 @@ func buildPortrait(f PortraitFile, kind string, ids map[facetID]int, loc *time.L
 		Written: f.Written.In(loc).Format(time.DateOnly), Stale: f.Stale,
 		Blocks: blocks, Links: make([][]int, n), Keywords: []Keyword{},
 	}
+	// Only a LEADING heading is the portrait's title (both prompts open with one). The
+	// overall's becomes Title; a notebook's is dropped, since the page gives it a plain heading
+	// of its name (spec §4.2). A heading anywhere later is a section and stays in the column.
 	if kind == "overall" {
 		p.Title = ""
-		for i, b := range p.Blocks {
-			if b.Kind == "h" {
-				p.Title = b.Text
-				p.Blocks = append(p.Blocks[:i], p.Blocks[i+1:]...)
-				break
-			}
+	}
+	if len(blocks) > 0 && blocks[0].Kind == "h" {
+		if kind == "overall" {
+			p.Title = blocks[0].Text
 		}
+		p.Blocks = blocks[1:]
 	}
 
 	// The hash in CurrentPortraitSources proves the sources describe THIS text; the count
@@ -92,17 +94,27 @@ func buildPortrait(f PortraitFile, kind string, ids map[facetID]int, loc *time.L
 	return p
 }
 
-// linkIDs maps one sentence's links to active trait ids: deduped and direct first
-// (DedupeLinks, what every reader of sources uses), unknown or archived keys dropped BEFORE
-// the cap, so a dead link never takes one of the panel's three places.
+// linkIDs maps one sentence's links to active trait ids, deduped by DedupeLinks (a key cited
+// both ways counts as direct). It returns the live direct links, or, only when none is live,
+// the partial ones (spec §7.2: partials are look-alike padding next to a real support), at
+// most three. Dead keys are dropped FIRST, so a direct link to a retired trait never hides
+// the live partial ones.
 func linkIDs(links []store.TraitLink, ids map[facetID]int) []int {
-	out := []int{}
+	var direct, partial []int
 	for _, l := range store.DedupeLinks(links) {
-		if id, ok := ids[facetID{l.Lens, l.Dimension, l.Key}]; ok && len(out) < 3 {
-			out = append(out, id)
+		id, ok := ids[facetID{l.Lens, l.Dimension, l.Key}]
+		switch {
+		case !ok:
+		case l.Strength == store.LinkDirect:
+			direct = append(direct, id)
+		default:
+			partial = append(partial, id)
 		}
 	}
-	return out
+	if len(direct) == 0 {
+		direct = partial
+	}
+	return append([]int{}, direct[:min(3, len(direct))]...)
 }
 
 // portraitBlocks rebuilds the headings, paragraphs and list items that SplitSentences reads,
@@ -139,7 +151,6 @@ func portraitBlocks(md string) ([]Block, int) {
 	}
 	for _, line := range strings.Split(strings.ReplaceAll(md, "\r\n", "\n"), "\n") {
 		t := strings.TrimSpace(line)
-		item, isItem := listItem(t)
 		switch {
 		case t == "":
 			flush()
@@ -147,28 +158,15 @@ func portraitBlocks(md string) ([]Block, int) {
 			flush()
 			text := strings.TrimSpace(strings.ReplaceAll(strings.TrimLeft(t, "#"), "**", ""))
 			blocks = append(blocks, Block{Kind: "h", Text: text, Sentences: []Sentence{}})
-		case isItem:
+		case distill.IsListItem(t):
 			flush()
-			emit("li", item)
+			emit("li", distill.StripListMarker(t))
 		default:
 			para = append(para, t)
 		}
 	}
 	flush()
 	return blocks, n
-}
-
-// listItem mirrors distill's isListItem + stripListMarker (unexported there): "- ", "* " or
-// ASCII digits + ". " start a list item, and the marker is cut.
-func listItem(t string) (string, bool) {
-	if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ") {
-		return strings.TrimSpace(t[2:]), true
-	}
-	d := strings.IndexFunc(t, func(r rune) bool { return r < '0' || r > '9' })
-	if d > 0 && strings.HasPrefix(t[d:], ". ") {
-		return strings.TrimSpace(t[d+2:]), true
-	}
-	return t, false
 }
 
 // unbold removes ** the way SplitSentences does (strings.ReplaceAll: left to right, never
