@@ -92,22 +92,8 @@ func (s *Store) ReadViewInput(ctx context.Context) (*ViewInput, error) {
 	}
 
 	// Read confidence log, ORDER BY id (insertion order)
-	rows, err = tx.QueryContext(ctx,
-		`SELECT lens, dimension, key, at, clock_seq, from_conf, to_conf, kind
-		   FROM confidence_log ORDER BY id`)
+	in.Log, err = readConfidenceLog(ctx, tx)
 	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var ev ConfidenceEvent
-		if err := rows.Scan(&ev.Lens, &ev.Dimension, &ev.Key, &ev.At, &ev.ClockSeq, &ev.From, &ev.To, &ev.Kind); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		in.Log = append(in.Log, ev)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 

@@ -49,7 +49,7 @@ type Store struct {
 	profileFS  // L4 narrative profile files under <root>/profile/ (issue #73-C1)
 	procLocks  // cross-process advisory flocks (worker/import) (issue #73-C1)
 	lensReg    // on-disk lens registry under <root>/lenses/ (issue #73-C1)
-	facetIO    // L2 bi-temporal facets (reviewer is sole writer) (issue #73-C1)
+	facetIO    // L2 bi-temporal facets (writers listed on WriteFacets) (issue #73-C1)
 	rawIO      // L0 append-only transcript + size/sample/prune helpers (issue #73-C1)
 	obsIO      // L1 observations + in-session staged buffer (issue #73-C1)
 	queue      // distillation queue: per-(session,lens) watermark/backoff (issue #73-C1)
