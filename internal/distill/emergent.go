@@ -99,27 +99,7 @@ func Candidates(obs []store.Observation, facets []store.Facet, lens string, onRa
 	idx := indexObs(obs, lens) // stable index over the lens's (embeddable) obs
 	m := len(idx.obs)
 	need := (len(band) + 1) / 2 // >= half the band (ceil)
-	together := make(map[int64]int)
-	nodes, ranks := vector.KNNRanks(obs, lens, band[len(band)-1], onRank)
-	for _, k := range band {
-		for _, cc := range vector.ConnectedComponents(vector.MutualAt(ranks, k)) {
-			if len(cc) < 2 {
-				continue
-			}
-			// map node indices (into `nodes`) to our stable index, then count all pairs.
-			gi := make([]int, 0, len(cc))
-			for _, ni := range cc {
-				if si, ok := idx.byID[nodes[ni].ID]; ok {
-					gi = append(gi, si)
-				}
-			}
-			for a := 0; a < len(gi); a++ {
-				for b := a + 1; b < len(gi); b++ {
-					together[pairKey(gi[a], gi[b])]++
-				}
-			}
-		}
-	}
+	together := bandTogether(obs, lens, band, idx, onRank)
 	// Build the co-membership adjacency (edge iff the pair was together at >= need k's).
 	adj := make([][]int, m)
 	for key, cnt := range together {
@@ -324,6 +304,37 @@ func memberIDs(members []store.Observation) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// bandTogether counts, per pair of idx's observations (pairKey), how many k of the band put
+// both in one mutual-kNN component. It ranks once for the band's LARGEST k and reads each k's
+// graph off a prefix, so every k sees the same graph a fresh MutualKNNAdj(k) would — but only
+// because kMax is the band's top: MutualAt clamps k to what was ranked, so a smaller kMax
+// would quietly hand every larger k a smaller graph. TestBandTogetherMatchesPerKReference
+// pins it against the per-k loop this replaced.
+func bandTogether(obs []store.Observation, lens string, band []int, idx obsIndex, onRank func(done, total int)) map[int64]int {
+	together := make(map[int64]int)
+	nodes, ranks := vector.KNNRanks(obs, lens, band[len(band)-1], onRank)
+	for _, k := range band {
+		for _, cc := range vector.ConnectedComponents(vector.MutualAt(ranks, k)) {
+			if len(cc) < 2 {
+				continue
+			}
+			// map node indices (into `nodes`) to our stable index, then count all pairs.
+			gi := make([]int, 0, len(cc))
+			for _, ni := range cc {
+				if si, ok := idx.byID[nodes[ni].ID]; ok {
+					gi = append(gi, si)
+				}
+			}
+			for a := 0; a < len(gi); a++ {
+				for b := a + 1; b < len(gi); b++ {
+					together[pairKey(gi[a], gi[b])]++
+				}
+			}
+		}
+	}
+	return together
 }
 
 // obsIndex is a stable indexing of a lens's embeddable observations, so the pair-level
