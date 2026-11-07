@@ -120,7 +120,8 @@ type serveRecord struct {
 // Three gates, all required, in cheapest-first order:
 //  1. the owning witness process must be GONE (else this is a live sibling's serve);
 //  2. the serve pid must still look like a witness private serve (isOurServePID — the same
-//     fingerprint the ps sweep uses);
+//     fingerprint the ps sweep uses, or on Windows its executable half when the OS will not
+//     give the command line; see serveProbeMatches);
 //  3. the serve must answer OUR password on its recorded port (proves it is the very serve
 //     that record describes, not a pid-reuse coincidence).
 //
@@ -1029,11 +1030,26 @@ const openCodeServeMarker = "opencode"
 // orphan by command-line shape alone — that's an accepted, documented edge case (reap
 // is conservative for witness's own serves, but this external collision is possible).
 func isStrayServeLine(cmdline string) bool {
-	fields := strings.Fields(cmdline)
+	// Split on ASCII whitespace only — the set Go's argv quoting and CommandLineToArgvW use (ps
+	// joins argv with ASCII spaces too). strings.Fields also splits on U+3000/U+00A0, which Go
+	// does NOT quote, so a profile like `山田　太郎` cut the executable path and the reaper never
+	// recognised that user's own serve.
+	fields := strings.FieldsFunc(cmdline, isArgvSpace)
 	if len(fields) == 0 {
 		return false
 	}
-	if !strings.Contains(filepath.Base(fields[0]), openCodeServeMarker) {
+	exe := fields[0]
+	// Windows quotes an argv[0] that contains a space (syscall.makeCmdLine), so a profile such as
+	// `C:\Users\John Smith` arrives as `"C:\Users\John Smith\...\opencode.exe" serve ...`, which
+	// the split cuts inside the path. Take the quoted span as the executable.
+	if s := strings.TrimLeftFunc(cmdline, isArgvSpace); strings.HasPrefix(s, `"`) {
+		end := strings.IndexByte(s[1:], '"')
+		if end < 0 {
+			return false
+		}
+		exe = s[1 : 1+end]
+	}
+	if !isOpenCodeExe(exe) {
 		return false
 	}
 	// Require the full private-serve shape so a user's own `opencode serve` (or any
@@ -1045,6 +1061,26 @@ func isStrayServeLine(cmdline string) bool {
 		}
 	}
 	return true
+}
+
+func isArgvSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }
+
+// serveProbeMatches is gate 2's decision on Windows, kept apart from the OS calls so it is
+// testable off Windows. The command line carries the full fingerprint and, when readable, is
+// FINAL: a non-matching line must not be rescued by the looser check below. Only when the OS
+// refuses the command line does it fall back to the image name, which carries the executable half;
+// gate 3 (the password probe) stays the ownership proof either way.
+func serveProbeMatches(cmdline, image func() (string, error)) bool {
+	if line, err := cmdline(); err == nil {
+		return isStrayServeLine(line)
+	}
+	exe, err := image()
+	return err == nil && isOpenCodeExe(exe)
+}
+
+// isOpenCodeExe is the executable half of the fingerprint: the basename names opencode.
+func isOpenCodeExe(exe string) bool {
+	return exe != "" && strings.Contains(filepath.Base(exe), openCodeServeMarker)
 }
 
 // (The ps-column parser and the orphan-gate scan that used isStrayServeLine now

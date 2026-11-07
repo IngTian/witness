@@ -26,12 +26,19 @@ func (sys) Detach(cmd *exec.Cmd) {
 // honors the worker_stop_requested meta flag cooperatively; this is the forceful
 // backstop the way SIGTERM is on Unix.
 //
-// KNOWN GAP (issue #42): TerminateProcess is uncatchable, so the worker's stop
-// context (NotifyStop, which cancels the drain ctx and thus its `claude -p`
+// KNOWN GAP, UNFIXED (tracked in #216, split out of #199 as F138 part b; #42 was folded into #43, which
+// closed as a refactor without it): TerminateProcess is uncatchable, so the worker's
+// stop context (NotifyStop, which cancels the drain ctx and thus its `claude -p`
 // children on Unix) never runs here, and TerminateProcess does not cascade to
-// children — up to mine_concurrency `claude -p` can orphan on a Windows stop (each
-// self-reaps at its 10-min ctx timeout). The fix is a Job Object with
-// kill-on-close; tracked separately, not blocking.
+// children — up to mine_concurrency `claude -p` can orphan on a Windows stop, with
+// nothing bounding them (the 10-min claudeRunTimeout is a context the worker itself
+// enforces, and the worker is what just died), and so does the `opencode serve` child,
+// which only the pid-file reaper (opencode reapPriorServe) cleans up, at the next
+// drain. The fix is to put the worker itself into a KILL_ON_JOB_CLOSE Job Object at
+// startup so its children inherit it; BindToParent runs before Start, so it cannot.
+// That job would also kill the detached children the worker means to outlive it
+// (spawnDetached's wakeups), so those need CREATE_BREAKAWAY_FROM_JOB — part of why it
+// waits for a Windows box to verify on.
 func (sys) TerminateGroup(pid int) error {
 	p, err := os.FindProcess(pid)
 	if err != nil {

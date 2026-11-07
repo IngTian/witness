@@ -55,8 +55,8 @@ type Control interface {
 	// TerminateGroup stops the process identified by pid. Unix: SIGTERM to the
 	// process GROUP (-pid) first — the worker leads its own group via Detach — then
 	// the bare pid as a fallback, so a `claude -p` child dies with it. Windows has
-	// no process-group signal, so it opens the process and terminates it (the
-	// child-cascade gap is issue #42, tracked separately).
+	// no process-group signal, so it opens the process and terminates it; children
+	// are NOT cascaded there (the open Job Object gap — see proc_windows.go).
 	TerminateGroup(pid int) error
 
 	// NotifyStop returns a context cancelled on the first SIGINT/SIGTERM, plus a

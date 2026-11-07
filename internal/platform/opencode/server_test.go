@@ -92,6 +92,23 @@ func TestIsStrayServeLine(t *testing.T) {
 		{"not opencode at all", "claude -p --model haiku", false},
 		{"empty line", "", false},
 		{"opencode substring in another binary is fine (still needs serve+flags)", "/opt/my-opencode-helper/tool run", false},
+		// Windows quotes an argv[0] containing a space (syscall.makeCmdLine), so a profile such as
+		// `C:\Users\John Smith` puts the executable inside quotes. Splitting on whitespace alone made
+		// the executable `"C:\Users\John`, and the reaper matched nothing for that user.
+		{"windows quoted executable with a space", `"C:\Users\John Smith\.opencode\bin\opencode.exe" serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR`, true},
+		{"windows quoted executable that is not opencode", `"C:\Program Files\nodejs\node.exe" opencode serve --pure --hostname 127.0.0.1`, false},
+		{"unterminated quote", `"C:\Users\John Smith\opencode.exe serve --pure --hostname 127.0.0.1`, false},
+		{"unterminated quote around a bare opencode", `"opencode serve --pure --hostname 127.0.0.1`, false},
+		// The closing quote is the FIRST one: node running the npm script quotes two paths, and
+		// only the first is the executable.
+		{"node running the npm opencode script", `"C:\Program Files\nodejs\node.exe" "C:\Users\x\npm\node_modules\opencode-ai\bin\opencode" serve --pure --hostname 127.0.0.1`, false},
+		{"opencode in a directory, not the executable", "/Users/x/.opencode/bin/node serve --pure --hostname 127.0.0.1", false},
+		{"another opencode subcommand with the serve flags", "opencode web --pure --hostname 127.0.0.1", false},
+		// Go quotes argv[0] only for an ASCII space or tab, so a profile name with a full-width
+		// (U+3000) or no-break (U+00A0) space arrives UNQUOTED. Splitting on every Unicode space
+		// cut the path there, and the reaper never recognised that user's own serve.
+		{"unquoted path with a full-width space", "C:\\Users\\山田\u3000太郎\\.opencode\\bin\\opencode.exe serve --pure --hostname 127.0.0.1 --port 5321", true},
+		{"unquoted path with a no-break space", "/Users/a\u00a0b/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

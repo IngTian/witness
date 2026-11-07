@@ -150,8 +150,10 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// detached worker) or a Ctrl-C on a foreground drain (SIGINT) tears
 	// down in-flight `claude -p` children too — the ctx threads worker→Drain→
 	// MineSession→Run→exec.CommandContext, and cancelling it sends the child a kill.
-	// Without this, stopping the parent left up to `conc` orphaned children to run to
-	// their own 10-min timeout (issue #22 audit). runner.Close still runs (deferred)
+	// Without this, stopping the parent left up to `conc` orphaned children running with
+	// no bound at all — their 10-min timeout is a context THIS process enforces, so it
+	// dies with it (issue #22 audit; on Windows the stop is a TerminateProcess this never
+	// sees, which is #216). runner.Close still runs (deferred)
 	// to sweep any OpenCode distill sessions. proc.NotifyStop is the port's
 	// signal-aware ctx (SIGINT+SIGTERM).
 	ctx, stopSignals := procCtl.NotifyStop(context.Background())

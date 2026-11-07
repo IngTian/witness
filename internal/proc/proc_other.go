@@ -25,8 +25,9 @@ func (sys) BindToParent(cmd *exec.Cmd) {}
 //
 // macOS reparents orphans to launchd (pid 1), so the ppid==1 gate is meaningful
 // there. On Windows there is no `ps` and orphans are not reparented to a fixed pid,
-// so this degrades to a no-op — acceptable while OpenCode-on-Windows is deferred
-// (issue #10); Windows' own detached worker relies on the Job Object gap (#42).
+// so this degrades to a no-op. The orphaned `opencode serve` is reaped there by the
+// pid-file path instead (opencode reapPriorServe); orphaned `claude -p` children
+// have no reaper on Windows at all (the Job Object gap — see proc_windows.go).
 func (sys) ReapOrphans(want func(cmdline string) bool) {
 	out, err := exec.Command("ps", "-ax", "-o", "pid=,ppid=,command=").Output()
 	if err != nil {

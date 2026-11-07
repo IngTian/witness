@@ -23,9 +23,9 @@ import (
 // unavailable. Implementing it here anyway keeps the reap logic identical on both platforms
 // rather than leaving a Windows-only code path that no one can exercise locally.
 func isOurServePID(pid int) bool {
-	// BOUNDED for the same reason as the Windows variant: this runs under the machine-wide
-	// WorkerLock (reapPriorServe <- StartOpenCodeServerIn), so an unbounded child would wedge every
-	// drain. `ps` is normally instant, but "normally" is not a bound.
+	// BOUNDED: this runs under the machine-wide WorkerLock (reapPriorServe <- StartOpenCodeServerIn),
+	// so an unbounded child would wedge every drain. `ps` is normally instant, but "normally" is not
+	// a bound. (The Windows variant needs no bound: it spawns nothing.)
 	ctx, cancel := context.WithTimeout(context.Background(), openCodeProbeTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()

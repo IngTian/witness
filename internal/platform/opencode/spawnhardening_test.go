@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,8 +95,7 @@ func TestHideOpenCodeWindowIsSafeEverywhere(t *testing.T) {
 	if cmd.Path == "" || len(cmd.Args) != 2 {
 		t.Fatalf("hideOpenCodeWindow damaged the command: path=%q args=%q", cmd.Path, cmd.Args)
 	}
-	// A nil receiver must not panic: reapPriorServe's Windows probe calls this on a command it
-	// built, and a future caller may pass a nil from a failed construction.
+	// A nil receiver must not panic: a caller may pass a nil from a failed construction.
 	hideOpenCodeWindow(nil)
 }
 
@@ -301,44 +301,55 @@ func TestEmptyRuntimeRootIsRefused(t *testing.T) {
 	}
 }
 
-// isStrayServeLine treats the FIRST whitespace-separated field as the executable, which is why the
-// Windows probe must hand it a bare command line and nothing else.
+// isStrayServeLine treats the FIRST field as the executable, which is why the Windows probe must
+// hand it a bare command line and nothing else.
 //
-// This pins the bug that made the Windows reaper a silent no-op. `wmic ... get commandline` in its
-// default TABLE format emits the column name as the first output line, so the blob handed to this
-// function began with "CommandLine" — and since strings.Fields splits on newlines too, fields[0] was
-// "CommandLine", whose basename does not contain "opencode". The executable check therefore failed
-// for EVERY pid, isOurServePID returned false always, gate 2 of reapPriorServe could never pass, and
-// the reaper reaped nothing on the one platform it exists for. It failed CLOSED, so nothing
-// complained.
-//
-// The fix is to query WMIC with /value and extract the value, which servepid_windows.go now does.
-// This test guards the shared predicate's side of that contract: a header-prefixed blob must NOT be
-// accepted as a serve (it is not a command line), while the bare line MUST be.
+// This pins a bug that once made the Windows reaper a silent no-op. The probe used to be `wmic ...
+// get commandline`, whose default TABLE format emits the column name as the first line, so fields[0]
+// was "CommandLine", the executable check failed for EVERY pid, and gate 2 of reapPriorServe could
+// never pass. It failed CLOSED, so nothing complained. The probe now reads the command line straight
+// from the process (servepid_windows.go), but the predicate's side of the contract is unchanged: a
+// header-prefixed blob is not a command line and must NOT be accepted, while the bare line MUST be.
 func TestStrayServeFingerprintNeedsABareCommandLine(t *testing.T) {
 	const bare = `C:\Users\x\.opencode\bin\opencode.exe serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR`
 	if !isStrayServeLine(bare) {
 		t.Fatal("a real private-serve command line was not recognized; the reaper cannot work at all")
 	}
-
-	// WMIC table format: header, blank line, then the value. This must NOT be accepted — not
-	// because rejecting it is useful, but because accepting it would mean the fingerprint is
-	// matching on something other than the executable, and the caller must therefore strip the
-	// header before asking.
 	tableFormat := "CommandLine\n\n" + bare + "\n"
 	if isStrayServeLine(tableFormat) {
-		t.Error("a WMIC table-format blob was accepted as a serve command line — the fingerprint is " +
+		t.Error("a header-prefixed blob was accepted as a serve command line — the fingerprint is " +
 			"no longer anchored on the executable field")
 	}
+}
 
-	// And the /value shape must be stripped by the caller, not fed in raw: `CommandLine=<line>`
-	// leaves fields[0] as "CommandLine=C:\...\opencode.exe", whose basename DOES contain
-	// "opencode", so it would match for the wrong reason. Pinning it as rejected keeps the parsing
-	// responsibility where it belongs.
-	// NOTE, deliberately not an assertion: `CommandLine=<path>` IS accepted, because the key is
-	// glued to the path and the resulting token still contains "opencode". The shared predicate
-	// cannot defend against that — it would have to know WMIC's output format, which is precisely
-	// the platform detail it must not carry. So the obligation lives with the caller
-	// (servepid_windows.go strips the value via wmicValue), and this comment records why there is no
-	// test here rather than leaving the gap looking accidental.
+// Gate 2 on Windows reads the command line first and falls back to the image name only when the
+// OS will not give the command line. (The old probe was WMIC, which Windows 11 24H2 removed; with it
+// gone the reaper silently reaped nothing.) A READABLE command line that does not match must be
+// final: letting the looser image check rescue it would accept the user's own `opencode` TUI on the
+// strength of its executable alone.
+func TestServeProbeFallsBackToTheImageOnlyWhenTheCommandLineIsUnreadable(t *testing.T) {
+	const serve = `C:\x\opencode.exe serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR`
+	ok := func(s string) func() (string, error) { return func() (string, error) { return s, nil } }
+	denied := func() (string, error) { return "", errors.New("access denied") }
+	cases := []struct {
+		name           string
+		cmdline, image func() (string, error)
+		want           bool
+	}{
+		{"full fingerprint", ok(serve), denied, true},
+		{"a readable non-serve command line is final", ok(`C:\x\opencode.exe`), ok(`C:\x\opencode.exe`), false},
+		{"image fallback", denied, ok(`C:\x\opencode.exe`), true},
+		{"image fallback rejects another executable", denied, ok(`C:\x\node.exe`), false},
+		// '/' separators so the basename check means the same on every OS (filepath.Base does
+		// not split on '\' off Windows): "opencode" in a DIRECTORY must not pass.
+		{"image fallback checks the basename, not the path", denied, ok(`/x/.opencode/bin/node.exe`), false},
+		{"nothing readable", denied, denied, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serveProbeMatches(tc.cmdline, tc.image); got != tc.want {
+				t.Fatalf("serveProbeMatches = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
