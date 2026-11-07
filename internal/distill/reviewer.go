@@ -426,12 +426,13 @@ func PreviewReview(ctx context.Context, run MineFunc, cfg store.Config, ln *lens
 //	                             it was here, it was dropped, it came back.
 //
 // The redirect follows a chain (A merged into B, B into C) because a later pass can merge a
-// survivor again. It is bounded: a cycle, or a survivor that is itself archived with no live
-// target, falls back to resurrecting rather than dropping the evidence on the floor.
+// survivor again, so a chain grows one hop per re-compaction and has no depth cap. A cycle, or a
+// survivor that is itself archived with no live target, falls back to resurrecting the last facet
+// walked rather than dropping the evidence on the floor.
 func resolveArchived(byKey map[string]*store.Facet, lensName string, f *store.Facet, id string) (*store.Facet, string) {
 	seen := map[string]bool{id: true}
 	cur, curID := f, id
-	for hops := 0; hops < 8; hops++ {
+	for { // seen ends the walk: every hop is to an unvisited facet of a finite map
 		dim, key, ok := store.ParseFacetRef(cur.MergedInto)
 		if !ok {
 			break // retired outright (or an unparseable ref) → resurrect below

@@ -147,9 +147,9 @@ type SessionMining struct {
 	StagedThroughID int64  // how far staged was drained, to clear exactly those rows on success
 	Active          []store.Observation
 	// Per-lens mining results (issue #55). The watermark is per-(session,lens), so
-	// each lens's mined observations, its own start watermark (Done), and whether ITS
-	// call failed are tracked independently: a codereview transport failure backs off
-	// only codereview and never discards a healthy default mine for the same session.
+	// each lens's mined observations and whether ITS call failed are tracked
+	// independently: a codereview transport failure backs off only codereview and
+	// never discards a healthy default mine for the same session.
 	Lenses      []LensMining
 	NothingToDo bool // no new turns and nothing staged — commit just advances every lens's watermark
 }
@@ -157,7 +157,6 @@ type SessionMining struct {
 // LensMining is one lens's slice of a session's mining pass.
 type LensMining struct {
 	Lens       string
-	Done       int // this lens's watermark at read time (turns it had already mined)
 	Mined      []store.Observation
 	MineFailed bool // a transport error hit THIS lens — commit backs off this lens only
 	// MineTimedOut narrows MineFailed to "the request hit a deadline" (errors.Is of
@@ -279,7 +278,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 		if total > done && w.Store.LensBackedOff(session, ln.Name, now) {
 			continue
 		}
-		lm := LensMining{Lens: ln.Name, Done: done}
+		lm := LensMining{Lens: ln.Name}
 		if total > done {
 			anyDelta = true
 			// Track drift across ALL of this lens's inputs (a session may render to

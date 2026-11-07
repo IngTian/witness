@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // SampleSessions orders by total raw text size, largest first, and honors the limit.
 // Size-desc is what makes `witness lens try` deterministic across prompt edits and
@@ -9,8 +12,8 @@ func TestSampleSessionsSizeDescending(t *testing.T) {
 	s := tempStore(t)
 	// small: ~4 chars; medium: ~40; large: ~400 — deliberately unambiguous ordering.
 	mustRaw(t, s, "small", "tiny")
-	mustRaw(t, s, "medium", repeat("m", 40))
-	mustRaw(t, s, "large", repeat("L", 400))
+	mustRaw(t, s, "medium", strings.Repeat("m", 40))
+	mustRaw(t, s, "large", strings.Repeat("L", 400))
 
 	got, err := s.SampleSessions(3)
 	if err != nil {
@@ -131,12 +134,4 @@ func mustRawTS(t *testing.T, s *Store, session, ts, text string) {
 	if err := s.AppendRaw(RawRecord{Session: session, Seq: s.NextSeq(session), TS: ts, Role: "user", Text: text}); err != nil {
 		t.Fatalf("AppendRaw: %v", err)
 	}
-}
-
-func repeat(ch string, n int) string {
-	out := make([]byte, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, ch[0])
-	}
-	return string(out)
 }

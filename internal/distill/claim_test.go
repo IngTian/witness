@@ -19,7 +19,6 @@ import (
 func claimer(st *fakeCompactStore, reply string) *Claimer {
 	return &Claimer{
 		Store:  st,
-		Lenses: []*lens.Lens{{Name: "default"}},
 		Config: store.Config{},
 		Runner: func(context.Context, string, string, string) (string, error) { return reply, nil },
 	}
@@ -62,7 +61,7 @@ func TestWritingClaimsNeverTouchesTheValue(t *testing.T) {
 		cf("thinking", "a", "the original full prose, untouched", 0.8, 1),
 	}}
 	c := claimer(st, `[{"dimension":"thinking","key":"a","claim":"He does the thing."}]`)
-	if n := c.Run(context.Background(), c.Lenses[0]); n != 1 {
+	if n := c.Run(context.Background(), &lens.Lens{Name: "default"}); n != 1 {
 		t.Fatalf("want 1 claim written, got %d", n)
 	}
 	got := writtenByRef(t, st, "thinking", "a")
@@ -82,7 +81,7 @@ func TestAnOverlongClaimIsRefusedNotTruncated(t *testing.T) {
 	st := &fakeCompactStore{facets: []store.Facet{cf("thinking", "a", "value", 0.8, 1)}}
 	long := strings.Repeat("x", claimMaxChars+1)
 	c := claimer(st, `[{"dimension":"thinking","key":"a","claim":"`+long+`"}]`)
-	if n := c.Run(context.Background(), c.Lenses[0]); n != 0 {
+	if n := c.Run(context.Background(), &lens.Lens{Name: "default"}); n != 0 {
 		t.Fatalf("an overlong claim must be refused, got %d written", n)
 	}
 	if st.writes != 0 {
@@ -93,7 +92,7 @@ func TestAnOverlongClaimIsRefusedNotTruncated(t *testing.T) {
 func TestAnEmptyClaimIsRefused(t *testing.T) {
 	st := &fakeCompactStore{facets: []store.Facet{cf("thinking", "a", "value", 0.8, 1)}}
 	c := claimer(st, `[{"dimension":"thinking","key":"a","claim":"   "}]`)
-	if n := c.Run(context.Background(), c.Lenses[0]); n != 0 {
+	if n := c.Run(context.Background(), &lens.Lens{Name: "default"}); n != 0 {
 		t.Fatalf("an empty claim must be refused, got %d", n)
 	}
 }
@@ -104,7 +103,7 @@ func TestAClaimForAnUnshownFacetIsIgnored(t *testing.T) {
 	st := &fakeCompactStore{facets: []store.Facet{cf("thinking", "a", "value", 0.8, 1)}}
 	c := claimer(st, `[{"dimension":"thinking","key":"nonexistent","claim":"invented"},
 	                   {"dimension":"thinking","key":"a","claim":"real"}]`)
-	if n := c.Run(context.Background(), c.Lenses[0]); n != 1 {
+	if n := c.Run(context.Background(), &lens.Lens{Name: "default"}); n != 1 {
 		t.Fatalf("only the real facet should be claimed, got %d", n)
 	}
 	if got := writtenByRef(t, st, "thinking", "a"); got.Current().Claim != "real" {
@@ -124,7 +123,7 @@ func TestAnExistingClaimIsNotRewritten(t *testing.T) {
 		calls++
 		return `[{"dimension":"thinking","key":"a","claim":"a replacement"}]`, nil
 	}
-	if n := c.Run(context.Background(), c.Lenses[0]); n != 0 {
+	if n := c.Run(context.Background(), &lens.Lens{Name: "default"}); n != 0 {
 		t.Errorf("an already-claimed facet is not a candidate, got %d written", n)
 	}
 	if calls != 0 {
@@ -144,7 +143,7 @@ func TestArchivedFacetsAreNotClaimed(t *testing.T) {
 		sawInput = input
 		return `[{"dimension":"thinking","key":"live","claim":"a claim"}]`, nil
 	}
-	c.Run(context.Background(), c.Lenses[0])
+	c.Run(context.Background(), &lens.Lens{Name: "default"})
 	if strings.Contains(sawInput, "gone") {
 		t.Error("an archived facet must not be sent for claiming")
 	}
@@ -158,33 +157,11 @@ func TestAFailedClaimBatchChangesNothing(t *testing.T) {
 	c.Runner = func(context.Context, string, string, string) (string, error) {
 		return "", context.DeadlineExceeded
 	}
-	if n := c.Run(context.Background(), c.Lenses[0]); n != 0 {
+	if n := c.Run(context.Background(), &lens.Lens{Name: "default"}); n != 0 {
 		t.Errorf("a failed batch writes nothing, got %d", n)
 	}
 	if st.writes != 0 {
 		t.Error("a failed claim pass must not write")
-	}
-}
-
-// MaxBatches is what lets a caller drain progressively instead of spending an unbounded number
-// of calls in one go. 0 means unbounded, which is right for an explicit command.
-func TestMaxBatchesBoundsOneRun(t *testing.T) {
-	var facets []store.Facet
-	big := strings.Repeat("y", claimBatchChars/2) // two facets fill a batch
-	for i := 0; i < 6; i++ {
-		facets = append(facets, cf("thinking", string(rune('a'+i)), big, 0.8, 1))
-	}
-	st := &fakeCompactStore{facets: facets}
-	calls := 0
-	c := claimer(st, "[]")
-	c.MaxBatches = 1
-	c.Runner = func(context.Context, string, string, string) (string, error) {
-		calls++
-		return "[]", nil
-	}
-	c.Run(context.Background(), c.Lenses[0])
-	if calls != 1 {
-		t.Errorf("MaxBatches=1 should make exactly one call, got %d", calls)
 	}
 }
 

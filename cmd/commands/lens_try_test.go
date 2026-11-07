@@ -3,8 +3,10 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,28 +79,31 @@ func seedTryStore(t *testing.T, runner string) *store.Store {
 	return s
 }
 
-// OpenCode no longer sweeps the user's DB, so a preview may overlap a worker.
-// The injected runner keeps this concurrency contract test process-only.
-func TestLensTryOnOpenCodeIsLockFree(t *testing.T) {
-	s := seedTryStore(t, store.RunnerOpenCode)
-	opened := false
-	previous := runnerForName
-	runnerForName = func(string, store.Config) (platform.Runner, error) {
-		return limitedPreviewRunner{opened: &opened}, nil
-	}
-	t.Cleanup(func() { runnerForName = previous })
-	unlock, ok := s.WorkerLock() // stand in for a running worker
-	if !ok {
-		t.Fatal("precondition: could not take the worker lock")
-	}
-	defer unlock()
+// A preview is read-only, so it must not take the worker lock on either runner: it may overlap a
+// running worker. The injected runner keeps this concurrency contract test process-only.
+func TestLensTryIsLockFree(t *testing.T) {
+	for _, runner := range []string{store.RunnerClaude, store.RunnerOpenCode} {
+		t.Run(runner, func(t *testing.T) {
+			s := seedTryStore(t, runner)
+			opened := false
+			previous := runnerForName
+			runnerForName = func(string, store.Config) (platform.Runner, error) {
+				return limitedPreviewRunner{opened: &opened}, nil
+			}
+			t.Cleanup(func() { runnerForName = previous })
+			unlock, ok := s.WorkerLock() // stand in for a running worker
+			if !ok {
+				t.Fatal("precondition: could not take the worker lock")
+			}
+			defer unlock()
 
-	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1})
-	if err != nil {
-		t.Fatalf("opencode preview should proceed with a worker active: %v", err)
-	}
-	if !opened {
-		t.Fatal("lock-free opencode preview did not open its fake runner")
+			if err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1}); err != nil {
+				t.Fatalf("%s preview should proceed with a worker active: %v", runner, err)
+			}
+			if !opened {
+				t.Fatalf("lock-free %s preview did not open its fake runner", runner)
+			}
+		})
 	}
 }
 
@@ -125,25 +130,6 @@ func TestLensTryReservedNamePreviewsAsCandidate(t *testing.T) {
 	}
 	if got.Lens != "candidate" || !got.Candidate {
 		t.Fatalf("reserved name must preview as candidate, got lens=%q candidate=%v", got.Lens, got.Candidate)
-	}
-}
-
-// On Claude (no shutdown sweep) a preview must NOT take the worker lock — it can safely
-// overlap a running worker. With the lock held, the command proceeds past the lock and
-// stops at the unknown --session validation (proving it never blocked on the lock).
-func TestLensTryOnClaudeIsLockFree(t *testing.T) {
-	s := seedTryStore(t, store.RunnerClaude)
-	unlock, ok := s.WorkerLock() // a worker is "running"
-	if !ok {
-		t.Fatal("precondition: could not take the worker lock")
-	}
-	defer unlock()
-
-	// Use an unknown --session so we hit the pre-mining validation error (no real claude
-	// call), which is only reachable if the lock did NOT block the claude path.
-	err := cmdLensTry(validLensDir(t), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
-	if err == nil || !strings.Contains(err.Error(), "no raw turns") {
-		t.Fatalf("claude preview should be lock-free and reach --session validation, got: %v", err)
 	}
 }
 
@@ -234,34 +220,46 @@ func TestLensTryReportsResolvedPerLensModel(t *testing.T) {
 	}
 }
 
+// A t.Fatal inside fn ends the goroutine with runtime.Goexit; the stream must still be put back,
+// or every later test's output goes into a pipe nobody reads.
+func TestCaptureStdoutRestoresAfterGoexit(t *testing.T) {
+	orig := os.Stdout
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		captureStdout(t, func() { runtime.Goexit() })
+	}()
+	<-done
+	if os.Stdout != orig {
+		os.Stdout = orig
+		t.Fatal("captureStdout left os.Stdout pointing at its pipe after fn exited via Goexit")
+	}
+}
+
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns what it wrote.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
-	orig := os.Stdout
+	return captureStream(t, &os.Stdout, fn)
+}
+
+// captureStream is the one capture helper (captureStdout, captureStdoutErr and captureBoth wrap
+// it): it points *f at a pipe for fn and returns what fn wrote. The restore is deferred, so a
+// t.Fatal inside fn still puts the real stream back.
+func captureStream(t *testing.T, f **os.File, fn func()) string {
+	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stdout = w
-	done := make(chan string, 1)
-	go func() {
-		var b strings.Builder
-		buf := make([]byte, 4096)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				b.Write(buf[:n])
-			}
-			if err != nil {
-				break
-			}
-		}
-		done <- b.String()
+	out := make(chan string, 1)
+	go func() { b, _ := io.ReadAll(r); _ = r.Close(); out <- string(b) }()
+	prev := *f
+	*f = w
+	func() {
+		defer func() { *f = prev; _ = w.Close() }()
+		fn()
 	}()
-	fn()
-	_ = w.Close()
-	os.Stdout = orig
-	return <-done
+	return <-out
 }
 
 // registeredLensPath maps a registered lens NAME to its on-disk DIRECTORY, and leaves a

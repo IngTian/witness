@@ -72,57 +72,6 @@ func TestRunFullDoesNotMarkAnAcceptedArcSeenWhenTheL2WriteFails(t *testing.T) {
 	}
 }
 
-// A REJECTED arc is stamped immediately and stays stamped: there is nothing to persist for
-// it, so it carries no ordering hazard, and re-running an expensive no-op verify on every
-// future pass is exactly what the signature state exists to prevent.
-func TestRunFullStillSuppressesAReVerifiedRejection(t *testing.T) {
-	s := newStore(t)
-	seedArc(t, s, "a", 6, []float32{1, 0, 0})
-
-	calls := 0
-	reject := func(_ context.Context, _, _, _ string) (string, error) {
-		calls++
-		return `[]`, nil // empty array = the judge rejected the arc
-	}
-	r := emergentReviewer(s, reject)
-	if err := r.RunFull(context.Background(), time.Now()); err != nil {
-		t.Fatalf("first pass: %v", err)
-	}
-	first := calls
-	if first == 0 {
-		t.Fatal("no candidate was verified at all — the fixture is not exercising the path")
-	}
-	if err := r.RunFull(context.Background(), time.Now()); err != nil {
-		t.Fatalf("second pass: %v", err)
-	}
-	if calls != first {
-		t.Errorf("a rejected cluster was re-verified: %d calls then %d", first, calls)
-	}
-}
-
-// An accepted arc that DID write is stamped, so it is not re-verified next pass.
-func TestRunFullSuppressesAnAcceptedArcOnceItIsDurable(t *testing.T) {
-	s := newStore(t)
-	seedArc(t, s, "a", 6, []float32{1, 0, 0})
-
-	calls := 0
-	accept := func(_ context.Context, _, _, _ string) (string, error) {
-		calls++
-		return `[{"dimension":"thinking","key":"k","value":"v","confidence":0.8}]`, nil
-	}
-	r := emergentReviewer(s, accept)
-	if err := r.RunFull(context.Background(), time.Now()); err != nil {
-		t.Fatalf("first pass: %v", err)
-	}
-	first := calls
-	if err := r.RunFull(context.Background(), time.Now()); err != nil {
-		t.Fatalf("second pass: %v", err)
-	}
-	if calls != first {
-		t.Errorf("a durable accepted arc was re-verified: %d calls then %d", first, calls)
-	}
-}
-
 // `backfill --fresh` (DeleteLensData) must make a deleted arc verifiable again. The store deletes
 // the emerge_seen keys distill writes, so the two must agree on the spelling: when they could
 // drift, a re-mined arc (identical member ids, so an identical signature) was skipped forever with

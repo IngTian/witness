@@ -43,7 +43,6 @@ import (
 // here. The review call READS claims (store.FacetVersion.Gist); it does not produce them.
 type Claimer struct {
 	Store     store.CompactStore
-	Lenses    []*lens.Lens
 	Config    store.Config
 	Runner    MineFunc
 	RunnerFor func(ln *lens.Lens) MineFunc
@@ -80,14 +79,14 @@ type claimedFacet struct {
 	Claim     string `json:"claim"`
 }
 
-// WriteClaims fills in missing claims for one lens, bounded to MaxBatches calls (0 = no bound).
+// writeClaims fills in missing claims for one lens, bounded to MaxBatches calls (0 = all).
 // Returns how many claims were written. It mutates the facets in place; the caller owns the
 // WriteFacets that persists them.
 //
 // Only facets with a value and NO claim are candidates, so this is idempotent and converges:
 // each run drains a little more, and a facet whose value later changes becomes a candidate
 // again only if its claim is cleared (see applyFacet).
-func (c *Claimer) WriteClaims(ctx context.Context, ln *lens.Lens, facets []*store.Facet) int {
+func (c *Claimer) writeClaims(ctx context.Context, ln *lens.Lens, facets []*store.Facet) int {
 	var pending []*store.Facet
 	for _, f := range facets {
 		if f.Lens != ln.Name || !f.Active() {
@@ -179,7 +178,7 @@ func (c *Claimer) Run(ctx context.Context, ln *lens.Lens) int {
 	for _, f := range byKey {
 		ptrs = append(ptrs, f)
 	}
-	n := c.WriteClaims(ctx, ln, ptrs)
+	n := c.writeClaims(ctx, ln, ptrs)
 	if n > 0 {
 		if err := c.Store.WriteFacets(collectFacets(byKey)); err != nil {
 			slog.Error("claims: could not persist", "lens", ln.Name, "claims", n, "err", err)
