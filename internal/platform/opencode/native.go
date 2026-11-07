@@ -20,8 +20,8 @@ import (
 
 // nativeCommand is injectable so tests prove the two DB environments without a
 // real OpenCode binary. Production uses CommandContext through this small port.
-var nativeCommand = func(ctx context.Context, env []string, args ...string) ([]byte, error) {
-	return commandOutput(ctx, env, args...)
+var nativeCommand = func(ctx context.Context, root string, env []string, args ...string) ([]byte, error) {
+	return commandOutput(ctx, root, env, args...)
 }
 
 type nativeRuntime struct {
@@ -319,8 +319,7 @@ func (n *nativeRuntime) export(ctx context.Context, w *platform.NativeSession, s
 			_ = os.Remove(copyPath + suffix)
 		}
 	}()
-	env := replaceEnv(os.Environ(), append(isolatedEnv(n.root), "OPENCODE_DB="+copyPath))
-	b, err := nativeCommand(ctx, env, "export", "--pure", strings.TrimPrefix(w.Session, SessionPrefix))
+	b, err := nativeCommand(ctx, n.root, []string{"OPENCODE_DB=" + copyPath}, "export", "--pure", strings.TrimPrefix(w.Session, SessionPrefix))
 	if err != nil {
 		return fmt.Errorf("opencode native export unavailable; upgrade to OpenCode 1.18.0+: %w", err)
 	}
@@ -548,7 +547,7 @@ func (n *nativeRuntime) finalize(p string) error {
 // never returned. os.ReadDir sorts by name, so a single unreadable entry used to end
 // the sweep and hide every lexicographically later manifest — and because runner Open
 // treats a reconcile error as fatal, one corrupt file could block all OpenCode
-// distillation. A manifest that cannot be parsed at all is reaped (its fork id is
+// distillation. A manifest that cannot be parsed at all is reaped (its session id is
 // unrecoverable, so retaining it leaks forever) rather than retained.
 //
 // It also sweeps residue the manifest loop cannot see (orphan snapshots, .tmp files,
@@ -643,7 +642,7 @@ func (n *nativeRuntime) sweepResidue(entries []os.DirEntry, manifests map[string
 // mine always reads the session's present max(raw.id), so once a later turn arrives the
 // older generation can never be the one that commits — without this, a lens that keeps
 // failing (or one later disabled) strands one manifest + full-session snapshot + live
-// isolated fork per drain, forever.
+// isolated scratch session per drain, forever.
 func (n *nativeRuntime) generationStatus(m nativeManifest) (current, committed bool, err error) {
 	db, err := sql.Open("sqlite", readOnlyURI(filepath.Join(filepath.Dir(n.root), "witness.db")))
 	if err != nil {
@@ -672,25 +671,19 @@ func readOnlyURI(path string) string {
 	return platform.SQLiteFileURI(path, "mode=ro")
 }
 
-func commandOutput(ctx context.Context, env []string, args ...string) ([]byte, error) {
+// commandOutput runs one `opencode` subcommand under openCodeCommand's spawn policy, with
+// env layered on top (export repoints OPENCODE_DB at its read-only copy of the user's DB).
+func commandOutput(ctx context.Context, root string, env []string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("missing opencode command")
 	}
-	c := openCodeCommand(ctx, args...)
-	c.Env = env
-	// Pin the cwd, like the two sibling invocations in server.go. OpenCode derives the
-	// PROJECT it records (worktree, vcs, sandboxes) from the working directory, so
-	// inheriting the worker's cwd — which is a user repo, since neither spawnDetached nor
-	// the plugin's Bun.spawn sets one — makes a witness subprocess rewrite project
-	// bookkeeping for whatever repo the worker happened to start in. A neutral temp dir
-	// keeps witness's own invocations from carrying project identity at all.
-	c.Dir = os.TempDir()
-	procCtl.BindToParent(c)
+	c := openCodeCommand(ctx, root, args...)
+	c.Env = replaceEnv(c.Env, env)
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
 	if err := c.Run(); err != nil {
-		return stdout.Bytes(), fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		return stdout.Bytes(), fmt.Errorf("%w: %s", err, platform.StderrExcerpt(stderr.String()))
 	}
 	return stdout.Bytes(), nil
 }

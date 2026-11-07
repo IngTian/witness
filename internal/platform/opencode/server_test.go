@@ -55,20 +55,20 @@ func TestBuildOpenCodeServeCmdUsesPrivateRuntimeEnv(t *testing.T) {
 func TestValidateOpenCodeCapability(t *testing.T) {
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.17.9\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade") {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.17.9\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unsupported version error = %v", err)
 	}
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.18.5\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("2.0.0\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.0.0\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("version unknown\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade") {
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("version unknown\n"), nil }
+	if err := ValidateOpenCodeCapability(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("malformed version error=%v", err)
 	}
 }
@@ -187,12 +187,14 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			if body["agent"] != "witness" {
 				t.Fatalf("bad agent: %#v", body["agent"])
 			}
-			if system := body["system"].(string); !strings.Contains(system, "EXTRACT") || !strings.Contains(system, "UNTRUSTED") {
-				t.Fatalf("system prompt missing trusted/untrusted split: %q", system)
+			// The trusted/untrusted split: instructions on `system`, corpus as the text part, each
+			// VERBATIM — distill.RunnerMine has already fenced both, so the runner must not again.
+			if system := body["system"].(string); system != "EXTRACT" {
+				t.Fatalf("system prompt not passed verbatim: %q", system)
 			}
 			parts := body["parts"].([]any)
 			part := parts[0].(map[string]any)
-			if part["type"] != "text" || !strings.Contains(part["text"].(string), "<witness:untrusted>") || !strings.Contains(part["text"].(string), "DATA") {
+			if part["type"] != "text" || part["text"] != "DATA" {
 				t.Fatalf("bad parts: %#v", body["parts"])
 			}
 			model := body["model"].(map[string]any)

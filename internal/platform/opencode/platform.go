@@ -17,6 +17,15 @@ type Platform struct{}
 
 func init() { platform.Register(Platform{}) }
 
+// Capabilities are discovered by type assertion, so a signature that drifts would silently
+// drop one (an Import that no longer matches imports nothing and reports "up to date").
+// These make that a compile error instead.
+var (
+	_ platform.Importer            = Platform{}
+	_ platform.RunnerProvider      = Platform{}
+	_ platform.NativeSessionSource = Platform{}
+)
+
 func (Platform) Name() string { return "opencode" }
 
 func (Platform) SessionPrefix() string { return SessionPrefix }

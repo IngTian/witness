@@ -16,6 +16,29 @@ const DisableExternalRunnersEnv = "WITNESS_DISABLE_EXTERNAL_RUNNERS"
 
 func ExternalRunnersDisabled() bool { return os.Getenv(DisableExternalRunnersEnv) == "1" }
 
+// maxStderrExcerpt bounds how much of a failed child's stderr is interpolated into the error.
+//
+// That error string becomes ONE line in witness.log (the worker logs it on a mine failure), and
+// a child's stderr is unbounded (across claude's 10-minute timeout, say) — so a chatty or
+// looping CLI could write a single multi-megabyte log line. The measured real case is only
+// ~0.5KB (repeated ANSI-wrapped "AWS auth refresh timed out"), so this is a ceiling on a
+// known-possible shape rather than a fix for observed damage.
+const maxStderrExcerpt = 4000
+
+// StderrExcerpt trims a child's stderr and keeps its TAIL when oversized. Every runner's
+// spawned CLI goes through it.
+//
+// The tail, not the head: a failing CLI puts the actual error last, after any banner or progress
+// noise, so truncating from the front would preserve exactly the useless part. The marker makes
+// the truncation visible so nobody debugs a silently clipped message.
+func StderrExcerpt(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxStderrExcerpt {
+		return s
+	}
+	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
+}
+
 // NativeSession identifies one L0 input whose owning runtime keeps its own conversation
 // store. Runners that support native isolation use it to RETAIN an isolated scratch context
 // until that input's L1 commit succeeds, so a crash mid-generation resumes instead of
@@ -113,8 +136,21 @@ type Runner interface {
 	// no work; Close must tolerate an unopened runner.
 	Open(ctx context.Context) error
 	// Run performs one mining/review/summarize pass. systemPrompt is witness's own
-	// instruction; input is the corpus being analyzed — the platform fences it with
-	// WrapCorpus so it cannot impersonate instructions.
+	// instruction; input is the corpus being analyzed. Both arrive ALREADY FENCED:
+	// distill.RunnerMine, the seam every production Run goes through, appends CorpusNotice to
+	// systemPrompt and wraps input with WrapCorpus. A runner must pass them through verbatim,
+	// systemPrompt as the system/instruction channel and input as the user turn, and must not
+	// fence again.
+	//
+	// Two more rules every runner must follow, because nothing else enforces them:
+	//
+	//   - Its OWN timeout must surface as an error that errors.Is(err, context.DeadlineExceeded).
+	//     distill reads that as provider backpressure and narrows the drain window. os/exec does
+	//     not do it for you: a CommandContext kill returns "signal: killed", which is NOT
+	//     DeadlineExceeded. That silently disabled backpressure on the Claude path once; check
+	//     the run context's Err() and wrap it (see the claude runner).
+	//   - It must refuse to spawn anything when ExternalRunnersDisabled() is true (`make test`
+	//     sets it), so a test can never start a real model CLI.
 	//
 	// FRESH-CONTEXT INVARIANT. The context a Run executes in must be seeded EXCLUSIVELY by
 	// witness's own turns: systemPrompt plus the fenced corpus, and nothing else. A runner may

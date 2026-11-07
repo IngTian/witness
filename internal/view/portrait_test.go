@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/sentence"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -62,11 +62,11 @@ func sentenceTexts(t *testing.T, p Portrait) []string {
 	return out
 }
 
-// wantSplit pins THE invariant: the page's sentences are exactly distill.SplitSentences', in
+// wantSplit pins THE invariant: the page's sentences are exactly sentence.SplitSentences', in
 // order, because the stored links are indexed by that split.
 func wantSplit(t *testing.T, p Portrait, md string) {
 	t.Helper()
-	if got, want := sentenceTexts(t, p), distill.SplitSentences(md); !reflect.DeepEqual(got, want) {
+	if got, want := sentenceTexts(t, p), sentence.SplitSentences(md); !reflect.DeepEqual(got, want) {
 		t.Errorf("sentences:\n got  %q\n want %q", got, want)
 	}
 }
@@ -279,7 +279,7 @@ func TestPortraitLeadingHeading(t *testing.T) {
 }
 
 // A single-digit numbered item straight after a paragraph line starts its own block, exactly
-// as SplitSentences reads it (the view uses distill's own list rules, not a copy).
+// as SplitSentences reads it (the view walks the splitter's own blocks, not a copy).
 func TestPortraitNumberedItemAfterParagraph(t *testing.T) {
 	md := "Intro line\n1. Item."
 	p := onePortrait(t, portraitInput(), PortraitFile{ID: "default", Markdown: md})

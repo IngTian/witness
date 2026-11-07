@@ -129,8 +129,8 @@ func TestEngineHasNoPlatformDispatch(t *testing.T) {
 			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			// installers.go legitimately NAMES the platforms when registering their
-			// cmd-side installers (RegisterInstaller("claude", ...)) — that's the
+			// installers.go legitimately NAMES the platforms in its wire-target map
+			// (editors: "claude": {...}) — that's the
 			// composition root wiring, not dispatch. Allow it.
 			//
 			// install_codex.go is the same category one level down: AGENTS.md puts

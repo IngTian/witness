@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -124,18 +123,18 @@ func viewPortraits(st *store.Store) ([]view.PortraitFile, error) {
 		if err != nil {
 			return nil, err
 		}
-		info, serr := os.Stat(filepath.Join(st.ProfileDir(), id+".md"))
-		if !ok || os.IsNotExist(serr) {
-			continue // removed since it was listed: a refresh or a reap got there first
+		written, exists, err := st.ProfileModTime(id)
+		if err != nil {
+			return nil, err
 		}
-		if serr != nil {
-			return nil, serr
+		if !ok || !exists {
+			continue // removed since it was listed: a refresh or a reap got there first
 		}
 		src, srcOK, err := st.CurrentPortraitSources(id)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, view.PortraitFile{ID: id, Markdown: md, Written: info.ModTime(),
+		out = append(out, view.PortraitFile{ID: id, Markdown: md, Written: written,
 			Stale: stale[id], Sources: src, SourcesOK: srcOK})
 	}
 	return out, nil

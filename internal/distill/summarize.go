@@ -51,9 +51,7 @@ type Summarizer struct {
 	// seam (issue #75 slice 2). A per-lens summary then runs on that lens's own runtime,
 	// like its review. nil → every summary uses Run. The unified cross-lens portrait has no
 	// single lens, so it always uses Run (the default runner).
-	RunFor               func(ln *lens.Lens) SummarizeFunc
-	ResolvePrompt        string // prompts/summarize/resolve.md; "" turns the feature off
-	ResolveUnifiedPrompt string // prompts/summarize/resolve_unified.md
+	RunFor func(ln *lens.Lens) SummarizeFunc
 }
 
 // runFor returns the SummarizeFunc for a lens: the per-lens runner via RunFor when wired,
@@ -191,7 +189,9 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// served. The reap is load-bearing; only the count gate was dead.)
 	unifiedModel, unifiedSig, current := sm.unifiedPass(portrait.String())
 	if current {
-		return nil
+		// Skip the unified CALL, not the report: a lens that is still failing must stay visible
+		// on every pass (nil here once hid it behind a portrait stamped over its fallback).
+		return errors.Join(failures...)
 	}
 	umd, err := sm.Run(ctx, unifiedModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {

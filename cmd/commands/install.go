@@ -23,7 +23,7 @@ func newWireCmd() *cobra.Command {
 		// Built from the installer registry, not written out: a literal list went stale
 		// the moment a venue was added, and the staleness is user-facing — the help would
 		// omit a target that works, or name one that is not registered.
-		Use:     "wire <" + strings.Join(platform.InstallTargets(), "|") + ">",
+		Use:     "wire <" + strings.Join(editorNames(), "|") + ">",
 		GroupID: groupSetup,
 		Short:   "Connect an editor integration (hooks/plugin + MCP) to witness.",
 		Long: strings.TrimSpace(`
@@ -56,7 +56,7 @@ time your archive is opened.
 func editorArg(verb string) cobra.PositionalArgs {
 	return func(_ *cobra.Command, args []string) error {
 		if len(args) != 1 {
-			return fmt.Errorf("which editor? witness %s <%s>", verb, strings.Join(platform.InstallTargets(), "|"))
+			return fmt.Errorf("which editor? witness %s <%s>", verb, strings.Join(editorNames(), "|"))
 		}
 		return nil
 	}
@@ -64,12 +64,12 @@ func editorArg(verb string) cobra.PositionalArgs {
 
 // unknownEditor is the one wording for an editor witness cannot wire, in the registry's order.
 func unknownEditor(target string) error {
-	return fmt.Errorf("unknown editor %q — want one of: %s", target, strings.Join(platform.InstallTargets(), ", "))
+	return fmt.Errorf("unknown editor %q — want one of: %s", target, strings.Join(editorNames(), ", "))
 }
 
 func newUnwireCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "unwire <" + strings.Join(platform.InstallTargets(), "|") + ">",
+		Use:     "unwire <" + strings.Join(editorNames(), "|") + ">",
 		GroupID: groupSetup,
 		Short:   "Remove an editor integration (data/config untouched).",
 		Long:    "Remove the Claude Code, OpenCode or Codex integration. The witness data store and config are left untouched.",
@@ -554,19 +554,13 @@ func cmdProvision(path string) error {
 // runner and lens lines), so the installer returns it as a wireOutcome for cmdInstall to print.
 func cmdInstall(args []string) error {
 	target := installTarget(args)
-	in, ok := platform.InstallerFor(target)
+	ed, ok := editors[target]
 	if !ok {
 		return unknownEditor(target)
 	}
 	fmt.Println(title("wire "+target, "", ""))
 	fmt.Println()
-	out := wireOutcome{glyph: okGlyph(), line: "wired"}
-	var err error
-	if w, ok := in.(wirer); ok {
-		out, err = w.wire()
-	} else {
-		err = in.Install() // an installer that reports no outcome (a test's fake)
-	}
+	out, err := ed.wire()
 	if err != nil {
 		return err
 	}
@@ -588,7 +582,7 @@ func cmdInstall(args []string) error {
 		// The runner it leaves alone is the EFFECTIVE one (ResolveRunner), not the raw config field.
 		using := "the configured runner"
 		if st, err := store.Open(); err == nil {
-			using = st.ResolveRunner(st.LoadConfig())
+			using = st.ResolvedConfig().Runner
 			st.Close()
 		}
 		fmt.Println(resultRow(skipGlyph(), "runner", "unchanged", target+" runs no model; lenses use "+using))
@@ -627,14 +621,6 @@ type wireOutcome struct {
 	glyph, line string
 	hints       [][2]string
 	note        string
-}
-
-// wirer / unwirer are the installers that report what they did. The platform.Installer interface
-// only returns an error; a registered installer without these (a test's fake) still works, with a
-// generic result line.
-type wirer interface{ wire() (wireOutcome, error) }
-type unwirer interface {
-	unwire() (removed bool, warning string, err error)
 }
 
 // pullOnlyNote closes the wire screen of an editor whose agents get the MCP tools.
@@ -676,7 +662,7 @@ func bindRunner(target string) error {
 	defer st.Close()
 	// "unchanged" only when an earlier wire or `config set runner` had already bound this runner:
 	// a fresh archive resolves to the template's "claude" without anyone having chosen it.
-	unchanged := st.MetaString("runner_bound") == "1" && st.ResolveRunner(st.LoadConfig()) == target
+	unchanged := st.RunnerBound() && st.ResolvedConfig().Runner == target
 	if err := st.SetRunner(target); err != nil {
 		return fmt.Errorf("write runner to config: %w", err)
 	}
@@ -837,19 +823,13 @@ func cmdInstallOpenCode() (wireOutcome, error) {
 // per part, and one result line that says whether anything was actually removed.
 func cmdUninstall(args []string) error {
 	target := installTarget(args)
-	in, ok := platform.InstallerFor(target)
+	ed, ok := editors[target]
 	if !ok {
 		return unknownEditor(target)
 	}
 	fmt.Println(title("unwire "+target, "", ""))
 	fmt.Println()
-	removed, warning := true, ""
-	var err error
-	if u, ok := in.(unwirer); ok {
-		removed, warning, err = u.unwire()
-	} else {
-		err = in.Uninstall()
-	}
+	removed, warning, err := ed.unwire()
 	if err != nil {
 		return err
 	}

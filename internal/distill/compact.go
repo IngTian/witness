@@ -46,8 +46,8 @@ import (
 //
 // SAFETY. Every action is validated in Go before anything is written (validate): the model can
 // only act on facets it was actually shown, cannot touch another lens or dimension, cannot
-// absorb a facet twice, cannot merge a single facet (that is a rename), and cannot archive more
-// than compactMaxArchiveFraction of a lens in one pass. This mirrors the division of labour in
+// absorb a facet twice, cannot merge a single facet (that is a rename), and cannot leave a
+// dimension with fewer than compactMinSurvivors facets. This mirrors the division of labour in
 // applyFacet — the model judges what is the same, code enforces what may be done about it.
 const (
 	// compactBatchChars bounds one compaction call's facet payload. Sized like
@@ -121,8 +121,9 @@ type CompactPlan struct {
 	Failed int `json:"failed,omitempty"`
 }
 
-// Compactor rebalances the active facet surface of each lens. It is the only writer of
-// ArchivedAt/MergedInto.
+// Compactor rebalances the active facet surface of each lens. It is the main writer of
+// ArchivedAt/MergedInto; the reviewer clears them when new evidence resurrects a retired
+// facet (resolveArchived), and `witness merge` sets them on a key collision.
 type Compactor struct {
 	Store     store.CompactStore
 	Lenses    []*lens.Lens
@@ -130,14 +131,10 @@ type Compactor struct {
 	Runner    MineFunc
 	RunnerFor func(ln *lens.Lens) MineFunc
 
-	// The three knobs that decide how hard compaction consolidates. Zero means "use the
-	// package default", so production wires none of them; they exist because how aggressive to
-	// be is an empirical question, not a thing to guess once and bake in. Measured answers
-	// live in compactstrategy.go.
-	Prompt       string // "" → compactGroupPrompt (stage 1)
-	WritePrompt  string // "" → compactWritePrompt (stage 2)
-	BatchChars   int    // 0 → compactBatchChars
-	MinSurvivors int    // 0 → compactMinSurvivors
+	// BatchChars is the test seam for batch size; 0 → compactBatchChars, and production sets
+	// none. A per-lens override, if one is ever needed, goes in an optional lens file the way
+	// Emerge does.
+	BatchChars int
 
 	// Progress, when set, is called as Plan's model calls complete. nil is silent.
 	Progress ProgressFunc
@@ -181,13 +178,6 @@ func (c *Compactor) batchChars() int {
 		return c.BatchChars
 	}
 	return compactBatchChars
-}
-
-func (c *Compactor) minSurvivors() int {
-	if c.MinSurvivors > 0 {
-		return c.MinSurvivors
-	}
-	return compactMinSurvivors
 }
 
 func (c *Compactor) runnerFor(ln *lens.Lens) MineFunc {
@@ -316,7 +306,7 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 				survivors--
 			}
 		}
-		floor := c.minSurvivors()
+		floor := compactMinSurvivors
 		if len(inDim) < compactCollapseGuardMin {
 			// No floor on a small dimension. It may legitimately turn out to BE one
 			// disposition, and a dimension holding a single junk facet should be emptiable —
@@ -378,7 +368,7 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 // facets, projecting an 87.6% reduction. Large INPUT is cheap; large OUTPUT is what costs.
 func (c *Compactor) groupBatch(ctx context.Context, ln *lens.Lens, dim string, batch []store.Facet) ([]compactAction, error) {
 	input := renderCompactBatch(ln.Name, dim, batch, c.decaySeq)
-	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), c.groupPrompt(), input)
+	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), compactGroupPrompt, input)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +431,7 @@ func (c *Compactor) writeOne(ctx context.Context, ln *lens.Lens, dim string,
 	group compactAction, members []store.Facet, siblings []compactAction) (claim, value string, err error) {
 
 	input := renderMergeInput(ln.Name, dim, group, members, siblings, c.decaySeq)
-	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), c.writePrompt(), input)
+	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), compactWritePrompt, input)
 	if err != nil {
 		return "", "", err
 	}

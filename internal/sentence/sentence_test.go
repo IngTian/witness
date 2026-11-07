@@ -1,4 +1,4 @@
-package distill
+package sentence
 
 import (
 	"reflect"

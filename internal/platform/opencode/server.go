@@ -36,8 +36,8 @@ var procCtl proc.Control = proc.System()
 
 var openCodeModelsCache sync.Map // provider -> openCodeModelList
 
-var openCodeVersionCommand = func(ctx context.Context) ([]byte, error) {
-	return openCodeCommand(ctx, "--version").Output()
+var openCodeVersionCommand = func(ctx context.Context, runtimeRoot string) ([]byte, error) {
+	return openCodeCommand(ctx, runtimeRoot, "--version").Output()
 }
 
 var openCodeAsyncPollInterval = time.Second
@@ -304,8 +304,8 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models ...st
 // liveness backstop, not a quality knob: completion is observed by polling, and the
 // caller's ctx is signal-cancellable but has no deadline, so without this a stalled or
 // dead serve process would poll forever and pin the machine-wide WorkerLock until
-// someone sent a signal by hand. Every generation path must apply it — the legacy Run
-// below and the native retained-fork path (see runner.Run).
+// someone sent a signal by hand. Every generation path must apply it — Run below and
+// the native manifest path (nativeRuntime, which reuses its scratch session on resume).
 //
 // Do NOT raise this to "give a slow/queued free-tier model more room" — that was tried and
 // reverted. The reasoning: a timeout here is NOT lossy. mine failures back off
@@ -421,7 +421,7 @@ func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input str
 	return s.runSession(ctx, sessionID, model, systemPrompt, input)
 }
 
-// runSession prompts a retained isolated fork. Unlike Run, it never creates or
+// runSession prompts a retained scratch session. Unlike Run, it never creates or
 // deletes the session: native manifests own that lifecycle until L1 commits.
 func (s *OpenCodeServer) runSession(ctx context.Context, sessionID, model, systemPrompt, input string) (string, error) {
 	return s.runSessionWithMessage(ctx, sessionID, "msg_"+randomHex(12), model, systemPrompt, input)
@@ -431,10 +431,12 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	body := map[string]any{
 		"messageID": messageID,
 		"agent":     "witness",
-		"system":    systemPrompt + "\n\n" + platform.CorpusNotice,
+		// Both already fenced by distill.RunnerMine (CorpusNotice on the system prompt, the
+		// corpus wrapped and defanged), the one place every runner's fence is applied.
+		"system": systemPrompt,
 		"parts": []map[string]any{{
 			"type": "text",
-			"text": platform.WrapCorpus(input),
+			"text": input,
 		}},
 	}
 	if provider, modelID, ok, err := splitOpenCodeModel(model); err != nil {
@@ -486,15 +488,14 @@ func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, message
 	return parseOpenCodeAsyncReply(data, messageID), nil
 }
 
-// asyncReplyWindow is how many trailing messages each poll fetches from the fork.
+// asyncReplyWindow is how many trailing messages each poll fetches from the session.
 //
-// It must exceed 1 (our request) + the assistant reply, and the window is a TAIL: witness
-// prompts a fork of the user's session, so the fork already contains that entire conversation
-// (see parseOpenCodeAsyncReply). If the window were the OLDEST n messages, our request would
-// never appear in it on any session longer than n and the poll would spin to the timeout with
-// no reply and no error — a permanent stall that looks exactly like a slow model. The window
-// being a tail is what makes this safe, and requestMissingStreak below is the guard for it
-// being wrong: rather than trust the assumption for the full generateTimeout, we surface it.
+// It must exceed 1 (our request) + the assistant reply. The session is fresh, so it holds only
+// those two plus any earlier turns of a resumed manifest's retry; the window is still a TAIL because it was sized when witness prompted a fork
+// of the user's whole conversation (removed in #143), where the OLDEST n messages never reached
+// our request and the poll spun to the timeout with no error. requestMissingStreak below is the
+// guard for the window being wrong: rather than trust it for the full generateTimeout, we
+// surface it.
 const asyncReplyWindow = 50
 
 // messagesPath is the ONE spelling of the poll URL, so both poll sites (waitForAsyncReply,
@@ -848,7 +849,7 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 	if runtimeRoot == "" {
 		return fmt.Errorf("opencode isolated runtime root is unavailable")
 	}
-	if err := ValidateOpenCodeCapability(ctx); err != nil {
+	if err := ValidateOpenCodeCapability(ctx, runtimeRoot); err != nil {
 		return err
 	}
 	for _, model := range models {
@@ -871,14 +872,14 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 	return nil
 }
 
-// ValidateOpenCodeCapability gates the export/import/fork protocol. Do not fall
-// back to a shared user DB: an unavailable capability leaves L0 pending for retry.
-func ValidateOpenCodeCapability(ctx context.Context) error {
+// ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 1.18.0+). Do not
+// fall back to a shared user DB: an unavailable capability leaves L0 pending for retry.
+func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
 	// Bound the probe: a hung `opencode --version` would otherwise block Open (and doctor)
 	// for as long as the deadline-less drain ctx lives, holding the machine-wide WorkerLock.
 	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
 	defer cancel()
-	out, err := openCodeVersionCommand(ctx)
+	out, err := openCodeVersionCommand(ctx, runtimeRoot)
 	if err != nil {
 		return fmt.Errorf("opencode native session isolation unavailable; upgrade to OpenCode 1.18.0+: %w", err)
 	}
@@ -937,17 +938,16 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	// blocked Open/doctor forever while holding the machine-wide WorkerLock.
 	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
 	defer cancel()
-	cmd := openCodeCommand(ctx, "models", "--pure", provider)
-	cmd.Dir = os.TempDir()
-	// Isolated env: `opencode models` opens its OPENCODE_DB read-WRITE (and applies schema
-	// migrations), so inheriting the ambient env would reach into the USER's database from
-	// the hot Open/doctor paths — the one thing this package must never do.
-	cmd.Env = replaceEnv(append(os.Environ(), "WITNESS_WORKER=1"), isolatedEnv(runtimeRoot))
+	// Isolated (openCodeCommand + the mandatory runtime root): `opencode models` opens its
+	// OPENCODE_DB read-WRITE (and applies schema migrations), so the ambient env would reach
+	// into the USER's database from the hot Open/doctor paths — the one thing this package
+	// must never do.
+	cmd := openCodeCommand(ctx, runtimeRoot, "models", "--pure", provider)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
-		return openCodeModelList{}, fmt.Errorf("opencode models %s failed: %w (stderr: %s)", provider, err, strings.TrimSpace(errb.String()))
+		return openCodeModelList{}, fmt.Errorf("opencode models %s failed: %w (stderr: %s)", provider, err, platform.StderrExcerpt(errb.String()))
 	}
 	list := parseOpenCodeModels(out.String())
 	set := make(map[string]bool, len(list))
@@ -995,22 +995,18 @@ func modelHint(models []string) string {
 }
 
 func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, password string) *exec.Cmd {
-	cmd := openCodeCommand(ctx, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
-	cmd.Dir = os.TempDir()
-	cmd.Env = replaceEnv(os.Environ(), []string{
-		"WITNESS_WORKER=1",
+	// openCodeCommand binds the serve child's lifetime to the worker (issue #54 I2): on Linux
+	// proc.BindToParent sets Pdeathsig=SIGKILL so the kernel kills this serve child the
+	// instant the worker dies, even on a SIGKILL/OOM the worker's Go cleanup can't survive.
+	// No such primitive exists on macOS/Windows, where it's a no-op and the startup
+	// ReapOrphans sweep is the fallback.
+	cmd := openCodeCommand(ctx, runtimeRoot, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
+	cmd.Env = replaceEnv(cmd.Env, []string{
 		"OPENCODE_DISABLE_CLAUDE_CODE=1",
 		"OPENCODE_SERVER_USERNAME=opencode",
 		"OPENCODE_SERVER_PASSWORD=" + password,
 		"OPENCODE_CONFIG_CONTENT=" + openCodeConfigContent(),
 	})
-	cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
-	// Bind the serve child's lifetime to the worker (issue #54 I2) through the
-	// process-control port: on Linux proc.BindToParent sets Pdeathsig=SIGKILL so the
-	// kernel kills this serve child the instant the worker dies, even on a SIGKILL/OOM
-	// the worker's Go cleanup can't survive. No such primitive exists on macOS/Windows,
-	// where it's a no-op and the startup ReapOrphans sweep is the fallback.
-	procCtl.BindToParent(cmd)
 	return cmd
 }
 
@@ -1115,9 +1111,6 @@ func parseOpenCodeMessageResponse(data []byte) string {
 	return joinOpenCodeTextParts(findOpenCodeTextParts(v))
 }
 
-// parseOpenCodeAsyncError returns the provider error from an assistant message that
-// belongs to THIS request, or "" if none does. It mirrors parseOpenCodeAsyncReply's scan
-// exactly — only messages AFTER the request index count, so a failure recorded in the
 // generationStarted reports whether the provider has begun generating OUR reply — i.e. an
 // assistant message exists after our request.
 //
@@ -1219,8 +1212,11 @@ func openCodeMessageCompleted(data []byte) bool {
 	return msg.Info.Time.Completed != nil
 }
 
-// forked source conversation (history witness did not create) is never mistaken for this
-// run's outcome. Requires the request to be present for the same reason.
+// parseOpenCodeAsyncError returns the provider error from an assistant message that
+// belongs to THIS request, or "" if none does. It mirrors parseOpenCodeAsyncReply's scan
+// exactly — only messages AFTER the request index count, so nothing earlier in the session
+// is ever mistaken for this run's outcome. Requires the request to be present for the same
+// reason.
 func parseOpenCodeAsyncError(data []byte, requestMessageID string) string {
 	var list []json.RawMessage
 	if err := json.Unmarshal(data, &list); err != nil {
@@ -1262,8 +1258,8 @@ func parseOpenCodeAsyncReply(data []byte, requestMessageID string) string {
 				break
 			}
 		}
-		// A native fork contains the source conversation. Until this request is
-		// present, every assistant message belongs to that history, not this run.
+		// Until this request is present, no assistant message can be this run's reply
+		// (the session is fresh, but a resumed manifest may have earlier turns).
 		if requestIndex < 0 {
 			return ""
 		}

@@ -34,31 +34,39 @@ use; 'witness lens load-default' brings it back if you removed it.`),
 			Short: "Register or replace a lens definition.",
 			Long:  "Copy a lens definition DIRECTORY (holding lens.json + extract.md + review.md) into the witness store. Later edits to the source directory do not affect the registered snapshot until you register it again. Tune models with `witness config set <key> <value> --lens <name>`.",
 			Args:  cobra.ExactArgs(2),
-			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"register"}, args...)) },
+			RunE: func(_ *cobra.Command, args []string) error {
+				return withLensStore(func(st *store.Store) error { return lensRegister(st, args[0], args[1]) })
+			},
 		},
 		&cobra.Command{
 			Use:   "deregister <name>",
 			Short: "Remove a registered lens definition.",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"deregister"}, args...)) },
+			RunE: func(_ *cobra.Command, args []string) error {
+				return withLensStore(func(st *store.Store) error { return lensDeregister(st, args[0]) })
+			},
 		},
 		&cobra.Command{
 			Use:   "enable <name>",
 			Short: "Enable a registered lens for every session.",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"enable"}, args...)) },
+			RunE: func(_ *cobra.Command, args []string) error {
+				return withLensStore(func(st *store.Store) error { return lensEnable(st, args[0]) })
+			},
 		},
 		&cobra.Command{
 			Use:   "disable <name>",
 			Short: "Stop running a lens on new distillation work.",
 			Args:  cobra.ExactArgs(1),
-			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"disable"}, args...)) },
+			RunE: func(_ *cobra.Command, args []string) error {
+				return withLensStore(func(st *store.Store) error { return lensDisable(st, args[0]) })
+			},
 		},
 		&cobra.Command{
 			Use:   "list",
 			Short: "List registered lenses and enabled state.",
 			Args:  cobra.NoArgs,
-			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"list"}) },
+			RunE:  func(_ *cobra.Command, _ []string) error { return withLensStore(lensList) },
 		},
 		newLensShowCmd(),
 		&cobra.Command{
@@ -66,7 +74,7 @@ use; 'witness lens load-default' brings it back if you removed it.`),
 			Short: "Re-seed / restore the built-in \"default\" person-growth lens.",
 			Long:  "Register the bundled \"default\" person-growth lens into your archive and enable it, from ANY current state — deregistered, disabled, or already present. This is the explicit restore path for the auto-seeded starter lens: install no longer seeds content (#102), and a deliberately-removed default stays removed, so this command is how you bring it back or re-seed it after editing broke it.",
 			Args:  cobra.NoArgs,
-			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"load-default"}) },
+			RunE:  func(_ *cobra.Command, _ []string) error { return withLensStore(lensLoadDefault) },
 		},
 		newLensBackfillCmd(),
 		newLensTryCmd(),
@@ -134,8 +142,8 @@ scales with one lens × history.
 	return c
 }
 
-// cmdLens manages the central, global lens registry. Lenses are defined once and
-// shared across every session. Since #44 slice 1a "default" is an ordinary registered
+// The lens registry subcommands manage the central, global lens registry. Lenses are defined
+// once and shared across every session. Since #44 slice 1a "default" is an ordinary registered
 // lens (no always-on status), so it is managed through these same commands:
 //
 //	witness lens register <name> <dir>    add/replace a lens definition
@@ -144,118 +152,120 @@ scales with one lens × history.
 //	witness lens disable <name>           stop running it
 //	witness lens list                     show registered lenses + enabled state
 //	witness lens load-default             re-seed / restore the built-in default lens
-func cmdLens(args []string) error {
+//
+// Cobra parses each one and calls its function with typed arguments; withLensStore opens the
+// archive around it.
+func withLensStore(fn func(st *store.Store) error) error {
 	st, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if len(args) == 0 {
-		return fmt.Errorf("usage: witness lens <register <name> <dir>|deregister <name>|enable <name>|disable <name>|list|load-default>")
+	return fn(st)
+}
+
+func lensList(st *store.Store) error {
+	renderLensList(st, st.RegisteredLenses(), st.LoadConfig().EnabledLenses)
+	return nil
+}
+
+// lensLoadDefault is the explicit restore, bypassing the first-open one-shot gate: register the
+// bundled default prompts + enable, from any state (deregistered/disabled/present). Since #102
+// install no longer seeds content and a deliberately-removed default stays gone, this is the sole
+// "bring default back" path.
+func lensLoadDefault(st *store.Store) error {
+	if err := seedDefaultLens(st); err != nil {
+		return fmt.Errorf("load default lens: %w", err)
 	}
-	enabled := st.LoadConfig().EnabledLenses
-	reg := st.RegisteredLenses()
-	switch args[0] {
-	case "load-default":
-		// Explicit restore, bypassing the first-open one-shot gate: register the bundled
-		// default prompts + enable, from any state (deregistered/disabled/present). Since
-		// #102 install no longer seeds content and a deliberately-removed default stays
-		// gone, this is the sole "bring default back" path.
-		if err := seedDefaultLens(st); err != nil {
-			return fmt.Errorf("load default lens: %w", err)
+	fmt.Println(result(okGlyph(), "loaded the built-in default lens", "registered + enabled"))
+	return nil
+}
+
+func lensRegister(st *store.Store, name, dir string) error {
+	// The store's own error for a missing directory was a bare "stat …: no such file or
+	// directory", which says neither what was wanted nor that the path is the problem.
+	const want = "(want lens.json + extract.md + review.md)"
+	if fi, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("lens directory %s does not exist %s", dir, want)
+	} else if err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("%s is a file, not a lens directory %s", dir, want)
+	}
+	if err := st.RegisterLens(name, dir); err != nil {
+		return err
+	}
+	note := ""
+	if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil && l.Name != name {
+		note = fmt.Sprintf("mines as %q", l.Name)
+	}
+	fmt.Println(result(okGlyph(), "registered lens "+name, note))
+	if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
+		fmt.Println(hint("turn it on", "witness lens enable "+name))
+	}
+	return nil
+}
+
+func lensDeregister(st *store.Store, name string) error {
+	if !slices.Contains(st.RegisteredLenses(), name) {
+		return fmt.Errorf("lens %q is not registered — nothing to deregister (see `witness lens list`)", name)
+	}
+	if err := st.DeregisterLens(name); err != nil {
+		return err
+	}
+	// The registry and the enabled set are separate (store.DeregisterLens leaves config
+	// alone), so deregistering an enabled lens leaves an orphan the worker skips every pass.
+	if slices.Contains(st.LoadConfig().EnabledLenses, name) {
+		fmt.Println(result(warnGlyph(), "deregistered lens "+name, "still enabled in config.toml"))
+		fmt.Println(hint("finish", "witness lens disable "+name))
+	} else {
+		fmt.Println(result(okGlyph(), "deregistered lens "+name, ""))
+	}
+	if name == store.LensDefault {
+		// It will NOT come back on its own: the first-open seed is one-shot.
+		fmt.Println(hint("bring it back", "witness lens load-default"))
+	}
+	return nil
+}
+
+func lensEnable(st *store.Store, name string) error {
+	if name == "" {
+		return fmt.Errorf("usage: witness lens enable <name>")
+	}
+	if !slices.Contains(st.RegisteredLenses(), name) {
+		return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", name, name)
+	}
+	if slices.Contains(st.LoadConfig().EnabledLenses, name) {
+		fmt.Println(result(skipGlyph(), "lens "+name+" is already enabled", "nothing changed"))
+		return nil
+	}
+	if err := st.EnableLens(name); err != nil {
+		return err
+	}
+	fmt.Println(result(okGlyph(), "enabled lens "+name, "runs on every session"))
+	return nil
+}
+
+func lensDisable(st *store.Store, name string) error {
+	if name == "" {
+		return fmt.Errorf("usage: witness lens disable <name>")
+	}
+	if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
+		// A name that is neither enabled nor registered is a typo, and "disabled lens nope"
+		// with exit 0 told the user it worked. Disabling an enabled-but-unregistered name
+		// stays allowed: that is how an orphan is cleaned up.
+		if !slices.Contains(st.RegisteredLenses(), name) {
+			return fmt.Errorf("lens %q is not registered or enabled — nothing to disable (see `witness lens list`)", name)
 		}
-		fmt.Println(result(okGlyph(), "loaded the built-in default lens", "registered + enabled"))
-	case "register":
-		if len(args) < 3 {
-			return fmt.Errorf("usage: witness lens register <name> <dir>")
-		}
-		name, dir := args[1], args[2]
-		// The store's own error for a missing directory was a bare "stat …: no such file or
-		// directory", which says neither what was wanted nor that the path is the problem.
-		const want = "(want lens.json + extract.md + review.md)"
-		if fi, err := os.Stat(dir); os.IsNotExist(err) {
-			return fmt.Errorf("lens directory %s does not exist %s", dir, want)
-		} else if err != nil {
-			return err
-		} else if !fi.IsDir() {
-			return fmt.Errorf("%s is a file, not a lens directory %s", dir, want)
-		}
-		if err := st.RegisterLens(name, dir); err != nil {
-			return err
-		}
-		note := ""
-		if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil && l.Name != name {
-			note = fmt.Sprintf("mines as %q", l.Name)
-		}
-		fmt.Println(result(okGlyph(), "registered lens "+name, note))
-		if !slices.Contains(enabled, name) {
-			fmt.Println(hint("turn it on", "witness lens enable "+name))
-		}
-	case "deregister":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: witness lens deregister <name>")
-		}
-		name := args[1]
-		if !slices.Contains(reg, name) {
-			return fmt.Errorf("lens %q is not registered — nothing to deregister (see `witness lens list`)", name)
-		}
-		if err := st.DeregisterLens(name); err != nil {
-			return err
-		}
-		// The registry and the enabled set are separate (store.DeregisterLens leaves config
-		// alone), so deregistering an enabled lens leaves an orphan the worker skips every pass.
-		if slices.Contains(enabled, name) {
-			fmt.Println(result(warnGlyph(), "deregistered lens "+name, "still enabled in config.toml"))
-			fmt.Println(hint("finish", "witness lens disable "+name))
-		} else {
-			fmt.Println(result(okGlyph(), "deregistered lens "+name, ""))
-		}
-		if name == store.LensDefault {
-			// It will NOT come back on its own: the first-open seed is one-shot.
-			fmt.Println(hint("bring it back", "witness lens load-default"))
-		}
-	case "enable":
-		if len(args) < 2 || args[1] == "" {
-			return fmt.Errorf("usage: witness lens enable <name>")
-		}
-		name := args[1]
-		if !slices.Contains(reg, name) {
-			return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", name, name)
-		}
-		if slices.Contains(enabled, name) {
-			fmt.Println(result(skipGlyph(), "lens "+name+" is already enabled", "nothing changed"))
-			return nil
-		}
-		if err := st.EnableLens(name); err != nil {
-			return err
-		}
-		fmt.Println(result(okGlyph(), "enabled lens "+name, "runs on every session"))
-	case "disable":
-		if len(args) < 2 || args[1] == "" {
-			return fmt.Errorf("usage: witness lens disable <name>")
-		}
-		name := args[1]
-		if !slices.Contains(enabled, name) {
-			// A name that is neither enabled nor registered is a typo, and "disabled lens nope"
-			// with exit 0 told the user it worked. Disabling an enabled-but-unregistered name
-			// stays allowed: that is how an orphan is cleaned up.
-			if !slices.Contains(reg, name) {
-				return fmt.Errorf("lens %q is not registered or enabled — nothing to disable (see `witness lens list`)", name)
-			}
-			fmt.Println(result(skipGlyph(), "lens "+name+" is already disabled", "nothing changed"))
-			return nil
-		}
-		if err := st.DisableLens(name); err != nil {
-			return err
-		}
-		fmt.Println(result(okGlyph(), "disabled lens "+name, "no new work runs it"))
-		if name == store.LensDefault {
-			fmt.Println(hint("re-enable", "witness lens enable default"))
-		}
-	case "list":
-		renderLensList(st, reg, enabled)
-	default:
-		return fmt.Errorf("unknown lens subcommand %q (want register|deregister|enable|disable|list|show|load-default|backfill|try)", args[0])
+		fmt.Println(result(skipGlyph(), "lens "+name+" is already disabled", "nothing changed"))
+		return nil
+	}
+	if err := st.DisableLens(name); err != nil {
+		return err
+	}
+	fmt.Println(result(okGlyph(), "disabled lens "+name, "no new work runs it"))
+	if name == store.LensDefault {
+		fmt.Println(hint("re-enable", "witness lens enable default"))
 	}
 	return nil
 }

@@ -48,7 +48,7 @@ func TestToolsMapTheRegisteredLensName(t *testing.T) {
 	}
 	callText(t, fake, renamed, "record_observation", map[string]any{"session": "s1", "lens": "corpus-example",
 		"dimension": "regimes", "observation": "noticed"})
-	if fake.lastStaged.Lens != "regime" || fake.lastStaged.ID != obsID("s1", "regime", "noticed") {
+	if fake.lastStaged.Lens != "regime" || fake.lastStaged.ID != store.ObservationID("s1", "regime", "noticed") {
 		t.Errorf("record must stage under the name the review reads, got lens %q id %q", fake.lastStaged.Lens, fake.lastStaged.ID)
 	}
 }

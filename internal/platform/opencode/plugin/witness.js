@@ -6,11 +6,11 @@ function eventType(event) {
   return String(event?.type || "")
 }
 
-function spawnWitness(args, payload) {
+function spawnWitness(args) {
   if (process.env.WITNESS_WORKER === "1") return
   try {
     const proc = Bun.spawn([WITNESS_BIN, ...args], {
-      stdin: payload ? new Blob([JSON.stringify(payload)]) : "ignore",
+      stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
       env: { ...process.env },

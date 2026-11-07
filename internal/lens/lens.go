@@ -70,13 +70,13 @@ type LensConfig struct {
 	ReviewModel  string   `json:"review_model,omitempty"`
 }
 
-// LensConfigName / the on-disk filenames of a lens directory. One home for the literals
-// so the loader, the store registry, and the CLI never drift on a filename.
+// The on-disk filenames of a lens directory, aliased from their one home in the store
+// (store.LensFiles), so the loader, the registry, and merge never drift on a filename.
 const (
-	ConfigFile  = "lens.json"
-	ExtractFile = "extract.md"
-	ReviewFile  = "review.md"
-	EmergeFile  = "emerge.md" // S3 long-arc verify prompt; OPTIONAL (absent → fall back to review.md)
+	ConfigFile  = store.LensConfigFile
+	ExtractFile = store.LensExtractFile
+	ReviewFile  = store.LensReviewFile
+	EmergeFile  = store.LensEmergeFile // S3 long-arc verify prompt; OPTIONAL (absent → fall back to review.md)
 )
 
 // promptsDir resolves the bundled prompts directory. Resolution (bundle.Dir):
@@ -190,12 +190,9 @@ func LoadResolvePrompts() (lensPrompt, unifiedPrompt string, err error) {
 // is allowed to be absent/empty (a lens may mine without a custom review prompt), but
 // extract.md is required — it is the mining prompt, the reason the lens exists.
 func readPromptPair(dir string) (extract, review, emerge string, err error) {
-	e, err := os.ReadFile(filepath.Join(dir, ExtractFile))
+	e, err := store.ReadLensExtract(dir)
 	if err != nil {
-		return "", "", "", fmt.Errorf("read %s: %w", ExtractFile, err)
-	}
-	if strings.TrimSpace(string(e)) == "" {
-		return "", "", "", fmt.Errorf("%s is empty (the mining prompt is required)", ExtractFile)
+		return "", "", "", err
 	}
 	// review.md may not exist; treat absence as an empty review prompt rather than an error.
 	r, rerr := os.ReadFile(filepath.Join(dir, ReviewFile))
@@ -229,15 +226,18 @@ func loadDir(dir, fallbackName string) (*Lens, error) {
 		}
 		return nil, err
 	}
-	l := &Lens{Name: fallbackName, Extract: extract, Review: review, Emerge: emerge}
-	// lens.json is optional; when present it supplies name/dimensions/models.
+	// The name resolves by the registry's own rule, so loader and registry never disagree on
+	// a lens's identity.
+	name, err := store.ResolveLensName(dir, fallbackName)
+	if err != nil {
+		return nil, err
+	}
+	l := &Lens{Name: name, Extract: extract, Review: review, Emerge: emerge}
+	// lens.json is optional; when present it supplies dimensions/runner/models.
 	if data, jerr := os.ReadFile(filepath.Join(dir, ConfigFile)); jerr == nil {
 		var cfg LensConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", ConfigFile, err)
-		}
-		if strings.TrimSpace(cfg.Name) != "" {
-			l.Name = strings.TrimSpace(cfg.Name)
 		}
 		l.Dimensions = cfg.Dimensions
 		l.Runner = strings.TrimSpace(cfg.Runner)

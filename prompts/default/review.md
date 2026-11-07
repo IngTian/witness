@@ -28,7 +28,7 @@ You set `contradicts_prior` per facet. It governs whether a change-arc is record
 
 2. **Re-emergence → `contradicts_prior: true`, with the returning value.** The new observations re-assert a value the profile has **moved away from** (the current value is now something else). This is a genuine return — record it as a new arc. Re-emergence (a value → its opposite → back) is exactly what this system exists to capture; do not suppress it because a similar value existed before.
 
-3. **Sustained contradiction → `contradicts_prior: true`, with the new value.** The new observations show a *clear, repeated* pattern conflicting with the stored current value — several observations, ideally across more than one session. A *single* off-pattern observation is noise: leave the stance as it is. A drift too gradual to call from this pass alone is intentionally NOT flipped here; it will be caught when a full re-derivation reconsiders the whole history at once.
+3. **Sustained contradiction → `contradicts_prior: true`, with the new value.** The new observations show a *clear, repeated* pattern conflicting with the stored current value — several observations, ideally across more than one session. A *single* off-pattern observation is noise: leave the stance as it is. A drift too gradual to call from this pass alone is intentionally NOT flipped here; flip it in the pass whose evidence makes it clear.
 
 4. **Time-bound `state` facet that has clearly passed → `contradicts_prior: true`** with the new current state (or omit the facet if there is no current state). State (mood, season, focus) expires by recency. "Was deep in grief in June" naturally ends; don't keep asserting it once observations move on.
 
@@ -44,7 +44,7 @@ Reflect **cumulative** support: the stance you were handed PLUS the new evidence
 - 0.6-0.8: well-supported, recurring across sessions.
 - 0.9+: pervasive, defining, many independent observations.
 
-When new observations **reinforce** an existing facet, return a confidence at or above its `current_confidence` — raise it when new independent recurrences (especially across sessions) genuinely strengthen the case, hold steady when they merely re-confirm. (Code keeps the higher of old and new, so a lower number is ignored; never *lower* confidence on reinforcement — that is code-side decay's job.) A brand-new facet starts from its in-pass support alone.
+When new observations **reinforce** an existing facet, return a confidence at or above its `current_confidence` — raise it when new independent recurrences (especially across sessions) genuinely strengthen the case, hold steady when they merely re-confirm. (Code moves `current_confidence` toward the number you return by at most 0.1 per pass, up or down, so a lower number here really does lower it; never *lower* confidence on reinforcement — decay for unseen facets is code's job.) A brand-new facet starts from its in-pass support alone.
 
 ## Rules
 

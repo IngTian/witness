@@ -93,8 +93,7 @@ func ensureProfileFresh(st *store.Store) (bool, error) {
 // signatures and call fresh portraits stale. ensureProfileFresh adds the runner; `witness view`
 // only asks Stale, which never calls one.
 func profileSummarizer(st *store.Store) (*distill.Summarizer, error) {
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	lenses := activeLenses(st)
 	if len(lenses) == 0 {
 		return nil, nil

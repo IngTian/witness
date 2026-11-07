@@ -42,16 +42,25 @@ func TestResolveSourcesWritesLinks(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:         s,
-		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default"}},
-		ResolvePrompt: "RESOLVE",
-		Run:           fakeResolve,
+	sm := &Resolver{
+		Store:      s,
+		Config:     store.Config{},
+		Lenses:     []*lens.Lens{{Name: "default"}},
+		LensPrompt: "RESOLVE",
+		Run:        fakeResolve,
 	}
 
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	resolved, err := sm.ResolveSources(context.Background())
+	if err != nil {
 		t.Fatalf("ResolveSources: %v", err)
+	}
+	// It reports what it resolved (the worker logs the count): the one notebook, and not the
+	// unified portrait, which has no file and whose prompt is unset.
+	if len(resolved) != 1 || resolved[0] != "default" {
+		t.Fatalf("resolved = %v, want [default]", resolved)
+	}
+	if again, _ := sm.ResolveSources(context.Background()); len(again) != 0 {
+		t.Fatalf("a second pass with nothing stale resolved %v, want nothing", again)
 	}
 
 	// R5: the facet's FULL value is present in the input.
@@ -115,89 +124,6 @@ func TestResolveSourcesWritesLinks(t *testing.T) {
 	}
 }
 
-// TestResolveSourcesLeavesSummaryByteIdentical verifies that running Summarize with
-// or without ResolvePrompt set produces identical profile files and signatures.
-// ResolveSources is a separate pass that writes only portrait_sources rows.
-func TestResolveSourcesLeavesSummaryByteIdentical(t *testing.T) {
-	// Store 1: Summarize with ResolvePrompt empty.
-	s1 := newStore(t)
-	seedFacets(t, s1)
-
-	fake1 := func(_ context.Context, _, prompt, _ string) (string, error) {
-		if prompt == "RESOLVE" {
-			t.Fatal("Summarize must not call the resolver when ResolvePrompt is empty")
-		}
-		return "SUMMARY", nil
-	}
-
-	sm1 := &Summarizer{
-		Store:         s1,
-		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default"}},
-		LensPrompt:    "LENS",
-		UnifiedPrompt: "UNIFIED",
-		Run:           fake1,
-	}
-	if err := sm1.Summarize(context.Background()); err != nil {
-		t.Fatalf("Summarize (no resolve): %v", err)
-	}
-
-	// Store 2: Summarize with ResolvePrompt set, then ResolveSources.
-	s2 := newStore(t)
-	seedFacets(t, s2)
-
-	resolveCalls := 0
-	fake2 := func(_ context.Context, _, prompt, _ string) (string, error) {
-		if prompt == "RESOLVE" {
-			resolveCalls++
-			return `{"links":[],"keywords":[]}`, nil
-		}
-		return "SUMMARY", nil
-	}
-
-	sm2 := &Summarizer{
-		Store:         s2,
-		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default"}},
-		LensPrompt:    "LENS",
-		UnifiedPrompt: "UNIFIED",
-		ResolvePrompt: "RESOLVE",
-		Run:           fake2,
-	}
-	if err := sm2.Summarize(context.Background()); err != nil {
-		t.Fatalf("Summarize (with resolve): %v", err)
-	}
-	if resolveCalls != 0 {
-		t.Fatalf("Summarize made %d RESOLVE calls, want 0", resolveCalls)
-	}
-
-	if err := sm2.ResolveSources(context.Background()); err != nil {
-		t.Fatalf("ResolveSources: %v", err)
-	}
-	// ResolveSources should resolve both notebook portraits (default and math), skipping unified.
-	if resolveCalls != 2 {
-		t.Fatalf("ResolveSources made %d calls, want 2", resolveCalls)
-	}
-
-	// Every ReadProfile result is identical.
-	for _, l := range []string{"default", "math", "unified"} {
-		md1, ok1, _ := s1.ReadProfile(l)
-		md2, ok2, _ := s2.ReadProfile(l)
-		if ok1 != ok2 || md1 != md2 {
-			t.Fatalf("profile %s differs: ok1=%v ok2=%v md1=%q md2=%q", l, ok1, ok2, md1, md2)
-		}
-	}
-
-	// Every profile_sig:* meta value is identical.
-	for _, l := range []string{"default", "math", "unified"} {
-		sig1 := s1.MetaString("profile_sig:" + l)
-		sig2 := s2.MetaString("profile_sig:" + l)
-		if sig1 != sig2 {
-			t.Fatalf("signature for %s differs: %q vs %q", l, sig1, sig2)
-		}
-	}
-}
-
 // TestResolveSourcesFailureIsIsolated verifies that when the resolver returns an error,
 // ResolveSources returns a non-nil error, no sources row is written, and profile files
 // and signatures are unchanged.
@@ -221,15 +147,15 @@ func TestResolveSourcesFailureIsIsolated(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:         s,
-		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default"}},
-		ResolvePrompt: "RESOLVE",
-		Run:           fakeResolve,
+	sm := &Resolver{
+		Store:      s,
+		Config:     store.Config{},
+		Lenses:     []*lens.Lens{{Name: "default"}},
+		LensPrompt: "RESOLVE",
+		Run:        fakeResolve,
 	}
 
-	err := sm.ResolveSources(context.Background())
+	_, err := sm.ResolveSources(context.Background())
 	if err == nil {
 		t.Fatal("ResolveSources should return an error when the resolver fails")
 	}
@@ -287,15 +213,15 @@ func TestResolveSourcesIgnoresUnparseableReply(t *testing.T) {
 				return "", nil
 			}
 
-			sm := &Summarizer{
-				Store:         st,
-				Config:        store.Config{},
-				Lenses:        []*lens.Lens{{Name: "default"}},
-				ResolvePrompt: "RESOLVE",
-				Run:           fakeResolve,
+			sm := &Resolver{
+				Store:      st,
+				Config:     store.Config{},
+				Lenses:     []*lens.Lens{{Name: "default"}},
+				LensPrompt: "RESOLVE",
+				Run:        fakeResolve,
 			}
 
-			_ = sm.ResolveSources(context.Background())
+			_, _ = sm.ResolveSources(context.Background())
 
 			_, _, ok, err := st.ReadPortraitSources("default")
 			if err != nil {
@@ -423,15 +349,15 @@ func TestResolveSourcesValidatesLinks(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:         s,
-		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default"}, {Name: "math"}},
-		ResolvePrompt: "RESOLVE",
-		Run:           fakeResolve,
+	sm := &Resolver{
+		Store:      s,
+		Config:     store.Config{},
+		Lenses:     []*lens.Lens{{Name: "default"}, {Name: "math"}},
+		LensPrompt: "RESOLVE",
+		Run:        fakeResolve,
 	}
 
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources: %v", err)
 	}
 
@@ -550,16 +476,16 @@ func TestResolveSourcesSelfHeals(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:         s,
-		Config:        store.Config{},
-		Lenses:        []*lens.Lens{{Name: "default"}, {Name: "math"}},
-		ResolvePrompt: "RESOLVE",
-		Run:           fakeResolve,
+	sm := &Resolver{
+		Store:      s,
+		Config:     store.Config{},
+		Lenses:     []*lens.Lens{{Name: "default"}, {Name: "math"}},
+		LensPrompt: "RESOLVE",
+		Run:        fakeResolve,
 	}
 
 	// First pass: one call per stale portrait (2).
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources (pass 1): %v", err)
 	}
 	if calls != 2 {
@@ -568,7 +494,7 @@ func TestResolveSourcesSelfHeals(t *testing.T) {
 
 	// Second pass, nothing changed: zero calls.
 	calls = 0
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources (pass 2): %v", err)
 	}
 	if calls != 0 {
@@ -580,7 +506,7 @@ func TestResolveSourcesSelfHeals(t *testing.T) {
 		t.Fatalf("WriteProfile (rewrite): %v", err)
 	}
 	calls = 0
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources (pass 3): %v", err)
 	}
 	if calls != 1 {
@@ -592,7 +518,7 @@ func TestResolveSourcesSelfHeals(t *testing.T) {
 		t.Fatalf("DeleteProfile: %v", err)
 	}
 	calls = 0
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources (pass 4): %v", err)
 	}
 	if calls != 0 {
@@ -644,12 +570,12 @@ func TestResolveSourcesUsesPerLensRunner(t *testing.T) {
 	}
 
 	mathLens := &lens.Lens{Name: "math", Runner: "opencode", ReviewModel: "haiku"}
-	sm := &Summarizer{
-		Store:         s,
-		Config:        store.Config{Runner: "claude", DistillModel: "sonnet"},
-		Lenses:        []*lens.Lens{{Name: "default"}, mathLens},
-		ResolvePrompt: "RESOLVE",
-		Run:           defaultRunner,
+	sm := &Resolver{
+		Store:      s,
+		Config:     store.Config{Runner: "claude", DistillModel: "sonnet"},
+		Lenses:     []*lens.Lens{{Name: "default"}, mathLens},
+		LensPrompt: "RESOLVE",
+		Run:        defaultRunner,
 		RunFor: func(ln *lens.Lens) SummarizeFunc {
 			if ln != nil && ln.Name == "math" {
 				return mathRunner
@@ -658,7 +584,7 @@ func TestResolveSourcesUsesPerLensRunner(t *testing.T) {
 		},
 	}
 
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources: %v", err)
 	}
 
@@ -681,7 +607,7 @@ func TestResolveSourcesUsesPerLensRunner(t *testing.T) {
 	}
 }
 
-// TestResolveSourcesOffWithoutPrompt verifies that with ResolvePrompt == "", zero
+// TestResolveSourcesOffWithoutPrompt verifies that with LensPrompt == "", zero
 // calls are made, no rows are written, and ResolveSources returns nil.
 func TestResolveSourcesOffWithoutPrompt(t *testing.T) {
 	s := newStore(t)
@@ -697,15 +623,15 @@ func TestResolveSourcesOffWithoutPrompt(t *testing.T) {
 		return `{"links":[],"keywords":[]}`, nil
 	}
 
-	sm := &Summarizer{
+	sm := &Resolver{
 		Store:  s,
 		Config: store.Config{},
 		Lenses: []*lens.Lens{{Name: "default"}},
-		// ResolvePrompt is empty, feature is off.
+		// LensPrompt is empty, feature is off.
 		Run: fakeResolve,
 	}
 
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources: %v", err)
 	}
 	if calls != 0 {
@@ -718,7 +644,7 @@ func TestResolveSourcesOffWithoutPrompt(t *testing.T) {
 		t.Fatalf("ReadPortraitSources: %v", err)
 	}
 	if ok {
-		t.Fatal("sources row was written despite ResolvePrompt == \"\"")
+		t.Fatal("sources row was written despite LensPrompt == \"\"")
 	}
 }
 
@@ -748,16 +674,16 @@ func TestResolveUnifiedInheritsNotebookLinks(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  fakeResolve,
+	sm := &Resolver{
+		Store:         s,
+		Config:        store.Config{},
+		Lenses:        []*lens.Lens{{Name: "default"}},
+		LensPrompt:    "RESOLVE",
+		UnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:           fakeResolve,
 	}
 
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources: %v", err)
 	}
 
@@ -820,16 +746,16 @@ func TestResolveUnifiedWeakensPartialRefs(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  fakeResolve,
+	sm := &Resolver{
+		Store:         s,
+		Config:        store.Config{},
+		Lenses:        []*lens.Lens{{Name: "default"}},
+		LensPrompt:    "RESOLVE",
+		UnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:           fakeResolve,
 	}
 
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources: %v", err)
 	}
 
@@ -881,17 +807,17 @@ func TestResolveUnifiedReResolvesWhenANotebookChanges(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  fakeResolve,
+	sm := &Resolver{
+		Store:         s,
+		Config:        store.Config{},
+		Lenses:        []*lens.Lens{{Name: "default"}},
+		LensPrompt:    "RESOLVE",
+		UnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:           fakeResolve,
 	}
 
 	// Pass 1: resolve all (default + unified).
-	if err := sm.ResolveSources(context.Background()); err != nil {
+	if _, err := sm.ResolveSources(context.Background()); err != nil {
 		t.Fatalf("ResolveSources (pass 1): %v", err)
 	}
 
@@ -908,7 +834,7 @@ func TestResolveUnifiedReResolvesWhenANotebookChanges(t *testing.T) {
 	}
 
 	// Pass 2: re-resolve ONLY default (unified resolver will fail).
-	_ = sm.ResolveSources(context.Background()) // Ignore error (unified fails by design).
+	_, _ = sm.ResolveSources(context.Background()) // Ignore error (unified fails by design).
 
 	// Read default's new stored text_hash.
 	_, defaultHash2, ok, err := s.ReadPortraitSources("default")
@@ -972,13 +898,13 @@ func TestResolveUnifiedSkipsMissingNotebooks(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  successfulResolve,
+	sm := &Resolver{
+		Store:         s,
+		Config:        store.Config{},
+		Lenses:        []*lens.Lens{{Name: "default"}, {Name: "math"}},
+		LensPrompt:    "RESOLVE",
+		UnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:           successfulResolve,
 		RunFor: func(ln *lens.Lens) SummarizeFunc {
 			if ln != nil && ln.Name == "math" {
 				return fakeResolve // Fails for math.
@@ -988,7 +914,7 @@ func TestResolveUnifiedSkipsMissingNotebooks(t *testing.T) {
 	}
 
 	// ResolveSources should return an error for math's failure.
-	err := sm.ResolveSources(context.Background())
+	_, err := sm.ResolveSources(context.Background())
 	if err == nil {
 		t.Fatal("ResolveSources returned nil; expected a joined error for math's failure")
 	}
@@ -1060,13 +986,13 @@ func TestResolveUnifiedLoopGuard(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  successfulResolve,
+	sm := &Resolver{
+		Store:         s,
+		Config:        store.Config{},
+		Lenses:        []*lens.Lens{{Name: "default"}, {Name: "math"}},
+		LensPrompt:    "RESOLVE",
+		UnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:           successfulResolve,
 		RunFor: func(ln *lens.Lens) SummarizeFunc {
 			if ln != nil && ln.Name == "math" {
 				return mathFailsResolve
@@ -1076,86 +1002,24 @@ func TestResolveUnifiedLoopGuard(t *testing.T) {
 	}
 
 	// Pass 1: resolve default + unified (math fails).
-	_ = sm.ResolveSources(context.Background()) // Ignore error (math fails).
+	_, _ = sm.ResolveSources(context.Background()) // Ignore error (math fails).
 
 	if unifiedCalls != 1 {
 		t.Fatalf("pass 1: unified calls = %d, want 1", unifiedCalls)
 	}
 
 	// Pass 2: nothing changed, math still fails. Unified should NOT be called.
-	_ = sm.ResolveSources(context.Background())
+	_, _ = sm.ResolveSources(context.Background())
 
 	if unifiedCalls != 1 {
 		t.Fatalf("pass 2: unified calls = %d, want 1 (no re-call when nothing changed)", unifiedCalls)
 	}
 
 	// Pass 3: still nothing changed. Unified should still NOT be called.
-	_ = sm.ResolveSources(context.Background())
+	_, _ = sm.ResolveSources(context.Background())
 
 	if unifiedCalls != 1 {
 		t.Fatalf("pass 3: unified calls = %d, want 1 (no re-call when nothing changed)", unifiedCalls)
-	}
-}
-
-// TestResolveUnifiedSkipsWhenNoNotebookHasSources verifies that when no notebook
-// has a sources row, the unified resolver is never called (ZERO calls with RESOLVE_UNIFIED
-// prompt), but an empty unified row IS written. This pins the "skip the unified call when
-// there are no current notebook rows" guard.
-func TestResolveUnifiedSkipsWhenNoNotebookHasSources(t *testing.T) {
-	s := newStore(t)
-	seedFacets(t, s)
-
-	// Write a unified profile but no notebook profiles (so there are no notebook sources rows).
-	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
-		t.Fatalf("WriteProfile unified: %v", err)
-	}
-
-	unifiedCalls := 0
-	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
-		if prompt == "RESOLVE_UNIFIED" {
-			unifiedCalls++
-			return `{"links":[],"keywords":[]}`, nil
-		}
-		return "", nil
-	}
-
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  fakeResolve,
-	}
-
-	// Run ResolveSources: no notebook profiles exist, so no notebook sources rows exist.
-	// Unified should NOT call the model (no current notebook rows), but should write an empty row.
-	if err := sm.ResolveSources(context.Background()); err != nil {
-		t.Fatalf("ResolveSources: %v", err)
-	}
-
-	if unifiedCalls != 0 {
-		t.Fatalf("unified calls = %d, want 0 (no notebooks have sources; guard skips model call)", unifiedCalls)
-	}
-
-	// An empty unified sources row IS written (the guard writes it without calling the model).
-	src, _, ok, err := s.ReadPortraitSources(store.ProfileUnified)
-	if err != nil {
-		t.Fatalf("ReadPortraitSources unified: %v", err)
-	}
-	if !ok {
-		t.Fatal("unified sources row was not written (expected an empty row from the guard)")
-	}
-
-	// The row is empty (no sentences with links, no keywords, no Inherits).
-	if len(src.Sentences) > 0 && len(src.Sentences[0].Links) > 0 {
-		t.Fatal("unified row has links; expected empty")
-	}
-	if len(src.Keywords) > 0 {
-		t.Fatal("unified row has keywords; expected empty")
-	}
-	if len(src.Inherits) > 0 {
-		t.Fatal("unified row has Inherits; expected empty")
 	}
 }
 
@@ -1189,18 +1053,18 @@ func TestResolveUnifiedSkipsWhenAllNotebookResolversFail(t *testing.T) {
 		return "", nil
 	}
 
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  failingResolve,
+	sm := &Resolver{
+		Store:         s,
+		Config:        store.Config{},
+		Lenses:        []*lens.Lens{{Name: "default"}, {Name: "math"}},
+		LensPrompt:    "RESOLVE",
+		UnifiedPrompt: "RESOLVE_UNIFIED",
+		Run:           failingResolve,
 	}
 
 	// Run ResolveSources: both notebook resolvers fail, so no notebook sources rows exist.
 	// Unified should NOT be called (no current notebook rows).
-	_ = sm.ResolveSources(context.Background()) // Ignore error (notebooks fail).
+	_, _ = sm.ResolveSources(context.Background()) // Ignore error (notebooks fail).
 
 	if unifiedCalls != 0 {
 		t.Fatalf("unified calls = %d, want 0 (all notebook resolvers failed)", unifiedCalls)
@@ -1224,55 +1088,5 @@ func TestResolveUnifiedSkipsWhenAllNotebookResolversFail(t *testing.T) {
 	}
 	if len(src.Inherits) > 0 {
 		t.Fatal("unified row has Inherits; expected empty")
-	}
-}
-
-// TestSummarizeNeverCallsResolver verifies that Summarize, even with both resolve
-// prompts set, makes zero calls with those prompts. This guarantees that the read
-// path (ensureProfileFresh → Summarize) has exactly today's latency: source resolution
-// is wired only into the background worker, never into the read-time regeneration.
-func TestSummarizeNeverCallsResolver(t *testing.T) {
-	s := newStore(t)
-	// Seed a facet and write a profile so Summarize has work to do.
-	if err := s.WriteFacets([]store.Facet{
-		{Lens: "default", Dimension: "traits", Key: "k",
-			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.WriteProfile("default", "Summary."); err != nil {
-		t.Fatal(err)
-	}
-
-	var calls []string
-	fake := func(_ context.Context, _, prompt, _ string) (string, error) {
-		calls = append(calls, prompt)
-		return "OUTPUT", nil
-	}
-
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}},
-		LensPrompt:           "LENS",
-		UnifiedPrompt:        "UNIFIED",
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  fake,
-	}
-
-	if err := sm.Summarize(context.Background()); err != nil {
-		t.Fatalf("Summarize: %v", err)
-	}
-
-	// Assert: only LENS and UNIFIED were called, never RESOLVE or RESOLVE_UNIFIED.
-	for _, p := range calls {
-		if p == "RESOLVE" || p == "RESOLVE_UNIFIED" {
-			t.Fatalf("Summarize called the resolver with prompt %q; must never call resolve prompts", p)
-		}
-	}
-	// Ensure we actually called the fake (else the test is vacuous).
-	if len(calls) == 0 {
-		t.Fatal("no calls made; test is vacuous")
 	}
 }

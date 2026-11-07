@@ -29,7 +29,7 @@ import (
 // with synthetic vectors and can be dry-run/inspected on a real archive clone before
 // any LLM budget is spent.
 //
-// The geometry (see the S3 design spec + internal/vector/cluster.go):
+// The geometry (see internal/vector/cluster.go):
 //   - mutual-kNN graph over a k-BAND, keeping only components that PERSIST across the
 //     band — base-invariant, so there is no magic "which k / which log base" knob and
 //     no cosine-threshold blob;
@@ -185,7 +185,7 @@ func reexpand(members, all []store.Observation, lens string) []store.Observation
 		if len(m.Embedding) == 0 {
 			continue
 		}
-		if s := cosine(centroid, m.Embedding); s < radius {
+		if s := vector.Cosine(centroid, m.Embedding); s < radius {
 			radius = s
 		}
 	}
@@ -198,7 +198,7 @@ func reexpand(members, all []store.Observation, lens string) []store.Observation
 		if lens != "" && o.Lens != lens || have[o.ID] || len(o.Embedding) == 0 {
 			continue
 		}
-		if cosine(centroid, o.Embedding) >= radius {
+		if vector.Cosine(centroid, o.Embedding) >= radius {
 			expanded = append(expanded, o)
 			have[o.ID] = true
 		}
@@ -365,21 +365,11 @@ func pairKey(a, b int) int64 {
 }
 func unpairKey(k int64) (int, int) { return int(k >> 32), int(uint32(k)) }
 
-// signature is the order-independent identity of a component: its sorted member ids.
-func signature(members []store.Observation) string {
-	ids := memberIDs(members)
-	s := ""
-	for _, id := range ids {
-		s += id + "\x00"
-	}
-	return s
-}
-
 func dedupArcs(arcs []CandidateArc) []CandidateArc {
 	seen := map[string]bool{}
 	var out []CandidateArc
 	for _, a := range arcs {
-		sig := signature(a.Members)
+		sig := arcSignature("", a.Members) // one lens's candidates, so no namespace needed
 		if seen[sig] {
 			continue
 		}
@@ -389,34 +379,21 @@ func dedupArcs(arcs []CandidateArc) []CandidateArc {
 	return out
 }
 
-// cosine of two L2-normalized float32 vectors (dot product). Local helper mirroring
-// embed.Cosine's contract without importing it here (vector.go already re-normalizes).
-func cosine(a, b []float32) float64 {
-	if len(a) != len(b) {
-		return 0
-	}
-	var dot float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-	}
-	return dot
-}
-
 // --- S3b: verify + merge + idempotency -------------------------------------------
 
 // EmergentReviewer runs the S3 long-arc retrieval pass: for each lens it clusters L1
 // (Candidates, the pure hypothesis engine above), verifies each candidate arc with one
 // bounded LLM call (the judge), and merges accepted arcs into L2 via the same
 // bi-temporal applyFacet path the ordinary review uses. It keeps its OWN idempotency
-// state (cluster signatures in meta-KV) and NEVER advances the S2 review watermark
-// (issue #16 §5c) — the sequential fold remains the sole owner of review_rowid.
+// state (cluster signatures in meta-KV) and NEVER advances the review watermark
+// (issue #16) — the sequential fold remains the sole owner of review_rowid.
 type EmergentReviewer struct {
 	Store     store.EmergentStore
 	Lenses    []*lens.Lens
 	Config    store.Config
 	Runner    MineFunc                     // required; production wires a real runner, tests inject a fake
 	RunnerFor func(ln *lens.Lens) MineFunc // per-lens runner seam (#75); nil → Runner
-	// MaxVerify caps verify calls per lens per pass (the explicit budget knob, §2d).
+	// MaxVerify caps verify calls per lens per pass (the explicit LLM budget knob).
 	// 0 = unbounded (the first cold-start pass); a periodic re-run sets a ceiling.
 	MaxVerify int
 	// Progress, when set, is called as each lens's clustering steps and then its verify calls
@@ -425,12 +402,7 @@ type EmergentReviewer struct {
 }
 
 func (r *EmergentReviewer) runnerFor(ln *lens.Lens) MineFunc {
-	if r.RunnerFor != nil {
-		if fn := r.RunnerFor(ln); fn != nil {
-			return fn
-		}
-	}
-	return r.Runner
+	return resolveRunner(r.RunnerFor, ln, r.Runner)
 }
 
 // RunFull runs the emergent pass over every lens. Errors from one lens/candidate are
@@ -528,7 +500,7 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 			// should never fire here; only set dirty when something actually merged, so a
 			// rejected assertion can't trigger a no-op L2 rewrite.
 			// 0 = no decay clock, deliberately. EmergentStore has no ReviewRowid — the long-arc
-			// pass must never touch the review watermark (§5c) — and ReadObservations does not
+			// pass must never touch the review watermark — and ReadObservations does not
 			// populate Observation.Rowid, so there is no honest seq to stamp here. A NEW
 			// arc facet therefore does not decay until an ordinary review re-asserts it and
 			// stamps a real clock. Conservative: it keeps a facet readable rather than
@@ -627,7 +599,7 @@ func shortDate(ts string) string {
 	return ts
 }
 
-// --- idempotency state (meta-KV signatures; issue #16 §5b) -------------------------
+// --- idempotency state (meta-KV signatures; issue #16) ------------------------------
 
 // arcSignature is the stable identity of a cluster: sha256 of its sorted member ids,
 // namespaced by lens. Persisted so a re-run over the SAME cluster is skipped rather than

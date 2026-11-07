@@ -32,7 +32,7 @@ function warnIfInert() {
   }
 }
 
-function spawnWitness(args, payload) {
+function spawnWitness(args) {
   if (!WITNESS_BIN || process.env.WITNESS_WORKER === "1") return
   try {
     const env = { ...process.env }
@@ -42,12 +42,12 @@ function spawnWitness(args, payload) {
     // without this, LoadDefault fails and no distillation happens. Mirrors WITNESS_ASSETS.
     env.WITNESS_PROMPTS ||= promptsDir(PACKAGE_ROOT)
     // Bind distillation to OpenCode for the npm user, who never runs `witness
-    // install` (so their config carries the default runner="claude" but they have
-    // no `claude` CLI). Non-persistent fallback: an explicit `install` choice
+    // wire` (so their config carries the default runner="claude" but they have
+    // no `claude` CLI). Non-persistent fallback: an explicit `wire` choice
     // still wins (see ResolveRunner). Don't clobber a value the user already set.
     env.WITNESS_RUNNER ||= "opencode"
     const proc = Bun.spawn([WITNESS_BIN, ...args], {
-      stdin: payload ? new Blob([JSON.stringify(payload)]) : "ignore",
+      stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
       env,
@@ -146,9 +146,7 @@ const plugin = async () => {
   function syncOpenCode(sessions = []) {
     const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]
     for (const sessionID of sessions) args.push("--session", sessionID)
-    const proc = spawnWitness(args)
-    if (!proc) return
-    return proc
+    return spawnWitness(args)
   }
 
   function claimWaiters(sessions) {

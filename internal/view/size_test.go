@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/sentence"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -85,7 +85,7 @@ func TestBuildSizeAt75kNotes(t *testing.T) {
 			}
 		}
 		src := store.PortraitSources{}
-		for s, text := range distill.SplitSentences(md.String()) {
+		for s, text := range sentence.SplitSentences(md.String()) {
 			ss := store.SourcedSentence{Text: text}
 			for l := 0; l < 3; l++ {
 				f := &in.Facets[(pi*500+s*3+l)%traits]

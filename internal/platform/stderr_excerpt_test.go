@@ -1,4 +1,4 @@
-package claude
+package platform
 
 import (
 	"strings"
@@ -6,11 +6,11 @@ import (
 )
 
 // A failed child's stderr is interpolated into an error that becomes ONE line in witness.log,
-// and that stderr is unbounded across the 10-minute timeout — so a chatty or looping `claude`
+// and that stderr is unbounded across the 10-minute timeout — so a chatty or looping CLI
 // could write a single multi-megabyte log line. This bounds it.
 func TestStderrExcerptBoundsAnEnormousStderr(t *testing.T) {
 	huge := strings.Repeat("noise ", 2_000_000) + "THE REAL ERROR"
-	got := stderrExcerpt(huge)
+	got := StderrExcerpt(huge)
 
 	if len(got) > maxStderrExcerpt+200 { // +marker
 		t.Errorf("excerpt is %d bytes; the whole point is to bound the log line", len(got))
@@ -35,10 +35,10 @@ func TestStderrExcerptLeavesNormalStderrAlone(t *testing.T) {
 		"  \n error: AWS auth refresh timed out after 3 minutes \n ",
 		strings.Repeat("x", maxStderrExcerpt), // exactly at the limit
 	} {
-		got := stderrExcerpt(s)
+		got := StderrExcerpt(s)
 		want := strings.TrimSpace(s)
 		if got != want {
-			t.Errorf("stderrExcerpt(%d bytes) altered a normal message: got %d bytes", len(s), len(got))
+			t.Errorf("StderrExcerpt(%d bytes) altered a normal message: got %d bytes", len(s), len(got))
 		}
 		if strings.Contains(got, "elided") {
 			t.Errorf("a normal message was marked truncated: %q", got)

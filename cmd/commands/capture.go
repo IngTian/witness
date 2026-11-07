@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
@@ -18,11 +19,11 @@ func newInternalCaptureCmd() *cobra.Command {
 		Short:  "Internal hook entry point for raw capture.",
 		Hidden: true,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			args := []string{}
-			if agent != "" {
-				args = append(args, "--agent", agent)
+			a := strings.ToLower(strings.TrimSpace(agent))
+			if a == "" {
+				a = string(platform.AgentClaude) // a blank --agent rides the default, as an absent one does
 			}
-			return cmdCapture(args)
+			return cmdCapture(a)
 		},
 	}
 	c.Flags().StringVar(&agent, "agent", string(platform.AgentClaude), "internal capture agent")
@@ -31,12 +32,9 @@ func newInternalCaptureCmd() *cobra.Command {
 
 // cmdCapture writes one raw record from the hook event. Pure plumbing; no LLM.
 // Best-effort: it logs failures (so they're diagnosable) but always returns nil
-// so a capture problem never breaks the user's session.
-func cmdCapture(args []string) error {
-	agent, err := agentFlag(args, platform.AgentClaude)
-	if err != nil {
-		return err
-	}
+// so a capture problem never breaks the user's session — a blank or unknown agent
+// included.
+func cmdCapture(agent string) error {
 	st, err := store.Open()
 	if err != nil {
 		return nil

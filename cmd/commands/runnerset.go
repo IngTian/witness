@@ -81,7 +81,7 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 		rs.openRuntime(ctx, st, name)
 	}
 	// Fail closed if the default runner is broken — it's the one runtime the drain can't
-	// proceed without (the always-on default lens + the unified summary ride it), and this
+	// proceed without (every lens with no runner of its own + the unified summary ride it), and this
 	// matches slice-1's behavior where a failed default-runner Open returned an error. A
 	// non-default per-lens runtime being broken is NOT fatal: it's circuit-broken and only
 	// its own lenses back off, so a healthy Claude drain isn't wedged by a down OpenCode.

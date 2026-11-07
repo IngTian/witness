@@ -42,7 +42,7 @@ func (r *lensReg) migrateLegacyLenses() int {
 		}
 		dir := filepath.Join(r.LensesDir(), e.Name())
 		// Already new-format (has extract.md) → skip. This makes the pass idempotent.
-		if _, err := os.Stat(filepath.Join(dir, lensExtractFile)); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, LensExtractFile)); err == nil {
 			continue
 		}
 		oldPath := filepath.Join(dir, "lens.md")
@@ -66,11 +66,11 @@ func (r *lensReg) convertLegacyLensFile(dir, body string) bool {
 	if strings.TrimSpace(extract) == "" {
 		return false // no mining prompt → not convertible; leave the old file untouched
 	}
-	if err := os.WriteFile(filepath.Join(dir, lensExtractFile), []byte(extract), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, LensExtractFile), []byte(extract), 0o600); err != nil {
 		return false
 	}
 	if strings.TrimSpace(review) != "" {
-		_ = os.WriteFile(filepath.Join(dir, lensReviewFile), []byte(review), 0o600)
+		_ = os.WriteFile(filepath.Join(dir, LensReviewFile), []byte(review), 0o600)
 	}
 	// Only emit lens.json when it carries something (an explicit name that differs from the
 	// dir, or dimensions). A bare name matching the dir is redundant (loadDir falls back to
@@ -78,14 +78,14 @@ func (r *lensReg) convertLegacyLensFile(dir, body string) bool {
 	// dir with no lens.json.
 	cfg := map[string]any{}
 	if n := strings.TrimSpace(name); n != "" && n != filepath.Base(dir) {
-		cfg["name"] = n
+		cfg[LensKeyName] = n
 	}
 	if len(dims) > 0 {
-		cfg["dimensions"] = dims
+		cfg[LensKeyDimensions] = dims
 	}
 	if len(cfg) > 0 {
 		if out, err := json.MarshalIndent(cfg, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(dir, lensConfigFile), append(out, '\n'), 0o600)
+			_ = os.WriteFile(filepath.Join(dir, LensConfigFile), append(out, '\n'), 0o600)
 		}
 	}
 	return true

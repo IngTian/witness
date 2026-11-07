@@ -50,7 +50,7 @@ func TestSetConfigString(t *testing.T) {
 	data, _ := os.ReadFile(s.ConfigPath())
 	n := 0
 	for _, line := range strings.Split(string(data), "\n") {
-		if isConfigKeyLine(line, "triage_model") {
+		if k, _, ok := parseConfigLine(line); ok && k == "triage_model" {
 			n++
 		}
 	}

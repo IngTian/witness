@@ -9,7 +9,6 @@ package embed
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -223,23 +222,4 @@ func (e *Embedder) Embed(text string) (vec []float32, err error) {
 		return nil, err
 	}
 	return vec, nil
-}
-
-// Cosine returns cosine similarity of two equal-length vectors. Inputs are
-// L2-normalized by Embed, so this is just the dot product, but we normalize
-// defensively in case a caller passes raw vectors.
-func Cosine(a, b []float32) float64 {
-	if len(a) != len(b) {
-		return 0
-	}
-	var dot, na, nb float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-		na += float64(a[i]) * float64(a[i])
-		nb += float64(b[i]) * float64(b[i])
-	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }

@@ -23,7 +23,7 @@ import (
 //     register+enable default. This unifies the Claude-install and npm-OpenCode paths
 //     for free (both just open the store) with zero install-specific seed code.
 //   - LOAD/RESTORE (explicit): `witness lens load-default` re-seeds from any state,
-//     bypassing the one-shot gate (see cmdLens "load-default").
+//     bypassing the one-shot gate (see lensLoadDefault).
 //
 // The logic lives in cmd (not store.Open) because seeding copies the BUNDLED default
 // prompts (lens.DefaultSeedDir) into the registry, needing internal/lens + internal/

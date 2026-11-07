@@ -81,6 +81,9 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 	return ValidateOpenCodeModelsIn(ctx, r.cfg.RuntimeRoot, models...)
 }
 
+// Discovered by type assertion like the platform capabilities; pinned the same way.
+var _ platform.NativeSessionSupport = (*runner)(nil)
+
 func (*runner) InvocationHint() string      { return "opencode serve" }
 func (*runner) SupportsNativeSession() bool { return true }
 

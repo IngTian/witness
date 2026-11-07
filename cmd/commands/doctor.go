@@ -13,6 +13,7 @@ import (
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
+	"github.com/IngTian/witness/internal/vector"
 	"github.com/spf13/cobra"
 )
 
@@ -50,11 +51,10 @@ func cmdDoctor(asJSON bool) error {
 		return err
 	}
 	defer st.Close()
-	cfg := st.LoadConfig()
 	// Report the EFFECTIVE runner, resolving the WITNESS_RUNNER env fallback so an
 	// npm OpenCode user (who never bound a runner via install) sees "opencode",
 	// not the misleading template default "claude". Matches what the worker uses.
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	stat := st.Stats(activeLensNames(st))
 	// prose_drift surfacing (#57): a monotonic count of passes where a lens's model
 	// returned no JSON array (likely a below-floor triage model), with the last event's
@@ -120,8 +120,8 @@ func cmdDoctor(asJSON bool) error {
 		}
 		un, _ := emb.Embed("The quarterly revenue report is due Friday.")
 		embedDim = len(en)
-		enZh = embed.Cosine(en, zh)
-		enUnrelated = embed.Cosine(en, un)
+		enZh = vector.Cosine(en, zh)
+		enUnrelated = vector.Cosine(en, un)
 	}
 
 	// A newer archive wins the exit error: whatever else is wrong, this binary will not distill it.
@@ -279,7 +279,7 @@ func cmdDoctor(asJSON bool) error {
 	fmt.Println("  " + bold("Archive"))
 	row("layers", fmt.Sprintf("%s · %s raw messages · %s · %s",
 		countOf(stat.Sessions, "session", "sessions"), humanCount(stat.RawRecords),
-		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")), "")
+		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "active facet", "active facets")), "")
 	row("schema", fmt.Sprintf("v%d", archiveSchema), fmt.Sprintf("this binary writes v%d", binarySchema))
 	if newerErr != nil {
 		warn("written by a newer witness — distillation is refused")

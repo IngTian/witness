@@ -44,8 +44,8 @@ func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 	t.Setenv("WITNESS_OPENCODE_DB", source)
 	var commands [][]string
 	oldCommand := nativeCommand
-	nativeCommand = func(_ context.Context, env []string, args ...string) ([]byte, error) {
-		commands = append(commands, append(append([]string{}, env...), "--", strings.Join(args, " ")))
+	nativeCommand = func(_ context.Context, root string, env []string, args ...string) ([]byte, error) {
+		commands = append(commands, append(append([]string{"root=" + root}, env...), "--", strings.Join(args, " ")))
 		return []byte(`{"info":{},"messages":[]}`), nil
 	}
 	defer func() { nativeCommand = oldCommand }()
@@ -155,7 +155,9 @@ func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 			if !strings.Contains(joined, "OPENCODE_DB="+filepath.Join(root, "opencode-native", sourceCopyPrefix)) {
 				t.Fatalf("export did not target a disposable source copy: %s", joined)
 			}
-			if !strings.Contains(joined, "XDG_DATA_HOME="+filepath.Join(root, "xdg")) {
+			// openCodeCommand isolates XDG_DATA_HOME to the root it is given
+			// (TestOpenCodeCommandAppliesTheSpawnPolicy); the export must give it witness's.
+			if !strings.HasPrefix(joined, "root="+root+"\n") {
 				t.Fatalf("export not isolated from the user data dir: %s", joined)
 			}
 		}
@@ -187,7 +189,7 @@ func TestNativeRunRejectsExportNewerThanCapturedL0(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("WITNESS_OPENCODE_DB", writeFakeSourceDB(t, filepath.Join(t.TempDir(), "source.db")))
 	oldCommand := nativeCommand
-	nativeCommand = func(context.Context, []string, ...string) ([]byte, error) {
+	nativeCommand = func(context.Context, string, []string, ...string) ([]byte, error) {
 		return []byte(`{"messages":[{"info":{"role":"user"},"parts":[{"type":"text","text":"new text"}]}]}`), nil
 	}
 	defer func() { nativeCommand = oldCommand }()
@@ -207,7 +209,7 @@ func TestNativeRunsGenerateConcurrentlyAfterIsolatedScratchSetup(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("WITNESS_OPENCODE_DB", writeFakeSourceDB(t, filepath.Join(t.TempDir(), "source.db")))
 	oldCommand := nativeCommand
-	nativeCommand = func(context.Context, []string, ...string) ([]byte, error) {
+	nativeCommand = func(context.Context, string, []string, ...string) ([]byte, error) {
 		return []byte(`{"info":{},"messages":[]}`), nil
 	}
 	defer func() { nativeCommand = oldCommand }()
@@ -601,7 +603,7 @@ func TestNativeManifestKeyCoversModelAndPrompt(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("WITNESS_OPENCODE_DB", writeFakeSourceDB(t, filepath.Join(t.TempDir(), "source.db")))
 	oldCommand := nativeCommand
-	nativeCommand = func(context.Context, []string, ...string) ([]byte, error) {
+	nativeCommand = func(context.Context, string, []string, ...string) ([]byte, error) {
 		return []byte(`{"info":{},"messages":[]}`), nil
 	}
 	defer func() { nativeCommand = oldCommand }()

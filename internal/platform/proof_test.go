@@ -72,7 +72,10 @@ func (fakeRunner) Close() error                                    { return nil 
 func (fakeRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (fakeRunner) InvocationHint() string                          { return "fake-run" }
 func (fakeRunner) Run(_ context.Context, _, _, input string) (string, error) {
-	if !strings.HasPrefix(input, "FAKE-RENDER\n") {
+	// The input arrives fenced (distill.RunnerMine wraps it for every runner), so the shaped
+	// text sits just after the fence's opening line.
+	fenceOpen, _, _ := strings.Cut(platform.WrapCorpus(""), "\n")
+	if !strings.HasPrefix(input, fenceOpen+"\nFAKE-RENDER\n") {
 		return "", fmt.Errorf("input was not shaped by the fake's RenderInputs: %q", input)
 	}
 	return `[{"dimension":"thinking","observation":"the fake platform was mined by the real engine","evidence":"proof","poignancy":5}]`, nil

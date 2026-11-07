@@ -14,7 +14,15 @@ const SessionPrefix = "codex:"
 
 type Platform struct{}
 
-func init()                            { platform.Register(Platform{}) }
+func init() { platform.Register(Platform{}) }
+
+// Capabilities are discovered by type assertion, so a signature that drifts would silently
+// drop one (an Import that no longer matches imports nothing and reports "up to date").
+// These make that a compile error instead.
+var (
+	_ platform.Importer = Platform{}
+)
+
 func (Platform) Name() string          { return "codex" }
 func (Platform) SessionPrefix() string { return SessionPrefix }
 func (Platform) Import(ctx context.Context, st store.ImportStore, ids []string) (platform.ImportStats, error) {
