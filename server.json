@@ -30,7 +30,7 @@
   ],
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
-      "note": "Local stdio server. First run downloads a local embedding model and uses your local Claude Code / OpenCode auth for distillation; nothing leaves your machine. Prebuilt binaries: darwin-arm64, linux-x64.",
+      "note": "Local stdio server. First run downloads a local embedding model; distillation uses your own Claude Code / OpenCode auth, whichever you bound, so session text goes only to the provider you already chose. Prebuilt binaries: darwin-arm64, linux-x64, win32-x64, win32-arm64.",
       "tools": [
         "search_observations",
         "get_facets",

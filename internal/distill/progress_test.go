@@ -89,7 +89,7 @@ func TestClaimProgressCountsEveryBatch(t *testing.T) {
 		c.Runner = func(context.Context, string, string, string) (string, error) { calls++; return "[]", nil }
 		var evs []Progress
 		c.Progress = func(p Progress) { evs = append(evs, p) }
-		c.Run(context.Background(), c.Lenses[0])
+		c.Run(context.Background(), defaultLens()[0])
 
 		want := 3
 		if max == 1 {

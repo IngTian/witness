@@ -30,11 +30,12 @@ import (
 // of facets whose value changed in a fold) is a fraction of one call, and a first full pass over
 // a mature archive is tens of calls rather than thousands.
 //
-// Bounded per run, deliberately. A fresh archive has no claims at all, and draining 2,000 of
-// them inside one review would turn a routine fold into an hours-long job. Progressive is the
-// right shape: every fold fills in a few batches, the profile converges, and nothing is ever
-// blocked waiting for it. Until a facet has a claim, every consumer falls back to its value
-// (store.FacetVersion.Gist), so a half-claimed archive is correct, just not yet small.
+// It runs only from `witness compact`, unbounded (MaxBatches 0): the user asked, and a first
+// pass over a mature archive is tens of calls. The review never runs it — draining 2,000 claims
+// inside one fold would turn a routine review into an hours-long job. Until a facet has a claim,
+// every consumer falls back to its value (store.FacetVersion.Gist), so a half-claimed archive is
+// correct, just not yet small.
+
 // Claimer writes the short claims. Its own type rather than a method on Reviewer, because
 // claims are MAINTENANCE — run when the user asks, like compaction — and the review path
 // deliberately no longer triggers them: adding one or two silent model calls to every fold is a
@@ -42,7 +43,6 @@ import (
 // here. The review call READS claims (store.FacetVersion.Gist); it does not produce them.
 type Claimer struct {
 	Store     store.CompactStore
-	Lenses    []*lens.Lens
 	Config    store.Config
 	Runner    MineFunc
 	RunnerFor func(ln *lens.Lens) MineFunc
@@ -79,14 +79,14 @@ type claimedFacet struct {
 	Claim     string `json:"claim"`
 }
 
-// WriteClaims fills in missing claims for one lens, bounded to claimBatchesPerRun calls.
+// writeClaims fills in missing claims for one lens, bounded to MaxBatches calls (0 = all).
 // Returns how many claims were written. It mutates the facets in place; the caller owns the
 // WriteFacets that persists them.
 //
 // Only facets with a value and NO claim are candidates, so this is idempotent and converges:
 // each run drains a little more, and a facet whose value later changes becomes a candidate
 // again only if its claim is cleared (see applyFacet).
-func (c *Claimer) WriteClaims(ctx context.Context, ln *lens.Lens, facets []*store.Facet) int {
+func (c *Claimer) writeClaims(ctx context.Context, ln *lens.Lens, facets []*store.Facet) int {
 	var pending []*store.Facet
 	for _, f := range facets {
 		if f.Lens != ln.Name || !f.Active() {
@@ -161,13 +161,12 @@ func (c *Claimer) WriteClaims(ctx context.Context, ln *lens.Lens, facets []*stor
 	return written
 }
 
-// claimPass is the store-touching wrapper: read the profile, fill in missing claims, write it
-// back if anything changed. Runs once per lens per review, AFTER all of that lens's windows, so
-// a multi-window fold spends one claim budget rather than one per window.
+// Run is the store-touching wrapper: read the profile, fill in missing claims for one lens,
+// write it back if anything changed. `witness compact` calls it once per lens.
 //
 // Best-effort by design. A failure here leaves every facet falling back to its full value —
-// exactly the behaviour before claims existed — so it must never fail a fold that has already
-// committed real facets.
+// exactly the behaviour before claims existed — so it never fails the compaction that has
+// already committed its merges.
 func (c *Claimer) Run(ctx context.Context, ln *lens.Lens) int {
 	all, err := c.Store.ReadFacets()
 	if err != nil {
@@ -179,7 +178,7 @@ func (c *Claimer) Run(ctx context.Context, ln *lens.Lens) int {
 	for _, f := range byKey {
 		ptrs = append(ptrs, f)
 	}
-	n := c.WriteClaims(ctx, ln, ptrs)
+	n := c.writeClaims(ctx, ln, ptrs)
 	if n > 0 {
 		if err := c.Store.WriteFacets(collectFacets(byKey)); err != nil {
 			slog.Error("claims: could not persist", "lens", ln.Name, "claims", n, "err", err)

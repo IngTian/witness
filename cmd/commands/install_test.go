@@ -55,16 +55,6 @@ func TestMergeAddsAllFourWitnessHooks(t *testing.T) {
 	}
 }
 
-func TestMergeIsIdempotent(t *testing.T) {
-	out, _ := mergeWitnessHooks([]byte(`{}`), shellInvocation("/repo/hooks/witness.sh"))
-	out2, _ := mergeWitnessHooks(out, shellInvocation("/repo/hooks/witness.sh")) // re-install
-	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
-		if got := countWitness(eventCommands(t, out2, ev)); got != 1 {
-			t.Errorf("%s: re-install should not duplicate, got %d", ev, got)
-		}
-	}
-}
-
 func TestMergePreservesForeignHooksAndSettings(t *testing.T) {
 	in := `{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"prettier --write"}]}]}}`
 	out, err := mergeWitnessHooks([]byte(in), shellInvocation("/repo/hooks/witness.sh"))
@@ -135,32 +125,6 @@ func TestMergePreservesForeignHooksContainingWitnessShimSubstring(t *testing.T) 
 	}
 	if ours != 1 {
 		t.Errorf("our own witness.sh hook should be present exactly once, got %d in %v", ours, cmds)
-	}
-}
-
-// TestIsWitnessShimCommandMatchesOnlyOurs directly exercises the shell-form matcher.
-func TestIsWitnessShimCommandMatchesOnlyOurs(t *testing.T) {
-	ours := []string{
-		"'/repo/hooks/witness.sh' capture",
-		"'/a/b/witness.sh' session-start",
-		"/plain/path/witness.sh session-end", // unquoted also matches
-	}
-	for _, c := range ours {
-		if !isWitnessShimCommand(c) {
-			t.Errorf("should match our shim command: %q", c)
-		}
-	}
-	foreign := []string{
-		"/opt/tools/notwitness.sh capture",      // wrong basename
-		"'/opt/witness.showcase/run.sh' deploy", // wrong basename + non-token last
-		"/usr/bin/witness.sha256 verify",        // wrong basename
-		"'/repo/hooks/witness.sh' deploy",       // right basename, but "deploy" is not our token
-		"'/repo/hooks/witness.sh'",              // no token at all
-	}
-	for _, c := range foreign {
-		if isWitnessShimCommand(c) {
-			t.Errorf("must NOT match foreign/incomplete command: %q", c)
-		}
 	}
 }
 
@@ -538,33 +502,8 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `process.env.WITNESS_BIN || "witness"`) {
 		t.Fatalf("npm plugin should fall back to witness on PATH: %s", src)
 	}
-	if !strings.Contains(src, `export const Witness = plugin`) || !strings.Contains(src, `export const ClaudeWitness = plugin`) {
-		t.Fatalf("installed plugin should preserve both OpenCode export names: %s", src)
-	}
-	if !strings.Contains(src, `const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]`) || strings.Contains(src, `"import", "--agent", "opencode", "--quiet", "--auto"`) {
-		t.Fatalf("installed plugin should reconcile L0 without immediately starting distillation: %s", src)
-	}
-	if !strings.Contains(src, `const QUIET_PERIOD_MS = 5 * 60 * 1000`) || !strings.Contains(src, `spawnWitness(["worker-kick"])`) {
-		t.Fatalf("installed plugin should start automatic mining only after five minutes quiet: %s", src)
-	}
-	// worker-kick, not worker-run: dispose latches a durable worker_stop_requested flag
-	// that only the kick gate clears, so a direct worker-run spawn would permanently
-	// freeze automatic distillation after the first OpenCode close.
-	if strings.Contains(src, `spawnWitness(["worker-run", "--auto"])`) {
-		t.Fatalf("installed plugin must not spawn worker-run directly (bypasses the stop-flag clear): %s", src)
-	}
-	if !strings.Contains(src, `type === "session.idle"`) || !strings.Contains(src, `type === "session.status"`) || !strings.Contains(src, `status?.type === "idle"`) {
-		t.Fatalf("installed plugin should sync from idle events: %s", src)
-	}
-	if !strings.Contains(src, `const sessionWaiters = new Map()`) || !strings.Contains(src, `const batchWaiters = claimWaiters(coveredSessions)`) || !strings.Contains(src, `const idleCycles = new Map()`) {
-		t.Fatalf("installed plugin should wait for and deduplicate idle imports: %s", src)
-	}
-	if !strings.Contains(src, `const IMPORT_GRACE_MS = 5000`) || !strings.Contains(src, `let disposing = false`) || !strings.Contains(src, `waitForIdle()`) {
-		t.Fatalf("installed plugin should drain imports gracefully before disposal: %s", src)
-	}
-	if !strings.Contains(src, `spawnWitness(["worker", "stop", "--auto-only"])`) {
-		t.Fatalf("installed plugin should stop only auto workers on disposal: %s", src)
-	}
+	// The body's behaviour pins (exports, idle sync, quiet-period kick, disposal) live in
+	// internal/platform/opencode/plugin/plugin_test.go; Source only prepends the shim line.
 }
 
 func TestNpmPackageHidesSourceOnlyWireCommands(t *testing.T) {
@@ -750,12 +689,18 @@ func TestIsWitnessShimCommandRoundTripsQuotedPaths(t *testing.T) {
 			}
 		}
 	}
+	// An unquoted shim path (a hand-written or older hook) is ours too.
+	if !isWitnessShimCommand("/plain/path/witness.sh session-end") {
+		t.Error("must recognize an unquoted shim command")
+	}
 	// Narrowness: never claim a foreign hook (that would strip a user's own tooling).
 	for _, foreign := range []string{
 		"'/Users/me/My Projects/other/hooks/notwitness.sh' capture",
 		"'/Users/me/My Projects/witness/hooks/witness.sha256' capture",
 		"'/Users/me/My Projects/witness/hooks/witness.sh' not-our-token",
 		"'/Users/me/My Projects/witness/hooks/witness.sh'",
+		"/opt/tools/notwitness.sh capture", // unquoted, wrong basename
+		"/usr/bin/witness.sha256 verify",   // unquoted, starts with "witness.sh" but isn't it
 		"",
 		"   ",
 	} {

@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,20 +13,8 @@ import (
 // progress line takes its log form: one plain line per Where.
 func captureBoth(t *testing.T, fn func() error) (stdout, stderr string, err error) {
 	t.Helper()
-	read := func(f **os.File) func() string {
-		r, w, perr := os.Pipe()
-		if perr != nil {
-			t.Fatal(perr)
-		}
-		prev := *f
-		*f = w
-		out := make(chan string, 1)
-		go func() { b, _ := io.ReadAll(r); out <- string(b) }()
-		return func() string { _ = w.Close(); *f = prev; s := <-out; _ = r.Close(); return s }
-	}
-	doneOut, doneErr := read(&os.Stdout), read(&os.Stderr)
-	err = fn()
-	return doneOut(), doneErr(), err
+	stdout = captureStdout(t, func() { stderr = captureStream(t, &os.Stderr, func() { err = fn() }) })
+	return stdout, stderr, err
 }
 
 func codexRollouts(t *testing.T, ids ...string) {

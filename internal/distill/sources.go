@@ -101,7 +101,7 @@ type notebookData struct {
 	hash string
 }
 
-// isUnifiedStale returns true when the unified portrait is stale (ruling R9):
+// isUnifiedStale returns true when the unified portrait is stale:
 //   - No row exists, OR
 //   - Own hash differs, OR
 //   - For each (lens, h) in src.Inherits, the stored text_hash of that lens's row != h
@@ -287,7 +287,8 @@ func (sm *Resolver) resolveOneNotebook(ctx context.Context, portrait string, ln 
 }
 
 // renderResolveInput formats the sentences and facets as the resolver expects.
-// Each facet's text is its FULL current value (ruling R5).
+// Each facet's text is its FULL current value, not its short claim: the portrait was
+// written from the full values (renderFacetsForSummary), so that is what a sentence rests on.
 func renderResolveInput(sentences []string, facets []store.Facet) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "PROFILE SENTENCES:")
@@ -374,7 +375,7 @@ func parseKeywords(keywords []resolverKeyword, nSentences int) []store.Keyword {
 		}
 		// Only keep keywords that have at least one valid index.
 		if len(idxs) > 0 {
-			// M5: cap keyword text at 64 runes (trim, drop empty).
+			// Cap keyword text at 64 runes (trim, drop empty).
 			word := strings.TrimSpace(kw.K)
 			if len([]rune(word)) > 64 {
 				word = string([]rune(word)[:64])
@@ -509,8 +510,8 @@ func (sm *Resolver) resolveUnified(ctx context.Context) error {
 }
 
 // renderUnifiedInput formats the unified sentences and notebook sentences as the
-// unified resolver expects. M2: notebooks are rendered in stable order (order of Lenses,
-// then any remaining notebooks sorted by name).
+// unified resolver expects. Notebooks are rendered in a stable order (order of sm.Lenses,
+// then any remaining notebooks sorted by name), so the same input yields the same prompt.
 func renderUnifiedInput(sentences []string, notebooks map[string]notebookData, lensOrder []*lens.Lens) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "PORTRAIT SENTENCES:")

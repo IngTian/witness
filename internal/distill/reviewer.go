@@ -280,10 +280,10 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		// which is the point: the number should track repeated independent evidence, which is
 		// exactly what #16's signal is about.
 		//
-		// NOT fixed here, and still true: "decays on absence" remains unimplemented. A facet the
-		// model does not mention is left untouched, because a fold asserts ~25 facets out of
-		// thousands and decaying every unmentioned one per fold would rot the whole profile in a
-		// few passes. That needs a time-based rate, not a per-fold one — tracked on #173.
+		// "Decays on absence" is NOT done here: a fold asserts ~25 facets out of thousands, so
+		// decaying every unmentioned one per fold would rot the whole profile in a few passes.
+		// It is read-time instead (#176): FacetVersion.DecayedConfidence decays by the
+		// observations elapsed since ConfidenceSeq, floored, and is what the model is shown.
 		// Step from what the model actually SAW — the decayed value — not from the stored
 		// one. Stepping from the stored value would silently undo decay on every citation:
 		// the model would be shown 0.4, agree with 0.4, and the facet would snap back toward
@@ -426,12 +426,13 @@ func PreviewReview(ctx context.Context, run MineFunc, cfg store.Config, ln *lens
 //	                             it was here, it was dropped, it came back.
 //
 // The redirect follows a chain (A merged into B, B into C) because a later pass can merge a
-// survivor again. It is bounded: a cycle, or a survivor that is itself archived with no live
-// target, falls back to resurrecting rather than dropping the evidence on the floor.
+// survivor again, so a chain grows one hop per re-compaction and has no depth cap. A cycle, or a
+// survivor that is itself archived with no live target, falls back to resurrecting the last facet
+// walked rather than dropping the evidence on the floor.
 func resolveArchived(byKey map[string]*store.Facet, lensName string, f *store.Facet, id string) (*store.Facet, string) {
 	seen := map[string]bool{id: true}
 	cur, curID := f, id
-	for hops := 0; hops < 8; hops++ {
+	for { // seen ends the walk: every hop is to an unvisited facet of a finite map
 		dim, key, ok := store.ParseFacetRef(cur.MergedInto)
 		if !ok {
 			break // retired outright (or an unparseable ref) → resurrect below
@@ -525,11 +526,11 @@ func slimFacets(facets []store.Facet, lensName string, decaySeq int64) []map[str
 			// ratchet from the model's point of view (#173).
 			conf = cur.DecayedConfidence(decaySeq)
 		}
-		// current_confidence is REQUIRED, not decorative: applyFacet keeps
-		// max(current, returned) confidence on reinforcement (reviewer.go), so a
-		// reinforcement is a silent no-op unless the model can see the current value
-		// and return one above it. Exposing it is what lets repeated evidence actually
-		// raise confidence (the keep-everything reinforcement signal, issue #16).
+		// current_confidence is REQUIRED, not decorative: applyFacet steps the decayed
+		// current value toward the returned one by at most maxConfidenceStep, so the model
+		// must see where the facet stands to return a number that moves it the right way.
+		// That is what lets repeated evidence actually raise confidence (the reinforcement
+		// signal, issue #16) and keeps an agreeing pass from lowering it.
 		out = append(out, map[string]any{
 			"dimension": f.Dimension, "key": f.Key,
 			"current_value": val, "current_confidence": conf,

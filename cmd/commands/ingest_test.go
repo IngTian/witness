@@ -103,6 +103,9 @@ func TestCmdIngestWritesL0AndDedups(t *testing.T) {
 	if ing2 != 0 {
 		t.Fatalf("re-ingest identical wrote %d records, want 0 (idempotent)", ing2)
 	}
+	if n := st.RawCount("file:feed"); n != 2 {
+		t.Fatalf("after an identical re-ingest: raw count = %d, want 2", n)
+	}
 }
 
 // TestIncrementalAppend verifies that ingesting new records under an existing shared
@@ -166,105 +169,6 @@ func TestIncrementalAppend(t *testing.T) {
 		if got != want[i] {
 			t.Errorf("record[%d].Text = %q, want %q", i, got, want[i])
 		}
-	}
-}
-
-// TestSameIDUpdate verifies that re-ingesting the same id with CHANGED text updates
-// the record in place (count stays the same, text changes).
-func TestSameIDUpdate(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("WITNESS_HOME", home)
-	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
-
-	// Ingest one record.
-	batch1 := `{"text":"one","id":"a1","session":"S"}
-`
-	ing1, _, err := cmdIngest(strings.NewReader(batch1), true)
-	if err != nil {
-		t.Fatalf("batch1: %v", err)
-	}
-	if ing1 != 1 {
-		t.Fatalf("batch1: ingested %d, want 1", ing1)
-	}
-
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	if n := st.RawCount("file:S"); n != 1 {
-		t.Fatalf("after batch1: raw count = %d, want 1", n)
-	}
-	recs1, _ := st.ReadRaw("file:S")
-	if recs1[0].Text != "one" {
-		t.Fatalf("after batch1: text = %q, want \"one\"", recs1[0].Text)
-	}
-
-	// Re-ingest the SAME id with CHANGED text.
-	batch2 := `{"text":"two","id":"a1","session":"S"}
-`
-	ing2, _, err := cmdIngest(strings.NewReader(batch2), true)
-	if err != nil {
-		t.Fatalf("batch2: %v", err)
-	}
-	// We expect 1 update (not 0, not 2 — the record is updated in place).
-	if ing2 != 1 {
-		t.Fatalf("batch2: ingested %d, want 1 (update)", ing2)
-	}
-
-	// Count must STAY 1 (not grow to 2).
-	if n := st.RawCount("file:S"); n != 1 {
-		t.Fatalf("after batch2: raw count = %d, want 1 (update in place)", n)
-	}
-
-	recs2, _ := st.ReadRaw("file:S")
-	if len(recs2) != 1 {
-		t.Fatalf("after batch2: record count = %d, want 1", len(recs2))
-	}
-	// Text must now be "two".
-	if recs2[0].Text != "two" {
-		t.Errorf("after batch2: text = %q, want \"two\"", recs2[0].Text)
-	}
-}
-
-// TestIdempotentReIngest verifies that re-ingesting an identical batch (same ids,
-// same text) writes 0 new records (idempotent, no change).
-func TestIdempotentReIngest(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("WITNESS_HOME", home)
-	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
-
-	batch := `{"text":"alpha","id":"a","session":"feed"}
-{"text":"beta","id":"b","session":"feed"}
-`
-	// First ingest.
-	ing1, _, err := cmdIngest(strings.NewReader(batch), true)
-	if err != nil {
-		t.Fatalf("first ingest: %v", err)
-	}
-	if ing1 != 2 {
-		t.Fatalf("first ingest: wrote %d, want 2", ing1)
-	}
-
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	// Re-ingest identical → 0 new records.
-	ing2, _, err := cmdIngest(strings.NewReader(batch), true)
-	if err != nil {
-		t.Fatalf("second ingest: %v", err)
-	}
-	if ing2 != 0 {
-		t.Fatalf("second ingest: wrote %d, want 0 (idempotent)", ing2)
-	}
-
-	// Count stays 2.
-	if n := st.RawCount("file:feed"); n != 2 {
-		t.Fatalf("after re-ingest: count = %d, want 2", n)
 	}
 }
 

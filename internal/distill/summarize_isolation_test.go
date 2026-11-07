@@ -3,6 +3,7 @@ package distill
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -63,7 +64,7 @@ func TestOneFailingLensDoesNotStarveTheOthers(t *testing.T) {
 		}
 	}
 	// And the portrait was still built.
-	if !contains(called, "UNIFIED") {
+	if !slices.Contains(called, "UNIFIED") {
 		t.Errorf("the cross-lens portrait was never attempted; calls=%v", called)
 	}
 	if md, ok, _ := s.ReadProfile(store.ProfileUnified); !ok || md != "PORTRAIT" {
@@ -156,6 +157,3 @@ func TestAFailingLensKeepsItsPriorSectionInThePortrait(t *testing.T) {
 		t.Errorf("the unified call re-ran %d time(s) on an unchanged portrait while a lens was broken", unified)
 	}
 }
-
-// (containsStr used to live here — my own duplicate of `contains` in lens_parity_test.go, the same
-// eight-line scan in the same package. Removed; the call site uses the existing helper.)

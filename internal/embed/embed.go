@@ -108,7 +108,7 @@ func New() (*Embedder, error) {
 	if err := model.VariablesToContext(ctx); err != nil {
 		return nil, fmt.Errorf("load weights: %w", err)
 	}
-	backend, err := backends.New()
+	backend, err := newBackend()
 	if err != nil {
 		return nil, fmt.Errorf("backend: %w", err)
 	}
@@ -118,6 +118,12 @@ func New() (*Embedder, error) {
 	}
 	return &Embedder{model: model, ctx: ctx, backend: backend, tok: tok}, nil
 }
+
+// newBackend pins the pure-Go simplego backend by name. backends.New() would obey an inherited
+// GOMLX_BACKEND and panic on any backend not compiled in (e.g. "xla" — this binary is
+// CGO_ENABLED=0), and the paths that skip the Unix shim (Windows exec-form hooks, npm, MCP via
+// npx) have no way to scrub the environment first.
+func newBackend() (backends.Backend, error) { return backends.NewWithConfig("go") }
 
 // tokenize returns XLM-R token ids for text, wrapped as <s> … </s>. e5 expects a
 // task prefix; callers pass it (we use "query: " for everything — symmetric corpus).

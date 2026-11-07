@@ -7,7 +7,7 @@ Copy it as the starting point for any document corpus — research notes, a know
 reports, meeting logs. The shape transfers; only the dimensions and the prose change.
 
 ```sh
-cp -R "$CLAUDE_PLUGIN_ROOT/prompts/lens/corpus-example" ./regime   # edit for your domain
+cp -R prompts/lens/corpus-example ./regime   # from your witness checkout; edit for your domain
 witness lens register regime ./regime
 witness lens enable regime
 ```
@@ -69,8 +69,9 @@ The **summary prompt** is person-shaped by default too. If the narrative reads l
 personality rather than your subject, override it — one file, no registration:
 
 ```sh
-mkdir -p "$(witness doctor | awk '/data root/{print $3}')/summarize"
-$EDITOR "$(witness doctor | awk '/data root/{print $3}')/summarize/unified.md"
+root="$(dirname "$(witness config path)")"   # the data root: config.toml sits in it
+mkdir -p "$root/summarize"
+$EDITOR "$root/summarize/unified.md"
 ```
 
 An archive with no override keeps receiving improved defaults on upgrade; once you override, your file

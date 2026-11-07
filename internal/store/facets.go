@@ -238,7 +238,7 @@ func (f *facetIO) FacetTrajectory(lens, dimension, key string) ([]Facet, error) 
 	for len(queue) > 0 {
 		ref := queue[0]
 		queue = queue[1:]
-		if seen[ref] { // a cycle would otherwise spin forever; see mergeCycles in distill
+		if seen[ref] { // a cycle would otherwise spin forever; distill's resolveArchived guards the same way
 			continue
 		}
 		seen[ref] = true

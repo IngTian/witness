@@ -12,7 +12,7 @@ import (
 //
 // The watermark is per-(session, lens) (issue #55): each lens tracks how far it has
 // mined a session independently, so enabling a NEW lens backfills only that lens
-// over history without re-mining the always-on `default` (or any other) lens. Every
+// over history without re-mining `default` (or any other) lens. Every
 // queue op takes a lens; the #49-C2 raw-generation CAS is preserved, now also
 // matching on lens. Stats.LastReview reads the `meta` review stamp via the shared
 // metaGet primitive rather than the metaKV type, keeping this concern a leaf.
@@ -404,7 +404,7 @@ func (q *queue) ConfidenceLogCount(lens string) int {
 // row's ts is unparseable (or empty), and a NULL fails both range comparisons. That is the
 // intended reading — a session with no known time cannot claim to fall inside a window —
 // and the DEFAULT drain (no range) still picks these up, so nothing is stranded outright.
-// What was wrong is that the skip was SILENT: `witness distill start --since ...` reported
+// What was wrong is that the skip was SILENT: `witness worker run --since ...` reported
 // "nothing pending" while sessions sat there excluded for a reason the user could not see.
 // MAX ignores NULLs, so a session with even one usable ts is NOT counted here. Read-only.
 func (q *queue) SessionsWithNoUsableTimestamp() int {
@@ -668,7 +668,7 @@ func (q *queue) Stats(lenses []string) Stats {
 			 SELECT COUNT(*) FROM candidates`, append(append([]any{}, lensArgs...), now, now)...).Scan(&st.Pending)
 		// BackedOff counts distinct sessions with an ACTIVE lens currently sleeping on a
 		// retry. Filter to active lenses (like Pending): a backoff row left on a disabled
-		// lens is inert (never mined), so counting it would make `distill start --all` and
+		// lens is inert (never mined), so counting it would make `worker run` and
 		// `lens backfill` falsely report "incomplete" when every active lens is caught up.
 		_ = q.db.QueryRow(
 			`WITH active_lens(lens) AS (`+lensValues+`)

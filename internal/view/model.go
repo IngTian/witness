@@ -22,7 +22,7 @@ type Model struct {
 	Activity  Activity   `json:"activity"`
 	Notebooks []Notebook `json:"notebooks"`          // lenses with ≥1 active trait, by name
 	Traits    []Trait    `json:"traits"`             // ACTIVE only; index = trait id used everywhere
-	Portraits []Portrait `json:"portraits"`          // Task 5
+	Portraits []Portrait `json:"portraits"`          // reading columns, in left-menu order (buildPortraits)
 	E2EStart  string     `json:"e2eStart,omitempty"` // test hook only: "changed" to land on the second page
 }
 
@@ -57,8 +57,8 @@ type Window struct {
 	Conversations int    `json:"conv"`  // DISTINCT sessions with a turn in the window
 	Turns         int    `json:"turns"`
 	Notes         int    `json:"notes"`
-	NewTraits     int    `json:"newTraits"` // Task 4 wires this
-	Rewrites      int    `json:"rewrites"`  // Task 4 wires this
+	NewTraits     int    `json:"newTraits"` // conversation-notebook traits that arrived in the window
+	Rewrites      int    `json:"rewrites"`  // their review-written versions after the first, by ValidFrom
 	ActiveDays    int    `json:"activeDays"`
 	SpanDays      int    `json:"spanDays"`   // the window clipped to [First, Last], in days; 0 if disjoint
 	SoFar         bool   `json:"soFar"`      // the window contains Last
@@ -76,7 +76,7 @@ type Notebook struct {
 // Topic is one dimension of a notebook, under its plain-words label.
 type Topic struct {
 	Key       string `json:"key"`       // the dimension
-	Label     string `json:"label"`     // §3 vocabulary
+	Label     string `json:"label"`     // topicLabel(Key)
 	Traits    []int  `json:"traits"`    // trait ids, by Arrival ascending, then Name
 	AxisStart string `json:"axisStart"` // YYYY-MM-01 of the topic's earliest Arrival
 }

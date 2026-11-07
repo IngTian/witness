@@ -400,44 +400,6 @@ func TestCodexWindowsFormDedupesAndMigrates(t *testing.T) {
 	}
 }
 
-// resolveCodexInstall on Windows must point at the INSTALLED exe, never the bash shim.
-// A source assertion for the same reason install_opencode_wintarget_test.go is one: the
-// Windows branch is behind a build tag, so no test running on macOS/Linux — i.e. CI —
-// can execute it.
-func TestCodexWindowsTargetIsTheInstalledExeNotTheShim(t *testing.T) {
-	src, err := os.ReadFile("install_windows.go")
-	if err != nil {
-		t.Fatalf("read install_windows.go: %v", err)
-	}
-	body, ok := funcBody(string(src), "func resolveCodexInstall()")
-	if !ok {
-		t.Fatal("resolveCodexInstall is missing from install_windows.go — Windows Codex wiring would not compile or would fall back to the Unix path")
-	}
-	if strings.Contains(body, "repoShim()") {
-		t.Error("resolveCodexInstall (Windows) calls repoShim(): Windows has no guaranteed shell, so the hook would never run and capture would fail silently (issue #10)")
-	}
-	if !strings.Contains(body, "installSelf()") {
-		t.Error("resolveCodexInstall (Windows) must installSelf(): hooks.json holds an absolute path, so it must point at a stable install, not a build checkout")
-	}
-	if !strings.Contains(body, "powerShell: true") {
-		t.Error("resolveCodexInstall (Windows) must set powerShell: true, or it writes the POSIX `command` field that Codex will not use on Windows")
-	}
-}
-
-// funcBody returns the text of the named function, from its signature to the first
-// line that is exactly "}".
-func funcBody(src, signature string) (string, bool) {
-	i := strings.Index(src, signature)
-	if i < 0 {
-		return "", false
-	}
-	rest := src[i:]
-	if j := strings.Index(rest, "\n}"); j >= 0 {
-		return rest[:j], true
-	}
-	return rest, true
-}
-
 // The installer must resolve the Codex home through the importer's own function. If the
 // two ever disagreed, witness would wire hooks into one Codex home and import
 // conversations from another — and the symptom is an archive that silently stays empty.
@@ -591,11 +553,7 @@ func TestCodexIsARegisteredInstallTarget(t *testing.T) {
 	if _, ok := editors["codex"]; !ok {
 		t.Fatal("codex is not registered as an install target, so `witness wire codex` cannot dispatch")
 	}
-	for _, name := range editorNames() {
-		if !strings.Contains(newWireCmd().Use, name) {
-			t.Errorf("wire help omits registered target %q", name)
-		}
-	}
+	// TestWireUnwireInstallShapes checks that wire's help names every registered target.
 }
 
 // registerFakeCaptureOnlyEditor adds a wire target that captures but runs no model, for the

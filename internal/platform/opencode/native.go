@@ -547,7 +547,7 @@ func (n *nativeRuntime) finalize(p string) error {
 // never returned. os.ReadDir sorts by name, so a single unreadable entry used to end
 // the sweep and hide every lexicographically later manifest — and because runner Open
 // treats a reconcile error as fatal, one corrupt file could block all OpenCode
-// distillation. A manifest that cannot be parsed at all is reaped (its fork id is
+// distillation. A manifest that cannot be parsed at all is reaped (its session id is
 // unrecoverable, so retaining it leaks forever) rather than retained.
 //
 // It also sweeps residue the manifest loop cannot see (orphan snapshots, .tmp files,
@@ -642,7 +642,7 @@ func (n *nativeRuntime) sweepResidue(entries []os.DirEntry, manifests map[string
 // mine always reads the session's present max(raw.id), so once a later turn arrives the
 // older generation can never be the one that commits — without this, a lens that keeps
 // failing (or one later disabled) strands one manifest + full-session snapshot + live
-// isolated fork per drain, forever.
+// isolated scratch session per drain, forever.
 func (n *nativeRuntime) generationStatus(m nativeManifest) (current, committed bool, err error) {
 	db, err := sql.Open("sqlite", readOnlyURI(filepath.Join(filepath.Dir(n.root), "witness.db")))
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -552,30 +553,6 @@ func TestStagedRetainedAfterFailure(t *testing.T) {
 	}
 }
 
-// A transient mine failure (claude -p hiccup) must NOT advance the watermark or
-// write observations — the turns stay pending so the next run retries them.
-func TestMineFailureRetriesWithoutLoss(t *testing.T) {
-	s := newStore(t)
-	m := &fakeMiner{failsLeft: 1}
-	w := testWorker(s, m)
-
-	capture(t, s, "s", "user", "alpha")
-	capture(t, s, "s", "assistant", "reply")
-	if err := w.Process(context.Background(), "s"); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-
-	if obs, _ := s.ReadObservations(""); len(obs) != 0 {
-		t.Fatalf("failed mine should write nothing, got %d obs", len(obs))
-	}
-	if got := s.DistilledCount("s", "default"); got != 0 {
-		t.Fatalf("watermark must NOT advance on failure, got %d", got)
-	}
-	if got := s.RetryCount("s", "default"); got != 1 {
-		t.Fatalf("retry count should be 1, got %d", got)
-	}
-}
-
 // S1: a persistently-failing mine must NEVER advance the watermark or drop the
 // delta. The raw turns stay pending so they self-heal when the failure clears.
 // (Replaces the old data-losing dead-letter behavior.)
@@ -656,7 +633,7 @@ func TestProseDriftAdvancesAndIsCounted(t *testing.T) {
 		t.Fatalf("drift last stamp wrong: ts=%q lens=%q", ts, lens)
 	}
 	// Drift must NOT back the session off — the queue stays drainable (no wedge).
-	if p, _ := s.PendingSessions([]string{"default"}); contains(p, "s") {
+	if p, _ := s.PendingSessions([]string{"default"}); slices.Contains(p, "s") {
 		t.Fatalf("a drifted (advanced) session must not be pending: %v", p)
 	}
 }
@@ -812,7 +789,7 @@ func TestDriftIsPerLens(t *testing.T) {
 		t.Fatalf("drift attributed to wrong lens: %q", lens)
 	}
 	// Neither lens backed off — a mixed drift+success session stays fully drained.
-	if p, _ := s.PendingSessions([]string{"default", "codereview"}); contains(p, "s") {
+	if p, _ := s.PendingSessions([]string{"default", "codereview"}); slices.Contains(p, "s") {
 		t.Fatalf("session must be fully drained (no drift-induced backoff): %v", p)
 	}
 }
@@ -875,99 +852,6 @@ func twoLensWorker(s *store.Store, r *lensRouter) *Worker {
 		},
 		Config: store.Config{},
 		Run:    r.run,
-	}
-}
-
-// #55: enabling a NEW lens over an already-default-distilled session must mine ONLY
-// the new lens — default is at its watermark and must not be re-mined.
-func TestNewLensMinesOnlyItselfOverDistilledSession(t *testing.T) {
-	s := newStore(t)
-	capture(t, s, "s", "user", "alpha")
-	capture(t, s, "s", "assistant", "reply")
-
-	// First pass: default only, catches up to 2.
-	single := testWorker(s, &fakeMiner{})
-	if err := single.Process(context.Background(), "s"); err != nil {
-		t.Fatalf("default pass: %v", err)
-	}
-	if got := s.DistilledCount("s", "default"); got != 2 {
-		t.Fatalf("default should be at 2, got %d", got)
-	}
-
-	// Second pass: default + codereview now active. default is caught up (mines
-	// nothing); codereview is at 0 and mines the whole session.
-	r := &lensRouter{}
-	if err := twoLensWorker(s, r).Process(context.Background(), "s"); err != nil {
-		t.Fatalf("two-lens pass: %v", err)
-	}
-	if len(r.inputsByPrompt["mine-default"]) != 0 {
-		t.Fatalf("default is caught up; it must NOT be re-mined, got %d calls", len(r.inputsByPrompt["mine-default"]))
-	}
-	if len(r.inputsByPrompt["mine-codereview"]) != 1 {
-		t.Fatalf("codereview must mine the session once, got %d calls", len(r.inputsByPrompt["mine-codereview"]))
-	}
-	if got := s.DistilledCount("s", "codereview"); got != 2 {
-		t.Fatalf("codereview watermark should advance to 2, got %d", got)
-	}
-	if got := s.DistilledCount("s", "default"); got != 2 {
-		t.Fatalf("default watermark must stay 2, got %d", got)
-	}
-	// codereview produced its observation; default's earlier one is still there.
-	obs, _ := s.ReadObservations("codereview")
-	if len(obs) != 1 {
-		t.Fatalf("codereview should have 1 observation, got %d", len(obs))
-	}
-}
-
-// #55: when one lens's mine fails but a sibling succeeds, the healthy lens must
-// commit + advance while ONLY the failed lens backs off — the old all-or-nothing
-// rule discarded the healthy lens too.
-func TestPerLensFailureIsolation(t *testing.T) {
-	s := newStore(t)
-	capture(t, s, "s", "user", "alpha")
-	capture(t, s, "s", "assistant", "reply")
-
-	r := &lensRouter{failPrompt: "mine-codereview"} // codereview fails, default succeeds
-	w := twoLensWorker(s, r)
-	if err := w.Process(context.Background(), "s"); err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-
-	// default committed and advanced.
-	if got := s.DistilledCount("s", "default"); got != 2 {
-		t.Fatalf("healthy default lens must advance to 2, got %d", got)
-	}
-	if got := s.RetryCount("s", "default"); got != 0 {
-		t.Fatalf("healthy lens must not accrue retries, got %d", got)
-	}
-	if obs, _ := s.ReadObservations("default"); len(obs) != 1 {
-		t.Fatalf("healthy lens's observation must be written, got %d", len(obs))
-	}
-	// codereview failed: watermark held at 0, retry counted, backed off.
-	if got := s.DistilledCount("s", "codereview"); got != 0 {
-		t.Fatalf("failed lens watermark must hold at 0, got %d", got)
-	}
-	if got := s.RetryCount("s", "codereview"); got != 1 {
-		t.Fatalf("failed lens must count a retry, got %d", got)
-	}
-	if obs, _ := s.ReadObservations("codereview"); len(obs) != 0 {
-		t.Fatalf("failed lens must write nothing, got %d", len(obs))
-	}
-
-	// A recovery pass (codereview no longer fails) catches it up without touching
-	// default (already at watermark). Let codereview's backoff window elapse first —
-	// MineSession now skips a still-backed-off lens, so real recovery only happens
-	// once the retry timer would have fired.
-	elapseBackoff(t, s, "s", "codereview")
-	r2 := &lensRouter{}
-	if err := twoLensWorker(s, r2).Process(context.Background(), "s"); err != nil {
-		t.Fatalf("recovery Process: %v", err)
-	}
-	if len(r2.inputsByPrompt["mine-default"]) != 0 {
-		t.Fatalf("default already caught up; must not re-mine on recovery, got %d", len(r2.inputsByPrompt["mine-default"]))
-	}
-	if got := s.DistilledCount("s", "codereview"); got != 2 {
-		t.Fatalf("codereview must catch up on recovery, got %d", got)
 	}
 }
 

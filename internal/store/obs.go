@@ -144,9 +144,9 @@ func (o *obsIO) ClearStagedThrough(session string, throughID int64) {
 
 // --- observations ---------------------------------------------------------
 
-// AppendObservations appends the worker's combined output. obs_id is the PRIMARY
-// KEY, so INSERT OR IGNORE makes the whole write idempotent: re-drained active
-// obs and identical re-mines after a crash are dropped, not duplicated.
+// AppendObservations appends the worker's combined output. obs_id is UNIQUE (seq has
+// been the primary key since v8), so INSERT OR IGNORE makes the whole write idempotent:
+// re-drained active obs and identical re-mines after a crash are dropped, not duplicated.
 func (o *obsIO) AppendObservations(obs []Observation) error {
 	if len(obs) == 0 {
 		return nil

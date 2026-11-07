@@ -57,7 +57,7 @@ type Embedder interface {
 // MineFunc runs one extraction pass (one LLM call). Injectable so tests can drive
 // the worker without spawning a real model. It is the narrow seam the Worker/
 // Reviewer/Summarizer actually call; production wires it to a Runner (see
-// runnerMine), tests supply a fake directly.
+// RunnerMine), tests supply a fake directly.
 type MineFunc func(ctx context.Context, model, prompt, input string) (string, error)
 
 // RunnerMine adapts a platform.Runner into the MineFunc seam. This keeps the
@@ -86,10 +86,9 @@ type PreviewStore interface {
 // Worker processes ONE session's L0 into L1. It is the sole writer of L1 and the
 // sole place active + mined observations are combined.
 //
-// Combine rule (preserves hand-authored quality):
-//   - active observations: passed through VERBATIM (authoritative; never re-distilled)
-//   - mined observations: kept only if not a near-duplicate of an active one or an
-//     already-stored same-lens observation
+// Combine rule: active (MCP-staged) observations pass through VERBATIM — authoritative,
+// never re-distilled — and mined ones are all kept. The only write-time filter is
+// exact-obsID idempotency (see CommitMining); recurrence is signal, not noise.
 type Worker struct {
 	// Store is the narrow distillation-queue surface (issue #73-C1): the L0/L1 reads,
 	// the L1 commit, and the per-(session,lens) watermark/backoff/drift writes the
@@ -99,7 +98,7 @@ type Worker struct {
 	// resolves each session's owning platform through it.
 	Store    store.Queue
 	Embedder Embedder
-	Lenses   []*lens.Lens // default (always) + any config-enabled lenses; all global, applied to every session regardless of source (CC or OpenCode)
+	Lenses   []*lens.Lens // the enabled lenses; all global, applied to every session regardless of source
 	Config   store.Config
 	Run      MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 	// RunFor, when set, picks the MineFunc for a specific lens — the per-lens RUNNER seam
@@ -142,7 +141,7 @@ func resolveRunner(perLens func(*lens.Lens) MineFunc, ln *lens.Lens, fallback Mi
 // any other session. It is produced by MineSession (safe to run for many sessions
 // concurrently) and consumed by CommitMining (serial, the sole L1 writer). The
 // split is what lets the engine parallelize the expensive LLM mining while keeping
-// dedup + writes single-threaded and correct (issue #22).
+// the idempotency check + writes single-threaded and correct (issue #22).
 type SessionMining struct {
 	Session         string
 	Total           int    // len(raw) at read time — the watermark to advance to on success
@@ -151,9 +150,9 @@ type SessionMining struct {
 	StagedThroughID int64  // how far staged was drained, to clear exactly those rows on success
 	Active          []store.Observation
 	// Per-lens mining results (issue #55). The watermark is per-(session,lens), so
-	// each lens's mined observations, its own start watermark (Done), and whether ITS
-	// call failed are tracked independently: a codereview transport failure backs off
-	// only codereview and never discards a healthy default mine for the same session.
+	// each lens's mined observations and whether ITS call failed are tracked
+	// independently: a codereview transport failure backs off only codereview and
+	// never discards a healthy default mine for the same session.
 	Lenses      []LensMining
 	NothingToDo bool // no new turns and nothing staged — commit just advances every lens's watermark
 }
@@ -161,7 +160,6 @@ type SessionMining struct {
 // LensMining is one lens's slice of a session's mining pass.
 type LensMining struct {
 	Lens       string
-	Done       int // this lens's watermark at read time (turns it had already mined)
 	Mined      []store.Observation
 	MineFailed bool // a transport error hit THIS lens — commit backs off this lens only
 	// MineTimedOut narrows MineFailed to "the request hit a deadline" (errors.Is of
@@ -222,8 +220,8 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 // NO L1 writes and reads NO cross-session state, so the engine may call it for many
 // sessions concurrently. Embeddings for active obs are computed here too (the
 // embedder guards itself with a mutex, so concurrent callers serialize on it
-// briefly — cheap relative to the LLM call). All dedup-against-corpus and writes
-// happen later in CommitMining.
+// briefly — cheap relative to the LLM call). The obsID idempotency check and all
+// writes happen later in CommitMining.
 func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMining, error) {
 	// Read the delta AND its raw "generation" (highest raw.id) as ONE atomic snapshot.
 	// CommitMining advances each lens's watermark only if this id still exists, so a
@@ -283,7 +281,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 		if total > done && w.Store.LensBackedOff(session, ln.Name, now) {
 			continue
 		}
-		lm := LensMining{Lens: ln.Name, Done: done}
+		lm := LensMining{Lens: ln.Name}
 		if total > done {
 			anyDelta = true
 			// Track drift across ALL of this lens's inputs (a session may render to

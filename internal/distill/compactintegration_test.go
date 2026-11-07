@@ -2,6 +2,7 @@ package distill
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -95,22 +96,28 @@ func TestAssertionOnARetiredFacetResurrectsIt(t *testing.T) {
 	}
 }
 
-// A survivor can itself be merged by a later pass, so the redirect has to walk the chain.
+// A survivor can itself be merged by a later pass, so the redirect has to walk the chain — to
+// any depth: a chain grows one hop per re-compaction of its survivor, and a hop cap once stopped
+// at 8 and resurrected the archived intermediate it stopped on.
 func TestRedirectFollowsAMergeChain(t *testing.T) {
-	a := cf("thinking", "a", "va", 0.6, 1)
-	a.ArchivedAt, a.MergedInto = "t", "thinking/b"
-	b := cf("thinking", "b", "vb", 0.6, 1)
-	b.ArchivedAt, b.MergedInto = "t", "thinking/c"
-	c := cf("thinking", "c", "vc", 0.8, 1)
-
-	byKey := indexFacets([]store.Facet{a, b, c})
-	got, id := resolveArchived(byKey, "default", byKey["default|thinking|a"], "default|thinking|a")
-	if id != "default|thinking|c" || got.Key != "c" {
-		t.Fatalf("the chain should resolve to the live survivor c, got %s", id)
-	}
-	for _, k := range []string{"a", "b"} {
-		if byKey["default|thinking|"+k].Active() {
-			t.Errorf("walking the chain must not reactivate intermediate facet %s", k)
+	for _, depth := range []int{2, 9} {
+		var all []store.Facet
+		for i := 0; i <= depth; i++ {
+			f := cf("thinking", fmt.Sprintf("k%d", i), "v", 0.6, 1)
+			if i < depth {
+				f.ArchivedAt, f.MergedInto = "t", fmt.Sprintf("thinking/k%d", i+1)
+			}
+			all = append(all, f)
+		}
+		byKey := indexFacets(all)
+		got, id := resolveArchived(byKey, "default", byKey["default|thinking|k0"], "default|thinking|k0")
+		if want := fmt.Sprintf("default|thinking|k%d", depth); id != want || got.Key != fmt.Sprintf("k%d", depth) {
+			t.Fatalf("depth %d: the chain should resolve to the live survivor %s, got %s", depth, want, id)
+		}
+		for i := 0; i < depth; i++ {
+			if byKey[fmt.Sprintf("default|thinking|k%d", i)].Active() {
+				t.Errorf("depth %d: walking the chain must not reactivate intermediate facet k%d", depth, i)
+			}
 		}
 	}
 }
@@ -124,9 +131,13 @@ func TestRedirectSurvivesACycle(t *testing.T) {
 	b.ArchivedAt, b.MergedInto = "t", "thinking/a"
 
 	byKey := indexFacets([]store.Facet{a, b})
-	got, _ := resolveArchived(byKey, "default", byKey["default|thinking|a"], "default|thinking|a")
+	got, id := resolveArchived(byKey, "default", byKey["default|thinking|a"], "default|thinking|a")
 	if got == nil {
 		t.Fatal("a cycle must still resolve to something")
+	}
+	// The walk stops where it would revisit a, so the facet it stands on — b — comes back.
+	if id != "default|thinking|b" || got.Key != "b" {
+		t.Errorf("a cycle should resurrect the last facet walked (b), got %s", id)
 	}
 	if !got.Active() {
 		t.Error("with no live survivor the facet should be resurrected rather than dropped")

@@ -76,6 +76,15 @@ func TestDocumentedCommandsResolve(t *testing.T) {
 		// Omitting an [optional] group must leave a valid command line, so check that form.
 		inv := strings.TrimSpace(optional.ReplaceAllString(c.inv, ""))
 		tokens := strings.Fields(strings.TrimPrefix(inv, "witness "))
+		// A redirect or pipe ends the witness argv: `witness ingest < notes.ndjson` has no
+		// positionals. Cut at a standalone operator TOKEN only — cutting at any `<` would also
+		// eat a `<path>` placeholder, hiding exactly the wrong-arity docs this test exists for.
+		for i, tk := range tokens {
+			if shellOperator[tk] {
+				tokens = tokens[:i]
+				break
+			}
+		}
 		if len(tokens) == 0 || !word.MatchString(tokens[0]) {
 			continue // prose that happens to begin "witness …"
 		}
@@ -232,6 +241,10 @@ func TestDocumentedInstallScriptInvocations(t *testing.T) {
 	t.Logf("checked %d documented install.sh invocations against accepted targets %v", checked, keysOf(accepted))
 }
 
+// shellOperator is the set of standalone tokens after which a documented line is no longer the
+// witness argv.
+var shellOperator = map[string]bool{"<": true, ">": true, ">>": true, "|": true, "&&": true, ";": true}
+
 func keysOf(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -243,11 +256,18 @@ func keysOf(m map[string]bool) []string {
 
 // docFiles is the README, every docs/*.md, and the READMEs that walk someone through running
 // something — each example's and each shipped lens's — relative to this package (cmd/commands).
-// Those are where people copy commands from, so they are held to the same contract.
+// Those are where people copy commands from, so they are held to the same contract. llms.txt,
+// AGENTS.md, prompts/*.md and the npm READMEs are in too: they were skipped once, and every one
+// of them still carried a deleted command (`witness ingest <path>`, `witness uninstall`,
+// `distill start`) — the exact class this test exists to catch.
 func docFiles(t *testing.T) []string {
 	t.Helper()
 	root := filepath.Join("..", "..")
-	out := []string{filepath.Join(root, "README.md")}
+	out := []string{
+		filepath.Join(root, "README.md"),
+		filepath.Join(root, "llms.txt"),
+		filepath.Join(root, "AGENTS.md"),
+	}
 	entries, err := os.ReadDir(filepath.Join(root, "docs"))
 	if err != nil {
 		t.Fatalf("read docs/: %v", err)
@@ -257,7 +277,8 @@ func docFiles(t *testing.T) []string {
 			out = append(out, filepath.Join(root, "docs", e.Name()))
 		}
 	}
-	for _, pattern := range []string{"examples/*/README.md", "prompts/lens/*/README.md"} {
+	for _, pattern := range []string{"examples/*/README.md", "prompts/lens/*/README.md",
+		"prompts/*.md", "npm/*/README.md", "npm/platform/*/README.md"} {
 		m, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil {
 			t.Fatalf("glob %s: %v", pattern, err)
