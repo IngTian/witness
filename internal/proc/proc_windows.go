@@ -26,7 +26,7 @@ func (sys) Detach(cmd *exec.Cmd) {
 // honors the worker_stop_requested meta flag cooperatively; this is the forceful
 // backstop the way SIGTERM is on Unix.
 //
-// KNOWN GAP, UNFIXED (tracked in #199, F138 part b; #42 was folded into #43, which
+// KNOWN GAP, UNFIXED (tracked in #216, split out of #199 as F138 part b; #42 was folded into #43, which
 // closed as a refactor without it): TerminateProcess is uncatchable, so the worker's
 // stop context (NotifyStop, which cancels the drain ctx and thus its `claude -p`
 // children on Unix) never runs here, and TerminateProcess does not cascade to
