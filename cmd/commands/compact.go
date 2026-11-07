@@ -157,7 +157,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	// payload — so a profile needs both to actually get smaller. Measured: compaction alone
 	// took a dimension 73% fewer facets but only 15% less text.
 	cl := &distill.Claimer{
-		Store: st, Lenses: lenses, Config: cfg,
+		Store: st, Config: cfg,
 		Runner: rs.RunFor(nil), RunnerFor: rs.RunFor,
 	}
 	for _, ln := range lenses {

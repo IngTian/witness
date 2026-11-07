@@ -1097,68 +1097,6 @@ func TestResolveUnifiedLoopGuard(t *testing.T) {
 	}
 }
 
-// TestResolveUnifiedSkipsWhenNoNotebookHasSources verifies that when no notebook
-// has a sources row, the unified resolver is never called (ZERO calls with RESOLVE_UNIFIED
-// prompt), but an empty unified row IS written. This pins the "skip the unified call when
-// there are no current notebook rows" guard.
-func TestResolveUnifiedSkipsWhenNoNotebookHasSources(t *testing.T) {
-	s := newStore(t)
-	seedFacets(t, s)
-
-	// Write a unified profile but no notebook profiles (so there are no notebook sources rows).
-	if err := s.WriteProfile(store.ProfileUnified, "First unified sentence."); err != nil {
-		t.Fatalf("WriteProfile unified: %v", err)
-	}
-
-	unifiedCalls := 0
-	fakeResolve := func(_ context.Context, _, prompt, _ string) (string, error) {
-		if prompt == "RESOLVE_UNIFIED" {
-			unifiedCalls++
-			return `{"links":[],"keywords":[]}`, nil
-		}
-		return "", nil
-	}
-
-	sm := &Summarizer{
-		Store:                s,
-		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
-		ResolvePrompt:        "RESOLVE",
-		ResolveUnifiedPrompt: "RESOLVE_UNIFIED",
-		Run:                  fakeResolve,
-	}
-
-	// Run ResolveSources: no notebook profiles exist, so no notebook sources rows exist.
-	// Unified should NOT call the model (no current notebook rows), but should write an empty row.
-	if err := sm.ResolveSources(context.Background()); err != nil {
-		t.Fatalf("ResolveSources: %v", err)
-	}
-
-	if unifiedCalls != 0 {
-		t.Fatalf("unified calls = %d, want 0 (no notebooks have sources; guard skips model call)", unifiedCalls)
-	}
-
-	// An empty unified sources row IS written (the guard writes it without calling the model).
-	src, _, ok, err := s.ReadPortraitSources(store.ProfileUnified)
-	if err != nil {
-		t.Fatalf("ReadPortraitSources unified: %v", err)
-	}
-	if !ok {
-		t.Fatal("unified sources row was not written (expected an empty row from the guard)")
-	}
-
-	// The row is empty (no sentences with links, no keywords, no Inherits).
-	if len(src.Sentences) > 0 && len(src.Sentences[0].Links) > 0 {
-		t.Fatal("unified row has links; expected empty")
-	}
-	if len(src.Keywords) > 0 {
-		t.Fatal("unified row has keywords; expected empty")
-	}
-	if len(src.Inherits) > 0 {
-		t.Fatal("unified row has Inherits; expected empty")
-	}
-}
-
 // TestResolveUnifiedSkipsWhenAllNotebookResolversFail verifies that when all notebook
 // resolvers fail, the unified resolver is never called (there are no current notebook rows).
 func TestResolveUnifiedSkipsWhenAllNotebookResolversFail(t *testing.T) {
@@ -1237,10 +1175,18 @@ func TestSummarizeNeverCallsResolver(t *testing.T) {
 	if err := s.WriteFacets([]store.Facet{
 		{Lens: "default", Dimension: "traits", Key: "k",
 			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
+		{Lens: "math", Dimension: "traits", Key: "k",
+			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.9}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.WriteProfile("default", "Summary."); err != nil {
+		t.Fatal(err)
+	}
+	// A resolved row for math, current for the summary Summarize will write. Without one the
+	// unified resolver skips its model call, so a regression that wired it in would pass.
+	mathHash := store.PortraitHash("OUTPUT")
+	if err := s.WritePortraitSources("math", mathHash, store.PortraitSources{}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1253,7 +1199,7 @@ func TestSummarizeNeverCallsResolver(t *testing.T) {
 	sm := &Summarizer{
 		Store:                s,
 		Config:               store.Config{},
-		Lenses:               []*lens.Lens{{Name: "default"}},
+		Lenses:               []*lens.Lens{{Name: "default"}, {Name: "math"}},
 		LensPrompt:           "LENS",
 		UnifiedPrompt:        "UNIFIED",
 		ResolvePrompt:        "RESOLVE",
@@ -1263,6 +1209,9 @@ func TestSummarizeNeverCallsResolver(t *testing.T) {
 
 	if err := sm.Summarize(context.Background()); err != nil {
 		t.Fatalf("Summarize: %v", err)
+	}
+	if md, _, _ := s.ReadProfile("math"); store.PortraitHash(md) != mathHash {
+		t.Fatalf("fixture: math's seeded row is not current (profile %q), so the unified half proves nothing", md)
 	}
 
 	// Assert: only LENS and UNIFIED were called, never RESOLVE or RESOLVE_UNIFIED.
