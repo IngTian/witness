@@ -8,45 +8,9 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// The WITNESS_WORKER=1 recursion guard is a FROZEN CONTRACT (AGENTS.md) and had NO test.
-//
-// The worker runs `claude -p`, which re-fires the Claude Code hooks, which invoke `witness
-// capture`. Without the guard those hooks CAPTURE THE WORKER'S OWN TRAFFIC: every distillation
-// prompt and model reply lands in L0 under the nested session id and is then mined as if it
-// were the user's work. That is the exact contamination class v0.7.0 eliminated for OpenCode
-// via native session isolation — and it compounds, because polluted L0 becomes new pending work
-// whose mining emits more polluted L0, so the archive and the model bill grow without bound
-// while the profile drifts toward describing witness's own prompts.
-//
-// On Unix the shell shim checks too, so this is belt-and-suspenders. On WINDOWS there is no
-// shim (exec-form hooks call the exe directly), so Run() is the ONLY line of defense.
-//
-// Deliberately spawn-free: `capture` has no spawnDetached call site (the full list is
-// autoworker/distill/importcmd/ingest/observations), and underTest() would make one inert
-// anyway — so this cannot leak processes, which matters in a repo that has already had two
-// runaway-process incidents.
-func TestRecursionGuardStopsCaptureInsideAWorkerSubprocess(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("WITNESS_HOME", home)
-	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
-	t.Setenv("WITNESS_WORKER", "1")
-
-	payload := `{"session_id":"nested-worker-session","prompt":"a distillation prompt witness itself sent"}`
-	withArgsAndStdin(t, []string{"witness", "capture"}, payload)
-
-	if code := Run(); code != 0 {
-		t.Errorf("the guard must exit 0 (capture is best-effort and must never break a session), got %d", code)
-	}
-
-	// The load-bearing assertion: NOTHING was written.
-	if n := rawRowCount(t); n != 0 {
-		t.Errorf("the worker's own turn was captured into L0 (%d raw rows) — this is the "+
-			"self-feed loop that pollutes the archive and compounds every run", n)
-	}
-}
-
 // The negative control: without the env var, the SAME payload IS captured. Without this, a guard
-// that rejected everything would pass the test above while breaking all capture.
+// that rejected everything would pass TestRecursionGuardCoversOtherCommands while breaking all
+// capture.
 func TestCaptureStillWorksWithoutTheWorkerEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WITNESS_HOME", home)
@@ -81,8 +45,24 @@ func TestRecursionGuardExemptsDoctor(t *testing.T) {
 	}
 }
 
-// Every OTHER command is guarded, not just capture — the guard keys on the env var, so a new
-// subcommand is covered automatically and must stay that way.
+// The WITNESS_WORKER=1 recursion guard is a FROZEN CONTRACT (AGENTS.md).
+//
+// The worker runs `claude -p`, which re-fires the Claude Code hooks, which invoke `witness
+// capture`. Without the guard those hooks CAPTURE THE WORKER'S OWN TRAFFIC: every distillation
+// prompt and model reply lands in L0 under the nested session id and is then mined as if it
+// were the user's work. That is the exact contamination class v0.7.0 eliminated for OpenCode
+// via native session isolation — and it compounds, because polluted L0 becomes new pending work
+// whose mining emits more polluted L0, so the archive and the model bill grow without bound
+// while the profile drifts toward describing witness's own prompts.
+//
+// On Unix the shell shim checks too, so this is belt-and-suspenders. On WINDOWS there is no
+// shim (exec-form hooks call the exe directly), so Run() is the ONLY line of defense.
+//
+// Every command is guarded, not just capture — the guard keys on the env var, so a new
+// subcommand is covered automatically and must stay that way. Spawn-free: the guard returns
+// before cobra dispatches anything, and underTest() would make a spawn inert anyway — so this
+// cannot leak processes, which matters in a repo that has already had two runaway-process
+// incidents.
 //
 // The assertion is that the archive was never even OPENED. Exit-0-and-zero-raw-rows, which this
 // table checked before, is vacuous for three of the four tokens: cmdSessionStart and cmdSessionEnd

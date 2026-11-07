@@ -36,6 +36,23 @@ func normalizeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\r", "\n")
 }
 
+// funcSource returns the function in the named source file whose declaration starts with sig,
+// up to its closing brace. It fails the test when sig is missing, so a renamed function cannot
+// turn a source guard into a silent pass.
+func funcSource(t *testing.T, file, sig string) string {
+	t.Helper()
+	src := readSource(t, file)
+	i := strings.Index(src, sig)
+	if i < 0 {
+		t.Fatalf("%s not found in %s", sig, file)
+	}
+	fn := src[i:]
+	if end := strings.Index(fn, "\n}\n"); end >= 0 {
+		fn = fn[:end]
+	}
+	return fn
+}
+
 // No test may spawn the real `claude` CLI, and the production call must be killable.
 //
 // This exists because of a concrete incident, not a style preference. cmdUninstallClaude
@@ -66,11 +83,11 @@ func TestClaudeMCPRemoveIsBoundedAndStubbable(t *testing.T) {
 
 	// The timeout is real and sane: long enough not to abort a healthy CLI, short enough
 	// that a wedged one cannot hold the command open indefinitely.
-	if claudeMCPRemoveTimeout <= 0 {
-		t.Error("claudeMCPRemoveTimeout must be positive; an unbounded child is what leaked 366 orphans")
+	if claudeCLITimeout <= 0 {
+		t.Error("claudeCLITimeout must be positive; an unbounded child is what leaked 366 orphans")
 	}
-	if claudeMCPRemoveTimeout > 2*time.Minute {
-		t.Errorf("claudeMCPRemoveTimeout = %s is too long to be a liveness bound", claudeMCPRemoveTimeout)
+	if claudeCLITimeout > 2*time.Minute {
+		t.Errorf("claudeCLITimeout = %s is too long to be a liveness bound", claudeCLITimeout)
 	}
 
 	// And the PRODUCTION builder must actually honor a deadline.

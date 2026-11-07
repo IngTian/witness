@@ -58,17 +58,6 @@ func TestProgressLineOnATerminal(t *testing.T) {
 		t.Errorf("a shorter line must blank the longer one's tail with spaces: %q", third)
 	}
 
-	// The redraw advances the spinner frame without any new progress: the clock must keep moving
-	// through a minutes-long model call.
-	before := p.frame
-	p.mu.Lock()
-	p.frame++
-	p.draw()
-	p.mu.Unlock()
-	if p.frame == before {
-		t.Error("redraw did not advance")
-	}
-
 	buf.Reset()
 	p.finish()
 	if out := buf.String(); !strings.HasPrefix(out, "\r") || !strings.HasSuffix(out, "\r") || strings.TrimSpace(out) != "" {

@@ -28,56 +28,76 @@ import (
 )
 
 // dispatchPatterns are the shapes that mean "engine code is branching on a platform
-// identity" — the thing the refactor removed.
-var dispatchPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`switch\s+.*\b(cfg\.)?[Rr]unner\b`),
-	regexp.MustCompile(`switch\s+.*\b(target|agent)\b`),
-	regexp.MustCompile(`EqualFold\([^)]*\b([Rr]unner|target|agent)\b`),
-	regexp.MustCompile(`case\s+"(claude|opencode)"`),
-	// Spawning a distillation RUNNER from the engine (claude -p / opencode serve).
-	// NOT `claude mcp add` — that's the installer's CLI plumbing (cmd-side, legit),
-	// so match the `-p` distill invocation specifically, not any `claude` subcommand.
-	regexp.MustCompile(`"claude".*"-p"|"-p".*"claude"`),
-	regexp.MustCompile(`StartOpenCodeServer|"opencode".*"serve"`),
+// identity" — the thing the refactor removed. names is every adapter, read from the
+// internal/platform subdirectories, because a hand-maintained list silently stops covering
+// whichever adapter was added last (codex went unguarded for two releases that way).
+func dispatchPatterns(names []string) []*regexp.Regexp {
+	alt := strings.Join(names, "|")
+	return []*regexp.Regexp{
+		regexp.MustCompile(`switch\s+.*\b(cfg\.)?[Rr]unner\b`),
+		regexp.MustCompile(`switch\s+.*\b(target|agent)\b`),
+		regexp.MustCompile(`EqualFold\([^)]*\b([Rr]unner|target|agent)\b`),
+		// Spawning a distillation RUNNER from the engine (claude -p / opencode serve).
+		// NOT `claude mcp add` — that's the installer's CLI plumbing (cmd-side, legit),
+		// so match the `-p` distill invocation specifically, not any `claude` subcommand.
+		regexp.MustCompile(`"claude".*"-p"|"-p".*"claude"`),
+		regexp.MustCompile(`StartOpenCodeServer|"opencode".*"serve"`),
 
-	// The shapes below were added after this guard MISSED the one real violation it
-	// existed to catch. internal/distill/worker.go asked
-	// `platform.ForSession(...).Name() == platform.AgentOpenCode` — engine code deciding
-	// behaviour from a platform identity, in the fenced tree, for months. None of the six
-	// patterns above matches it: there is no `switch`, no `EqualFold`, no `case "…"`, and no
-	// quoted runtime name on the line. A guard with a hole exactly where the violation lives
-	// is worse than no guard, because it reads as coverage.
-	//
-	// So: match the ACT of comparing an identity, not the specific spellings someone happened
-	// to use. Each pattern below is a shape a careless author would plausibly produce.
+		// The shapes below were added after this guard MISSED the one real violation it
+		// existed to catch. internal/distill/worker.go asked
+		// `platform.ForSession(...).Name() == platform.AgentOpenCode` — engine code deciding
+		// behaviour from a platform identity, in the fenced tree, for months. None of the six
+		// patterns above matches it: there is no `switch`, no `EqualFold`, no `case "…"`, and no
+		// quoted runtime name on the line. A guard with a hole exactly where the violation lives
+		// is worse than no guard, because it reads as coverage.
+		//
+		// So: match the ACT of comparing an identity, not the specific spellings someone happened
+		// to use. Each pattern below is a shape a careless author would plausibly produce.
 
-	// `x.Name() == …` / `!=` — the miss above. Any identity equality on a platform value.
-	regexp.MustCompile(`\.Name\(\)\s*(==|!=)`),
-	// Comparing against the platform/runner NAME CONSTANTS rather than a quoted literal, which
-	// is how the same dispatch survives a rename: `== platform.AgentOpenCode`,
-	// `!= store.RunnerClaude`, `case platform.AgentClaude:`.
-	regexp.MustCompile(`(==|!=)\s*(platform\.Agent|store\.Runner)`),
-	regexp.MustCompile(`case\s+(platform\.Agent|store\.Runner)`),
-	// A `case` arm naming any registered platform, not just the two hardcoded ones. "file" was
-	// invisible to the old pattern even though it is a real registered platform.
-	//
-	// "codex" is here for the same reason, found the same way: it registered as a platform in
-	// v0.9.1 and NOTHING in this guard mentioned it, so for two releases the engine could have
-	// switched on it, type-asserted its adapter, or imported the package outright and this test
-	// would have reported clean. A guard whose coverage is a hand-maintained list of names
-	// silently stops covering whatever was added last.
-	regexp.MustCompile(`case\s+"(claude|opencode|file|codex)"`),
-	// A TYPE switch or assertion on a concrete adapter reaches around the capability
-	// interfaces entirely — the engine must never name an adapter type.
-	regexp.MustCompile(`\.\((\*)?(claude|opencode|file|codex)\.`),
-	// Importing an adapter package from the engine at all. The compiler would allow it and
-	// every pattern above would still pass.
-	regexp.MustCompile(`witness/internal/platform/(claude|opencode|file|codex)"`),
+		// `x.Name() == …` / `!=` — the miss above. Any identity equality on a platform value.
+		regexp.MustCompile(`\.Name\(\)\s*(==|!=)`),
+		// Comparing against the platform/runner NAME CONSTANTS rather than a quoted literal, which
+		// is how the same dispatch survives a rename: `== platform.AgentOpenCode`,
+		// `!= store.RunnerClaude`, `case platform.AgentClaude:`.
+		regexp.MustCompile(`(==|!=)\s*(platform\.Agent|store\.Runner)`),
+		regexp.MustCompile(`case\s+(platform\.Agent|store\.Runner)`),
+		// A `case` arm naming any adapter, not just the two this guard first hardcoded.
+		regexp.MustCompile(`case\s+"(` + alt + `)"`),
+		// A quoted SESSION PREFIX: `HasPrefix(session, "opencode:")` is the original #21 violation,
+		// and none of the shapes above see it. #197 then added four `"file:"` checks to view.
+		regexp.MustCompile(`"(` + alt + `):`),
+		// A TYPE switch or assertion on a concrete adapter reaches around the capability
+		// interfaces entirely — the engine must never name an adapter type.
+		regexp.MustCompile(`\.\((\*)?(` + alt + `)\.`),
+		// Importing an adapter package from the engine at all. The compiler would allow it and
+		// every pattern above would still pass.
+		regexp.MustCompile(`witness/internal/platform/(` + alt + `)"`),
+	}
 }
 
-// engineDirs are the trees that MUST stay platform-agnostic. Notably absent:
-// internal/platform/* (the platform impls — dispatch there is the point) and
-// internal/store (the documented backfill literal + config default live there).
+// adapterNames lists the adapter packages: the subdirectories of internal/platform.
+func adapterNames(t *testing.T, platformDir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(platformDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != "testdata" {
+			names = append(names, e.Name())
+		}
+	}
+	if !slices.Contains(names, "claude") || !slices.Contains(names, "codex") {
+		t.Fatalf("adapter discovery found %v; the guard would cover nothing", names)
+	}
+	return names
+}
+
+// The engine is every internal/* package plus cmd/ — everything that MUST stay platform-agnostic.
+// Excluded: internal/platform (the adapters — dispatch there is the point) and internal/store (the
+// documented backfill literal + config default live there). Walking the whole tree rather than a
+// list is what catches a NEW package: view arrived with four "file:" checks nothing looked at.
 func TestEngineHasNoPlatformDispatch(t *testing.T) {
 	// Locate the repo root from this test file (internal/platform → up two).
 	wd, err := os.Getwd()
@@ -85,10 +105,20 @@ func TestEngineHasNoPlatformDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Dir(filepath.Dir(wd)) // .../internal/platform → repo root
+	patterns := dispatchPatterns(adapterNames(t, wd))
 
-	engineDirs := []string{
-		filepath.Join(root, "internal", "distill"),
-		filepath.Join(root, "cmd", "commands"),
+	engineDirs := []string{filepath.Join(root, "cmd")}
+	internals, err := os.ReadDir(filepath.Join(root, "internal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range internals {
+		if e.IsDir() && e.Name() != "platform" && e.Name() != "store" {
+			engineDirs = append(engineDirs, filepath.Join(root, "internal", e.Name()))
+		}
+	}
+	if len(engineDirs) < 4 {
+		t.Fatalf("walking only %v — the tree layout changed and this guard is vacuous", engineDirs)
 	}
 
 	for _, dir := range engineDirs {
@@ -113,9 +143,14 @@ func TestEngineHasNoPlatformDispatch(t *testing.T) {
 			//
 			// The exemption is one FILE, not a tree, and it is narrower than the hole it
 			// replaces: before this commit "codex" appeared in no pattern at all, so every
-			// file in the fenced trees was unguarded against it.
+			// file in the fenced trees was unguarded against it. install_opencode.go is the
+			// same exemption for opencode.ConfigDir(): a cmd-side copy of that lookup missed
+			// XDG_CONFIG_HOME and wired OpenCode where it never reads.
+			//
+			// ingest.go is the same category for the file adapter: `witness ingest` is that
+			// source's cmd-side producer, so minting its "file:" session ids is the file's job.
 			switch filepath.Base(path) {
-			case "installers.go", "root.go", "install_codex.go":
+			case "installers.go", "root.go", "install_codex.go", "install_opencode.go", "ingest.go":
 				return nil
 			}
 			src, err := os.ReadFile(path)
@@ -132,7 +167,7 @@ func TestEngineHasNoPlatformDispatch(t *testing.T) {
 				if strings.Contains(code, "fmt.Print") || strings.Contains(code, "Fprint") {
 					continue
 				}
-				for _, pat := range dispatchPatterns {
+				for _, pat := range patterns {
 					if pat.MatchString(code) {
 						rel, _ := filepath.Rel(root, path)
 						t.Errorf("platform-name DISPATCH reintroduced into the engine:\n  %s: %s\n  (matched %s) — route through the platform registry instead",

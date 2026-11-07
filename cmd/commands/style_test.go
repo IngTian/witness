@@ -192,3 +192,11 @@ func TestShortTime(t *testing.T) {
 		}
 	}
 }
+
+// Every count on a screen groups its thousands the same way. pluralize used to print a bare
+// %d, so a screen mixing it with countOf showed "1234 lines" next to "1,234 facets".
+func TestPluralizeGroupsThousandsLikeCountOf(t *testing.T) {
+	if got := pluralize(1234, "line", "lines"); got != "1,234 lines" {
+		t.Errorf("pluralize(1234) = %q, want %q", got, "1,234 lines")
+	}
+}

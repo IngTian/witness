@@ -18,13 +18,13 @@ import (
 // searchInput is the typed argument for search_observations.
 type searchInput struct {
 	Query string `json:"query" jsonschema:"the growth/pattern question to search for"`
-	Lens  string `json:"lens,omitempty" jsonschema:"which lens to search; omit for the always-on 'default' lens (cross-domain), or name a repo lens like 'math'"`
+	Lens  string `json:"lens,omitempty" jsonschema:"which lens to search, by the name 'witness lens list' shows (e.g. 'math'); omit for 'default'"`
 	K     int    `json:"k,omitempty" jsonschema:"max results (default 8)"`
 }
 
 // getFacetsInput is the typed argument for get_facets (structured L2 facets).
 type getFacetsInput struct {
-	Lens string `json:"lens,omitempty" jsonschema:"which lens to read; omit for the always-on 'default' lens (cross-domain), or name a repo lens like 'math'"`
+	Lens string `json:"lens,omitempty" jsonschema:"which lens to read, by the name 'witness lens list' shows (e.g. 'math'); omit for 'default'"`
 }
 
 // getProfileInput is the typed argument for get_profile (the L4 narrative).
@@ -33,7 +33,7 @@ type getFacetsInput struct {
 // blends every active lens (default + math + …), which is NOT itself a lens. Pass
 // 'default' to read the default lens's own narrative instead of the blend.
 type getProfileInput struct {
-	Lens string `json:"lens,omitempty" jsonschema:"omit for 'unified' (the cross-lens portrait blending ALL lenses — an aggregate view, not a lens); or name one lens: 'default' (the always-on lens's own narrative), 'math', etc."`
+	Lens string `json:"lens,omitempty" jsonschema:"omit for 'unified' (the cross-lens portrait blending ALL lenses — an aggregate view, not a lens); or name one lens: 'default' (that lens's own narrative), 'math', etc."`
 }
 
 // deleteInput is the typed argument for delete_observation.
@@ -82,7 +82,8 @@ const (
 )
 
 // normalizeRecord validates and clamps record_observation input. Pure (no IO) so
-// it is unit-testable; the quantity bound (StagedCount) is enforced in the handler.
+// it is unit-testable; the quantity bound is enforced atomically in the handler, by
+// StageObservationCapped.
 func normalizeRecord(in recordInput) (recordInput, error) {
 	in.Session = strings.TrimSpace(in.Session)
 	in.Observation = strings.TrimSpace(in.Observation)
@@ -133,12 +134,26 @@ type Embedder interface {
 	Embed(text string) ([]float32, error)
 }
 
-// Serve runs the MCP stdio server until the context is cancelled. version is the
-// witness build version to report in the MCP initialize handshake; it is passed
-// in from cmd (which owns the ldflags-injected version) so this leaf package does
-// not import cmd. Empty falls back to "dev".
-func Serve(ctx context.Context, st store.MCPStore, emb Embedder, version string, refresh RefreshProfiles) error {
-	return newServer(st, emb, version, refresh).Run(ctx, &mcpsdk.StdioTransport{})
+// Serve runs the MCP stdio server until the context is cancelled.
+func Serve(ctx context.Context, st store.MCPStore, emb Embedder, opts Options) error {
+	return newServer(st, emb, opts).Run(ctx, &mcpsdk.StdioTransport{})
+}
+
+// Options is what cmd knows and this leaf package must not import: the ldflags-injected version,
+// a model runner, the lens registry, the install targets. Every zero value works, so the
+// fake-driven tests set only what they exercise.
+type Options struct {
+	// Version is reported in the MCP initialize handshake; "" → "dev".
+	Version string
+	// Refresh regenerates stale profiles before get_profile reads one; nil serves what is on disk.
+	Refresh RefreshProfiles
+	// DataName maps the lens name an agent passes — the registered name `witness lens list` shows
+	// and every command takes — to the name that lens's rows are tagged with (its lens.json
+	// `name`; the shipped corpus-example mines as "regime"). nil uses names as given.
+	DataName func(lens string) string
+	// Wire is the copyable "connect an editor" command, built from the install targets so it
+	// names every editor `witness wire` accepts.
+	Wire string
 }
 
 // RefreshProfiles regenerates stale L4 summaries before get_profile reads one (issue #100,
@@ -166,9 +181,18 @@ type RefreshProfiles func() error
 // text Content — so a typed-but-empty return made every tool look like it
 // returned `{}` even though the real payload was in Content. Returning `any`/nil
 // suppresses the output schema so clients use Content. (See TestNoStructuredOutput.)
-func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshProfiles) *mcpsdk.Server {
+func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
+	version, refresh := opts.Version, opts.Refresh
 	if strings.TrimSpace(version) == "" {
 		version = "dev"
+	}
+	dataName := opts.DataName
+	if dataName == nil {
+		dataName = func(lens string) string { return lens }
+	}
+	wire := opts.Wire
+	if wire == "" {
+		wire = "witness wire <editor>"
 	}
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "witness",
@@ -180,12 +204,13 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		Name: "search_observations",
 		Description: "Search the user's growth archive for observations related to a query. " +
 			"Returns past observations about how the user thinks/works/changes. " +
-			"Defaults to the 'default' lens (cross-domain); pass lens='math' etc. for a repo-scoped view.",
+			"Defaults to the 'default' lens; pass lens='math' etc. for another lens.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in searchInput) (*mcpsdk.CallToolResult, any, error) {
 		lens := in.Lens
 		if lens == "" {
-			lens = store.LensDefault // default view = the cross-domain person
+			lens = store.LensDefault
 		}
+		data := dataName(lens)
 		k := in.K
 		if k <= 0 {
 			k = 8
@@ -195,7 +220,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		// gigabyte per megabyte of input, inside the LONG-LIVED MCP server process that serves
 		// every other tool. A confused agent pasting a whole file into search_observations could
 		// therefore OOM the server rather than just get a bad answer. Refusing early also skips
-		// the full-corpus ReadObservations below, so an oversized call costs nothing.
+		// the ReadObservations below, so an oversized call costs nothing.
 		query := strings.TrimSpace(in.Query)
 		if query == "" {
 			return errResult("query is required"), nil, nil
@@ -204,7 +229,10 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 			return errResult(fmt.Sprintf("query too long (%d > %d chars); search takes a short "+
 				"semantic phrase, not a document", len(query), maxQueryLen)), nil, nil
 		}
-		obs, err := st.ReadObservations("") // read all; vector.Search filters by lens
+		// One lens, not the whole corpus filtered in Go: this runs per query in a long-lived
+		// process, and every lens's decoded embeddings cost ~5x the memory (889 MB vs 177 MB at
+		// 150k observations over 5 lenses). Search keeps the same lens filter, so hits are identical.
+		obs, err := st.ReadObservations(data)
 		if err != nil {
 			return errResult(fmt.Sprintf("read archive: %v", err)), nil, nil
 		}
@@ -212,8 +240,8 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		if err != nil {
 			return errResult(fmt.Sprintf("embed query: %v", err)), nil, nil
 		}
-		hits := vector.Search(obs, qv, lens, k)
-		return textResult(renderHits(lens, hits, func() string { return emptySearchHint(st, lens) })), nil, nil
+		hits := vector.Search(obs, qv, data, k)
+		return textResult(renderHits(lens, hits, func() string { return emptyHint(st, lens, data, wire, true) })), nil, nil
 	})
 
 	// record_observation: active in-session write. Stages to the session buffer;
@@ -228,11 +256,15 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
+		// Staged under the lens's MINED name: the row drains into L1 verbatim and the review reads
+		// the lens by that name, so the agent's (registered) name would orphan it — after
+		// reporting success.
+		data := dataName(in.Lens)
 		o := store.Observation{
-			ID:          obsID(in.Session, in.Lens, in.Observation),
+			ID:          obsID(in.Session, data, in.Observation),
 			TS:          time.Now().UTC().Format(time.RFC3339),
 			Session:     in.Session,
-			Lens:        in.Lens,
+			Lens:        data,
 			Dimension:   in.Dimension,
 			Observation: in.Observation,
 			Evidence:    in.Evidence,
@@ -279,7 +311,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		Name: "get_facets",
 		Description: "Read the synthesized growth facets (structured attributes) for a lens. " +
 			"Returns current facet values — trajectory arcs, mastery markers, resilience patterns. " +
-			"Defaults to the always-on 'default' lens (cross-domain); pass lens='math' etc. for a repo lens. " +
+			"Defaults to the 'default' lens; pass lens='math' etc. for another lens. " +
 			"(Facets are per-lens, so there is no cross-lens 'unified' facet set — that aggregate exists only for the narrative; use get_profile for it.) " +
 			"For a readable prose overview instead, use get_profile.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in getFacetsInput) (*mcpsdk.CallToolResult, any, error) {
@@ -287,6 +319,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		if lensName == "" {
 			lensName = store.LensDefault
 		}
+		data := dataName(lensName)
 		facets, err := st.ReadActiveFacets()
 		if err != nil {
 			return errResult(fmt.Sprintf("read facets: %v", err)), nil, nil
@@ -295,7 +328,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		if err != nil {
 			return errResult(fmt.Sprintf("read observation high-water: %v", err)), nil, nil
 		}
-		return textResult(renderFacets(lensName, facets, hw, func() string { return emptyFacetsHint(st, lensName) })), nil, nil
+		return textResult(renderFacets(lensName, data, facets, hw, func() string { return emptyHint(st, lensName, data, wire, false) })), nil, nil
 	})
 
 	// get_profile: read the L4 narrative summary (prose) for a lens — the human-
@@ -308,7 +341,7 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 		Name: "get_profile",
 		Description: "Read the narrative growth profile (readable prose) for a lens. " +
 			"Omit lens (or pass 'unified') for the cross-lens portrait — an aggregate blending ALL active lenses, not a lens itself. " +
-			"Pass lens='default' for the always-on lens's OWN narrative (distinct from the unified blend), or lens='math' etc. for another lens. " +
+			"Pass lens='default' for that lens's OWN narrative (distinct from the unified blend), or lens='math' etc. for another lens. " +
 			"(This defaults to the unified aggregate, whereas search_observations/get_facets default to the 'default' lens.) " +
 			"For precise structured attributes instead, use get_facets.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in getProfileInput) (*mcpsdk.CallToolResult, any, error) {
@@ -328,13 +361,15 @@ func newServer(st store.MCPStore, emb Embedder, version string, refresh RefreshP
 					err.Error() + " — so it may not reflect the newest facets.)"
 			}
 		}
-		md, ok, err := st.ReadProfile(lensName)
+		data := dataName(lensName)
+		md, ok, err := st.ReadProfile(data)
 		if err != nil {
 			return errResult(fmt.Sprintf("read profile: %v", err)), nil, nil
 		}
 		if !ok {
-			return textResult(fmt.Sprintf("No narrative profile for '%s' yet. %s Use get_facets for the current structured attributes.",
-				lensName, emptyFacetsHint(st, lensName))), nil, nil
+			// stale rides along: when a refresh failed, it is the actual reason there is no profile.
+			return textResult(fmt.Sprintf("No narrative profile for '%s' yet. %s Use get_facets for the current structured attributes.%s",
+				lensName, emptyHint(st, lensName, data, wire, false), stale)), nil, nil
 		}
 		return textResult(md + stale), nil, nil
 	})
@@ -373,38 +408,32 @@ func errResult(s string) *mcpsdk.CallToolResult {
 	return &mcpsdk.CallToolResult{IsError: true, Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: s}}}
 }
 
-// emptyFacetsHint names the remedy that actually applies when a lens has no facets.
-// Deliberately NOT a blanket "the reviewer may not have run yet": that is true only in
-// the last case, and telling someone whose archive has no capture wired that waiting will
-// help is how a never-filling install looks like a working one.
-func emptyFacetsHint(st store.MCPStore, lens string) string {
-	switch st.WhyEmpty(lens) {
-	case store.NoCapture:
+// emptyHint names the remedy that actually applies when a lens shows nothing. Deliberately NOT a
+// blanket "the reviewer may not have run yet": that is true only in the last case, and telling
+// someone whose archive has no capture wired that waiting will help is how a never-filling install
+// looks like a working one. lens is the name the agent passed (what every command takes); data is
+// the name its rows are tagged with.
+//
+// The last case differs by surface: search is top-k with no score threshold, so zero hits never
+// means "your query missed" — it means the lens has no observations carrying embeddings.
+func emptyHint(st store.MCPStore, lens, data, wire string, search bool) string {
+	reason := st.WhyEmpty(data)
+	switch {
+	case reason == store.NoCapture:
 		return "This archive holds no raw turns at all, so nothing is capturing — the MCP server only READS. " +
-			"Wire an editor: `witness wire claude`, or add the plugin to opencode.json for OpenCode. Waiting will not help."
-	case store.NoObservations:
+			"Wire an editor: `" + wire + "`. Waiting will not help."
+	case lens == store.ProfileUnified:
+		// Not a lens: nothing is mined into it, so a lens remedy (backfilling a reserved name) can only fail.
+		return "The unified portrait is written from the enabled lenses' facets; get_facets on a lens shows what it holds."
+	case reason == store.NoObservations:
 		return fmt.Sprintf("Capture is working, but nothing has been mined into '%s' yet. "+
 			"Check the lens is enabled (`witness lens list`); `witness lens backfill %s` mines it over existing history.", lens, lens)
+	case search:
+		return fmt.Sprintf("'%s' has observations, but none of them carry embeddings, so nothing is searchable. "+
+			"Check `witness doctor` for the embedder's status.", lens)
 	default:
 		return fmt.Sprintf("'%s' has observations but no facets yet — the reviewer folds them once enough accumulate; "+
 			"force one with `witness worker review`.", lens)
-	}
-}
-
-// emptySearchHint is emptyFacetsHint for the search surface. It differs in the last case:
-// Search is top-k with no score threshold, so zero hits never means "your query missed" —
-// it means the lens has no observations carrying embeddings.
-func emptySearchHint(st store.MCPStore, lens string) string {
-	switch st.WhyEmpty(lens) {
-	case store.NoCapture:
-		return "This archive holds no raw turns at all, so nothing is capturing — the MCP server only READS. " +
-			"Wire an editor: `witness wire claude`, or add the plugin to opencode.json for OpenCode. Waiting will not help."
-	case store.NoObservations:
-		return fmt.Sprintf("Capture is working, but nothing has been mined into '%s' yet. "+
-			"Check the lens is enabled (`witness lens list`); `witness lens backfill %s` mines it over existing history.", lens, lens)
-	default:
-		return fmt.Sprintf("'%s' has observations, but none of them carry embeddings, so nothing is searchable. "+
-			"Check `witness doctor` for the embedder's status.", lens)
 	}
 }
 
@@ -428,12 +457,12 @@ func renderHits(lens string, hits []vector.Hit, hint func() string) string {
 // renderFacets reports each facet's CURRENT confidence — decayed to the observation high-water
 // mark — not the value stored at its last confirmation. The stored number only falls when a
 // review cites the facet, so an agent shown it would read a trait nothing has evidenced in
-// thousands of observations as a certainty.
-func renderFacets(lensName string, facets []store.Facet, decaySeq int64, hint func() string) string {
+// thousands of observations as a certainty. lensName is shown; data is what the facets are tagged with.
+func renderFacets(lensName, data string, facets []store.Facet, decaySeq int64, hint func() string) string {
 	var b strings.Builder
 	count := 0
 	for _, f := range facets {
-		if f.Lens != lensName {
+		if f.Lens != data {
 			continue
 		}
 		cur := f.Current()

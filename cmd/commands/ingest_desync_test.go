@@ -20,7 +20,7 @@ func desyncKeys(t *testing.T, session, keysJSON string) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.SetMetaString("file_import_keys:"+session, keysJSON); err != nil {
+	if err := st.SetMetaString(store.FileImportKeysNS+":"+session, keysJSON); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -182,6 +182,11 @@ func TestIngestIdentityCheckPassesOnAlignedKeys(t *testing.T) {
 
 // A normal in-place update (no desync) must still be counted and still update in place —
 // the honest-count change must not turn ordinary edits into appends.
+//
+// It also pins the documented "TRUE MERGE/APPEND" contract: an update goes through the
+// replace=true rebuild path, and the record the caller did not mention must survive it. An
+// audit finding (#135) claimed that path was destructive; it is not, and the sibling check
+// below is what says so.
 func TestIngestInRangeUpdateStillUpdatesInPlaceAndCounts(t *testing.T) {
 	ingestHome(t)
 	first := `{"text":"body a","id":"a","session":"s"}` + "\n" + `{"text":"body b","id":"b","session":"s"}` + "\n"

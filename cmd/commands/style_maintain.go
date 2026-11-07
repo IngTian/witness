@@ -32,11 +32,6 @@ func padGlyph(glyph string) string { return outPen().pick(glyph, fmt.Sprintf("%-
 // rather than the screen's ("                ↳ enable  witness lens enable math").
 func subHint(label, command string) string { return outPen().hint(16, label, command) }
 
-// errText styles text that will be part of an ERROR message, which reportError prints whole to
-// stderr after its ✗. Plain when stderr is not a terminal, and always plain under --json, where the
-// message is data inside {"error": …}.
-func errText(code, s string) string { return errPen().paint(code, s) }
-
 // errHint is hint() for a line inside an error message: "  ↳ label  command" on stderr.
 func errHint(label, command string) string { return errPen().hint(2, label, command) }
 
@@ -46,7 +41,7 @@ func errRow(label, text string) string {
 	if strings.TrimSpace(text) == "" {
 		return "" // errLines drops it: a bare "cause" label explains nothing
 	}
-	return "  " + errText(ansiDim, fmt.Sprintf("%-15s", label)) + " " + text
+	return "  " + styledErr(ansiDim, fmt.Sprintf("%-15s", label)) + " " + text
 }
 
 // errLines is an error whose message is a headline plus the lines under it (a cause row, next
@@ -64,7 +59,7 @@ func errLines(headline string, lines ...string) error {
 // workerBusyHead is the one sentence for "a worker holds the lock", with its pid when it stamped one.
 func workerBusyHead(st *store.Store, skipped string) string {
 	head := "a distillation worker is running"
-	if pid := strings.TrimSpace(st.MetaString("worker_pid")); pid != "" {
+	if pid := strings.TrimSpace(st.MetaString(metaWorkerPID)); pid != "" {
 		head += " (pid " + pid + ")"
 	}
 	return head + " — " + skipped

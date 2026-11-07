@@ -14,13 +14,12 @@ import (
 
 // Tests for `witness wire codex` (issue #179).
 //
-// SCOPE, stated plainly because it bounds what these prove: no Codex is installed on
-// the machine that wrote this, so nothing here verifies that Codex READS hooks.json or
-// FIRES these events. That is spec-derived from the official hooks guide and needs a
-// real Codex run to confirm. What IS verified below is everything on witness's side of
-// the boundary — the document we write, its idempotency, its ownership discipline, and
-// the Windows form — because those are where the silent failures the issue is about
-// actually live.
+// SCOPE, stated plainly because it bounds what these prove: nothing here runs Codex, so
+// nothing here verifies that Codex READS hooks.json or FIRES these events. A real Codex
+// run confirmed that once ("What is verified" in docs/codex-capture.md); these tests do
+// not. What IS verified below is everything on witness's side of the boundary — the
+// document we write, its idempotency, its ownership discipline, and the Windows form —
+// because those are where the silent failures the issue is about actually live.
 
 const unixShim = "/repo/hooks/witness.sh"
 
@@ -401,44 +400,6 @@ func TestCodexWindowsFormDedupesAndMigrates(t *testing.T) {
 	}
 }
 
-// resolveCodexInstall on Windows must point at the INSTALLED exe, never the bash shim.
-// A source assertion for the same reason install_opencode_wintarget_test.go is one: the
-// Windows branch is behind a build tag, so no test running on macOS/Linux — i.e. CI —
-// can execute it.
-func TestCodexWindowsTargetIsTheInstalledExeNotTheShim(t *testing.T) {
-	src, err := os.ReadFile("install_windows.go")
-	if err != nil {
-		t.Fatalf("read install_windows.go: %v", err)
-	}
-	body, ok := funcBody(string(src), "func resolveCodexInstall()")
-	if !ok {
-		t.Fatal("resolveCodexInstall is missing from install_windows.go — Windows Codex wiring would not compile or would fall back to the Unix path")
-	}
-	if strings.Contains(body, "repoShim()") {
-		t.Error("resolveCodexInstall (Windows) calls repoShim(): Windows has no guaranteed shell, so the hook would never run and capture would fail silently (issue #10)")
-	}
-	if !strings.Contains(body, "installSelf()") {
-		t.Error("resolveCodexInstall (Windows) must installSelf(): hooks.json holds an absolute path, so it must point at a stable install, not a build checkout")
-	}
-	if !strings.Contains(body, "powerShell: true") {
-		t.Error("resolveCodexInstall (Windows) must set powerShell: true, or it writes the POSIX `command` field that Codex will not use on Windows")
-	}
-}
-
-// funcBody returns the text of the named function, from its signature to the first
-// line that is exactly "}".
-func funcBody(src, signature string) (string, bool) {
-	i := strings.Index(src, signature)
-	if i < 0 {
-		return "", false
-	}
-	rest := src[i:]
-	if j := strings.Index(rest, "\n}"); j >= 0 {
-		return rest[:j], true
-	}
-	return rest, true
-}
-
 // The installer must resolve the Codex home through the importer's own function. If the
 // two ever disagreed, witness would wire hooks into one Codex home and import
 // conversations from another — and the symptom is an archive that silently stays empty.
@@ -592,11 +553,7 @@ func TestCodexIsARegisteredInstallTarget(t *testing.T) {
 	if _, ok := platform.InstallerFor("codex"); !ok {
 		t.Fatal("codex is not registered as an install target, so `witness wire codex` cannot dispatch")
 	}
-	for _, name := range platform.InstallTargets() {
-		if !strings.Contains(newWireCmd().Use, name) {
-			t.Errorf("wire help omits registered target %q", name)
-		}
-	}
+	// TestWireUnwireInstallShapes checks that wire's help names every registered target.
 }
 
 // fakeCaptureOnlyInstaller stands in for a venue that captures but runs no model.

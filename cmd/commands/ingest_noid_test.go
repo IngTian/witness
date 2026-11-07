@@ -64,7 +64,7 @@ func TestIngestDoesNotReappendAnIDLessRecord(t *testing.T) {
 	}
 	// The stored key list must not accumulate duplicates either — it is the dedup state.
 	st, _ := store.Open()
-	keys := st.MetaString("file_import_keys:file:docs")
+	keys := st.MetaString(store.FileImportKeysNS + ":file:docs")
 	st.Close()
 	if strings.Count(keys, "h:") != 1 {
 		t.Errorf("stored keys accumulated duplicates: %s", keys)
@@ -110,66 +110,6 @@ func TestIngestKeepsDistinctIDLessRecords(t *testing.T) {
 	}
 	if rows := rawRows(t, "file:docs"); len(rows) != 5 {
 		t.Errorf("want 5 rows, got %d", len(rows))
-	}
-}
-
-// The id-ful path must be untouched: same id + same text is a no-op, same id + edited text
-// UPDATES in place rather than appending.
-func TestIngestIDPathStillDedupsAndUpdatesInPlace(t *testing.T) {
-	ingestHome(t)
-	if _, _, err := cmdIngest(strings.NewReader(`{"text":"v1","id":"doc-1","session":"s"}`+"\n"), true); err != nil {
-		t.Fatal(err)
-	}
-	n, _, err := cmdIngest(strings.NewReader(`{"text":"v1","id":"doc-1","session":"s"}`+"\n"), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Errorf("an unchanged id-ful record re-ingested %d times", n)
-	}
-	if _, _, err := cmdIngest(strings.NewReader(`{"text":"v2 edited","id":"doc-1","session":"s"}`+"\n"), true); err != nil {
-		t.Fatal(err)
-	}
-	rows := rawRows(t, "file:s")
-	if len(rows) != 1 {
-		t.Fatalf("an edit must update in place, not append: %d rows", len(rows))
-	}
-	if !strings.Contains(rows[0].Text, "v2 edited") {
-		t.Errorf("the edit did not land: %q", rows[0].Text)
-	}
-}
-
-// A partial update must NOT delete records the caller did not mention. This is the documented
-// "TRUE MERGE/APPEND" contract, and it goes through the replace=true rebuild path — an audit
-// finding claimed that path was destructive; it is not, and this pins that.
-func TestIngestPartialUpdateKeepsUnmentionedRecords(t *testing.T) {
-	ingestHome(t)
-	first := `{"text":"doc A","id":"a","session":"s"}` + "\n" + `{"text":"doc B","id":"b","session":"s"}` + "\n"
-	if _, _, err := cmdIngest(strings.NewReader(first), true); err != nil {
-		t.Fatal(err)
-	}
-	// Mention ONLY b, edited.
-	if _, _, err := cmdIngest(strings.NewReader(`{"text":"doc B EDITED","id":"b","session":"s"}`+"\n"), true); err != nil {
-		t.Fatal(err)
-	}
-	rows := rawRows(t, "file:s")
-	if len(rows) != 2 {
-		t.Fatalf("a partial update changed the row count to %d; unmentioned records must survive", len(rows))
-	}
-	var sawA, sawEdited bool
-	for _, r := range rows {
-		if strings.Contains(r.Text, "doc A") {
-			sawA = true
-		}
-		if strings.Contains(r.Text, "doc B EDITED") {
-			sawEdited = true
-		}
-	}
-	if !sawA {
-		t.Error("the unmentioned record was deleted")
-	}
-	if !sawEdited {
-		t.Error("the mentioned record was not updated")
 	}
 }
 

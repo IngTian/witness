@@ -2,34 +2,20 @@ package commands
 
 import (
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/IngTian/witness/internal/distill"
 )
 
 // captureStdoutErr is captureStdout (lens_try_test.go) for a fn that returns an error, so a
 // test can assert on the EXIT CODE and the emitted document together.
-func captureStdoutErr(t *testing.T, fn func() error) (string, error) {
+func captureStdoutErr(t *testing.T, fn func() error) (out string, err error) {
 	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	prev := os.Stdout
-	os.Stdout = w
-	done := make(chan string, 1)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
-	runErr := fn()
-	_ = w.Close()
-	os.Stdout = prev
-	out := <-done
-	_ = r.Close()
-	return out, runErr
+	out = captureStdout(t, func() { err = fn() })
+	return out, err
 }
 
 // `witness doctor --json` must FAIL when the archive cannot distill.
@@ -100,6 +86,39 @@ func TestDoctorJSONSucceedsOnAHealthyArchive(t *testing.T) {
 	emb, _ := report["embedder"].(map[string]any)
 	if status, _ := emb["status"].(string); !strings.HasPrefix(status, "OK") {
 		t.Errorf("expected a healthy embedder on the success path, got status %q", status)
+	}
+}
+
+// fixedEmbedder stands in for the model: the same vector for every text.
+type fixedEmbedder struct{ vec []float32 }
+
+func (f fixedEmbedder) Embed(string) ([]float32, error) { return f.vec, nil }
+
+// The success path WITHOUT the real model, so it runs in CI. The real-model test above always
+// skips there (the model is gitignored), which left "a healthy archive exits 0" unguarded: a
+// doctor that always returned an error passed the suite.
+func TestDoctorJSONSucceedsWithAWorkingEmbedder(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	prev := newDoctorEmbedder
+	newDoctorEmbedder = func() (distill.Embedder, error) { return fixedEmbedder{vec: []float32{1, 0, 0}}, nil }
+	t.Cleanup(func() { newDoctorEmbedder = prev })
+
+	out, err := captureStdoutErr(t, func() error { return cmdDoctor(true) })
+	if err != nil {
+		t.Fatalf("doctor --json failed with a working embedder: %v (out=%s)", err, out)
+	}
+	var report struct {
+		Embedder struct {
+			Status    string `json:"status"`
+			Dimension int    `json:"dimension"`
+		} `json:"embedder"`
+	}
+	if jsonErr := json.Unmarshal([]byte(out), &report); jsonErr != nil {
+		t.Fatalf("--json output is not parseable: %q (%v)", out, jsonErr)
+	}
+	if report.Embedder.Status != "OK" || report.Embedder.Dimension != 3 {
+		t.Errorf("embedder = %+v, want status OK and dimension 3", report.Embedder)
 	}
 }
 

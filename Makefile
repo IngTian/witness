@@ -53,8 +53,7 @@ package-windows: build-all fetch-model
 ## npm-opencode-package: stage prebuilt binaries/prompts and verify the npm package
 npm-opencode-package:
 	./scripts/stage-npm-opencode.sh --build
-	npm pack ./npm/platform/darwin-arm64 --dry-run
-	npm pack ./npm/platform/linux-x64 --dry-run
+	for p in ./npm/platform/*/; do npm pack "$$p" --dry-run || exit 1; done
 	npm pack ./npm/opencode --ignore-scripts --dry-run
 
 ## fetch-model: download the embedding model (~448MB, once; idempotent)
@@ -79,7 +78,7 @@ uninstall-opencode: build
 
 ## doctor: verify the embedder + model + config
 doctor: build
-	GOMLX_BACKEND=go $(BIN) doctor
+	$(BIN) doctor
 
 ## test / vet / fmt
 test:

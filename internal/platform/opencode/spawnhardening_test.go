@@ -115,9 +115,6 @@ func TestHideOpenCodeWindowIsSafeEverywhere(t *testing.T) {
 func TestReapPriorServeDoesNotKillAnUnrelatedProcess(t *testing.T) {
 	root := t.TempDir()
 	pidFile := servePIDPath(root)
-	if pidFile == "" {
-		t.Fatal("servePIDPath returned empty for a non-empty runtimeRoot")
-	}
 	victim := os.Getppid()
 	if victim <= 1 {
 		t.Skip("no usable parent pid to stand in for a recycled-pid victim")
@@ -282,14 +279,26 @@ func TestReapPriorServeIgnoresGarbageRecords(t *testing.T) {
 	}
 }
 
-// No runtimeRoot (the legacy shared-DB path) means no pid tracking at all, and reaping must
-// be a silent no-op rather than touching the process's cwd.
-func TestServePIDPathIsEmptyWithoutARuntimeRoot(t *testing.T) {
-	if got := servePIDPath(""); got != "" {
-		t.Errorf("servePIDPath(\"\") = %q, want empty — an empty root must not resolve to a "+
-			"relative path in whatever cwd the worker inherited", got)
+// The runtime root is mandatory. An empty one used to mean "the ambient OpenCode database": the
+// `opencode models` probe (which opens its DB read-write) and serve itself ran against the USER's
+// opencode.db, the trap #152 named. ValidateOpenCodeModelsIn refuses it before probing anything,
+// and StartOpenCodeServerIn calls it first. The cached provider means the pre-fix code returned
+// nil here instead of spawning; the stubs fail loudly if anything is spawned at all.
+func TestEmptyRuntimeRootIsRefused(t *testing.T) {
+	prevVersion, prevExec := openCodeVersionCommand, execCommandContext
+	t.Cleanup(func() { openCodeVersionCommand, execCommandContext = prevVersion, prevExec })
+	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		t.Errorf("spawned %s %v with no runtime root", name, args)
+		return exec.CommandContext(ctx, os.Args[0], "-test.run=XXX_NONE")
 	}
-	reapPriorServe("") // must not panic
+	const provider = "witness-test-emptyroot"
+	openCodeModelsCache.Store(provider, openCodeModelList{set: map[string]bool{provider + "/m": true}})
+	t.Cleanup(func() { openCodeModelsCache.Delete(provider) })
+
+	if err := ValidateOpenCodeModelsIn(context.Background(), "", provider+"/m"); err == nil {
+		t.Error("an empty runtime root was accepted; it must be refused, never fall back to the user's database")
+	}
 }
 
 // isStrayServeLine treats the FIRST field as the executable, which is why the Windows probe must

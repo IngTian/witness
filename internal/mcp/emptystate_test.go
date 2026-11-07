@@ -10,34 +10,18 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// callText drives one tool over the in-memory transport and returns its text content.
-func callText(t *testing.T, fake *fakeMCPStore, tool string, args map[string]any) string {
-	t.Helper()
-	ctx := context.Background()
-	serverT, clientT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(fake, fakeEmbedder{}, "v0.0.0-fake", nil).Connect(ctx, serverT, nil)
-	if err != nil {
-		t.Fatalf("server connect: %v", err)
-	}
-	defer ss.Close()
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil)
-	cs, err := client.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatalf("client connect: %v", err)
-	}
-	defer cs.Close()
+// testOptions injects a wire command no hardcoded string could contain, so a hint that names it
+// proves it came from cmd (which derives it from the install targets) rather than from this package.
+var testOptions = Options{Version: "v0.0.0-fake", Wire: "witness wire <a|b>"}
 
-	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: tool, Arguments: args})
+// callText drives one tool over the in-memory transport and returns its text content.
+func callText(t *testing.T, fake *fakeMCPStore, opts Options, tool string, args map[string]any) string {
+	t.Helper()
+	res, err := connect(t, fake, opts).CallTool(context.Background(), &mcpsdk.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
 		t.Fatalf("call %s: %v", tool, err)
 	}
-	var b strings.Builder
-	for _, c := range res.Content {
-		if tc, ok := c.(*mcpsdk.TextContent); ok {
-			b.WriteString(tc.Text)
-		}
-	}
-	return b.String()
+	return resultText(res)
 }
 
 // An empty answer must name the layer that is actually missing. Before #166 every empty
@@ -56,7 +40,7 @@ func TestEmptyStateNamesTheMissingLayer(t *testing.T) {
 		{
 			name:   "no capture wired",
 			reason: store.NoCapture,
-			want:   "witness wire claude",
+			want:   testOptions.Wire,
 			absent: "reviewer",
 		},
 		{
@@ -76,7 +60,7 @@ func TestEmptyStateNamesTheMissingLayer(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeMCPStore{whyEmpty: tc.reason}
-			got := callText(t, fake, "get_facets", map[string]any{"lens": "default"})
+			got := callText(t, fake, testOptions, "get_facets", map[string]any{"lens": "default"})
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("get_facets empty answer should mention %q, got: %s", tc.want, got)
 			}
@@ -93,7 +77,7 @@ func TestEmptyStateNamesTheMissingLayer(t *testing.T) {
 // wrong twice over.
 func TestEmptySearchBlamesEmbeddingsNotTheReviewer(t *testing.T) {
 	fake := &fakeMCPStore{whyEmpty: store.NoFacets}
-	got := callText(t, fake, "search_observations", map[string]any{"query": "anything", "lens": "default"})
+	got := callText(t, fake, testOptions, "search_observations", map[string]any{"query": "anything", "lens": "default"})
 	if !strings.Contains(got, "embeddings") {
 		t.Errorf("empty search with observations present should blame embeddings, got: %s", got)
 	}
@@ -106,8 +90,8 @@ func TestEmptySearchBlamesEmbeddingsNotTheReviewer(t *testing.T) {
 // the old flat "nothing has been distilled for it".
 func TestEmptyProfileNamesTheMissingLayer(t *testing.T) {
 	fake := &fakeMCPStore{whyEmpty: store.NoCapture}
-	got := callText(t, fake, "get_profile", map[string]any{"lens": "default"})
-	if !strings.Contains(got, "witness wire claude") {
+	got := callText(t, fake, testOptions, "get_profile", map[string]any{"lens": "default"})
+	if !strings.Contains(got, testOptions.Wire) {
 		t.Errorf("empty get_profile should name the capture fix, got: %s", got)
 	}
 }

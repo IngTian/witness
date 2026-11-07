@@ -46,30 +46,57 @@ type dimObs struct {
 	Dimension string `json:"dimension"`
 }
 
-// #3: a top-level result array must win over an array nested inside an earlier
-// object (e.g. a "schema example"). Counting items isn't enough — both are length
-// 1 — so this asserts which array was chosen.
+// #3: a top-level result array must win over an array nested inside an object (e.g. a
+// "schema example"). Counting items isn't enough — both are length 1 — so this asserts
+// which array was chosen. Both orders: since parsing became last-wins, a nested array that
+// comes FIRST loses by position alone, so only the reversed order (nested object AFTER the
+// result) exercises the nesting filter at all.
 func TestParseJSONArrayPrefersTopLevelOverNested(t *testing.T) {
-	reply := `Schema: {"examples":[{"dimension":"x"}]}` + "\n" + `[{"dimension":"a"}]`
-	got, err := ParseJSONArray[dimObs](reply)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Dimension != "a" {
-		t.Fatalf("want the top-level array [a], got %+v", got)
+	for name, reply := range map[string]string{
+		"nested first": `Schema: {"examples":[{"dimension":"x"}]}` + "\n" + `[{"dimension":"a"}]`,
+		"nested after": `[{"dimension":"a"}]` + "\n" + `Schema: {"examples":[{"dimension":"x"}]}`,
+	} {
+		got, err := ParseJSONArray[dimObs](reply)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(got) != 1 || got[0].Dimension != "a" {
+			t.Errorf("%s: want the top-level array [a], got %+v", name, got)
+		}
 	}
 }
 
-// #5: when several ``` fences exist, the ```json fence wins over an incidental
-// ```text/```sh fence that happens to contain a decodable array.
-func TestParseJSONArrayPrefersJSONFence(t *testing.T) {
-	reply := "```text\nexample: [{\"dimension\":\"x\"}]\n```\n```json\n[{\"dimension\":\"a\"}]\n```"
-	got, err := ParseJSONArray[dimObs](reply)
-	if err != nil {
-		t.Fatal(err)
+// oddQuote is a preamble with one straight quote. It flips string parity for the whole-reply scan,
+// so every array after it reads as string content: only the per-fence candidates can find the
+// answer, which is what makes fencedBlocks load-bearing rather than a redundant first try.
+const oddQuote = "Noted the user's 27\" monitor.\n"
+
+// With the whole-reply scan blinded, a fenced answer must still parse — else a valid answer becomes
+// drift, the watermark advances, and the session's observations are lost.
+func TestParseJSONArrayFindsAFenceAfterAnOddQuote(t *testing.T) {
+	got, err := ParseJSONArray[dimObs](oddQuote + "```json\n[{\"dimension\":\"a\"}]\n```")
+	if err != nil || len(got) != 1 || got[0].Dimension != "a" {
+		t.Fatalf("want [a], got %+v (%v)", got, err)
 	}
-	if len(got) != 1 || got[0].Dimension != "a" {
-		t.Fatalf("the ```json fence should win, got %+v", got)
+}
+
+// Fences compete in DOCUMENT order, so last-wins holds across them whatever their tags: a ```text
+// example before a ```json answer must not win just because json blocks were tried first.
+func TestParseJSONArrayLastFenceWinsWhateverItsTag(t *testing.T) {
+	reply := oddQuote + "```text\nexample: [{\"dimension\":\"x\"}]\n```\n```json\n[{\"dimension\":\"a\"}]\n```"
+	got, err := ParseJSONArray[dimObs](reply)
+	if err != nil || len(got) != 1 || got[0].Dimension != "a" {
+		t.Fatalf("the later fence should win, got %+v (%v)", got, err)
+	}
+}
+
+// And the converse, the #133 shape: an echoed ```json example followed by an UNTAGGED answer
+// returns the answer. Putting json blocks last would return the echo.
+func TestParseJSONArrayUntaggedAnswerBeatsAnEarlierJSONEcho(t *testing.T) {
+	reply := oddQuote + "```json\n[{\"dimension\":\"echo\"}]\n```\nFor this session:\n```\n[{\"dimension\":\"a\"}]\n```"
+	got, err := ParseJSONArray[dimObs](reply)
+	if err != nil || len(got) != 1 || got[0].Dimension != "a" {
+		t.Fatalf("the answer must beat the echoed example, got %+v (%v)", got, err)
 	}
 }
 

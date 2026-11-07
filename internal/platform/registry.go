@@ -64,11 +64,12 @@ func ValidateRunnerName(name string) error {
 	return nil
 }
 
-// Platform is one agent runtime (Claude Code, OpenCode, …) as a first-class type,
-// replacing the bare "claude"/"opencode" strings that were re-parsed across the
-// engine (issue #21). It composes small capability interfaces; PR3a introduces
-// the per-session ones (Identity, InputRenderer). Distillation-engine capabilities
-// (Runner) and install/capture/import capabilities are folded in by later PRs.
+// Platform is one session source (Claude Code, OpenCode, Codex, ingested files) as a
+// first-class type, replacing the bare "claude"/"opencode" strings that were re-parsed
+// across the engine (issue #21). Identity is all a platform must supply; everything else
+// is an optional capability found by type assertion — InputRenderer, Importer, Capturer,
+// RunnerProvider, NativeSessionSource — because Go has no default methods, and a required
+// method every adapter answers with the same one-liner is the boilerplate this replaces.
 //
 // Two axes, deliberately kept separate (see the two registry lookups below):
 //   - PER-SESSION owner: which platform PRODUCED a session (by id prefix / the
@@ -76,8 +77,6 @@ func ValidateRunnerName(name string) error {
 //   - GLOBAL runner: which engine DISTILLS (one for the whole process). Not here.
 type Platform interface {
 	Identity
-	InputRenderer
-	Importer
 }
 
 // Capturer is the optional capability for hook-fed platforms that write one L0
@@ -85,15 +84,24 @@ type Platform interface {
 // break a session, so callers log the error and carry on. Reconcile-only
 // platforms such as OpenCode deliberately do not implement it.
 type Capturer interface {
-	Capture(st store.CaptureStore, data []byte, now time.Time) (ok bool, err error)
+	Capture(st store.CaptureStore, data []byte, now time.Time) error
 }
 
-// Importer pulls external native sessions into L0 (the reconcile path). An empty
-// session list performs the platform's global incremental import; otherwise only
-// the requested native session ids are reconciled. OpenCode reads its SQLite
-// store, while Claude's hook-fed implementation is a no-op.
+// Importer is the optional capability that pulls external native sessions into L0 (the
+// reconcile path). An empty session list performs the platform's global incremental import;
+// otherwise only the requested native session ids are reconciled. OpenCode and Codex read
+// their own stores; a hook-fed (Claude) or push-fed (file) source has nothing to pull, so it
+// does not implement this and ImportFor reports an empty import for it.
 type Importer interface {
 	Import(ctx context.Context, st store.ImportStore, sessionIDs []string) (ImportStats, error)
+}
+
+// ImportFor runs p's Importer, or reports an empty import when p has nothing to pull.
+func ImportFor(ctx context.Context, p Platform, st store.ImportStore, sessionIDs []string) (ImportStats, error) {
+	if im, ok := p.(Importer); ok {
+		return im.Import(ctx, st, sessionIDs)
+	}
+	return ImportStats{Agent: p.Name()}, nil
 }
 
 // Identity is a platform's naming/namespacing surface: its stable name and the
@@ -123,21 +131,18 @@ type Identity interface {
 // It is a STRUCT rather than a bare int on purpose: it is the seam where lens-kind
 // awareness (arc vs atomic) and chunk-then-merge reconciliation plug in later
 // (#57's queued design) with no interface churn — a future field is added here and
-// the two platforms read it, nothing else moves.
+// RenderChunks reads it, nothing else moves.
 type ChunkPolicy struct {
 	MaxChars int // per-input char budget; <=0 = send the whole session (default, best quality)
 }
 
-// InputRenderer shapes a session's raw L0 records into the one-or-more model inputs
-// a distillation pass mines, under a ChunkPolicy. It is a PER-SESSION capability
-// resolved by ForSession — deliberately independent of which engine runs the mining,
-// so a Claude runner distilling imported OpenCode sessions shapes them by the same
-// rule. Post-#57 the rule is SOURCE-AGNOSTIC: both hook-fed (Claude) and
-// structured-log (OpenCode) sources mine whole by default and split only when a
-// session overflows the policy budget. That parity is the fix for the CC-vs-OpenCode
-// divergence (#56 B1) where OpenCode's unconditional chunking structurally
-// under-extracted long arc-heavy sessions. The interface stays per-platform so a
-// third runtime — or the future arc-aware merge path — can still shape differently.
+// InputRenderer is the optional capability for a platform that shapes its sessions' raw
+// L0 records into model inputs differently from the shared RenderChunks. No shipped
+// platform implements it: post-#57 the rule is SOURCE-AGNOSTIC — every source mines whole
+// by default and splits only when a session overflows the policy budget, the fix for the
+// divergence (#56 B1) where OpenCode's unconditional chunking under-extracted long
+// arc-heavy sessions. It remains so a future source — or the arc-aware merge path — can
+// still shape differently.
 type InputRenderer interface {
 	// RenderInputs returns the model input(s) for a session's raw records: one whole
 	// transcript when the policy budget is off or the session fits, or several
@@ -145,12 +150,20 @@ type InputRenderer interface {
 	RenderInputs(raw []store.RawRecord, policy ChunkPolicy) []string
 }
 
-// RenderTranscript renders raw records as "ROLE: text\n\n". It is the shared,
-// source-neutral transcript format every runtime's RenderInputs emits — the whole
-// session for a hook-fed source (Claude), one string per overlapping chunk for a
-// structured-log source (OpenCode). It lives in the leaf platform package (like
-// WrapCorpus) so both paths format identically from one source and a new runtime
-// gets it for free — rather than one runtime importing another as a de-facto base.
+// RenderInputsFor is the PER-SESSION shaping seam: p's own InputRenderer if it has one,
+// else RenderChunks. Resolved by ForSession, independent of which engine runs the mining,
+// so a Claude runner distilling imported OpenCode sessions shapes them by the same rule.
+func RenderInputsFor(p Platform, raw []store.RawRecord, policy ChunkPolicy) []string {
+	if r, ok := p.(InputRenderer); ok {
+		return r.RenderInputs(raw, policy)
+	}
+	return RenderChunks(raw, policy)
+}
+
+// RenderTranscript renders raw records as "ROLE: text\n\n" — the shared, source-neutral
+// transcript format RenderChunks emits, once for a whole session or once per window. It
+// lives in the leaf platform package (like WrapCorpus) so every source formats identically
+// rather than one runtime importing another as a de-facto base.
 func RenderTranscript(raw []store.RawRecord) string {
 	var b strings.Builder
 	for _, r := range raw {
@@ -167,10 +180,8 @@ func RenderTranscript(raw []store.RawRecord) string {
 // whole in one window. It only matters when the policy budget forces a split.
 const chunkOverlapRecords = 2
 
-// RenderChunks is the ONE source-agnostic shaper every platform's RenderInputs
-// delegates to (it lives here, beside RenderTranscript, so a new runtime gets both
-// for free rather than importing another runtime as a de-facto base). It applies the
-// #57 policy uniformly:
+// RenderChunks is the ONE source-agnostic shaper, used for every platform without its
+// own InputRenderer (see RenderInputsFor). It applies the #57 policy uniformly:
 //
 //   - policy.MaxChars <= 0  → the whole session as ONE transcript (the default and
 //     the best-quality path; see ChunkPolicy for why chunking degrades arc lenses).
@@ -313,6 +324,25 @@ func ForSession(st store.SessionPlatformReader, session string) Platform {
 		}
 	}
 	return forSessionByPrefix(session)
+}
+
+// CorpusSource is the optional capability of a platform whose sessions are ingested DOCUMENTS
+// (a corpus), not conversations with the user. `witness view` counts activity only from
+// conversations, and asks this rather than spelling an adapter's session prefix.
+type CorpusSource interface{ IsCorpus() bool }
+
+// IsCorpusSession reports whether session belongs to a corpus platform, by session-id prefix.
+// It needs no store and never falls back to Default(), so a caller (or a test) that registered
+// no adapters gets "not a corpus" rather than a panic — which is also why a test feeding it
+// corpus sessions must blank-import the adapter that owns them.
+func IsCorpusSession(session string) bool {
+	for _, p := range registry {
+		if pre := p.SessionPrefix(); pre != "" && strings.HasPrefix(session, pre) {
+			c, ok := p.(CorpusSource)
+			return ok && c.IsCorpus()
+		}
+	}
+	return false
 }
 
 // forSessionByPrefix is the prefix-only resolution (step 2+3), split out so it can

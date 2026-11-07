@@ -116,7 +116,7 @@ Canonical keys:
   mine_model    MINING model — L0 turns → L1 observations, per session (frequent, dominant cost). Empty = the runner's default.
   review_model  REVIEW model — L1 observations → L2 facets + L4 profile, batched. Empty = falls back to mine_model, so one setting covers the whole pipeline.
 
-Legacy synonyms (accepted in get/set):
+Also accepted in get/set — the names config.toml and lens.json use:
   triage_model → mine_model, distill_model → review_model, extract_model → mine_model.
 
 Precedence: per-lens › default › environment.`,
@@ -204,7 +204,8 @@ func cmdConfigSet(key, value string, lensName string) error {
 	}
 	value = strings.TrimSpace(value)
 	// runner validation ONLY at default scope; at lens scope allow any runner string
-	// (a lens may target a runtime that isn't the default — matches today's `lens set --runner`).
+	// (a lens may target a runtime that isn't the default; SetLensRunner leaves an unknown
+	// name to surface at drain time and in `witness doctor`).
 	if canonical == "runner" && lensName == "" && value != "" {
 		// Ask the platform registry, not a hardcoded pair. The old allowlist was a closed
 		// set in a system that is otherwise uniformly registry-driven, and it DISAGREED with

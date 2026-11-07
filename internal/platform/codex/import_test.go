@@ -167,10 +167,16 @@ func TestSQLiteAppendEditMigrationAndCleanup(t *testing.T) {
 	if len(recs) != 3 || recs[1].Text != "edited answer" {
 		t.Fatal("edit missing")
 	}
+	// The manifest must live in the namespace the store reaps and merges; otherwise the cleanup
+	// check below passes because the row was never under that name.
+	manifest := store.CodexImportStateNS + ":codex:s1"
+	if st.MetaString(manifest) == "" {
+		t.Fatalf("import state is not under the store's %q namespace", store.CodexImportStateNS)
+	}
 	if _, _, err := st.PruneSessionsBefore("2027-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if st.MetaString(statePrefix+"codex:s1") != "" {
+	if st.MetaString(manifest) != "" {
 		t.Fatal("cleanup leaked manifest")
 	}
 	if s := runImport(t, im); s.Records != 3 {
@@ -217,6 +223,21 @@ func TestCommitRetryAndErrors(t *testing.T) {
 	}
 }
 
+// url.URL percent-encodes '#', space and CJK, which SQLite decodes, so the hostile-home case in
+// TestHomeAndReadOnlyURI passes even with the pre-#10 url.URL builder. That shape breaks only on
+// a Windows path (drive letter as authority, %5C), so this is what pins Codex to the shared
+// builder on a non-Windows CI.
+func TestReadOnlyURIWindowsShape(t *testing.T) {
+	const p = `C:\x\y.sqlite`
+	got := readOnlyURI(p)
+	if want := platform.SQLiteFileURI(p, "mode=ro"); got != want {
+		t.Errorf("readOnlyURI diverged from platform.SQLiteFileURI: %s vs %s", got, want)
+	}
+	if strings.Contains(got, "%5C") || strings.HasPrefix(got, "file://") {
+		t.Errorf("regressed to the broken Windows shape: %s", got)
+	}
+}
+
 func TestHomeAndReadOnlyURI(t *testing.T) {
 	a, b := t.TempDir(), t.TempDir()
 	t.Setenv("CODEX_HOME", a)
@@ -228,8 +249,16 @@ func TestHomeAndReadOnlyURI(t *testing.T) {
 	if p, err := Home(); err != nil || p != a {
 		t.Fatalf("home %q %v", p, err)
 	}
-	if uri := readOnlyURI(filepath.Join(a, "sp ace#中文.sqlite")); !strings.Contains(uri, "mode=ro") || strings.Contains(uri, "#中文") {
-		t.Fatal(uri)
+	// The history database opens through platform.SQLiteFileURI, so a hostile home path — an
+	// unescaped '#' would truncate the URI and open a different, empty database — still reads it.
+	im, _ := testImporter(t)
+	im.Home = filepath.Join(im.Home, "sp ace#中文")
+	if err := os.MkdirAll(im.Home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sqlMessages(t, testHistoryDB(t, im.Home))
+	if s := runImport(t, im); s.Records != 2 {
+		t.Fatalf("history database under %q not read: %+v", im.Home, s)
 	}
 	if _, ok := any(Platform{}).(platform.RunnerProvider); ok {
 		t.Fatal("capture source unexpectedly provides a runner")

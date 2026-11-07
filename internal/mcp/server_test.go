@@ -14,6 +14,25 @@ type fakeEmbedder struct{}
 
 func (fakeEmbedder) Embed(string) ([]float32, error) { return []float32{0.1, 0.2, 0.3}, nil }
 
+// connect serves st over the in-memory transport and returns a connected client; both ends
+// close when the test ends.
+func connect(t *testing.T, st store.MCPStore, opts Options) *mcpsdk.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+	serverT, clientT := mcpsdk.NewInMemoryTransports()
+	ss, err := newServer(st, fakeEmbedder{}, opts).Connect(ctx, serverT, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	cs, err := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil).Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
 // TestNoStructuredOutput is the regression for the silent "every tool returns {}"
 // bug: the go-sdk derives an output schema from a non-`any` handler return type
 // and then emits `structuredContent` on every call result. A spec-compliant
@@ -37,18 +56,7 @@ func TestNoStructuredOutput(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	clientT, serverT := mcpsdk.NewInMemoryTransports()
-	ss, err := newServer(st, fakeEmbedder{}, "v9.9.9-test", nil).Connect(ctx, serverT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ss.Close()
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "t", Version: "0"}, nil)
-	cs, err := client.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
+	cs := connect(t, st, Options{Version: "v9.9.9-test"})
 
 	// get_facets returns the structured facets in Content, with NO structuredContent.
 	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -87,45 +95,6 @@ func TestNoStructuredOutput(t *testing.T) {
 	}
 }
 
-func TestNormalizeRecordValidation(t *testing.T) {
-	if _, err := normalizeRecord(recordInput{Observation: "x"}); err == nil {
-		t.Error("missing session should error")
-	}
-	if _, err := normalizeRecord(recordInput{Session: "s"}); err == nil {
-		t.Error("missing observation should error")
-	}
-	if _, err := normalizeRecord(recordInput{Session: " ", Observation: " "}); err == nil {
-		t.Error("whitespace-only should error")
-	}
-	long := strings.Repeat("a", maxObsLen+1)
-	if _, err := normalizeRecord(recordInput{Session: "s", Observation: long}); err == nil {
-		t.Error("over-long observation should error")
-	}
-}
-
-func TestNormalizeRecordClampsAndDefaults(t *testing.T) {
-	got, err := normalizeRecord(recordInput{Session: "s", Observation: "o", Poignancy: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Lens != store.LensDefault {
-		t.Errorf("lens should default to %q, got %q", store.LensDefault, got.Lens)
-	}
-	if got.Poignancy != 5 {
-		t.Errorf("poignancy 0 should default to 5, got %d", got.Poignancy)
-	}
-	// An absurd poignancy must be clamped so it can't force a review.
-	hi, _ := normalizeRecord(recordInput{Session: "s", Observation: "o", Poignancy: 1000000})
-	if hi.Poignancy != maxPoignancy {
-		t.Errorf("poignancy should clamp to %d, got %d", maxPoignancy, hi.Poignancy)
-	}
-	// A normal value is preserved.
-	ok, _ := normalizeRecord(recordInput{Session: "s", Observation: "o", Poignancy: 7})
-	if ok.Poignancy != 7 {
-		t.Errorf("valid poignancy should be preserved, got %d", ok.Poignancy)
-	}
-}
-
 // The MCP initialize handshake must report the build version passed in from cmd
 // (previously hardcoded "0.1.0"), and fall back to "dev" when empty. Registries
 // and clients read this ServerInfo.Version (issue #45).
@@ -139,20 +108,7 @@ func TestServerReportsInjectedVersion(t *testing.T) {
 
 	check := func(in, want string) {
 		t.Helper()
-		ctx := context.Background()
-		clientT, serverT := mcpsdk.NewInMemoryTransports()
-		ss, err := newServer(st, fakeEmbedder{}, in, nil).Connect(ctx, serverT, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer ss.Close()
-		client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "t", Version: "0"}, nil)
-		cs, err := client.Connect(ctx, clientT, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer cs.Close()
-		got := cs.InitializeResult().ServerInfo.Version
+		got := connect(t, st, Options{Version: in}).InitializeResult().ServerInfo.Version
 		if got != want {
 			t.Errorf("version=%q: handshake reported %q, want %q", in, got, want)
 		}

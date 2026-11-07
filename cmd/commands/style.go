@@ -18,9 +18,13 @@ import (
 
 var useColor = isatty.IsTerminal(os.Stdout.Fd()) && os.Getenv("NO_COLOR") == ""
 
-// useColorErr is the same rule for STDERR, where errors and progress go. Kept separate so a
-// redirected stdout does not strip color from a terminal's stderr, or the reverse.
-var useColorErr = isatty.IsTerminal(os.Stderr.Fd()) && os.Getenv("NO_COLOR") == ""
+// stderrIsTerminal is the one raw TTY check for STDERR, where errors, spinner frames and
+// progress lines go; a var so a test can pin the redirected case.
+var stderrIsTerminal = isatty.IsTerminal(os.Stderr.Fd())
+
+// useColorErr is the same rule for STDERR. Kept separate so a redirected stdout does not strip
+// color from a terminal's stderr, or the reverse.
+var useColorErr = stderrIsTerminal && os.Getenv("NO_COLOR") == ""
 
 const (
 	ansiReset  = "\x1b[0m"
@@ -72,7 +76,9 @@ func (p pen) hint(indent int, label, command string) string {
 
 func styled(code, s string) string { return outPen().paint(code, s) }
 
-// styledErr is styled for text bound for stderr.
+// styledErr is styled for text bound for stderr, including text that will be part of an ERROR
+// message, which reportError prints whole to stderr after its ✗. Plain when stderr is not a
+// terminal, and always plain under --json, where the message is data inside {"error": …}.
 func styledErr(code, s string) string { return errPen().paint(code, s) }
 
 func bold(s string) string   { return styled(ansiBold, s) }
@@ -82,8 +88,8 @@ func yellow(s string) string { return styled(ansiYellow, s) }
 func red(s string) string    { return styled(ansiRed, s) }
 func cyan(s string) string   { return styled(ansiCyan, s) }
 
-// okGlyph / warnGlyph / badGlyph are the status marks used down the left margin
-// of doctor's report. They degrade to ASCII when color is off so a non-UTF8 or
+// okGlyph / warnGlyph / badGlyph are the status marks result rows lead with, on every
+// command's screen. They degrade to ASCII when color is off so a non-UTF8 or
 // piped terminal still reads cleanly.
 func okGlyph() string   { return outPen().mark(ansiGreen, "✓", "[ok]") }
 func warnGlyph() string { return outPen().mark(ansiYellow, "!", "[!]") }
@@ -212,7 +218,7 @@ func cols(s string) int {
 	return n
 }
 
-// countOf is pluralize with humanCount's thousands separators: "2,039 facets", "1 lens".
+// countOf renders a count with humanCount's thousands separators: "2,039 facets", "1 lens".
 func countOf(n int, singular, plural string) string {
 	if n == 1 {
 		return "1 " + singular
@@ -262,10 +268,6 @@ func humanCount(n int) string {
 }
 
 // pluralize renders "<n> <singular|plural>" picking the form by count, so summary lines
-// read "1 lens" / "2 lenses" instead of the ungrammatical "1 lenses".
-func pluralize(n int, singular, plural string) string {
-	if n == 1 {
-		return "1 " + singular
-	}
-	return fmt.Sprintf("%d %s", n, plural)
-}
+// read "1 lens" / "2 lenses" instead of the ungrammatical "1 lenses". It is countOf, so every
+// count on a screen groups its thousands the same way.
+func pluralize(n int, singular, plural string) string { return countOf(n, singular, plural) }

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -32,7 +33,8 @@ func newProfileCmd() *cobra.Command {
 // portrait by default, or a specific lens (e.g. `witness profile math`). Raw
 // markdown to stdout; it's already terminal-readable. In --json mode, emits an
 // object with lens / markdown / freshness fields (markdown is "" when no summary
-// has been generated yet, so consumers can distinguish empty-from-pending).
+// has been generated yet, so consumers can distinguish empty-from-pending), plus
+// refresh_error when the profile could not be rebuilt and markdown is the last one.
 func cmdProfile(args []string, asJSON bool) error {
 	st, err := store.Open()
 	if err != nil {
@@ -48,14 +50,17 @@ func cmdProfile(args []string, asJSON bool) error {
 	// now (no runner, a provider outage, a drain holding the lock) we still serve whatever is on
 	// disk, because a stale narrative beats no narrative. The notice goes to stderr so `witness
 	// profile > file` still captures only the markdown.
-	if _, err := ensureProfileFresh(st); err != nil && !asJSON {
+	refreshErr := ""
+	if _, err := ensureProfileFresh(st); err != nil && asJSON {
+		refreshErr = err.Error()
+	} else if err != nil {
 		// Headline + cause on its own line: the cause is a runner error of any length, and it is
 		// the whole answer to "why is this stale" (rule: failures show their cause on screen).
 		fmt.Fprintln(os.Stderr, errLine("!", "[!]", ansiYellow, "could not refresh the profile — showing the last one"))
 		fmt.Fprintln(os.Stderr, "  "+styledErr(ansiDim, err.Error()))
 	}
 	// A profile is written under the lens's MINED name, which a registered lens may override.
-	md, ok, err := st.ReadProfile(lensDataName(st, lensName))
+	md, ok, err := st.ReadProfile(lens.DataName(st, lensName))
 	if err != nil {
 		return err
 	}
@@ -66,7 +71,7 @@ func cmdProfile(args []string, asJSON bool) error {
 		Pending:          stat.Pending,
 	}
 	if asJSON {
-		out := profileJSON{Lens: lensName, Freshness: fresh}
+		out := profileJSON{Lens: lensName, Freshness: fresh, RefreshError: refreshErr}
 		if ok {
 			out.Markdown = md
 		}
@@ -124,6 +129,8 @@ type profileJSON struct {
 	Lens      string           `json:"lens"`
 	Markdown  string           `json:"markdown"`
 	Freshness profileFreshness `json:"freshness"`
+	// RefreshError says the profile could not be rebuilt just now, so markdown is the last one.
+	RefreshError string `json:"refresh_error,omitempty"`
 }
 
 type profileFreshness struct {

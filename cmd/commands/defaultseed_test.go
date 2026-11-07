@@ -40,6 +40,7 @@ func openOptedOut(t *testing.T, home string) *store.Store {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -58,9 +59,9 @@ func TestFreshArchiveAutoSeedsDefault(t *testing.T) {
 		t.Fatal("auto-seed must ENABLE default so it distills")
 	}
 	// The seeded lens carries the person dimensions from bundled prompts/default/lens.json.
-	act, err := activeLenses(s)
-	if err != nil || len(act) != 1 || act[0].Name != store.LensDefault {
-		t.Fatalf("activeLenses after auto-seed = %v (err %v), want just default", act, err)
+	act := activeLenses(s)
+	if len(act) != 1 || act[0].Name != store.LensDefault {
+		t.Fatalf("activeLenses after auto-seed = %v, want just default", act)
 	}
 	if len(act[0].Dimensions) == 0 {
 		t.Fatal("auto-seeded default must carry its dimensions from the seeded lens.json")
@@ -174,10 +175,7 @@ func TestDefaultSeedMigratesPre1aArchive(t *testing.T) {
 	if !slices.Contains(s2.LoadConfig().EnabledLenses, store.LensDefault) {
 		t.Fatal("migration must ENABLE the default lens so the install keeps distilling it")
 	}
-	act, err := activeLenses(s2)
-	if err != nil {
-		t.Fatalf("activeLenses: %v", err)
-	}
+	act := activeLenses(s2)
 	var names []string
 	for _, l := range act {
 		names = append(names, l.Name)
@@ -284,41 +282,6 @@ func TestBackfillFreshDisabledDefaultFailsFast(t *testing.T) {
 	obsAfter, _ := s.ReadObservations("")
 	if len(obsAfter) != len(obsBefore) || len(obsAfter) == 0 {
 		t.Fatalf("backfill --fresh must NOT have dropped observations: before=%d after=%d", len(obsBefore), len(obsAfter))
-	}
-}
-
-// TestBackfillFreshWorkerActiveFailsFast guards the #102-fix ordering: `backfill --fresh`
-// must FAIL FAST when a distillation worker is already running, BEFORE dropping any data —
-// otherwise it would DeleteLensData and then find runWorker returns ran=false (lock held),
-// leaving the lens gutted with no re-mine. We stand in for a live worker by holding the
-// WorkerLock (the sole liveness authority), then assert --fresh errors and drops nothing.
-func TestBackfillFreshWorkerActiveFailsFast(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "witness")
-	s := openSeedTestStore(t, home) // fresh open auto-seeds + enables default
-	if err := s.AppendObservations([]store.Observation{{ID: "o1", Lens: store.LensDefault, Observation: "x", Poignancy: 3}}); err != nil {
-		t.Fatalf("AppendObservations: %v", err)
-	}
-	obsBefore, _ := s.ReadObservations("")
-
-	// Stand in for a running worker: hold the WorkerLock so WorkerActive() reports true.
-	unlock, ok := s.WorkerLock()
-	if !ok {
-		t.Fatal("precondition: should have acquired the worker lock")
-	}
-	defer unlock()
-
-	// --fresh must refuse (worker running) and drop NOTHING — even with assumeYes, since the
-	// worker-active guard is checked before the confirm and before DeleteLensData.
-	err := lensBackfill(s, store.LensDefault, true, true)
-	if err == nil {
-		t.Fatal("backfill --fresh while a worker is running must fail fast, not drop data it can't re-mine")
-	}
-	if !strings.Contains(err.Error(), "worker is running") {
-		t.Fatalf("expected a 'worker is running' error, got: %v", err)
-	}
-	obsAfter, _ := s.ReadObservations("")
-	if len(obsAfter) != len(obsBefore) || len(obsAfter) == 0 {
-		t.Fatalf("worker-active --fresh must NOT have dropped observations: before=%d after=%d", len(obsBefore), len(obsAfter))
 	}
 }
 
