@@ -279,7 +279,7 @@ func cmdDoctor(asJSON bool) error {
 	fmt.Println("  " + bold("Archive"))
 	row("layers", fmt.Sprintf("%s · %s raw messages · %s · %s",
 		countOf(stat.Sessions, "session", "sessions"), humanCount(stat.RawRecords),
-		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")), "")
+		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "active facet", "active facets")), "")
 	row("schema", fmt.Sprintf("v%d", archiveSchema), fmt.Sprintf("this binary writes v%d", binarySchema))
 	if newerErr != nil {
 		warn("written by a newer witness — distillation is refused")

@@ -47,9 +47,13 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 		t.Error("child not bound to the parent's lifetime (BindToParent)")
 	}
 
-	// No runtime root yet: the ambient env stays, the other three rules still hold.
+	// No runtime root: still isolated (relative to the temp-dir cwd), never the user's DB —
+	// the root-less default must fail safe, because several subcommands open it read-WRITE.
 	cmd = openCodeCommand(context.Background(), "", "--version")
-	if !slices.Contains(cmd.Env, "OPENCODE_DB=/user/opencode.db") || !slices.Contains(cmd.Env, "WITNESS_WORKER=1") ||
+	if slices.Contains(cmd.Env, "OPENCODE_DB=/user/opencode.db") || slices.Contains(cmd.Env, "XDG_DATA_HOME=/user/data") {
+		t.Errorf("root-less command reaches the user's OpenCode data: env=%v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "OPENCODE_DB=opencode.db") || !slices.Contains(cmd.Env, "WITNESS_WORKER=1") ||
 		cmd.Dir != os.TempDir() || !slices.Contains(fake.Bound, cmd) {
 		t.Errorf("root-less command lost a rule: dir=%q bound=%v env=%v", cmd.Dir, slices.Contains(fake.Bound, cmd), cmd.Env)
 	}

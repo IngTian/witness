@@ -44,7 +44,7 @@ Reflect **cumulative** support: the stance you were handed PLUS the new evidence
 - 0.6-0.8: well-supported, recurring across sessions.
 - 0.9+: pervasive, defining, many independent observations.
 
-When new observations **reinforce** an existing facet, return a confidence at or above its `current_confidence` — raise it when new independent recurrences (especially across sessions) genuinely strengthen the case, hold steady when they merely re-confirm. (Code moves the stored confidence toward the number you return by at most 0.1 per pass, up or down, so a lower number here really does lower it; never *lower* confidence on reinforcement — decay for unseen facets is code's job.) A brand-new facet starts from its in-pass support alone.
+When new observations **reinforce** an existing facet, return a confidence at or above its `current_confidence` — raise it when new independent recurrences (especially across sessions) genuinely strengthen the case, hold steady when they merely re-confirm. (Code moves `current_confidence` toward the number you return by at most 0.1 per pass, up or down, so a lower number here really does lower it; never *lower* confidence on reinforcement — decay for unseen facets is code's job.) A brand-new facet starts from its in-pass support alone.
 
 ## Rules
 

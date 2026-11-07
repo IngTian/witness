@@ -17,7 +17,7 @@ import (
 //     shape from a helper the caller did not know it was calling.
 //  2. NO CONSOLE WINDOW. hideOpenCodeWindow is a GOOS-split no-op/setter
 //     (opencode_cmd_windows.go). Windows pops a blank console for every child of a
-//     GUI-subsystem parent, so serve/models/export/import each flashed a window on
+//     GUI-subsystem parent, so serve/models/export/--version each flashed a window on
 //     the user's desktop.
 //  3. THE TEST SEAM. It routes through execCommandContext, the package's single
 //     indirection point, so tests can stub command execution. Calling
@@ -31,8 +31,10 @@ import (
 //     spawnDetached nor the plugin's Bun.spawn sets one. WITNESS_WORKER=1 is the
 //     recursion guard. isolatedEnv(root) points OPENCODE_DB and XDG_DATA_HOME at
 //     witness's runtime root, because several subcommands open their DB read-WRITE and
-//     apply migrations, so the ambient env would reach into the USER's database (root ""
-//     keeps the ambient env, for a caller with no runtime root yet). And
+//     apply migrations, so the ambient env would reach into the USER's database. That
+//     holds for root "" too: every production caller passes a root (the entry points
+//     refuse an empty one), and if one ever does not, the relative paths land under the
+//     temp-dir cwd — never the user's DB, so the default fails safe. And
 //     procCtl.BindToParent makes the child die with the worker on Linux. A caller layers
 //     its own variables on top with replaceEnv(cmd.Env, …).
 func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
@@ -43,11 +45,7 @@ func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd
 	cmd := execCommandContext(ctx, binary, args...)
 	hideOpenCodeWindow(cmd)
 	cmd.Dir = os.TempDir()
-	env := []string{"WITNESS_WORKER=1"}
-	if root != "" {
-		env = append(env, isolatedEnv(root)...)
-	}
-	cmd.Env = replaceEnv(os.Environ(), env)
+	cmd.Env = replaceEnv(os.Environ(), append([]string{"WITNESS_WORKER=1"}, isolatedEnv(root)...))
 	procCtl.BindToParent(cmd)
 	return cmd
 }

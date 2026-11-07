@@ -189,7 +189,9 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// served. The reap is load-bearing; only the count gate was dead.)
 	unifiedModel, unifiedSig, current := sm.unifiedPass(portrait.String())
 	if current {
-		return nil
+		// Skip the unified CALL, not the report: a lens that is still failing must stay visible
+		// on every pass (nil here once hid it behind a portrait stamped over its fallback).
+		return errors.Join(failures...)
 	}
 	umd, err := sm.Run(ctx, unifiedModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {

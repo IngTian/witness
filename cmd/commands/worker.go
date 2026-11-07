@@ -88,9 +88,9 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	}
 	// Resolved here, not just loaded: cfg.Runner is the runtime a lens with no explicit
 	// `# runner` rides, and the target the per-lens router (distill.RunnerFor) compares
-	// against. This is what lets an npm OpenCode user — who never ran `install`, so config
+	// against. This is what lets an npm OpenCode user — who never ran `wire`, so config
 	// says the default "claude" — distill via OpenCode: their plugin passes
-	// WITNESS_RUNNER=opencode. An explicit `install` choice (runner_bound) still wins (see
+	// WITNESS_RUNNER=opencode. An explicit `wire` / `config set runner` choice (runner_bound) still wins (see
 	// ResolveRunner). Per-lens runners layer on top via newRunnerSet below.
 	cfg := st.ResolvedConfig()
 	if auto && !cfg.AutoDistill {

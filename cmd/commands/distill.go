@@ -443,7 +443,7 @@ func cmdDistillStatus(asJSON bool) error {
 		fmt.Println("  " + kvRow("current", current, ""))
 	}
 	fmt.Println("  " + kvRow("raw", humanCount(stat.Sessions)+" sessions · "+humanCount(stat.RawRecords)+" messages", ""))
-	fmt.Println("  " + kvRow("distilled", humanCount(stat.Observations)+" observations · "+humanCount(stat.Facets)+" facets", ""))
+	fmt.Println("  " + kvRow("distilled", humanCount(stat.Observations)+" observations · "+humanCount(stat.Facets)+" active facets", ""))
 	queueLine := humanCount(stat.Pending) + " pending · " + humanCount(stat.BackedOff) + " backing off"
 	if stat.BackedOff > 0 {
 		queueLine = yellow(queueLine)

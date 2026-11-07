@@ -489,8 +489,8 @@ func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, message
 
 // asyncReplyWindow is how many trailing messages each poll fetches from the session.
 //
-// It must exceed 1 (our request) + the assistant reply. The session is fresh, so today it holds
-// only those two; the window is still a TAIL because it was sized when witness prompted a fork
+// It must exceed 1 (our request) + the assistant reply. The session is fresh, so it holds only
+// those two plus any earlier turns of a resumed manifest's retry; the window is still a TAIL because it was sized when witness prompted a fork
 // of the user's whole conversation (removed in #143), where the OLDEST n messages never reached
 // our request and the poll spun to the timeout with no error. requestMissingStreak below is the
 // guard for the window being wrong: rather than trust it for the full generateTimeout, we
