@@ -117,7 +117,7 @@ func cmdExport(path string, force, all, asJSON bool) error {
 func snapshotSummary(st *store.Store, db string) string {
 	stat := st.Stats(activeLensNames(st))
 	parts := []string{countOf(stat.Sessions, "session", "sessions"),
-		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "facet", "facets")}
+		countOf(stat.Observations, "observation", "observations"), countOf(stat.Facets, "active facet", "active facets")}
 	if info, err := os.Stat(db); err == nil {
 		parts = append([]string{humanBytes(info.Size())}, parts...)
 	}

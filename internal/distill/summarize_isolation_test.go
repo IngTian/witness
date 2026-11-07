@@ -152,8 +152,15 @@ func TestAFailingLensKeepsItsPriorSectionInThePortrait(t *testing.T) {
 		}
 		return "SUMMARY v3", nil
 	}
-	_ = sm.Summarize(context.Background())
+	err := sm.Summarize(context.Background())
 	if unified != 0 {
 		t.Errorf("the unified call re-ran %d time(s) on an unchanged portrait while a lens was broken", unified)
+	}
+	// ...but the still-failing lens must still be REPORTED. Skipping the unified call must not
+	// also skip the per-lens failures: before this was pinned, every read after the first
+	// returned nil, so `witness profile`, MCP get_profile and the worker's "profile regenerated"
+	// all looked healthy while aaa's summarizer kept failing (and kept being paid for).
+	if err == nil || !strings.Contains(err.Error(), "summarize lens aaa") {
+		t.Errorf("a lens that is still failing must be reported on every pass, got err=%v", err)
 	}
 }
