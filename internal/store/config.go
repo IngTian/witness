@@ -484,7 +484,7 @@ func (c *configFile) EnsureConfigFile() error {
 # Docs: https://github.com/IngTian/witness/blob/main/docs/cli.md#configuration
 
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness wire`" + ` also binds it.
+# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness wire claude|opencode`" + ` also binds it.
 # runner = ` + strconv.Quote(d.Runner) + `
 
 # Two distillation stages, two models:

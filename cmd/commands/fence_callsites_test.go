@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
@@ -37,19 +36,11 @@ func (fenceRecordingRunner) Run(_ context.Context, _, prompt, input string) (str
 }
 func (fenceRecordingRunner) ValidateModels(context.Context, ...string) error { return nil }
 func (fenceRecordingRunner) InvocationHint() string                          { return "fakefence" }
-func (fenceRecordingRunner) ConcurrentRunSafe() bool                         { return true }
 
 type fenceFakePlatform struct{}
 
-func (fenceFakePlatform) Name() string          { return "fakefence" }
-func (fenceFakePlatform) SessionPrefix() string { return "fakefence:" }
-func (fenceFakePlatform) RenderInputs([]store.RawRecord, platform.ChunkPolicy) []string {
-	return []string{""}
-}
-func (fenceFakePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) { return false, nil }
-func (fenceFakePlatform) Import(context.Context, store.ImportStore, []string) (platform.ImportStats, error) {
-	return platform.ImportStats{}, nil
-}
+func (fenceFakePlatform) Name() string                           { return "fakefence" }
+func (fenceFakePlatform) SessionPrefix() string                  { return "fakefence:" }
 func (fenceFakePlatform) NewRunner(store.Config) platform.Runner { return fenceRecordingRunner{} }
 
 func resetFenceCalls(t *testing.T) {

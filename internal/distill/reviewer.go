@@ -13,7 +13,8 @@ import (
 )
 
 // Reviewer is the slow path: synthesize L1 observations into L2 facets, detecting
-// durable change across sessions. It is the SOLE writer of L2.
+// durable change across sessions. It is L2's main writer; the long-arc pass, the claim
+// pass, compaction and merge write it too (store.WriteFacets lists them).
 //
 // Division of labor: the LLM judges *what is true now* and *what changed* (it sees
 // the observations + the current profile and proposes facet states). Deterministic

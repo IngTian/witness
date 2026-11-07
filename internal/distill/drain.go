@@ -112,7 +112,7 @@ func (w *Worker) attemptKey(session string) string {
 // It scopes the default PendingInputChars sizer (issue #56 B2) so the in-flight char
 // estimate reflects exactly the per-lens deltas the drain will mine (a newly-enabled
 // lens with no watermark counts its whole-session delta; a since-disabled lens is
-// excluded). Empty → PendingInputChars falls back to the always-on default lens.
+// excluded). Empty → PendingInputChars returns 0: no active lens, nothing to mine.
 func (w *Worker) lensNames() []string {
 	names := make([]string, len(w.Lenses))
 	for i, ln := range w.Lenses {

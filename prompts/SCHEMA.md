@@ -57,8 +57,10 @@ registry (`<root>/lenses/<name>/`), never in a repo.
 
 A lens is a **directory** of `lens.json` (settings: `name`, `dimensions`, optional per-lens models)
 plus `extract.md` and `review.md` (each whole file is the prompt for its pass). See
-`prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own by
-adding `extract_model` / `review_model` to its `lens.json` (verify with `witness lens show <name>`),
+`prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own with
+`witness config set --lens <name> mine_model|review_model <model>` (or `extract_model` /
+`review_model` in its `lens.json`, then re-register: the store keeps a snapshot), verified with
+`witness lens show <name>`,
 so a rare heavy lens can run a stronger model without paying for it on every session.
 
 One moment can produce several observations — one per lens that finds it salient — sharing a raw
