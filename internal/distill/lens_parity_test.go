@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -127,11 +128,11 @@ func TestParityWatermarkIndependence(t *testing.T) {
 	}
 
 	// The session is not pending when only default is active...
-	if p, _ := s.PendingSessions([]string{store.LensDefault}); contains(p, "s") {
+	if p, _ := s.PendingSessions([]string{store.LensDefault}); slices.Contains(p, "s") {
 		t.Fatalf("caught-up default should not be pending")
 	}
 	// ...but IS pending once parity is active (parity behind at 0) — without a full reset.
-	if p, _ := s.PendingSessions([]string{store.LensDefault, parityLens}); !contains(p, "s") {
+	if p, _ := s.PendingSessions([]string{store.LensDefault, parityLens}); !slices.Contains(p, "s") {
 		t.Fatalf("a newly-active lens must make the session pending again")
 	}
 
@@ -278,21 +279,12 @@ func TestParityBackoffSymmetry(t *testing.T) {
 				t.Fatalf("healthy lens %q must not accrue retries, got %d", healthy, got)
 			}
 			// The failed lens is parked; the healthy one keeps the session pending.
-			if p, _ := s.PendingSessions([]string{failing}); contains(p, "s") {
+			if p, _ := s.PendingSessions([]string{failing}); slices.Contains(p, "s") {
 				t.Fatalf("failed lens %q alone should be backed off / not pending", failing)
 			}
-			if p, _ := s.PendingSessions([]string{healthy}); contains(p, "s") {
+			if p, _ := s.PendingSessions([]string{healthy}); slices.Contains(p, "s") {
 				t.Fatalf("healthy lens %q is caught up → not pending", healthy)
 			}
 		})
 	}
-}
-
-func contains(xs []string, x string) bool {
-	for _, v := range xs {
-		if v == x {
-			return true
-		}
-	}
-	return false
 }

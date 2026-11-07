@@ -2,7 +2,6 @@ package commands
 
 import (
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,25 +12,10 @@ import (
 
 // captureStdoutErr is captureStdout (lens_try_test.go) for a fn that returns an error, so a
 // test can assert on the EXIT CODE and the emitted document together.
-func captureStdoutErr(t *testing.T, fn func() error) (string, error) {
+func captureStdoutErr(t *testing.T, fn func() error) (out string, err error) {
 	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	prev := os.Stdout
-	os.Stdout = w
-	done := make(chan string, 1)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
-	runErr := fn()
-	_ = w.Close()
-	os.Stdout = prev
-	out := <-done
-	_ = r.Close()
-	return out, runErr
+	out = captureStdout(t, func() { err = fn() })
+	return out, err
 }
 
 // `witness doctor --json` must FAIL when the archive cannot distill.
