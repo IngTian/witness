@@ -2,6 +2,7 @@ package distill
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -158,7 +159,7 @@ func TestMergeArchivesAbsorbedAndKeepsHistory(t *testing.T) {
 	// Provenance is the whole claim of the archive: a merge that drops the absorbed
 	// facets' evidence makes the merged value unjustifiable.
 	for _, want := range []string{"obs-dup1", "obs-dup2", "obs-survivor"} {
-		if !containsStr(cur.BecauseOf, want) {
+		if !slices.Contains(cur.BecauseOf, want) {
 			t.Errorf("merged version must cite %s; got %v", want, cur.BecauseOf)
 		}
 	}
@@ -201,7 +202,7 @@ func TestMergeCanMintANewAbstractionKey(t *testing.T) {
 	if !newF.Active() || newF.Current() == nil || newF.Current().Value != mergedValue {
 		t.Fatalf("the new abstraction should be active with the merged value, got %+v", newF)
 	}
-	if !containsStr(newF.Current().BecauseOf, "obs-specific1") {
+	if !slices.Contains(newF.Current().BecauseOf, "obs-specific1") {
 		t.Errorf("a new abstraction must inherit provenance, got %v", newF.Current().BecauseOf)
 	}
 }
@@ -453,13 +454,4 @@ func TestAnAllFailedLensIsReportedNotSilentlyDropped(t *testing.T) {
 	if len(plans) != 1 || plans[0].Failed != 1 || len(plans[0].Actions) != 0 {
 		t.Fatalf("want one plan with 0 actions and 1 failure, got %+v", plans)
 	}
-}
-
-func containsStr(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
 }

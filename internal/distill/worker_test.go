@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -632,7 +633,7 @@ func TestProseDriftAdvancesAndIsCounted(t *testing.T) {
 		t.Fatalf("drift last stamp wrong: ts=%q lens=%q", ts, lens)
 	}
 	// Drift must NOT back the session off — the queue stays drainable (no wedge).
-	if p, _ := s.PendingSessions([]string{"default"}); contains(p, "s") {
+	if p, _ := s.PendingSessions([]string{"default"}); slices.Contains(p, "s") {
 		t.Fatalf("a drifted (advanced) session must not be pending: %v", p)
 	}
 }
@@ -788,7 +789,7 @@ func TestDriftIsPerLens(t *testing.T) {
 		t.Fatalf("drift attributed to wrong lens: %q", lens)
 	}
 	// Neither lens backed off — a mixed drift+success session stays fully drained.
-	if p, _ := s.PendingSessions([]string{"default", "codereview"}); contains(p, "s") {
+	if p, _ := s.PendingSessions([]string{"default", "codereview"}); slices.Contains(p, "s") {
 		t.Fatalf("session must be fully drained (no drift-induced backoff): %v", p)
 	}
 }

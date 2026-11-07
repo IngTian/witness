@@ -2,7 +2,6 @@ package commands
 
 import (
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -362,14 +361,7 @@ func TestSeedNoticeIsShownToAPersonOnce(t *testing.T) {
 	defer func() { seedNoticeWanted = old }()
 	home := filepath.Join(t.TempDir(), "fresh")
 	read := func() string {
-		r, w, _ := os.Pipe()
-		orig := os.Stderr
-		os.Stderr = w
-		openSeedTestStore(t, home).Close()
-		w.Close()
-		os.Stderr = orig
-		b, _ := io.ReadAll(r)
-		return string(b)
+		return captureStream(t, &os.Stderr, func() { openSeedTestStore(t, home).Close() })
 	}
 	first := read()
 	if !strings.Contains(first, `added the built-in "default" lens`) || !strings.Contains(first, "witness lens disable default") ||

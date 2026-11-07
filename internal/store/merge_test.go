@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -240,7 +241,7 @@ func TestMergeSameKeyNewerEvidenceWins(t *testing.T) {
 		if k == nil || !k.Active() || k.Current().Value != "the August view" {
 			t.Fatalf("the key must carry the newer-evidenced value, got %+v", k)
 		}
-		if !containsID(k.Current().BecauseOf, "ob1") || !containsID(k.Current().BecauseOf, "oi1") {
+		if !slices.Contains(k.Current().BecauseOf, "ob1") || !slices.Contains(k.Current().BecauseOf, "oi1") {
 			t.Errorf("the winner must cite both copies' evidence, got %v", k.Current().BecauseOf)
 		}
 		loser := base.facet("default", "thinking", "k__m1")
@@ -273,15 +274,6 @@ func TestMergeSameKeyNewerEvidenceWins(t *testing.T) {
 			t.Errorf("their child must follow THEIR copy to k__m1, got %+v", c)
 		}
 	})
-}
-
-func containsID(ids []string, want string) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
 }
 
 // Shared history — a restore, a re-run, a merge back — stores nothing twice. An equal chain is
