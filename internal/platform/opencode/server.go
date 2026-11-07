@@ -1030,15 +1030,19 @@ const openCodeServeMarker = "opencode"
 // orphan by command-line shape alone — that's an accepted, documented edge case (reap
 // is conservative for witness's own serves, but this external collision is possible).
 func isStrayServeLine(cmdline string) bool {
-	fields := strings.Fields(cmdline)
+	// Split on ASCII whitespace only — the set Go's argv quoting and CommandLineToArgvW use (ps
+	// joins argv with ASCII spaces too). strings.Fields also splits on U+3000/U+00A0, which Go
+	// does NOT quote, so a profile like `山田　太郎` cut the executable path and the reaper never
+	// recognised that user's own serve.
+	fields := strings.FieldsFunc(cmdline, isArgvSpace)
 	if len(fields) == 0 {
 		return false
 	}
 	exe := fields[0]
 	// Windows quotes an argv[0] that contains a space (syscall.makeCmdLine), so a profile such as
 	// `C:\Users\John Smith` arrives as `"C:\Users\John Smith\...\opencode.exe" serve ...`, which
-	// strings.Fields cuts inside the path. Take the quoted span as the executable.
-	if s := strings.TrimSpace(cmdline); strings.HasPrefix(s, `"`) {
+	// the split cuts inside the path. Take the quoted span as the executable.
+	if s := strings.TrimLeftFunc(cmdline, isArgvSpace); strings.HasPrefix(s, `"`) {
 		end := strings.IndexByte(s[1:], '"')
 		if end < 0 {
 			return false
@@ -1058,6 +1062,8 @@ func isStrayServeLine(cmdline string) bool {
 	}
 	return true
 }
+
+func isArgvSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }
 
 // serveProbeMatches is gate 2's decision on Windows, kept apart from the OS calls so it is
 // testable off Windows. The command line carries the full fingerprint and, when readable, is

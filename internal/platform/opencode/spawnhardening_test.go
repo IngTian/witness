@@ -340,6 +340,9 @@ func TestServeProbeFallsBackToTheImageOnlyWhenTheCommandLineIsUnreadable(t *test
 		{"a readable non-serve command line is final", ok(`C:\x\opencode.exe`), ok(`C:\x\opencode.exe`), false},
 		{"image fallback", denied, ok(`C:\x\opencode.exe`), true},
 		{"image fallback rejects another executable", denied, ok(`C:\x\node.exe`), false},
+		// '/' separators so the basename check means the same on every OS (filepath.Base does
+		// not split on '\' off Windows): "opencode" in a DIRECTORY must not pass.
+		{"image fallback checks the basename, not the path", denied, ok(`/x/.opencode/bin/node.exe`), false},
 		{"nothing readable", denied, denied, false},
 	}
 	for _, tc := range cases {
