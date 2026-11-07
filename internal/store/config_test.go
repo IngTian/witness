@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -92,6 +93,49 @@ func TestOpenCreatesFullConfigTemplate(t *testing.T) {
 	if c.Runner != "claude" || c.ReviewEvery != 5 || c.ReviewPoignancy != 30 || !c.AutoDistill || c.MineConcurrency != DefaultMineConcurrency {
 		t.Errorf("template defaults not loadable: %+v", c)
 	}
+}
+
+// TestConfigTemplateDocsLinkResolves: the template's "# Docs:" URL must land on a heading that
+// exists in this repo. It pointed at README#configuration for months after #180 moved that
+// section to docs/cli.md, so the first link a new user's config offered went nowhere. The runner
+// comment is checked too: only `witness wire` binds a runner; `install` provisions an archive.
+func TestConfigTemplateDocsLinkResolves(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	data, err := os.ReadFile(st.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if strings.Contains(body, "`witness install`") {
+		t.Errorf("template says `witness install` binds the runner; only `witness wire` does")
+	}
+	m := regexp.MustCompile(`# Docs: https://github\.com/IngTian/witness(\S*)`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("template has no repo docs link:\n%s", body)
+	}
+	path, anchor, _ := strings.Cut(m[1], "#")
+	file := "README.md"
+	if rel, ok := strings.CutPrefix(path, "/blob/main/"); ok {
+		file = rel
+	} else if path != "" {
+		t.Fatalf("docs link %q is neither the repo root nor a /blob/main/ path", m[0])
+	}
+	doc, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(file)))
+	if err != nil {
+		t.Fatalf("docs link names %s: %v", file, err)
+	}
+	for _, line := range strings.Split(string(doc), "\n") {
+		h := strings.TrimSpace(strings.TrimLeft(line, "#"))
+		if strings.HasPrefix(line, "#") && strings.ReplaceAll(strings.ToLower(h), " ", "-") == anchor {
+			return
+		}
+	}
+	t.Errorf("template links %s#%s, but %s has no such heading", file, anchor, file)
 }
 
 // The template must not PIN the defaults. An active `review_max_chars = 16000` line froze

@@ -30,8 +30,11 @@ import (
 // of facets whose value changed in a fold) is a fraction of one call, and a first full pass over
 // a mature archive is tens of calls rather than thousands.
 //
-// Until a facet has a claim, every consumer falls back to its value (store.FacetVersion.Gist),
-// so a half-claimed archive (a bounded or failed run) is correct, just not yet small.
+// It runs only from `witness compact`, unbounded (MaxBatches 0): the user asked, and a first
+// pass over a mature archive is tens of calls. The review never runs it — draining 2,000 claims
+// inside one fold would turn a routine review into an hours-long job. Until a facet has a claim,
+// every consumer falls back to its value (store.FacetVersion.Gist), so a half-claimed archive is
+// correct, just not yet small.
 
 // Claimer writes the short claims. Its own type rather than a method on Reviewer, because
 // claims are MAINTENANCE — run when the user asks, like compaction — and the review path
@@ -159,10 +162,10 @@ func (c *Claimer) writeClaims(ctx context.Context, ln *lens.Lens, facets []*stor
 }
 
 // Run is the store-touching wrapper: read the profile, fill in missing claims for one lens,
-// write it back if anything changed.
+// write it back if anything changed. `witness compact` calls it once per lens.
 //
 // Best-effort by design. A failure here leaves every facet falling back to its full value —
-// exactly the behaviour before claims existed — so it must never fail the compaction that has
+// exactly the behaviour before claims existed — so it never fails the compaction that has
 // already committed its merges.
 func (c *Claimer) Run(ctx context.Context, ln *lens.Lens) int {
 	all, err := c.Store.ReadFacets()

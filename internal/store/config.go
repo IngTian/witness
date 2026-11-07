@@ -63,7 +63,7 @@ type Config struct {
 	// ceiling, never a quality knob. <=0 in config clamps back to the default.
 	ReviewMaxChars int
 	// EnabledLenses is the set of registered lens names that run on EVERY session
-	// (alongside the always-on "default" lens). Lenses are global and centrally
+	// ("default" included, when enabled — it has no privilege). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
 	EnabledLenses []string
 }
@@ -464,10 +464,10 @@ func (c *configFile) EnsureConfigFile() error {
 	d := DefaultConfig()
 	tpl := `# witness configuration — all fields optional. Each commented line shows the current
 # built-in default; uncomment a line to pin your own value.
-# Docs: https://github.com/IngTian/witness#configuration
+# Docs: https://github.com/IngTian/witness/blob/main/docs/cli.md#configuration
 
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness install`" + ` also binds it.
+# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness wire`" + ` also binds it.
 # runner = ` + strconv.Quote(d.Runner) + `
 
 # Two distillation stages, two models:

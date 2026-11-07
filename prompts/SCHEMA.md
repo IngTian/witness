@@ -57,8 +57,8 @@ registry (`<root>/lenses/<name>/`), never in a repo.
 
 A lens is a **directory** of `lens.json` (settings: `name`, `dimensions`, optional per-lens models)
 plus `extract.md` and `review.md` (each whole file is the prompt for its pass). See
-`prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own via
-`witness lens set <name> --extract-model <m>` / `--review-model <m>` (written to its `lens.json`),
+`prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own by
+adding `extract_model` / `review_model` to its `lens.json` (verify with `witness lens show <name>`),
 so a rare heavy lens can run a stronger model without paying for it on every session.
 
 One moment can produce several observations — one per lens that finds it salient — sharing a raw
@@ -128,5 +128,5 @@ sessions.
 {"id": "note-2026-07-08", "session": "weekly-retros", "ts": "2026-07-08", "text": "Same trap again — saw a failing test, went straight to the code. Forced myself to read the failure message first; saved an hour."}
 ```
 
-After ingest, `witness distill start` mines these as one session (they share `session`), and the
-lens sees both notes together — enough context to notice a pattern.
+After ingest, the worker (`witness worker run` to start it now) mines these as one session (they
+share `session`), and the lens sees both notes together — enough context to notice a pattern.
