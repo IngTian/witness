@@ -1,4 +1,10 @@
-package distill
+// Package sentence is the one definition of "a sentence" in a portrait. The resolver numbers a
+// portrait's sentences with it and persists the numbers in portrait_sources; the read-only view
+// numbers the same text with it to show which traits each sentence rests on. Any drift between
+// two splitters moves every stored link onto the wrong sentence, so both walk the blocks below.
+// Standard library only: the view must never pull the distill engine in (#195: never the read
+// path).
+package sentence
 
 import (
 	"strings"
@@ -20,75 +26,83 @@ import (
 // digits (97.7%). Chinese punctuation (。！？) also ends a sentence. Only sentences
 // with len(trim(s)) > 1 are returned, and all returned sentences are trimmed.
 func SplitSentences(md string) []string {
-	// Split into blocks: blank lines, headings, and list items are block boundaries.
-	lines := strings.Split(strings.ReplaceAll(md, "\r\n", "\n"), "\n")
-	var blocks []string
-	var currentBlock []string
-
-	flushBlock := func() {
-		if len(currentBlock) > 0 {
-			text := strings.Join(currentBlock, " ")
-			if text != "" {
-				blocks = append(blocks, text)
-			}
-			currentBlock = nil
-		}
+	all := []string{} // empty, not nil, when there are no sentences
+	for _, b := range PortraitBlocks(md) {
+		all = append(all, BlockSentences(b)...)
 	}
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Blank line or heading: flush current block.
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			flushBlock()
-			continue
-		}
-		// List item: flush current block, start new block with this item.
-		if IsListItem(trimmed) {
-			flushBlock()
-			line = StripListMarker(trimmed)
-			if line != "" {
-				currentBlock = []string{line}
-				flushBlock() // list item is its own block
-			}
-			continue
-		}
-		// Regular line: add to current block.
-		currentBlock = append(currentBlock, trimmed)
-	}
-	flushBlock()
-
-	// Strip emphasis markers from each block.
-	for i, block := range blocks {
-		blocks[i] = strings.ReplaceAll(block, "**", "")
-	}
-
-	// Split each block into sentences.
-	allSentences := []string{} // Return empty slice (not nil) if there are no sentences
-	for _, block := range blocks {
-		sentences := splitBlockIntoSentences(block)
-		allSentences = append(allSentences, sentences...)
-	}
-	return allSentences
+	return all
 }
 
-// IsListItem checks if a line starts with a list marker. Exported with StripListMarker so
-// internal/view rebuilds SplitSentences' blocks by the same rules, never a drifting copy.
-func IsListItem(line string) bool {
-	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
-		return true
+// Block is one markdown block as the splitter reads it. Kind is "h" (a heading: Text is the
+// trimmed line, # and all), "p" (a paragraph: its trimmed lines joined by one space) or "li"
+// (a list item: the text after its marker). Text keeps the ** markers, so a reader can still
+// show the bold the sentences themselves drop.
+type Block struct {
+	Kind, Text string
+}
+
+// PortraitBlocks is the block pass of SplitSentences: blank lines, headings and list items are
+// block boundaries, and each list item is a block of its own. It is exported so the view walks
+// exactly these blocks and numbers sentences exactly as the resolver did.
+func PortraitBlocks(md string) []Block {
+	var blocks []Block
+	var para []string
+	flush := func() {
+		if len(para) > 0 {
+			blocks = append(blocks, Block{Kind: "p", Text: strings.Join(para, " ")})
+			para = nil
+		}
 	}
-	// Check for numbered list: digit(s) followed by ". ".
+	for _, line := range strings.Split(strings.ReplaceAll(md, "\r\n", "\n"), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(t, "#") {
+			flush()
+			blocks = append(blocks, Block{Kind: "h", Text: t})
+			continue
+		}
+		if item, ok := listItem(t); ok {
+			flush()
+			if item != "" {
+				blocks = append(blocks, Block{Kind: "li", Text: item})
+			}
+			continue
+		}
+		para = append(para, t)
+	}
+	flush()
+	return blocks
+}
+
+// BlockSentences is one block's sentences, numbered in order after the blocks before it.
+// Headings carry none; elsewhere the ** markers are dropped before splitting.
+func BlockSentences(b Block) []string {
+	if b.Kind == "h" {
+		return nil
+	}
+	return splitBlockIntoSentences(strings.ReplaceAll(b.Text, "**", ""))
+}
+
+// listItem reports whether a trimmed line starts with a list marker ("- ", "* ", or digits
+// then ". ") and returns the text after it, trimmed.
+func listItem(line string) (string, bool) {
+	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+		return strings.TrimSpace(line[2:]), true
+	}
 	if len(line) > 0 && unicode.IsDigit(rune(line[0])) {
 		for i := 1; i < len(line); i++ {
 			if line[i] == '.' && i+1 < len(line) && line[i+1] == ' ' {
-				return true
+				return strings.TrimSpace(line[i+2:]), true
 			}
 			if !unicode.IsDigit(rune(line[i])) {
 				break
 			}
 		}
 	}
-	return false
+	return line, false
 }
 
 // splitBlockIntoSentences splits a block of text into sentences using punctuation rules.
@@ -192,30 +206,6 @@ func splitBlockIntoSentences(text string) []string {
 	}
 
 	return result
-}
-
-// StripListMarker removes list item markers from the start of a line.
-// Handles: "- ", "* ", and digit+". " (e.g., "1. ").
-func StripListMarker(line string) string {
-	line = strings.TrimSpace(line)
-	if strings.HasPrefix(line, "- ") {
-		return strings.TrimSpace(line[2:])
-	}
-	if strings.HasPrefix(line, "* ") {
-		return strings.TrimSpace(line[2:])
-	}
-	// Check for numbered list: digit(s) followed by ". ".
-	if len(line) > 0 && unicode.IsDigit(rune(line[0])) {
-		for i := 1; i < len(line); i++ {
-			if line[i] == '.' && i+1 < len(line) && line[i+1] == ' ' {
-				return strings.TrimSpace(line[i+2:])
-			}
-			if !unicode.IsDigit(rune(line[i])) {
-				break
-			}
-		}
-	}
-	return line
 }
 
 // isSentenceEnd reports whether r is a sentence-ending character.

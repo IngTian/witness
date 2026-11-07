@@ -78,8 +78,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	}
 	defer unlock()
 
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	lenses := activeLenses(st)
 	if len(lenses) == 0 {
 		fmt.Println(skipGlyph() + " no enabled lenses — nothing to compact")

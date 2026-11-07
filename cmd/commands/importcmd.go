@@ -34,23 +34,7 @@ func newImportCmd() *cobra.Command {
 			if hook {
 				return cmdImportHook(agent, os.Stdin)
 			}
-			var args []string
-			if agent != "" { // a bare `witness import` asks "which agent?" instead of "--agent requires a value"
-				args = append(args, "--agent", agent)
-			}
-			for _, session := range sessions {
-				args = append(args, "--session", session)
-			}
-			if quiet {
-				args = append(args, "--quiet")
-			}
-			if auto {
-				args = append(args, "--auto")
-			}
-			if noKick {
-				args = append(args, "--no-kick")
-			}
-			return cmdImport(args)
+			return cmdImport(importOpts{agent: agent, sessions: sessions, quiet: quiet, auto: auto, noKick: noKick})
 		},
 	}
 	c.Flags().StringVar(&agent, "agent", "", "agent to import from: "+importAgents(", "))
@@ -65,58 +49,44 @@ func newImportCmd() *cobra.Command {
 	return c
 }
 
-func cmdImport(args []string) error {
-	agent := ""
-	var sessions []string
-	quiet := false
-	auto := false
-	noKick := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--agent":
-			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
-				return fmt.Errorf("--agent requires a value")
-			}
-			agent = strings.ToLower(strings.TrimSpace(args[i+1]))
-			i++
-		case "--quiet":
-			quiet = true
-		case "--auto":
-			auto = true
-		case "--no-kick":
-			noKick = true
-		case "--session":
-			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
-				return fmt.Errorf("--session requires a value")
-			}
-			sessions = append(sessions, strings.TrimSpace(args[i+1]))
-			i++
-		default:
-			return fmt.Errorf("usage: witness import --agent <%s> [--session <id>]... [--quiet] [--auto] [--no-kick]", importAgents("|"))
-		}
-	}
-	if agent == "" {
+// importOpts is `witness import`'s flags, as cobra parsed them.
+type importOpts struct {
+	agent               string
+	sessions            []string
+	quiet, auto, noKick bool
+}
+
+func cmdImport(o importOpts) error {
+	agent := strings.ToLower(strings.TrimSpace(o.agent))
+	if agent == "" { // a bare `witness import` asks "which agent?", and so does a blank --agent
 		return fmt.Errorf("which agent? witness import --agent <%s>", importAgents("|"))
 	}
+	var sessions []string
+	for _, s := range o.sessions {
+		if s = strings.TrimSpace(s); s == "" {
+			return fmt.Errorf("--session requires a value")
+		}
+		sessions = append(sessions, s)
+	}
 	ctx, finish := context.Background(), func() {}
-	if !quiet { // --quiet is how the OpenCode plugin imports in the background: it stays silent
+	if !o.quiet { // --quiet is how the OpenCode plugin imports in the background: it stays silent
 		ctx, finish = importProgress(ctx, agent)
 	}
-	stats, kicked, err := runImport(ctx, agent, sessions, !noKick, auto)
+	stats, kicked, err := runImport(ctx, agent, sessions, !o.noKick, o.auto)
 	finish()
 	if err != nil {
 		return err
 	}
-	if !quiet {
-		printImportResult(stats, kicked, noKick)
+	if !o.quiet {
+		printImportResult(stats, kicked, o.noKick)
 	}
 	return nil
 }
 
 // importAgents lists the agents import takes — the editors, in the one order wire uses
-// (platform.InstallTargets). The "file" source is pushed in by `witness ingest`; its import was a
+// (editorNames). The "file" source is pushed in by `witness ingest`; its import was a
 // silent no-op that reported "imported 0 raw record(s)" although the usage never offered it.
-func importAgents(sep string) string { return strings.Join(platform.InstallTargets(), sep) }
+func importAgents(sep string) string { return strings.Join(editorNames(), sep) }
 
 func printImportResult(stats platform.ImportStats, kicked, noKick bool) {
 	name := bold(stats.Agent)
@@ -181,7 +151,7 @@ func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorke
 	defer setupLogging(st)()
 
 	p, ok := platform.ByName(agent)
-	if _, editor := platform.InstallerFor(agent); !ok || !editor {
+	if _, isEditor := editors[agent]; !ok || !isEditor {
 		return platform.ImportStats{}, false, fmt.Errorf("unknown agent %q — want one of: %s", agent, importAgents(", "))
 	}
 	// The Importer owns its own reconcile mechanics (OpenCode takes the sync lock

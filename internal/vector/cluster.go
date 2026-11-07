@@ -5,7 +5,6 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -67,7 +66,7 @@ func topK(nodes []store.Observation, i, k int) []int {
 	scores := make([]sc, 0, len(nodes)-1)
 	for j := range nodes {
 		if j != i {
-			scores = append(scores, sc{j, embed.Cosine(nodes[i].Embedding, nodes[j].Embedding)})
+			scores = append(scores, sc{j, Cosine(nodes[i].Embedding, nodes[j].Embedding)})
 		}
 	}
 	sort.Slice(scores, func(a, b int) bool {
@@ -136,7 +135,7 @@ func MutualKNNAdj(obs []store.Observation, lens string, k int) (nodes []store.Ob
 			if j == i {
 				continue
 			}
-			scores = append(scores, sc{j, embed.Cosine(nodes[i].Embedding, nodes[j].Embedding)})
+			scores = append(scores, sc{j, Cosine(nodes[i].Embedding, nodes[j].Embedding)})
 		}
 		// Rank by score descending, then take the top k. n is bounded (brute-force design
 		// point); a full sort per node is fine. Tie-break on index so the graph is

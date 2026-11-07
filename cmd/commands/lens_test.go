@@ -37,7 +37,7 @@ func TestLensListShowsMigratedLegacyLens(t *testing.T) {
 	st.Close()
 
 	out := captureStdout(t, func() {
-		if err := cmdLens([]string{"list"}); err != nil {
+		if err := withLensStore(lensList); err != nil {
 			t.Fatalf("lens list: %v", err)
 		}
 	})

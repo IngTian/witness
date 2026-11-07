@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"crypto/sha1"
 	"fmt"
 	"slices"
 	"strings"
@@ -237,7 +236,7 @@ func cmdObservationRecord(session, lensName, dimension, observation, evidence st
 	// lens by that name, so the registered name here would orphan the observation.
 	dataName := lens.DataName(st, lensName)
 	o := store.Observation{
-		ID:          cliObsID(session, dataName, observation),
+		ID:          store.ObservationID(session, dataName, observation),
 		TS:          time.Now().UTC().Format(time.RFC3339),
 		Session:     session,
 		Lens:        dataName,
@@ -294,9 +293,4 @@ func cmdObservationDelete(obsID string) error {
 	}
 	fmt.Println(result(okGlyph(), "deleted "+obsID, ""))
 	return nil
-}
-
-func cliObsID(session, lensName, text string) string {
-	h := sha1.Sum([]byte(session + "|" + lensName + "|" + text))
-	return "obs_" + fmt.Sprintf("%x", h[:6])
 }

@@ -36,8 +36,8 @@ var procCtl proc.Control = proc.System()
 
 var openCodeModelsCache sync.Map // provider -> openCodeModelList
 
-var openCodeVersionCommand = func(ctx context.Context) ([]byte, error) {
-	return openCodeCommand(ctx, "--version").Output()
+var openCodeVersionCommand = func(ctx context.Context, runtimeRoot string) ([]byte, error) {
+	return openCodeCommand(ctx, runtimeRoot, "--version").Output()
 }
 
 var openCodeAsyncPollInterval = time.Second
@@ -430,10 +430,12 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	body := map[string]any{
 		"messageID": messageID,
 		"agent":     "witness",
-		"system":    systemPrompt + "\n\n" + platform.CorpusNotice,
+		// Both already fenced by distill.RunnerMine (CorpusNotice on the system prompt, the
+		// corpus wrapped and defanged), the one place every runner's fence is applied.
+		"system": systemPrompt,
 		"parts": []map[string]any{{
 			"type": "text",
-			"text": platform.WrapCorpus(input),
+			"text": input,
 		}},
 	}
 	if provider, modelID, ok, err := splitOpenCodeModel(model); err != nil {
@@ -846,7 +848,7 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 	if runtimeRoot == "" {
 		return fmt.Errorf("opencode isolated runtime root is unavailable")
 	}
-	if err := ValidateOpenCodeCapability(ctx); err != nil {
+	if err := ValidateOpenCodeCapability(ctx, runtimeRoot); err != nil {
 		return err
 	}
 	for _, model := range models {
@@ -871,12 +873,12 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 
 // ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 1.18.0+). Do not
 // fall back to a shared user DB: an unavailable capability leaves L0 pending for retry.
-func ValidateOpenCodeCapability(ctx context.Context) error {
+func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
 	// Bound the probe: a hung `opencode --version` would otherwise block Open (and doctor)
 	// for as long as the deadline-less drain ctx lives, holding the machine-wide WorkerLock.
 	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
 	defer cancel()
-	out, err := openCodeVersionCommand(ctx)
+	out, err := openCodeVersionCommand(ctx, runtimeRoot)
 	if err != nil {
 		return fmt.Errorf("opencode native session isolation unavailable; upgrade to OpenCode 1.18.0+: %w", err)
 	}
@@ -935,17 +937,16 @@ func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (open
 	// blocked Open/doctor forever while holding the machine-wide WorkerLock.
 	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
 	defer cancel()
-	cmd := openCodeCommand(ctx, "models", "--pure", provider)
-	cmd.Dir = os.TempDir()
-	// Isolated env: `opencode models` opens its OPENCODE_DB read-WRITE (and applies schema
-	// migrations), so inheriting the ambient env would reach into the USER's database from
-	// the hot Open/doctor paths — the one thing this package must never do.
-	cmd.Env = replaceEnv(append(os.Environ(), "WITNESS_WORKER=1"), isolatedEnv(runtimeRoot))
+	// Isolated (openCodeCommand + the mandatory runtime root): `opencode models` opens its
+	// OPENCODE_DB read-WRITE (and applies schema migrations), so the ambient env would reach
+	// into the USER's database from the hot Open/doctor paths — the one thing this package
+	// must never do.
+	cmd := openCodeCommand(ctx, runtimeRoot, "models", "--pure", provider)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
-		return openCodeModelList{}, fmt.Errorf("opencode models %s failed: %w (stderr: %s)", provider, err, strings.TrimSpace(errb.String()))
+		return openCodeModelList{}, fmt.Errorf("opencode models %s failed: %w (stderr: %s)", provider, err, platform.StderrExcerpt(errb.String()))
 	}
 	list := parseOpenCodeModels(out.String())
 	set := make(map[string]bool, len(list))
@@ -993,22 +994,18 @@ func modelHint(models []string) string {
 }
 
 func buildOpenCodeServeCmdIn(ctx context.Context, runtimeRoot string, port int, password string) *exec.Cmd {
-	cmd := openCodeCommand(ctx, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
-	cmd.Dir = os.TempDir()
-	cmd.Env = replaceEnv(os.Environ(), []string{
-		"WITNESS_WORKER=1",
+	// openCodeCommand binds the serve child's lifetime to the worker (issue #54 I2): on Linux
+	// proc.BindToParent sets Pdeathsig=SIGKILL so the kernel kills this serve child the
+	// instant the worker dies, even on a SIGKILL/OOM the worker's Go cleanup can't survive.
+	// No such primitive exists on macOS/Windows, where it's a no-op and the startup
+	// ReapOrphans sweep is the fallback.
+	cmd := openCodeCommand(ctx, runtimeRoot, "serve", "--pure", "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--log-level", "ERROR")
+	cmd.Env = replaceEnv(cmd.Env, []string{
 		"OPENCODE_DISABLE_CLAUDE_CODE=1",
 		"OPENCODE_SERVER_USERNAME=opencode",
 		"OPENCODE_SERVER_PASSWORD=" + password,
 		"OPENCODE_CONFIG_CONTENT=" + openCodeConfigContent(),
 	})
-	cmd.Env = replaceEnv(cmd.Env, isolatedEnv(runtimeRoot))
-	// Bind the serve child's lifetime to the worker (issue #54 I2) through the
-	// process-control port: on Linux proc.BindToParent sets Pdeathsig=SIGKILL so the
-	// kernel kills this serve child the instant the worker dies, even on a SIGKILL/OOM
-	// the worker's Go cleanup can't survive. No such primitive exists on macOS/Windows,
-	// where it's a no-op and the startup ReapOrphans sweep is the fallback.
-	procCtl.BindToParent(cmd)
 	return cmd
 }
 

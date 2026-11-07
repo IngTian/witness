@@ -19,17 +19,8 @@ func newInternalWorkerCmd() *cobra.Command {
 	var auto bool
 	var since string
 	var until string
-	c := &cobra.Command{Use: "worker-run", Hidden: true, RunE: func(_ *cobra.Command, args []string) error {
-		if auto {
-			args = append(args, "--auto")
-		}
-		if since != "" {
-			args = append(args, "--since", since)
-		}
-		if until != "" {
-			args = append(args, "--until", until)
-		}
-		return cmdWorker(args)
+	c := &cobra.Command{Use: "worker-run", Hidden: true, Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+		return cmdWorker(auto, since, until)
 	}}
 	c.Flags().BoolVar(&auto, "auto", false, "run with automatic distillation limits")
 	c.Flags().StringVar(&since, "since", "", "only sessions updated at or after this time")
@@ -42,40 +33,14 @@ func newInternalWorkerCmd() *cobra.Command {
 // runs the reviewer if due. Triggers just spawn this; if a consumer is already
 // running, the new one no-ops immediately. The filesystem is the durable job
 // queue; this lock elects the single consumer that drains it.
-func cmdWorker(args []string) error {
-	auto, timeRange, err := workerFlags(args)
+func cmdWorker(auto bool, since, until string) error {
+	timeRange, err := parseSessionTimeRange(since, until, time.Now())
 	if err != nil {
 		return err
 	}
 	// Silent: this is the detached worker every trigger spawns.
 	_, err = runWorkerInRange(auto, timeRange, "")
 	return err
-}
-
-func workerFlags(args []string) (bool, sessionTimeRange, error) {
-	auto := false
-	since := ""
-	until := ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--auto":
-			auto = true
-		case "--since", "--until":
-			if i+1 >= len(args) {
-				return false, sessionTimeRange{}, fmt.Errorf("%s requires a value", args[i])
-			}
-			if args[i] == "--since" {
-				since = args[i+1]
-			} else {
-				until = args[i+1]
-			}
-			i++
-		default:
-			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker-run [--auto] [--since <time>] [--until <time>]")
-		}
-	}
-	timeRange, err := parseSessionTimeRange(since, until, time.Now())
-	return auto, timeRange, err
 }
 
 // The worker's liveness meta keys and worker_mode values. Named, because a misspelt key reads
@@ -121,7 +86,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		slog.Error("worker refused", "err", err)
 		return false, err
 	}
-	cfg := st.LoadConfig()
+	// Resolved here, not just loaded: cfg.Runner is the runtime a lens with no explicit
+	// `# runner` rides, and the target the per-lens router (distill.RunnerFor) compares
+	// against. This is what lets an npm OpenCode user — who never ran `install`, so config
+	// says the default "claude" — distill via OpenCode: their plugin passes
+	// WITNESS_RUNNER=opencode. An explicit `install` choice (runner_bound) still wins (see
+	// ResolveRunner). Per-lens runners layer on top via newRunnerSet below.
+	cfg := st.ResolvedConfig()
 	if auto && !cfg.AutoDistill {
 		return false, nil
 	}
@@ -166,14 +137,6 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		defer scheduleRetryWakeup(st)
 	}
 
-	// Resolve the effective default runner ONCE and overwrite cfg.Runner: it is the runtime
-	// a lens with no explicit `# runner` rides, and the target the per-lens router
-	// (distill.RunnerFor) compares against. This is what lets an npm OpenCode user — who
-	// never ran `install`, so config says the default "claude" — distill via OpenCode:
-	// their plugin passes WITNESS_RUNNER=opencode. An explicit `install` choice
-	// (runner_bound) still wins (see ResolveRunner). Per-lens runners layer on top via
-	// newRunnerSet below.
-	cfg.Runner = st.ResolveRunner(cfg)
 	lenses := activeLenses(st)
 	// The pending query cross-joins sessions against the ACTIVE lens set (#55). Use
 	// the same loaded lenses the drain will mine, so the queue only offers pairs the
@@ -559,23 +522,24 @@ func regenerateProfile(ctx context.Context, st *store.Store, cfg store.Config, l
 const sourcesRetryKey = "sources_retry_after"
 
 // resolvePortraitSources links portrait sentences to their source facets. Reads the resolver
-// prompts, builds a Summarizer with ResolvePrompt/ResolveUnifiedPrompt, and calls
-// ResolveSources(), which resolves every stale portrait and writes the links to disk.
-// ensure opens the runner set and is called only when a portrait is stale, so an idle worker
-// with everything current never pays for it; if it fails (and logged why) nothing was attempted,
-// so nothing is cleared or backed off. Once nothing is stale it clears sourcesRetryKey — EVERY
-// caller, because a review that relinks must lift a failed self-heal's back-off, or the next
-// portrait change waits up to 6h. Failures are logged but never propagated: source resolution is
-// auxiliary metadata that must never break the review or worker run. Returns error only for
-// logging and the self-heal's back-off; callers must not propagate it into an exit status.
+// prompts, builds a distill.Resolver, and calls ResolveSources(), which resolves every stale
+// portrait and writes the links to disk.
+// ensure opens the runner set and is called only when a portrait is stale — StaleSources is the
+// no-model gate — so an idle worker with everything current never pays for it; if it fails (and
+// logged why) nothing was attempted, so nothing is cleared or backed off. Once nothing is stale it
+// clears sourcesRetryKey — EVERY caller, because a review that relinks must lift a failed
+// self-heal's back-off, or the next portrait change waits up to 6h. Failures are logged but never
+// propagated: source resolution is auxiliary metadata that must never break the review or worker
+// run. Returns error only for logging and the self-heal's back-off; callers must not propagate it
+// into an exit status.
 func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens, runFn distill.MineFunc, runForLens func(*lens.Lens) distill.MineFunc, ensure func() bool) error {
 	lensPrompt, unifiedPrompt, err := lens.LoadResolvePrompts()
 	if err != nil {
 		slog.Warn("profile: resolver prompts unavailable; skipping source linking", "err", err)
 		return err
 	}
-	sm := &distill.Summarizer{Store: st, Config: cfg, Lenses: lenses, ResolvePrompt: lensPrompt, ResolveUnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
-	stale, err := sm.StaleSources()
+	rs := &distill.Resolver{Store: st, Config: cfg, Lenses: lenses, LensPrompt: lensPrompt, UnifiedPrompt: unifiedPrompt, Run: runFn, RunFor: runForLens}
+	stale, err := rs.StaleSources()
 	if err != nil {
 		slog.Warn("profile: failed to check stale sources", "err", err)
 		return err
@@ -584,11 +548,14 @@ func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Conf
 		if !ensure() {
 			return nil
 		}
-		if err := sm.ResolveSources(ctx); err != nil {
+		resolved, err := rs.ResolveSources(ctx)
+		if len(resolved) > 0 {
+			slog.Info("profile: sources linked", "portraits", len(resolved))
+		}
+		if err != nil {
 			slog.Warn("profile: source resolution failed", "err", err)
 			return err
 		}
-		slog.Info("profile: sources linked", "portraits", len(stale))
 	}
 	_ = st.SetMetaString(sourcesRetryKey, "")
 	return nil

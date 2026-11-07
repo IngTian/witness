@@ -80,34 +80,12 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 // shrink it; nothing in production reassigns it.
 var claudeRunTimeout = 10 * time.Minute
 
-// maxStderrExcerpt bounds how much of a failed child's stderr is interpolated into the error.
-//
-// That error string becomes ONE line in witness.log (the worker logs it on a mine failure), and
-// the child's stderr is unbounded across the 10-minute timeout — so a chatty or looping `claude`
-// could write a single multi-megabyte log line. The measured real case is only ~0.5KB (repeated
-// ANSI-wrapped "AWS auth refresh timed out"), so this is a ceiling on a known-possible shape
-// rather than a fix for observed damage.
-const maxStderrExcerpt = 4000
-
-// stderrExcerpt trims a child's stderr and keeps its TAIL when oversized.
-//
-// The tail, not the head: a failing CLI puts the actual error last, after any banner or progress
-// noise, so truncating from the front would preserve exactly the useless part. The marker makes
-// the truncation visible so nobody debugs a silently clipped message.
-func stderrExcerpt(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= maxStderrExcerpt {
-		return s
-	}
-	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
-}
-
 // childOutput is a failed child's stderr excerpt plus, when there is any, a bounded tail of its
 // stdout — which is where `claude -p` prints its own errors. Reporting stderr alone logged the
 // default-lens stall 322 times as `exit status 1 (stderr: )`.
 func childOutput(stderr, stdout string) string {
-	s := stderrExcerpt(stderr)
-	if o := stderrExcerpt(stdout); o != "" {
+	s := platform.StderrExcerpt(stderr)
+	if o := platform.StderrExcerpt(stdout); o != "" {
 		s += "; stdout: " + o
 	}
 	return s
@@ -145,15 +123,15 @@ var buildRunCmdFn = buildRunCmd
 
 // buildRunCmd assembles the isolated `claude -p` invocation, separating witness's
 // instructions from the corpus: the instructions become the system prompt; the
-// corpus is the user turn (stdin), fenced by platform.WrapCorpus so it cannot
-// impersonate witness's instructions. This is the profile prompt-injection defense
-// — a hostile repo that induces record_observation(<payload>) cannot have that
-// payload reach the reviewer as instructions. Split out from Run so the wiring is
-// unit-testable. WITNESS_WORKER=1 is the recursion guard.
+// corpus is the user turn (stdin). Both arrive already fenced (distill.RunnerMine applies
+// platform.WrapCorpus + CorpusNotice for every runner), so the corpus cannot impersonate
+// witness's instructions — a hostile repo that induces record_observation(<payload>)
+// cannot have that payload reach the reviewer as instructions. Split out from Run so the
+// wiring is unit-testable. WITNESS_WORKER=1 is the recursion guard.
 func buildRunCmd(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
 	cmd := newClaudeCmd(ctx, model)
-	cmd.Args = append(cmd.Args, "--append-system-prompt", systemPrompt+"\n\n"+platform.CorpusNotice)
-	cmd.Stdin = strings.NewReader(platform.WrapCorpus(input))
+	cmd.Args = append(cmd.Args, "--append-system-prompt", systemPrompt)
+	cmd.Stdin = strings.NewReader(input)
 	cmd.Env = append(os.Environ(), "WITNESS_WORKER=1")
 	return cmd
 }

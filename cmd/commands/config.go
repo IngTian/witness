@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -30,25 +29,14 @@ func canonicalConfigKey(k string) string {
 // default, and from says where the value came from ("" when there is nothing worth saying).
 type setting struct{ key, value, from string }
 
-// runnerBoundMetaKey mirrors store.runnerBoundKey: "1" once a runner was bound explicitly (config
-// set runner / wire), which is what makes config.toml win over $WITNESS_RUNNER.
-const runnerBoundMetaKey = "runner_bound"
-
 // effectiveConfig resolves runner, mine_model and review_model the way the engine does —
 // ResolveRunner, then distill.RunnerFor / distill.ModelFor — so every surface shows what will run,
 // not the raw field. Reading the raw field said review_model was "(runner default)" while review
 // actually ran on mine_model, because an empty review_model falls back to it. l == nil is the
 // default scope; otherwise l is the lens as loaded from the registry (its fields are the overrides).
 func effectiveConfig(st *store.Store, l *lens.Lens) []setting {
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
-	runnerFrom := "built-in default"
-	switch {
-	case st.MetaString(runnerBoundMetaKey) == "1":
-		runnerFrom = "config.toml"
-	case strings.TrimSpace(os.Getenv("WITNESS_RUNNER")) != "":
-		runnerFrom = "$WITNESS_RUNNER"
-	}
+	cfg := st.ResolvedConfig()
+	runnerFrom := st.RunnerOrigin()
 	if l == nil {
 		mineFrom, reviewFrom := "", ""
 		if cfg.TriageModel != "" {

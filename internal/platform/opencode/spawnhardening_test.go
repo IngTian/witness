@@ -66,7 +66,7 @@ func TestOpenCodeCommandUsesTheTestSeam(t *testing.T) {
 		return prev(ctx, "echo", "stubbed")
 	}
 
-	cmd := openCodeCommand(context.Background(), "serve", "--pure")
+	cmd := openCodeCommand(context.Background(), "", "serve", "--pure")
 	if cmd == nil {
 		t.Fatal("openCodeCommand returned nil")
 	}
@@ -287,7 +287,7 @@ func TestReapPriorServeIgnoresGarbageRecords(t *testing.T) {
 func TestEmptyRuntimeRootIsRefused(t *testing.T) {
 	prevVersion, prevExec := openCodeVersionCommand, execCommandContext
 	t.Cleanup(func() { openCodeVersionCommand, execCommandContext = prevVersion, prevExec })
-	openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
 	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		t.Errorf("spawned %s %v with no runtime root", name, args)
 		return exec.CommandContext(ctx, os.Args[0], "-test.run=XXX_NONE")

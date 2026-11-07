@@ -111,8 +111,8 @@ func TestParseOpenCodeVersionShapes(t *testing.T) {
 			// ValidateOpenCodeCapability itself rather than on a copy of its condition.
 			prev := openCodeVersionCommand
 			t.Cleanup(func() { openCodeVersionCommand = prev })
-			openCodeVersionCommand = func(context.Context) ([]byte, error) { return []byte(tc.in), nil }
-			if gate := ValidateOpenCodeCapability(context.Background()) == nil; gate != tc.expectGatePassing {
+			openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte(tc.in), nil }
+			if gate := ValidateOpenCodeCapability(context.Background(), "") == nil; gate != tc.expectGatePassing {
 				t.Errorf("1.18 gate = %v, want %v for %q", gate, tc.expectGatePassing, tc.in)
 			}
 			major, minor, _, ok := parseOpenCodeVersion(tc.in)

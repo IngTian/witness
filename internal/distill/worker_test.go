@@ -324,7 +324,7 @@ func TestCommitDoesNotWriteMinedObsWhenRawReplacedMidMine(t *testing.T) {
 	// An MCP-staged active obs rides along with this commit; it is authoritative and
 	// generation-independent, so it must survive even when the mined obs are dropped.
 	active := store.Observation{
-		ID: obsID(sess, "default", "active-fact"), Session: sess, Lens: "default",
+		ID: store.ObservationID(sess, "default", "active-fact"), Session: sess, Lens: "default",
 		Dimension: "thinking", Observation: "active-fact",
 	}
 	if err := s.StageObservation(active); err != nil {
@@ -457,7 +457,7 @@ func TestStagedActiveObsNotDuplicatedOnRedistill(t *testing.T) {
 	ctx := context.Background()
 
 	active := store.Observation{
-		ID:          obsID("s", "default", "active-fact"),
+		ID:          store.ObservationID("s", "default", "active-fact"),
 		Session:     "s",
 		Lens:        "default",
 		Dimension:   "thinking",
@@ -506,7 +506,7 @@ func TestEmbedFailureIsLoggedForActiveAndMinedObs(t *testing.T) {
 	s := newStore(t)
 	w := testWorker(s, &fakeMiner{})
 	w.Embedder = failingEmbedder{}
-	if err := s.StageObservation(store.Observation{ID: obsID("s", "default", "af"), Session: "s", Lens: "default", Observation: "af"}); err != nil {
+	if err := s.StageObservation(store.Observation{ID: store.ObservationID("s", "default", "af"), Session: "s", Lens: "default", Observation: "af"}); err != nil {
 		t.Fatal(err)
 	}
 	capture(t, s, "s", "user", "alpha")
@@ -524,7 +524,7 @@ func TestStagedClearedAfterSuccess(t *testing.T) {
 	s := newStore(t)
 	w := testWorker(s, &fakeMiner{})
 	_ = s.StageObservation(store.Observation{
-		ID: obsID("s", "default", "af"), Session: "s", Lens: "default", Observation: "af",
+		ID: store.ObservationID("s", "default", "af"), Session: "s", Lens: "default", Observation: "af",
 	})
 	capture(t, s, "s", "user", "x")
 	if err := w.Process(context.Background(), "s"); err != nil {
@@ -541,7 +541,7 @@ func TestStagedRetainedAfterFailure(t *testing.T) {
 	s := newStore(t)
 	w := testWorker(s, &fakeMiner{failsLeft: 1})
 	_ = s.StageObservation(store.Observation{
-		ID: obsID("s", "default", "af"), Session: "s", Lens: "default", Observation: "af",
+		ID: store.ObservationID("s", "default", "af"), Session: "s", Lens: "default", Observation: "af",
 	})
 	capture(t, s, "s", "user", "x")
 	if err := w.Process(context.Background(), "s"); err != nil {

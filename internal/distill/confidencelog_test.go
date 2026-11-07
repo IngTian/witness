@@ -21,7 +21,7 @@ import (
 func stageObs(t *testing.T, s *store.Store, lensName, text string) int64 {
 	t.Helper()
 	if err := s.AppendObservations([]store.Observation{{
-		ID: obsID("sess", lensName, text), TS: "2026-11-01T00:00:00Z", Session: "sess",
+		ID: store.ObservationID("sess", lensName, text), TS: "2026-11-01T00:00:00Z", Session: "sess",
 		Lens: lensName, Dimension: "d", Observation: text, Poignancy: 5,
 	}}); err != nil {
 		t.Fatalf("AppendObservations: %v", err)

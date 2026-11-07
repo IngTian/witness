@@ -261,7 +261,7 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		// reporting success.
 		data := dataName(in.Lens)
 		o := store.Observation{
-			ID:          obsID(in.Session, data, in.Observation),
+			ID:          store.ObservationID(in.Session, data, in.Observation),
 			TS:          time.Now().UTC().Format(time.RFC3339),
 			Session:     in.Session,
 			Lens:        data,
@@ -477,10 +477,4 @@ func renderFacets(lensName, data string, facets []store.Facet, decaySeq int64, h
 	}
 	header := fmt.Sprintf("Growth facets (%s lens) — %d:\n\n", lensName, count)
 	return header + b.String()
-}
-
-func obsID(session, lens, text string) string {
-	// match the worker's id scheme so active+mined dedup is coherent
-	h := sha1sum(session + "|" + lens + "|" + text)
-	return "obs_" + h[:12]
 }

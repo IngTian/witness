@@ -2,7 +2,6 @@ package distill
 
 import (
 	"context"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -65,9 +64,13 @@ type MineFunc func(ctx context.Context, model, prompt, input string) (string, er
 // injectable MineFunc for tests while routing production through the single Runner
 // (platform.RunnerForName) resolved once per drain. distill knows only platform.Runner
 // — never which runtime it is.
+//
+// It is also where the prompt-injection fence is applied, ONCE for every runtime: every
+// production Run goes through here, so the runner receives CorpusNotice already on the system
+// prompt and the corpus already fenced and defanged, and a new runner cannot ship without it.
 func RunnerMine(r platform.Runner) MineFunc {
 	return func(ctx context.Context, model, prompt, input string) (string, error) {
-		return r.Run(ctx, model, prompt, input)
+		return r.Run(ctx, model, prompt+"\n\n"+platform.CorpusNotice, platform.WrapCorpus(input))
 	}
 }
 
@@ -618,7 +621,7 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 			m.Poignancy = 1
 		}
 		obs = append(obs, store.Observation{
-			ID:          obsID(session, ln.Name, m.Observation),
+			ID:          store.ObservationID(session, ln.Name, m.Observation),
 			Session:     session,
 			Lens:        ln.Name,
 			Dimension:   m.Dimension,
@@ -687,11 +690,6 @@ func PreviewMine(ctx context.Context, run MineFunc, cfg store.Config, st Preview
 	// anywhere AND at least one input drifted, so a session where one chunk extracts
 	// fine is never miscounted.
 	return obs, chunkCount, sawDrift && !producedObs, nil
-}
-
-func obsID(session, lens, text string) string {
-	h := sha1.Sum([]byte(session + "|" + lens + "|" + text))
-	return "obs_" + fmt.Sprintf("%x", h[:6])
 }
 
 // mustJSON is a small helper for embedding structured input into prompts.

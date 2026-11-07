@@ -29,7 +29,7 @@ func TestCmdImportNoKickLeavesPendingL0ForQuietWorker(t *testing.T) {
 	importWorkerSpawner = func() { spawns++ }
 	t.Cleanup(func() { importWorkerSpawner = previousSpawner })
 
-	if err := cmdImport([]string{"--agent", "claude", "--quiet", "--no-kick"}); err != nil {
+	if err := cmdImport(importOpts{agent: "claude", quiet: true, noKick: true}); err != nil {
 		t.Fatal(err)
 	}
 	if spawns != 0 {
@@ -46,7 +46,7 @@ func TestCmdImportNoKickLeavesPendingL0ForQuietWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := cmdImport([]string{"--agent", "claude", "--quiet"}); err != nil {
+	if err := cmdImport(importOpts{agent: "claude", quiet: true}); err != nil {
 		t.Fatal(err)
 	}
 	if spawns != 1 {

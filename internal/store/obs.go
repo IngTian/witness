@@ -1,9 +1,20 @@
 package store
 
 import (
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 )
+
+// ObservationID is the L1 dedup identity: the same (session, lens, text) always mints the same
+// id, which is what lets an active observation and a mined one collapse, and what emerge_seen
+// marks key on. The one home for the scheme — the worker, the MCP server and the CLI all mint
+// through here, and existing archives hold ids in exactly this form, so it never changes.
+func ObservationID(session, lens, text string) string {
+	h := sha1.Sum([]byte(session + "|" + lens + "|" + text))
+	return "obs_" + fmt.Sprintf("%x", h[:6])
+}
 
 // obsIO is the L1 observation concern: the append-only `observations` table (the
 // worker's mined + passed-through-active output) plus the in-session `staged` buffer

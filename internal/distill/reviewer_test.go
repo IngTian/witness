@@ -16,7 +16,7 @@ import (
 func stageObsForReview(t *testing.T, s *store.Store, lensName string) {
 	t.Helper()
 	if err := s.AppendObservations([]store.Observation{{
-		ID:          obsID("sess", lensName, "obs-"+lensName),
+		ID:          store.ObservationID("sess", lensName, "obs-"+lensName),
 		TS:          time.Now().UTC().Format(time.RFC3339),
 		Session:     "sess",
 		Lens:        lensName,

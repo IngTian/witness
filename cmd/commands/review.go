@@ -70,8 +70,7 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	}
 	defer unlock()
 
-	cfg := st.LoadConfig()
-	cfg.Runner = st.ResolveRunner(cfg)
+	cfg := st.ResolvedConfig()
 	lenses := activeLenses(st)
 	ctx := context.Background()
 	// Same runner lifecycle as the worker: open the set of runtimes the active lenses

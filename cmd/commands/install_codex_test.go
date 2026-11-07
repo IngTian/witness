@@ -550,17 +550,25 @@ func TestCodexRefusesToClobberUnparseableHooksFile(t *testing.T) {
 }
 
 func TestCodexIsARegisteredInstallTarget(t *testing.T) {
-	if _, ok := platform.InstallerFor("codex"); !ok {
+	if _, ok := editors["codex"]; !ok {
 		t.Fatal("codex is not registered as an install target, so `witness wire codex` cannot dispatch")
 	}
 	// TestWireUnwireInstallShapes checks that wire's help names every registered target.
 }
 
-// fakeCaptureOnlyInstaller stands in for a venue that captures but runs no model.
-type fakeCaptureOnlyInstaller struct{ called *bool }
-
-func (f fakeCaptureOnlyInstaller) Install() error   { *f.called = true; return nil }
-func (f fakeCaptureOnlyInstaller) Uninstall() error { return nil }
+// registerFakeCaptureOnlyEditor adds a wire target that captures but runs no model, for the
+// length of the test (t.Cleanup removes it, so `-count=2` re-registers cleanly).
+func registerFakeCaptureOnlyEditor(t *testing.T, name string, called *bool) {
+	t.Helper()
+	editors[name] = editor{
+		wire: func() (wireOutcome, error) {
+			*called = true
+			return wireOutcome{glyph: okGlyph(), line: "wired"}, nil
+		},
+		unwire: func() (bool, string, error) { return true, "", nil },
+	}
+	t.Cleanup(func() { delete(editors, name) })
+}
 
 // Wiring a capture-only venue must NOT bind it as the distillation runner.
 //
@@ -579,7 +587,7 @@ func TestWiringACaptureOnlyVenueDoesNotBindItAsRunner(t *testing.T) {
 		t.Fatalf("precondition: %q must not be a valid runner, or this test proves nothing", venue)
 	}
 	called := false
-	platform.RegisterInstaller(venue, fakeCaptureOnlyInstaller{&called})
+	registerFakeCaptureOnlyEditor(t, venue, &called)
 
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")

@@ -56,7 +56,8 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   `registry.go` requires only identity; rendering, import, capture and runner are
   optional capabilities (rendering falls back to the shared `RenderChunks`, import to
   nothing); `cmd/commands/root.go` imports the adapters. Installers register
-  separately through `installer.go` and have cmd-side implementations.
+  separately: a cmd-local wire-target map (`cmd/commands/installers.go`) with cmd-side
+  implementations.
   `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
 - `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding
   model) relative to the binary via `os.Executable()` when no env var points at

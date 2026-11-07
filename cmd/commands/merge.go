@@ -256,11 +256,12 @@ func planMergeFiles(st *store.Store, dir string, rep *store.MergeReport) *mergeF
 	return f
 }
 
-// sameLensDef compares the files a lens definition consists of.
+// sameLensDef compares the files a lens definition consists of (store.LensFiles, so a new
+// lens file can never compare equal here and be lost on merge).
 func sameLensDef(a, b string) bool {
-	for _, name := range []string{"lens.json", "extract.md", "review.md", "emerge.md"} {
-		x, errA := os.ReadFile(filepath.Join(a, name))
-		y, errB := os.ReadFile(filepath.Join(b, name))
+	for _, f := range store.LensFiles {
+		x, errA := os.ReadFile(filepath.Join(a, f.Name))
+		y, errB := os.ReadFile(filepath.Join(b, f.Name))
 		if (errA == nil) != (errB == nil) || !bytes.Equal(x, y) {
 			return false
 		}

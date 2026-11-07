@@ -4,14 +4,12 @@ import (
 	"context"
 	"io"
 	"slices"
-	"strings"
 	"testing"
-
-	"github.com/IngTian/witness/internal/platform"
 )
 
 // The corpus must travel as the user turn, never as instructions: witness's prompt
-// goes to --append-system-prompt; the corpus is fenced on stdin. Moved from distill
+// goes to --append-system-prompt; the corpus goes on stdin. Both VERBATIM — the fence is
+// applied once, by distill.RunnerMine, before any runner sees them. Moved from distill
 // with the runner impl (issue #21 PR4b).
 func TestBuildRunCmdRoleSeparation(t *testing.T) {
 	cmd := buildRunCmd(context.Background(), "", "EXTRACT INSTRUCTIONS", "payload")
@@ -19,25 +17,20 @@ func TestBuildRunCmdRoleSeparation(t *testing.T) {
 	if i < 0 || i+1 >= len(cmd.Args) {
 		t.Fatalf("system prompt not passed: %v", cmd.Args)
 	}
-	sys := cmd.Args[i+1]
-	if !strings.Contains(sys, "EXTRACT INSTRUCTIONS") || !strings.Contains(sys, "UNTRUSTED") {
-		t.Fatalf("system prompt missing instructions or corpus notice: %q", sys)
+	if sys := cmd.Args[i+1]; sys != "EXTRACT INSTRUCTIONS" {
+		t.Fatalf("system prompt not passed verbatim: %q", sys)
 	}
 	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config"} {
 		if !slices.Contains(cmd.Args, want) {
 			t.Errorf("isolation flag %q lost: %v", want, cmd.Args)
 		}
 	}
-	// The corpus must be fenced on stdin, not concatenated into the instructions.
+	// The corpus goes on stdin, not concatenated into the instructions.
 	if cmd.Stdin == nil {
 		t.Fatal("corpus must be passed on stdin")
 	}
-	stdin, err := io.ReadAll(cmd.Stdin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(stdin), platform.WrapCorpus("payload"); got != want {
-		t.Errorf("stdin = %q, want the fenced corpus %q", got, want)
+	if in, _ := io.ReadAll(cmd.Stdin); string(in) != "payload" {
+		t.Fatalf("stdin = %q, want the corpus verbatim", in)
 	}
 }
 
