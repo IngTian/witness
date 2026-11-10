@@ -213,9 +213,11 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 		}
 		existingResolved, err := r.resolveNameFromRegistry(existing)
 		if err != nil {
-			// Corrupted registered lens; report the collision-check failure rather than
-			// silently ignoring it (letting this lens register might clobber the broken one).
-			return fmt.Errorf("can't check collision: existing lens %q is unreadable: %w", existing, err)
+			// An unreadable neighbour can't mine (activeLenses skips it), so compare only the name
+			// that is always known, its registry handle. Refusing instead blocked EVERY registration,
+			// the first-open default seed included, on one broken lens.json elsewhere, now that this
+			// loop runs for every candidate.
+			existingResolved = existing
 		}
 		switch erLower := strings.ToLower(existingResolved); {
 		case erLower == rnameLower:

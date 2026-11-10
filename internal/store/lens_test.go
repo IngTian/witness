@@ -543,6 +543,24 @@ func TestRegisterRejectsResolvedNameCollisionInEitherOrder(t *testing.T) {
 	}
 }
 
+// The collision check reads every other registered lens, so one broken lens.json must not block
+// unrelated registrations (the first-open default seed among them); it still blocks its own name.
+func TestAnUnreadableNeighbourBlocksOnlyItsOwnName(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("broken", writeLensSrcDir(t, "", "x", "y")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.LensesDir(), "broken", "lens.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterLens("fine", writeLensSrcDir(t, "", "x", "y")); err != nil {
+		t.Fatalf("an unrelated lens must register despite a broken neighbour: %v", err)
+	}
+	if err := s.RegisterLens("other", writeLensSrcDir(t, "broken", "x", "y")); err == nil {
+		t.Fatal("a lens that would mine under the broken lens's handle must still be refused")
+	}
+}
+
 // F153: re-registering from a copy that drops or edits lens.json's `name` silently moved the
 // lens's data key, stranding everything mined under the old one. Refuse it while the old name
 // holds data, and say how to keep it; with nothing stranded, or the same data name, it succeeds.
