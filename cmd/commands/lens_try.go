@@ -241,8 +241,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// Progress on stderr, so stdout (and --json) is untouched: each preview is a model call per
 	// chunk and can run for minutes, and nothing prints until all of them are back.
 	update, finish := tryProgress()
-	// A registered lens is shown by the name the user typed — corpus-example, not the "regime"
-	// its lens.json mines as. (--json keeps ln.Name, its documented field.)
+	// A registered lens is shown by the name the user typed, not a different lens.json name it
+	// mines as (a corpus-example registered from a pre-F153 checkout mines as "regime"). (--json
+	// keeps ln.Name, its documented field.)
 	display := ln.Name
 	if registered && !candidate {
 		display = file

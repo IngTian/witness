@@ -42,53 +42,101 @@ func TestOldFormatLensIsNamedWithItsFix(t *testing.T) {
 		if strings.Count(out, oldLensFormat) != 2 {
 			t.Errorf("%s must say %q once per old-format lens:\n%s", screen, oldLensFormat, out)
 		}
+		// lens.md's headers carried the data name and dimensions; a split into the two prompts
+		// alone loses them.
+		if !strings.Contains(out, `"# dimensions:" lines go in lens.json`) {
+			t.Errorf("%s must say where lens.md's header lines go:\n%s", screen, out)
+		}
 		if strings.Contains(out, "witness lens disable notes") || strings.Contains(out, "orphan") {
 			t.Errorf("%s must not treat an old-format lens as an orphan:\n%s", screen, out)
 		}
 	}
 }
 
+// The re-register hint is a command to paste, so a data dir with a space comes out quoted.
+func TestOldFormatHintQuotesThePath(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "home sp"))
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	want := "witness lens register notes " + shellQuote(filepath.Join(st.LensesDir(), "notes"))
+	if got := reRegisterOldLens(st, "notes"); got != want {
+		t.Fatalf("got %s\nwant %s", got, want)
+	}
+}
+
 // F048: `config set --lens` writes the registered lens.json, which a re-register replaces whole,
 // so a pinned model or runner vanished behind a bare "[ok] registered". Each lost setting must be
-// named with the command that puts it back; one the new source keeps is not lost.
+// named with the command that puts it back (quoted for a shell); one the new source keeps is not
+// lost, and one it changes is named as replaced, with no hint that would undo the change. Only
+// lens.json is compared, so a lens that does not load, before or after, is no exception.
 func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 	st := readFixture(t)
 	if err := st.RegisterLens("math", writeLensDir(t, "", "mine math", "fold math")); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetLensModel("math", "extract", "claude-opus-x"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetLensRunner("math", "opencode"); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetLensModel(store.LensDefault, "review", "claude-strong"); err != nil {
-		t.Fatal(err)
-	}
-	keep := writeLensDir(t, "", "mine math", "fold math")
-	if err := os.WriteFile(filepath.Join(keep, "lens.json"), []byte(`{"runner":"opencode"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out := captureStdout(t, func() {
-		if err := lensRegister(st, "math", keep); err != nil {
-			t.Fatal(err)
-		}
-		if err := lensLoadDefault(st); err != nil {
-			t.Fatal(err)
-		}
-	})
-	for _, want := range []string{
-		"[!] dropped mine_model = claude-opus-x  (lens math)",
-		"witness config set mine_model claude-opus-x --lens math",
-		"[!] dropped review_model = claude-strong  (lens default)",
-		"witness config set review_model claude-strong --lens default",
+	for _, set := range []func() error{
+		func() error { return st.SetLensModel("math", "extract", "opus[1m]") }, // zsh globs an unquoted [ ]
+		func() error { return st.SetLensModel("math", "review", "claude-a") },
+		func() error { return st.SetLensRunner("math", "opencode") },
+		func() error { return st.SetLensModel(store.LensDefault, "review", "claude-strong") },
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in:\n%s", want, out)
+		if err := set(); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if strings.Contains(out, "dropped runner") {
-		t.Errorf("a setting the new source keeps was not dropped:\n%s", out)
+	// The case load-default's help names, "re-seed it after editing broke it": default no longer loads.
+	if err := os.WriteFile(filepath.Join(st.LensesDir(), store.LensDefault, "extract.md"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := func(cfg string) string {
+		dir := writeLensDir(t, "", "mine math", "fold math")
+		if err := os.WriteFile(filepath.Join(dir, "lens.json"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	reg := func(cfg string) func() error { return func() error { return lensRegister(st, "math", src(cfg)) } }
+	for _, step := range []struct {
+		name      string
+		run       func() error
+		want, not []string
+	}{
+		{"keeps runner, changes review_model, drops mine_model", reg(`{"runner":"opencode","review_model":"claude-b"}`), []string{
+			"[!] dropped mine_model = opus[1m]  (lens math)",
+			"witness config set mine_model 'opus[1m]' --lens math",
+			"[!] replaced review_model claude-a → claude-b  (lens math)",
+		}, []string{"dropped runner", "replaced runner", "review_model claude-a --lens"}},
+		// Keeps both values but does not load (dimensions must be a list): nothing was lost.
+		{"keeps both, does not load", reg(`{"dimensions":"x","runner":"opencode","review_model":"claude-b"}`), nil, []string{"[!]"}},
+		// The copy that left does not load, and still has both values to lose.
+		{"from a copy that does not load", reg(`{}`), []string{
+			"[!] dropped runner = opencode  (lens math)",
+			"[!] dropped review_model = claude-b  (lens math)",
+		}, nil},
+		{"load-default over a default that does not load", func() error { return lensLoadDefault(st) }, []string{
+			"[!] dropped review_model = claude-strong  (lens default)",
+			"witness config set review_model claude-strong --lens default",
+		}, nil},
+	} {
+		out := captureStdout(t, func() {
+			if err := step.run(); err != nil {
+				t.Fatal(err)
+			}
+		})
+		for _, want := range step.want {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s: missing %q in:\n%s", step.name, want, out)
+			}
+		}
+		for _, not := range step.not {
+			if strings.Contains(out, not) {
+				t.Errorf("%s: %q, but nothing the source keeps or changes was dropped:\n%s", step.name, not, out)
+			}
+		}
 	}
 }
 
@@ -114,6 +162,22 @@ func TestDefaultLensPromptsDifferFromTheBundle(t *testing.T) {
 		}, true},
 		{"no default lens", func(t *testing.T, st *store.Store, _ string) {
 			if err := st.DeregisterLens(store.LensDefault); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		// A disabled default never runs, and load-default would turn it back on.
+		{"disabled, review.md edited", func(t *testing.T, st *store.Store, dir string) {
+			if err := st.DisableLens(store.LensDefault); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "review.md"), []byte("an older seed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		// No bundle resolves (an empty prompts dir): nothing to claim the copy differs from.
+		{"no bundle, review.md edited", func(t *testing.T, _ *store.Store, dir string) {
+			t.Setenv("WITNESS_PROMPTS", t.TempDir())
+			if err := os.WriteFile(filepath.Join(dir, "review.md"), []byte("an older seed\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}, false},

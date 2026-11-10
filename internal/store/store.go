@@ -198,8 +198,10 @@ func (s *Store) RegisterLens(name, srcDir string) error {
 		newName, err2 := ResolveLensName(srcDir, name)
 		if err1 == nil && err2 == nil && oldName != newName {
 			if obs, facets := s.LensDataCounts(oldName); obs+facets > 0 {
-				return fmt.Errorf("re-registering lens %q would store its data under %q instead of %q, stranding %d observations and %d facets; to keep them, set \"name\": %q in %s",
-					name, newName, oldName, obs, facets, oldName, filepath.Join(srcDir, LensConfigFile))
+				// The fix names a copy, not srcDir itself: on load-default srcDir is the shipped
+				// bundle, which no user should edit.
+				return fmt.Errorf("re-registering lens %q would store its data under %q instead of %q, stranding %d observations and %d facets; to keep them, register %q from a copy of %s whose %s sets \"name\": %q",
+					name, newName, oldName, obs, facets, name, srcDir, LensConfigFile, oldName)
 			}
 		}
 	}

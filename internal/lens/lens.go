@@ -292,9 +292,9 @@ func LoadFromDirUnchecked(dir string) (*Lens, error) {
 
 // DataName maps the name a lens is registered under (the one every command and MCP tool takes)
 // to the name the worker tags its observations, facets and profile with — the lens.json `name`,
-// which may differ: corpus-example mines as "regime". Every surface that takes a lens name must
-// pass it through here before touching data, or it reads an empty lens — and a writer files rows
-// under a name no review reads. A name that is not registered, or does not load, is returned as
+// which may differ (a corpus-example registered from a pre-F153 checkout mines as "regime").
+// Every surface that takes a lens name must pass it through here before touching data, or it
+// reads an empty lens — and a writer files rows under a name no review reads. A name that is not registered, or does not load, is returned as
 // given, so data that outlived its lens's registration stays readable by its own name.
 func DataName(st *store.Store, name string) string {
 	if !slices.Contains(st.RegisteredLenses(), name) {

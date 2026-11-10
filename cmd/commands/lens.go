@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -176,7 +177,7 @@ func lensList(st *store.Store) error {
 // install no longer seeds content and a deliberately-removed default stays gone, this is the sole
 // "bring default back" path.
 func lensLoadDefault(st *store.Store) error {
-	old, _ := lens.LoadRegistered(store.LensDefault, st.LensesDir())
+	old := lensSettings(st, store.LensDefault)
 	if err := seedDefaultLens(st); err != nil {
 		return fmt.Errorf("load default lens: %w", err)
 	}
@@ -188,26 +189,36 @@ func lensLoadDefault(st *store.Store) error {
 // warnDroppedSettings names each per-lens setting a re-register just erased (F048). `config set
 // --lens` writes the REGISTERED lens.json, and a register replaces that whole copy with the
 // source's, so a pinned model or runner vanished with only "[ok] registered" to show for it —
-// noticed, if ever, as worse facets or a different bill. old is the lens before the register
-// (nil when it was not registered or did not load: nothing to lose).
-func warnDroppedSettings(st *store.Store, name string, old *lens.Lens) {
-	if old == nil {
-		return
-	}
-	now, err := lens.LoadRegistered(name, st.LensesDir())
-	if err != nil {
-		now = &lens.Lens{}
-	}
+// noticed, if ever, as worse facets or a different bill. old is lensSettings before the register.
+// A value the new source changes is named as replaced, with no re-apply hint: running it would
+// undo a deliberate edit to the source.
+func warnDroppedSettings(st *store.Store, name string, old lens.LensConfig) {
+	now := lensSettings(st, name)
 	for _, s := range []struct{ key, was, is string }{
 		{"runner", old.Runner, now.Runner},
 		{"mine_model", old.ExtractModel, now.ExtractModel},
 		{"review_model", old.ReviewModel, now.ReviewModel},
 	} {
-		if s.was != "" && s.was != s.is {
+		switch {
+		case s.was == "" || s.was == s.is:
+		case s.is != "":
+			fmt.Println(result(warnGlyph(), "replaced "+s.key+" "+s.was+" → "+s.is, "lens "+name))
+		default:
 			fmt.Println(result(warnGlyph(), "dropped "+s.key+" = "+s.was, "lens "+name))
-			fmt.Println(hint("re-apply", "witness config set "+s.key+" "+s.was+" --lens "+name))
+			fmt.Println(hint("re-apply", "witness config set "+s.key+" "+shellArg(s.was)+" --lens "+name))
 		}
 	}
+}
+
+// lensSettings reads only the registered lens.json's settings, not the whole lens: a lens that
+// does not load (an emptied extract.md, a wrong-typed field) still loses its pinned values to a
+// re-register, and is how load-default's "re-seed it after editing broke it" is reached. Best
+// effort: unregistered or unreadable is the zero config (nothing to lose), and json.Unmarshal
+// still fills the well-typed fields when another one has the wrong type.
+func lensSettings(st *store.Store, name string) (c lens.LensConfig) {
+	data, _ := os.ReadFile(filepath.Join(st.LensesDir(), name, lens.ConfigFile))
+	_ = json.Unmarshal(data, &c)
+	return c
 }
 
 func lensRegister(st *store.Store, name, dir string) error {
@@ -221,7 +232,7 @@ func lensRegister(st *store.Store, name, dir string) error {
 	} else if !fi.IsDir() {
 		return fmt.Errorf("%s is a file, not a lens directory %s", dir, want)
 	}
-	old, _ := lens.LoadRegistered(name, st.LensesDir())
+	old := lensSettings(st, name)
 	if err := st.RegisterLens(name, dir); err != nil {
 		return err
 	}
@@ -729,7 +740,7 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 
 // oldLensFormat is what `lens list` and `doctor` say about a registry dir holding only a
 // pre-v0.3.0 lens.md (store.OldFormatLenses).
-const oldLensFormat = "old lens format: split it into extract.md + review.md, then re-register"
+const oldLensFormat = `old lens format: split it into extract.md + review.md (its "# name:"/"# dimensions:" lines go in lens.json as "name"/"dimensions"), then re-register`
 
 const defaultLensStaleMsg = "default lens prompts differ from this binary's; refresh with `witness lens load-default` (resets per-lens overrides)"
 
@@ -737,10 +748,13 @@ const defaultLensStaleMsg = "default lens prompts differ from this binary's; ref
 // ones this binary ships (F142). The default lens is seeded ONCE, then read only from the
 // archive's copy, so a prompt fix in a newer release (#209's confidence sentence, say) never
 // reached an existing archive and nothing said so. A byte compare can't tell an older seed
-// from a deliberate edit; it only makes the difference visible. A file the bundle lacks (no
-// bundle beside this binary) is not compared: there is nothing to claim it differs from.
+// from a deliberate edit; it only makes the difference visible. A file the resolved bundle lacks
+// is not compared: there is nothing to claim it differs from. (With no bundle beside the binary
+// and no env override, bundle.Dir falls back to a cwd-relative prompts/, and that is what gets
+// compared.) A disabled default is never run, so its prompts are not news, and the offered fix
+// would re-enable it.
 func defaultLensStale(st *store.Store) bool {
-	if !slices.Contains(st.RegisteredLenses(), store.LensDefault) {
+	if !slices.Contains(st.RegisteredLenses(), store.LensDefault) || !slices.Contains(st.LoadConfig().EnabledLenses, store.LensDefault) {
 		return false
 	}
 	for _, f := range []string{lens.ExtractFile, lens.ReviewFile, lens.EmergeFile} {
@@ -757,9 +771,10 @@ func defaultLensStale(st *store.Store) bool {
 }
 
 // reRegisterOldLens is the command that finishes the fix: split in place, then register the same
-// dir (a self-register is lossless, see store.RegisterLens).
+// dir. A self-register keeps only the lens files (store.LensFiles), so it removes the old lens.md;
+// its header lines must be in lens.json first, which oldLensFormat says.
 func reRegisterOldLens(st *store.Store, name string) string {
-	return "witness lens register " + name + " " + tildePath(filepath.Join(st.LensesDir(), name))
+	return "witness lens register " + name + " " + shellArg(filepath.Join(st.LensesDir(), name))
 }
 
 // renderLensPrompts is the `--prompts` view: the two prompts verbatim, under plain

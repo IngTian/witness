@@ -219,13 +219,16 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 			// loop runs for every candidate.
 			existingResolved = existing
 		}
+		// The first case names the candidate's lens.json name, so it needs one that really
+		// overrides the handle; a candidate without one falls through to the last case, which
+		// blames the lens.json that does.
 		switch erLower := strings.ToLower(existingResolved); {
-		case erLower == rnameLower:
+		case erLower == rnameLower && rnameLower != lname:
 			return fmt.Errorf("lens name %q with lens.json name=%q collides with existing lens %q (which resolves to %q); they would share observations/watermark/profile", name, resolvedName, existing, existingResolved)
 		case strings.ToLower(existing) == rnameLower:
 			return fmt.Errorf("lens name %q with lens.json name=%q shadows the registry handle %q; pick a different lens.json name or dir name", name, resolvedName, existing)
 		case erLower == lname:
-			return fmt.Errorf("lens name %q is the lens.json name existing lens %q stores its data under; pick a different name", name, existing)
+			return fmt.Errorf("lens name %q is the lens.json name existing lens %q stores its data under, so they would share observations/watermark/profile; pick a different name", name, existing)
 		}
 	}
 

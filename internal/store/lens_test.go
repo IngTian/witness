@@ -530,7 +530,9 @@ func TestRegisterRejectsResolvedNameCollisionInEitherOrder(t *testing.T) {
 	if err := s.RegisterLens("corpus-example", writeLensSrcDir(t, "regime", "x", "y")); err != nil {
 		t.Fatalf("register corpus-example: %v", err)
 	}
-	if err := s.RegisterLens("regime", writeLensSrcDir(t, "", "x", "y")); err == nil || !strings.Contains(err.Error(), "share") {
+	// The candidate has no lens.json name, so the refusal must blame the one that does.
+	if err := s.RegisterLens("regime", writeLensSrcDir(t, "", "x", "y")); err == nil || !strings.Contains(err.Error(), "share") ||
+		!strings.Contains(err.Error(), `is the lens.json name existing lens "corpus-example"`) {
 		t.Fatalf("regime after corpus-example (mines as regime) must be refused as shared data, got %v", err)
 	}
 	// A handle equal to another lens's data name is refused whatever the candidate mines as:
@@ -581,7 +583,7 @@ func TestReRegisterRefusesToStrandData(t *testing.T) {
 	}
 	src := writeLensSrcDir(t, "", "new-extract", "y")
 	err := s.RegisterLens("ce", src)
-	if err == nil || !strings.Contains(err.Error(), `set "name": "regime" in `+filepath.Join(src, "lens.json")) {
+	if err == nil || !strings.Contains(err.Error(), `register "ce" from a copy of `+src+` whose lens.json sets "name": "regime"`) {
 		t.Fatalf("re-register that strands data must be refused and name the fix, got %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(s.LensesDir(), "ce", "extract.md")); string(got) != "x" {
