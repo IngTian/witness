@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -187,6 +188,28 @@ func (s *Store) Close() error {
 // is visible rather than silent. Combines the obsIO count with the configFile watermark.
 func (s *Store) UnreviewedDelta(lens string) int {
 	return s.unreviewedDeltaSince(lens, s.ReviewRowid(lens))
+}
+
+// RegisterLens is lensReg.RegisterLens plus the one check the filesystem leaf can't make:
+// a RE-register must not change the name an existing lens's data is stored under (F153).
+// That name is lens.json's `name`, else the registry name, so re-registering from a copy
+// that drops or edits `name` silently moved every later write to a new key, leaving the
+// observations and facets already mined stranded under the old one, read by nothing.
+// A lens with no data under its old name moves freely: nothing is stranded. Every
+// re-register (lens register, load-default) routes through here; merge registers only
+// lenses not yet registered.
+func (s *Store) RegisterLens(name, srcDir string) error {
+	if slices.Contains(s.RegisteredLenses(), name) {
+		oldName, err1 := s.resolveNameFromRegistry(name)
+		newName, err2 := ResolveLensName(srcDir, name)
+		if err1 == nil && err2 == nil && oldName != newName {
+			if obs, facets := s.LensDataCounts(oldName); obs+facets > 0 {
+				return fmt.Errorf("re-registering lens %q would store its data under %q instead of %q, stranding %d observations and %d facets; to keep them, set \"name\": %q in %s",
+					name, newName, oldName, obs, facets, oldName, filepath.Join(srcDir, LensConfigFile))
+			}
+		}
+	}
+	return s.lensReg.RegisterLens(name, srcDir)
 }
 
 // EmptyReason explains why a lens has nothing to show. The three cases have COMPLETELY

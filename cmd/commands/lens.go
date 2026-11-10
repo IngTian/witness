@@ -553,7 +553,7 @@ func lensShow(name string, full bool) error {
 // one flag away (`--prompts`), pointed to on the hint line.
 //
 // name is the REGISTERED name — the one every lens command takes. The card used to print the
-// lens.json name, so for corpus-example (which mines as "regime") its own footer suggested
+// lens.json name, so for a corpus-example that mines as "regime" its own footer suggested
 // `witness lens show regime --prompts`, which fails with "not registered". The settings rows are
 // config list --lens's rows, so the same data reads the same way, effective values included.
 func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting) string {

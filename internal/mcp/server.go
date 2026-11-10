@@ -149,7 +149,8 @@ type Options struct {
 	Refresh RefreshProfiles
 	// DataName maps the lens name an agent passes — the registered name `witness lens list` shows
 	// and every command takes — to the name that lens's rows are tagged with (its lens.json
-	// `name`; the shipped corpus-example mines as "regime"). nil uses names as given.
+	// `name` when set, e.g. a lens registered as corpus-example that mines as "regime"). nil
+	// uses names as given.
 	DataName func(lens string) string
 	// Wire is the copyable "connect an editor" command, built from the install targets so it
 	// names every editor `witness wire` accepts.

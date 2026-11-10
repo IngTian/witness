@@ -9,7 +9,8 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// renamed is the shipped corpus-example lens's shape: an agent names it "corpus-example" (what
+// renamed is a lens whose lens.json `name` differs from its registered one (the shipped
+// corpus-example did until F153): an agent names it "corpus-example" (what
 // `witness lens list` shows), while its rows are tagged "regime" (its lens.json name).
 var renamed = Options{Version: "v0.0.0-fake", DataName: func(l string) string {
 	if l == "corpus-example" {

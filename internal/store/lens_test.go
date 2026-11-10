@@ -593,3 +593,56 @@ func TestRegisterRejectsResolvedNameCollision(t *testing.T) {
 		t.Fatalf("exact-case re-register of 'default' must be allowed: %v", err)
 	}
 }
+
+// The #101 guard used to run only when the CANDIDATE's two names differed, so it caught
+// probe-after-default but not this order: `regime` (no lens.json name) registered AFTER a
+// corpus-example that mines as "regime" passed, and both lenses wrote one "regime" archive.
+func TestRegisterRejectsResolvedNameCollisionInEitherOrder(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("corpus-example", writeLensSrcDir(t, "regime", "x", "y")); err != nil {
+		t.Fatalf("register corpus-example: %v", err)
+	}
+	if err := s.RegisterLens("regime", writeLensSrcDir(t, "", "x", "y")); err == nil || !strings.Contains(err.Error(), "share") {
+		t.Fatalf("regime after corpus-example (mines as regime) must be refused as shared data, got %v", err)
+	}
+	// A handle equal to another lens's data name is refused whatever the candidate mines as:
+	// in the other order it is the "shadows the registry handle" refusal.
+	if err := s.RegisterLens("regime", writeLensSrcDir(t, "other", "x", "y")); err == nil {
+		t.Fatal("a lens named after another lens's data name must be refused")
+	}
+	if slices.Contains(s.RegisteredLenses(), "regime") {
+		t.Fatal("a refused lens must not be registered")
+	}
+}
+
+// F153: re-registering from a copy that drops or edits lens.json's `name` silently moved the
+// lens's data key, stranding everything mined under the old one. Refuse it while the old name
+// holds data, and say how to keep it; with nothing stranded, or the same data name, it succeeds.
+func TestReRegisterRefusesToStrandData(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "regime", "x", "y")); err != nil {
+		t.Fatal(err)
+	}
+	// No data under "regime" yet: the move strands nothing, so it is allowed (and moved back).
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "", "x", "y")); err != nil {
+		t.Fatalf("re-register with no data under the old name must succeed: %v", err)
+	}
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "regime", "x", "y")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendObservations([]Observation{{ID: "o1", Session: "s1", Lens: "regime", Dimension: "d", Observation: "o"}}); err != nil {
+		t.Fatal(err)
+	}
+	src := writeLensSrcDir(t, "", "new-extract", "y")
+	err := s.RegisterLens("ce", src)
+	if err == nil || !strings.Contains(err.Error(), `set "name": "regime" in `+filepath.Join(src, "lens.json")) {
+		t.Fatalf("re-register that strands data must be refused and name the fix, got %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(s.LensesDir(), "ce", "extract.md")); string(got) != "x" {
+		t.Fatalf("a refused re-register must leave the registered copy alone, extract.md = %q", got)
+	}
+	// Keeping the data name is the ordinary update.
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "regime", "new-extract", "y")); err != nil {
+		t.Fatalf("re-register that keeps the data name must succeed: %v", err)
+	}
+}

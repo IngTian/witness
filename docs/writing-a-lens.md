@@ -57,6 +57,9 @@ math/
 { "name": "math", "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
 ```
 
+`name` is the key your data is stored under; omit it and the registered name is used. Changing it
+later strands existing data (a re-register that would do so is refused).
+
 ```markdown
 <!-- math/extract.md -->
 You are observing one session through a MATH-LEARNING lens. Notice things about the
