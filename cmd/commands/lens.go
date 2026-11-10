@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -637,16 +638,18 @@ func promptExcerpt(s string) string {
 // The footer used to count config entries, so "2 lenses · 3 enabled" sat under two rows, and the
 // lens the worker skips every pass was invisible.
 func renderLensList(st *store.Store, reg, enabled []string) {
+	// An old-format dir is not an orphan: its definition is there, and "disable" is the wrong fix.
+	old := st.OldFormatLenses()
 	var orphans []string
 	for _, name := range enabled {
-		if !slices.Contains(reg, name) {
+		if !slices.Contains(reg, name) && !slices.Contains(old, name) {
 			orphans = append(orphans, name)
 		}
 	}
 	// Since #44 slice 1a "default" has no special status — it is a registered lens like any
 	// other, so it appears in this loop naturally. An archive may have ZERO lenses (all
 	// disabled / none seeded), a legal "nothing to distill" state.
-	if len(reg) == 0 && len(orphans) == 0 {
+	if len(reg) == 0 && len(orphans) == 0 && len(old) == 0 {
 		fmt.Println(title("lens list", "", ""))
 		fmt.Println()
 		fmt.Printf("  %s no lenses registered — nothing is distilled\n", skipGlyph())
@@ -664,12 +667,15 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 	if len(orphans) > 0 {
 		summary += " · " + countOf(len(orphans), "orphan", "orphans")
 	}
+	if len(old) > 0 {
+		summary += fmt.Sprintf(" · %d old format", len(old))
+	}
 	fmt.Println(title("lens list", "", summary))
 	fmt.Println()
 	// kvRow's label column is 14 wide, so a longer name (corpus-example is 14) pushed its own
 	// value right of every other row's: pad every name to the longest first.
 	nameW := 0
-	for _, name := range append(slices.Clone(reg), orphans...) {
+	for _, name := range slices.Concat(reg, orphans, old) {
 		nameW = max(nameW, len([]rune(name)))
 	}
 	row := func(name, value, note string) string {
@@ -703,11 +709,27 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 	for _, name := range orphans {
 		fmt.Printf("  %s %s\n", flag, row(name, yellow("enabled, but not registered"), ""))
 	}
+	for _, name := range old {
+		fmt.Printf("  %s %s\n", flag, row(name, yellow(oldLensFormat), ""))
+	}
 	fmt.Println()
 	for _, name := range orphans {
 		fmt.Println(hint("clean up", "witness lens disable "+name))
 	}
+	for _, name := range old {
+		fmt.Println(hint("re-register", reRegisterOldLens(st, name)))
+	}
 	fmt.Println(hint("inspect one", "witness lens show <name>"))
+}
+
+// oldLensFormat is what `lens list` and `doctor` say about a registry dir holding only a
+// pre-v0.3.0 lens.md (store.OldFormatLenses).
+const oldLensFormat = "old lens format: split it into extract.md + review.md, then re-register"
+
+// reRegisterOldLens is the command that finishes the fix: split in place, then register the same
+// dir (a self-register is lossless, see store.RegisterLens).
+func reRegisterOldLens(st *store.Store, name string) string {
+	return "witness lens register " + name + " " + tildePath(filepath.Join(st.LensesDir(), name))
 }
 
 // renderLensPrompts is the `--prompts` view: the two prompts verbatim, under plain

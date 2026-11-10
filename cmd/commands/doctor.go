@@ -295,6 +295,11 @@ func cmdDoctor(asJSON bool) error {
 		row("compact", n.text(), "")
 		fix("compact", n.command())
 	}
+	// A lens left in the pre-v0.3.0 format never mines, and nothing else here would say so.
+	for _, name := range st.OldFormatLenses() {
+		warn("lens " + name + ": " + oldLensFormat)
+		fix("re-register", reRegisterOldLens(st, name))
+	}
 	// "N drifted" is the CURRENTLY-outstanding count (#69-2): distinct sessions whose
 	// last mine of some lens drifted and hasn't cleanly re-mined since. It drops as
 	// sessions recover, unlike the lifetime "drift events" total surfaced in the

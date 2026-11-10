@@ -31,7 +31,7 @@ import (
 // and a three-way facet merge, which this deliberately is not.
 //
 // THE SHAPE. The incoming database is never opened in place: Open writes into a data dir (config,
-// a lens migration, the default-lens seed), and a backup must stay a backup. It is copied to a
+// the default-lens seed), and a backup must stay a backup. It is copied to a
 // temp file, migrated THERE, and everything that has to change on the incoming side — renaming a
 // diverged session, dropping observations this archive already mined — is done to that copy. The
 // copy is then ATTACHed and the whole merge runs in ONE transaction on a pinned connection, so it

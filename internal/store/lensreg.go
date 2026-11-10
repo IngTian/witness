@@ -40,8 +40,7 @@ func ReservedLensName(name string) bool {
 
 // lensReg is the lens-registry concern: the on-disk lens definitions under
 // <root>/lenses/<name>/ (each a directory of lens.json + extract.md + review.md,
-// issue #75) plus their one-shot legacy-format migration (lensmigrate.go). A
-// filesystem leaf — it holds only the data root and never touches the DB. Its
+// issue #75). A filesystem leaf — it holds only the data root and never touches the DB. Its
 // registry-mutation lock rides the shared flockPath primitive, so it depends on no
 // other concern.
 type lensReg struct{ root string }
@@ -324,6 +323,32 @@ func (r *lensReg) RegisteredLenses() []string {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(r.LensesDir(), e.Name(), LensExtractFile)); err == nil {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// OldFormatLenses lists the registry dirs holding a pre-v0.3.0 single-file lens.md and no
+// extract.md (issue #75). RegisteredLenses can't see them, so on their own they read as absent,
+// or, if enabled, as an orphan whose hint said "disable". The converter that once rewrote them
+// at every Open is gone (F065: every archive that matters is past v0.3.0); this is only so
+// `lens list` and `doctor` can name the manual fix.
+func (r *lensReg) OldFormatLenses() []string {
+	entries, err := os.ReadDir(r.LensesDir())
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() || isLensStagingDir(e.Name()) {
+			continue
+		}
+		dir := filepath.Join(r.LensesDir(), e.Name())
+		if _, err := os.Stat(filepath.Join(dir, LensExtractFile)); !os.IsNotExist(err) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "lens.md")); err == nil {
 			names = append(names, e.Name())
 		}
 	}

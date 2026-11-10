@@ -105,12 +105,6 @@ func Open() (*Store, error) {
 	// Idempotent + best-effort (see adoptRunnerBound); needs s.db, so it runs after
 	// openDB. Keeps the "is a runner bound?" decision out of every config read.
 	s.adoptRunnerBound()
-	// One-shot: convert any pre-#75 single-file lens.md registry dirs to the new
-	// lens.json + extract.md + review.md format (issue #75). Idempotent + non-destructive
-	// (see migrateLegacyLenses); best-effort like the config template — a filesystem
-	// hiccup must not fail an Open. Keeps legacy handling in ONE frozen place (lensmigrate.go)
-	// instead of scattering old-format checks across the codebase, mirroring the DB migration.
-	_ = s.migrateLegacyLenses()
 	// One-shot (#44 slice 1a + #102): on the FIRST open of an archive that wants it — a
 	// brand-new personal install OR one that predates 1a (ran under the old always-on
 	// "default") — auto-seed "default" as an ordinary registered+enabled lens, so a fresh
