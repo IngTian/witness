@@ -177,57 +177,54 @@ func (o *obsIO) AppendObservations(obs []Observation) error {
 // DeleteObservation removes one L1 observation by obs_id, reporting whether a row
 // was actually deleted (false = no such id, not an error). Facets are reviewer-
 // owned and read-only to humans; pruning a wrong/stale observation here is the
-// supported way to correct the profile — the next review re-derives from what's
-// left. Durable against re-mining: the per-session watermark won't re-mine an
-// already-distilled delta, and obs_id dedup would catch it even if it did.
-// It also RESETS that lens's incremental review watermark, so the promise the CLI and
-// the MCP tool both make — "the profile re-derives from what's left on the next review" —
-// is actually kept. The fold is incremental (it reads only obs with seq > review_rowid,
-// the #16 fix), so a pruned observation that had ALREADY been folded would otherwise sit
-// below the cursor forever: the next review would see an empty delta, never invoke the
-// model for that lens, and leave the facet it grounded asserting a claim whose only
-// evidence (because_of) no longer exists in the archive. Clearing the cursor makes the
-// next review re-fold that lens from scratch. That is bounded work, not a timeout risk —
-// the fold is windowed by ReviewMaxChars (#123).
+// supported way to correct the profile. Durable against re-mining: the per-session
+// watermark won't re-mine an already-distilled delta, and obs_id dedup would catch it
+// even if it did.
+//
+// It touches nothing else, on purpose. It used to clear the lens's review cursor so the
+// next review would "re-derive from what's left" — which re-folded the whole lens (about
+// 650 model calls on a 20k-observation lens, a day holding the worker lock) and still
+// could not drop the facet: evidence only grows (mergeIDs) and absence never retracts. The
+// facets it supported are cleaned up instead at the start of the next review, under the
+// worker lock (Reviewer.pruneDeletedEvidence): the id is stripped from every facet citing
+// it, and a facet left citing nothing is retired. Doing that here would race the reviewer,
+// which holds the whole facet table in memory and writes it back as a replace.
 func (o *obsIO) DeleteObservation(obsID string) (bool, error) {
-	tx, err := beginImmediate(o.db)
+	res, err := o.db.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
 	if err != nil {
-		return false, err
-	}
-	// Capture the lens BEFORE the delete; afterwards the row is gone.
-	var lens string
-	switch err := tx.QueryRow(`SELECT lens FROM observations WHERE obs_id = ?`, obsID).Scan(&lens); {
-	case err == sql.ErrNoRows:
-		tx.Rollback()
-		return false, nil // no such id — not an error, just no hit
-	case err != nil:
-		tx.Rollback()
-		return false, err
-	}
-	res, err := tx.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
-	if err != nil {
-		tx.Rollback()
 		return false, err
 	}
 	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// MissingObservationIDs returns the ids in ids that name no observation in the archive —
+// in any lens, since a facet's citations are checked against the whole archive. One
+// query, whatever len(ids) is: the ids ride in as a single JSON array (json_each), so a
+// lens citing 30k ids hits no bound-parameter limit, and each is one probe of the obs_id
+// UNIQUE index. obs_id is NOT NULL, so NOT IN has no NULL trap.
+func (o *obsIO) MissingObservationIDs(ids []string) (map[string]bool, error) {
+	missing := map[string]bool{}
+	if len(ids) == 0 {
+		return missing, nil
+	}
+	b, err := json.Marshal(ids)
 	if err != nil {
-		tx.Rollback()
-		return false, err
+		return nil, err
 	}
-	if n == 0 {
-		tx.Rollback()
-		return false, nil
+	rows, err := o.db.Query(`SELECT value FROM json_each(?) WHERE value NOT IN (SELECT obs_id FROM observations)`, string(b))
+	if err != nil {
+		return nil, err
 	}
-	// Same transaction as the delete: the archive must never be left with the row gone
-	// but the stale cursor still in place (that is the bug this closes).
-	if _, err := tx.Exec(`DELETE FROM meta WHERE key = ?`, reviewRowidKey(lens)); err != nil {
-		tx.Rollback()
-		return false, err
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		missing[id] = true
 	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return missing, rows.Err()
 }
 
 // (ReadObservationsLite and ReadObservationsSince used to live here — 96 lines, both with zero

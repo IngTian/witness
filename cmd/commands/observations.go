@@ -67,7 +67,7 @@ func newObservationsCmd() *cobra.Command {
 	deleteCmd := &cobra.Command{
 		Use:    "delete <obs_id>",
 		Short:  "Delete one observation.",
-		Long:   "Delete one L1 observation by obs_id. This is the CLI equivalent of the MCP delete_observation tool.",
+		Long:   "Delete one L1 observation by obs_id. It is removed now; facets that rested only on it are retired at the next review, and nothing is re-read. This is the CLI equivalent of the MCP delete_observation tool.",
 		Args:   cobra.ExactArgs(1),
 		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -291,6 +291,6 @@ func cmdObservationDelete(obsID string) error {
 		fmt.Println(result(skipGlyph(), "no observation "+obsID, "nothing deleted"))
 		return nil
 	}
-	fmt.Println(result(okGlyph(), "deleted "+obsID, ""))
+	fmt.Println(result(okGlyph(), "deleted "+obsID, "facets that rested only on it are retired at the next review"))
 	return nil
 }

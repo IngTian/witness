@@ -172,9 +172,9 @@ func (r *MergeReport) Empty() bool {
 }
 
 // mergeSide is one archive's state. The incoming side is read from the private temp copy; this
-// archive's side is read INSIDE the merge transaction, so a concurrent write (a delete_observation
-// resetting a review cursor) either lands before the read or waits for the commit, instead of being
-// silently overwritten by it.
+// archive's side is read INSIDE the merge transaction, so a concurrent write (a review advancing a
+// cursor) either lands before the read or waits for the commit, instead of being silently overwritten
+// by it.
 type mergeSide struct {
 	head    int64            // MAX(observations.seq): the decay clock's "now" on this side
 	cursors map[string]int64 // review_rowid:<lens>
