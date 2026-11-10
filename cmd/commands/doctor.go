@@ -300,6 +300,9 @@ func cmdDoctor(asJSON bool) error {
 		warn("lens " + name + ": " + oldLensFormat)
 		fix("re-register", reRegisterOldLens(st, name))
 	}
+	if defaultLensStale(st) {
+		warn(defaultLensStaleMsg)
+	}
 	// "N drifted" is the CURRENTLY-outstanding count (#69-2): distinct sessions whose
 	// last mine of some lens drifted and hasn't cleanly re-mined since. It drops as
 	// sessions recover, unlike the lifetime "drift events" total surfaced in the

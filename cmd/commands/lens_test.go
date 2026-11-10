@@ -91,3 +91,51 @@ func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 		t.Errorf("a setting the new source keeps was not dropped:\n%s", out)
 	}
 }
+
+// F142: the default lens is seeded once and then read only from the archive's copy, so a prompt
+// fix in a newer binary never reached an existing archive and doctor said nothing. doctor and
+// `lens show default` name the difference in one line, and stay quiet when there is none.
+func TestDefaultLensPromptsDifferFromTheBundle(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, st *store.Store, dir string)
+		stale  bool
+	}{
+		{"match", func(*testing.T, *store.Store, string) {}, false},
+		{"review.md edited", func(t *testing.T, _ *store.Store, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "review.md"), []byte("an older seed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"emerge.md missing", func(t *testing.T, _ *store.Store, dir string) {
+			if err := os.Remove(filepath.Join(dir, "emerge.md")); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"no default lens", func(t *testing.T, st *store.Store, _ string) {
+			if err := st.DeregisterLens(store.LensDefault); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := readFixture(t) // seeds default from the bundled prompts/default
+			t.Setenv("WITNESS_ASSETS", t.TempDir())
+			tc.change(t, st, filepath.Join(st.LensesDir(), store.LensDefault))
+			doctor, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+			screens := map[string]string{"doctor": doctor}
+			if tc.name != "no default lens" {
+				show, err := runCLI(t, "lens", "show", "default")
+				if err != nil {
+					t.Fatal(err)
+				}
+				screens["lens show default"] = show
+			}
+			for screen, out := range screens {
+				if got := strings.Count(out, defaultLensStaleMsg); got != map[bool]int{true: 1, false: 0}[tc.stale] {
+					t.Errorf("%s: the stale-prompts line appears %d times, want stale=%v:\n%s", screen, got, tc.stale, out)
+				}
+			}
+		})
+	}
+}

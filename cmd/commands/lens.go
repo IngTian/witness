@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -573,7 +574,8 @@ func lensShow(name string, full bool) error {
 	if full {
 		fmt.Print(renderLensPrompts(l))
 	} else {
-		fmt.Print(renderLensCard(name, l, enabled, effectiveConfig(st, l)))
+		// The card only: --prompts output stays a clean copy of the prompts.
+		fmt.Print(renderLensCard(name, l, enabled, effectiveConfig(st, l), name == store.LensDefault && defaultLensStale(st)))
 	}
 	return nil
 }
@@ -586,7 +588,7 @@ func lensShow(name string, full bool) error {
 // lens.json name, so for a corpus-example that mines as "regime" its own footer suggested
 // `witness lens show regime --prompts`, which fails with "not registered". The settings rows are
 // config list --lens's rows, so the same data reads the same way, effective values included.
-func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting) string {
+func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting, stale bool) string {
 	var b strings.Builder
 	state := "disabled"
 	if enabled {
@@ -606,6 +608,9 @@ func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting)
 	}
 	fmt.Fprintln(&b, "  "+kvRow("extract.md", promptExcerpt(l.Extract), ""))
 	fmt.Fprintln(&b, "  "+kvRow("review.md", promptExcerpt(l.Review), ""))
+	if stale {
+		fmt.Fprintln(&b, "  "+warnGlyph()+" "+yellow(defaultLensStaleMsg))
+	}
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, hint("full prompts", "witness lens show "+name+" --prompts"))
 	return b.String()
@@ -725,6 +730,31 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 // oldLensFormat is what `lens list` and `doctor` say about a registry dir holding only a
 // pre-v0.3.0 lens.md (store.OldFormatLenses).
 const oldLensFormat = "old lens format: split it into extract.md + review.md, then re-register"
+
+const defaultLensStaleMsg = "default lens prompts differ from this binary's; refresh with `witness lens load-default` (resets per-lens overrides)"
+
+// defaultLensStale reports whether the archive's registered default lens prompts differ from the
+// ones this binary ships (F142). The default lens is seeded ONCE, then read only from the
+// archive's copy, so a prompt fix in a newer release (#209's confidence sentence, say) never
+// reached an existing archive and nothing said so. A byte compare can't tell an older seed
+// from a deliberate edit; it only makes the difference visible. A file the bundle lacks (no
+// bundle beside this binary) is not compared: there is nothing to claim it differs from.
+func defaultLensStale(st *store.Store) bool {
+	if !slices.Contains(st.RegisteredLenses(), store.LensDefault) {
+		return false
+	}
+	for _, f := range []string{lens.ExtractFile, lens.ReviewFile, lens.EmergeFile} {
+		shipped, err := os.ReadFile(filepath.Join(lens.DefaultSeedDir(), f))
+		if err != nil {
+			continue
+		}
+		ours, err := os.ReadFile(filepath.Join(st.LensesDir(), store.LensDefault, f))
+		if err != nil || !bytes.Equal(ours, shipped) {
+			return true
+		}
+	}
+	return false
+}
 
 // reRegisterOldLens is the command that finishes the fix: split in place, then register the same
 // dir (a self-register is lossless, see store.RegisterLens).
