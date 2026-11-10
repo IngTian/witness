@@ -451,3 +451,60 @@ func TestSummarizerFailureLeavesPriorFiles(t *testing.T) {
 		t.Fatalf("prior summary must survive a failed regen: ok=%v md=%q", ok, md)
 	}
 }
+
+// F095: the portrait writer sends every active facet's full text in one uncapped call, so the
+// first sign of outgrowing the model's context window is a failed call. Its error must carry the
+// size it sent and the lever that works: a larger review_model for that lens, and the default one
+// (no --lens) for the unified portrait, which runs on the default model.
+func TestSummarizerFailureNamesInputSizeAndLever(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	sent := map[string]string{} // lens name, or "unified" -> the input it was sent
+	fail := func(_ context.Context, _, prompt, input string) (string, error) {
+		name := store.ProfileUnified
+		if prompt == "L" {
+			name = strings.SplitN(strings.TrimPrefix(input, "LENS: "), "\n", 2)[0]
+		}
+		sent[name] = input
+		return "", fmt.Errorf("context window exceeded")
+	}
+	sm := &Summarizer{Store: s, Lenses: []*lens.Lens{{Name: "default"}, {Name: "math"}},
+		LensPrompt: "L", UnifiedPrompt: "U", Run: fail}
+
+	err := sm.Summarize(context.Background())
+	if err == nil {
+		t.Fatal("expected an error when every call fails")
+	}
+	facets, _ := s.ReadActiveFacets()
+	sizes := PortraitInputChars(facets)
+	for _, l := range []string{"default", "math"} {
+		// doctor's number is the writer's number: same rendering, same size.
+		if got := len([]rune(sent[l])); got != sizes[l] {
+			t.Fatalf("%s: doctor would report %d chars, the writer sent %d", l, sizes[l], got)
+		}
+		want := "(input " + InputSize(sizes[l]) + "; if that is more than the model's context window, " +
+			"use a larger-context model: witness config set review_model <model> --lens " + l + ")"
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("lens %s error lacks the size and lever %q:\n%v", l, want, err)
+		}
+	}
+	lines := strings.Split(err.Error(), "\n")
+	unified := lines[len(lines)-1]
+	if !strings.HasPrefix(unified, "summarize unified: ") ||
+		!strings.Contains(unified, "(input "+InputSize(len([]rune(sent[store.ProfileUnified])))+"; ") ||
+		!strings.HasSuffix(unified, "witness config set review_model <model>)") {
+		t.Fatalf("unified error should name its size and the DEFAULT review_model, got %q", unified)
+	}
+}
+
+func TestInputSize(t *testing.T) {
+	for n, want := range map[int]string{
+		2_419_532: "2.42M chars (~605k tokens)",
+		12_345:    "12k chars (~3k tokens)",
+		999:       "999 chars (~249 tokens)",
+	} {
+		if got := InputSize(n); got != want {
+			t.Errorf("InputSize(%d) = %q, want %q", n, got, want)
+		}
+	}
+}

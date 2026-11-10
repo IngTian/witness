@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // captureStdoutErr is captureStdout (lens_try_test.go) for a fn that returns an error, so a
@@ -136,5 +137,23 @@ func TestDoctorHumanPathStillFailsWhenTheEmbedderIsUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(out, "witness doctor") {
 		t.Errorf("the human report was not printed: %q", out)
+	}
+}
+
+// F095: doctor shows each enabled lens's portrait-writer input as plain info, measured the way
+// the writer renders it, so a user can see their headroom before a call fails on it.
+func TestDoctorShowsPortraitInputSize(t *testing.T) {
+	st := readFixture(t) // the default lens is enabled
+	t.Setenv("WITNESS_ASSETS", t.TempDir())
+	t.Setenv("NO_COLOR", "1")
+	facets := []store.Facet{{Lens: store.LensDefault, Dimension: "traits", Key: "k",
+		Versions: []store.FacetVersion{{Value: strings.Repeat("x", 5000), Confidence: 0.9}}}}
+	if err := st.WriteFacets(facets); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	want := "portrait input  default: " + distill.InputSize(distill.PortraitInputChars(facets)[store.LensDefault])
+	if !strings.Contains(out, want) || !strings.Contains(want, "5k chars (~1k tokens)") {
+		t.Fatalf("doctor should show %q, got:\n%s", want, out)
 	}
 }

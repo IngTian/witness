@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
@@ -126,8 +128,11 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 		// The model is shown CURRENT (decayed) confidence; the signature (planLenses) is over
 		// the stored rendering.
-		md, err := sm.runFor(p.lens)(ctx, p.model, sm.LensPrompt, renderFacetsForSummary(l, p.facets, hw))
-		if err == nil && strings.TrimSpace(md) == "" {
+		input := renderFacetsForSummary(l, p.facets, hw)
+		md, err := sm.runFor(p.lens)(ctx, p.model, sm.LensPrompt, input)
+		if err != nil {
+			err = withInputSize(err, input, p.lens)
+		} else if strings.TrimSpace(md) == "" {
 			// Never persist an empty summary (#148). The skip above tolerates an empty prior file
 			// (it regenerates), but nothing stopped this from WRITING one — replacing a good
 			// narrative with a blank and stamping a signature that vouches for it.
@@ -195,7 +200,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	}
 	umd, err := sm.Run(ctx, unifiedModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {
-		return errors.Join(append(failures, fmt.Errorf("summarize unified: %w", err))...)
+		return errors.Join(append(failures, fmt.Errorf("summarize unified: %w", withInputSize(err, portrait.String(), nil)))...)
 	}
 	// Refuse to persist an EMPTY summary at all (the other half of #148). Writing it would
 	// replace a good portrait with a blank one and — with the signature stamped — vouch for the
@@ -243,13 +248,7 @@ func (sm *Summarizer) planLenses() (map[string][]store.Facet, []lensPass, error)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read facets: %w", err)
 	}
-	byLens := map[string][]store.Facet{}
-	for _, f := range facets {
-		if f.Current() == nil {
-			continue // no active version -> nothing to say
-		}
-		byLens[f.Lens] = append(byLens[f.Lens], f)
-	}
+	byLens := activeByLens(facets)
 	names := make([]string, 0, len(byLens))
 	for l := range byLens {
 		names = append(names, l)
@@ -419,6 +418,66 @@ func (sm *Summarizer) reapOrphanProfiles(withFacets map[string][]store.Facet) {
 // below the version's own clock, and 0 is below every clock. Named so the signature call site
 // says what it means instead of passing a bare 0.
 const storedConfidence int64 = 0
+
+// activeByLens groups the facets that have an active version by lens: the set a portrait is
+// written from.
+func activeByLens(facets []store.Facet) map[string][]store.Facet {
+	byLens := map[string][]store.Facet{}
+	for _, f := range facets {
+		if f.Current() == nil {
+			continue // no active version -> nothing to say
+		}
+		byLens[f.Lens] = append(byLens[f.Lens], f)
+	}
+	return byLens
+}
+
+// PortraitInputChars is each lens's portrait-writer input in characters, keyed by the lens's data
+// name and measured on the writer's own rendering, so `witness doctor` reports the number that
+// actually goes to the model (F095). The confidence is printed at a fixed width, so measuring the
+// stored rendering gives the same size as the decayed one Summarize sends.
+func PortraitInputChars(facets []store.Facet) map[string]int {
+	out := map[string]int{}
+	for l, fs := range activeByLens(facets) {
+		out[l] = utf8.RuneCountInString(renderFacetsForSummary(l, fs, storedConfidence))
+	}
+	return out
+}
+
+// InputSize renders a model input's size as "2.42M chars (~605k tokens)", at ~4 chars a token.
+// The estimate runs low for CJK text or code, which tokenize denser.
+func InputSize(chars int) string {
+	return approxCount(chars) + " chars (~" + approxCount(chars/4) + " tokens)"
+}
+
+func approxCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.2fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.0fk", float64(n)/1e3)
+	}
+	return strconv.Itoa(n)
+}
+
+// withInputSize adds to a failed portrait-writer or resolver call the size of what it sent, and
+// the one lever that works if that was too much (F095). Both calls send every active facet's FULL
+// text in one request, uncapped on purpose: clipping would silently drop traits. So outgrowing
+// the model's context window first shows up as this failure, which used to read as a bare
+// "regeneration failed" with no cause. Compaction is not the lever: merged facets absorb the
+// merged text, which cuts the count, not the characters. ln is the lens whose review_model made
+// the call; nil (the unified portrait, an orphan lens) means the default review_model.
+//
+// ponytail: names the lens by its data name; a legacy lens registered under another name needs
+// that name in --lens. Map it here if one turns up (distill has no registry to ask).
+func withInputSize(err error, input string, ln *lens.Lens) error {
+	scope := ""
+	if ln != nil {
+		scope = " --lens " + ln.Name
+	}
+	return fmt.Errorf("%w (input %s; if that is more than the model's context window, use a larger-context model: witness config set review_model <model>%s)",
+		err, InputSize(utf8.RuneCountInString(input)), scope)
+}
 
 // renderFacetsForSummary formats one lens's active facets as readable input for
 // the summarizer prompt, with each confidence decayed to decaySeq.

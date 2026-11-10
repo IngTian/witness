@@ -1090,3 +1090,41 @@ func TestResolveUnifiedSkipsWhenAllNotebookResolversFail(t *testing.T) {
 		t.Fatal("unified row has Inherits; expected empty")
 	}
 }
+
+// F095: the resolver also sends every facet's full text in one call. A failure names that size
+// and the lens's review_model as the lever, in the error the worker logs; the unified resolver,
+// which runs on the default model, names the default review_model.
+func TestResolveSourcesFailureNamesInputSizeAndLever(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	for name, md := range map[string]string{"default": "Stops at good enough.", store.ProfileUnified: "Whole."} {
+		if err := s.WriteProfile(name, md); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const lever = "; if that is more than the model's context window, use a larger-context model: witness config set review_model <model>"
+	sm := &Resolver{Store: s, Lenses: []*lens.Lens{{Name: "default"}}, LensPrompt: "RESOLVE", UnifiedPrompt: "RESOLVE_UNIFIED"}
+
+	var sent string
+	sm.Run = func(_ context.Context, _, _, input string) (string, error) {
+		sent = input
+		return "", context.DeadlineExceeded
+	}
+	_, err := sm.ResolveSources(context.Background())
+	if want := "(input " + InputSize(len([]rune(sent))) + lever + " --lens default)"; err == nil || sent == "" || !strings.Contains(err.Error(), want) {
+		t.Fatalf("want the resolver error to carry %q, got %v", want, err)
+	}
+
+	// The notebook now resolves, so the unified resolver runs, and fails.
+	sm.Run = func(_ context.Context, _, prompt, input string) (string, error) {
+		if prompt == "RESOLVE" {
+			return `{"links":[{"n":1,"keys":[{"key":"traits/satisfices","strength":"direct"}]}]}`, nil
+		}
+		sent = input
+		return "", context.DeadlineExceeded
+	}
+	_, err = sm.ResolveSources(context.Background())
+	if want := "resolve unified: resolver call: context deadline exceeded (input " + InputSize(len([]rune(sent))) + lever + ")"; err == nil || err.Error() != want {
+		t.Fatalf("want the unified resolver error %q, got %v", want, err)
+	}
+}
