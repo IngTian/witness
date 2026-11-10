@@ -161,6 +161,9 @@ type ReviewStore interface {
 	// the max seq of the window just folded (#123), advanced per successful window.
 	ReviewRowid(lens string) int64
 	StampReviewLens(lens string, throughRowid int64) error
+	// MissingObservationIDs is how a review notices a delete_observation: the cited ids that no
+	// longer exist, stripped from the lens's facets before it folds (Reviewer.pruneDeletedEvidence).
+	MissingObservationIDs(ids []string) (map[string]bool, error)
 }
 
 // EmergentStore is the surface the S3 long-arc retrieval pass drives (issue #16): it

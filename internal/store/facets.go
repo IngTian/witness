@@ -35,7 +35,7 @@ func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
 // rowQuerier is what reading needs from either a *sql.DB or a *sql.Tx. The merge reads this
 // archive's facets INSIDE its transaction, so a facet change that lands while it runs either
 // precedes the read or waits for the commit — read outside, a concurrent write (a
-// delete_observation resetting a review cursor) would be silently overwritten by the merge.
+// review's facet write) would be silently overwritten by the merge.
 type rowQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row

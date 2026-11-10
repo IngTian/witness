@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -126,7 +128,13 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 	if budget <= 0 {
 		budget = store.DefaultReviewMaxChars // defensive: never fold unbounded (the #123 stall)
 	}
-	obs, err := r.Store.ReadObservationsSinceOrdered(ln.Name, r.Store.ReviewRowid(ln.Name))
+	since := r.Store.ReviewRowid(ln.Name)
+	// First, and whether or not anything is new: a delete since the last review must be honoured
+	// even on a lens with nothing to fold.
+	if err := r.pruneDeletedEvidence(ln.Name, nowStr, since); err != nil {
+		return fmt.Errorf("prune deleted evidence: %w", err)
+	}
+	obs, err := r.Store.ReadObservationsSinceOrdered(ln.Name, since)
 	if err != nil {
 		return fmt.Errorf("read L1 delta: %w", err)
 	}
@@ -191,6 +199,67 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 		}
 		start = end
 	}
+	return nil
+}
+
+// retiredReason is the ArchiveReason a deleted-evidence retirement carries, where compaction
+// stores the model's one-line why.
+const retiredReason = "every observation it cited is gone from the archive"
+
+// pruneDeletedEvidence strips, from every version of the lens's facets, the cited observation
+// ids that no longer exist (delete_observation) — or never did: an id the model invented is no
+// evidence either, and an archive that never deleted anything already held 25 — and retires each
+// active facet whose current version cited at least one id and now cites none. This is how a
+// delete reaches the profile: evidence otherwise only grows (mergeIDs) and the prompt never
+// retracts on absence, so a refold could not drop the facet — and refolding the lens to try was
+// a day of model calls. Here it costs one id lookup and writes only when an id was missing.
+//
+// A facet that never cited anything is left alone: no evidence was removed from under it. The
+// retirement is compaction's retired-outright archive (no MergedInto), so a later review that
+// re-asserts the key resurrects it (resolveArchived). Runs under the worker lock, the one place
+// that rewrites the facet table, which is why it lives here and not in the delete.
+func (r *Reviewer) pruneDeletedEvidence(lensName, nowStr string, clock int64) error {
+	all, err := r.Store.ReadFacets()
+	if err != nil {
+		return fmt.Errorf("read L2: %w", err)
+	}
+	cited := map[string]bool{}
+	for _, f := range all {
+		if f.Lens == lensName {
+			for _, v := range f.Versions {
+				for _, id := range v.BecauseOf {
+					if id != "" { // a blank is no citation, so never "missing": it retires nothing
+						cited[id] = true
+					}
+				}
+			}
+		}
+	}
+	missing, err := r.Store.MissingObservationIDs(slices.Collect(maps.Keys(cited)))
+	if err != nil || len(missing) == 0 {
+		return err
+	}
+	var events []store.ConfidenceEvent
+	for i := range all {
+		f := &all[i]
+		if f.Lens != lensName {
+			continue
+		}
+		cur := f.Current()
+		had := cur != nil && len(cur.BecauseOf) > 0
+		for j := range f.Versions {
+			f.Versions[j].BecauseOf = slices.DeleteFunc(f.Versions[j].BecauseOf, func(id string) bool { return missing[id] })
+		}
+		if had && f.Active() && len(cur.BecauseOf) == 0 {
+			f.ArchivedAt, f.MergedInto, f.ArchiveReason = nowStr, "", retiredReason
+			events = append(events, confidenceEvent(f, store.EventRetire, cur.DecayedConfidence(clock), nowStr))
+		}
+	}
+	if err := r.Store.WriteFacetsLogged(all, events); err != nil {
+		return fmt.Errorf("write L2: %w", err)
+	}
+	slog.Info("review: stripped deleted observations from facets",
+		"lens", lensName, "missing_ids", len(missing), "retired", len(events))
 	return nil
 }
 
@@ -329,11 +398,13 @@ func (r *Reviewer) logEvent(f *store.Facet, kind string, from float64, nowStr st
 // unconditionally, so an arc landing on an established facet overwrote its real clock with 0,
 // which DecayedConfidence reads as "never decays". A new facet asserted with seq 0 still starts
 // at 0, exactly as the emergent comment documents; only an existing clock is protected.
+//
+// A real seq never moves the clock BACKWARDS either: an early window, or a non-fresh `lens
+// backfill` refolding from seq 0, re-reads observations older than the facet's last
+// confirmation, and stamping that lower seq would make DecayedConfidence charge the facet for
+// observations it had already been confirmed past.
 func knownClock(seq, prior int64) int64 {
-	if seq > 0 {
-		return seq
-	}
-	return prior
+	return max(seq, prior)
 }
 
 // wellFormed rejects a facet assertion that cannot identify or state anything.

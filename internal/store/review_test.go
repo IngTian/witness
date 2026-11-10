@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // TestReadObservationsSinceOrderedByRowid locks the windowed-fold read (#123): it
 // returns obs for the lens with rowid > since, in ROWID order, each carrying its
@@ -73,9 +76,6 @@ func TestReviewCursorSurvivesDeleteNewestReMine(t *testing.T) {
 	})
 
 	// The new obs MUST be visible to the fold, or it is silently skipped forever (#125).
-	// Note the delete ALSO resets this lens's watermark (so a pruned-but-already-folded
-	// obs's facet gets re-derived), so the surviving earlier obs are pending too — what
-	// this test pins is that 'd' is NEVER below the cursor.
 	pending, _ := s.ReadObservationsSinceOrdered(LensDefault, s.ReviewRowid(LensDefault))
 	var sawNew bool
 	for _, ob := range pending {
@@ -236,62 +236,58 @@ func TestReviewDue(t *testing.T) {
 	}
 }
 
-// TestDeleteObservationResetsThatLensReviewCursor locks the audit fix: both the CLI
-// (`witness observations delete`) and the MCP delete_observation tool promise "the
-// profile re-derives from what's left on the next review". The fold is INCREMENTAL
-// (seq > review_rowid, the #16 fix), so an obs that had already been folded sits below
-// the cursor: without clearing it the next review sees an EMPTY delta, never invokes the
-// model for that lens, and the facet grounded in the deleted obs keeps being served over
-// MCP citing a because_of id that no longer exists. Deleting must therefore reset that
-// lens's cursor — and ONLY that lens's.
-func TestDeleteObservationResetsThatLensReviewCursor(t *testing.T) {
+// Deleting an observation must NOT move any review cursor. It used to clear the lens's, so the
+// next review "re-derived from what's left" by re-folding the whole lens — ~650 model calls on a
+// 20k-observation lens, and the facet the deleted obs grounded still survived, since evidence only
+// grows. The facet is now cleaned up by the next review's id sweep (distill's
+// pruneDeletedEvidence), and nothing is re-read.
+func TestDeleteObservationKeepsTheReviewCursor(t *testing.T) {
 	s := tempStore(t)
 	s.AppendObservations([]Observation{
 		{ID: "keep", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "keep"},
 		{ID: "wrong", TS: "2026-01-02T00:00:00Z", Lens: LensDefault, Observation: "wrong"},
-		{ID: "other", TS: "2026-01-03T00:00:00Z", Lens: "codereview", Observation: "sibling"},
 	})
 	all, _ := s.ReadObservationsSinceOrdered(LensDefault, 0)
 	folded := all[len(all)-1].Rowid
 	if err := s.StampReviewLens(LensDefault, folded); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StampReviewLens("codereview", 99); err != nil {
-		t.Fatal(err)
-	}
-	// Precondition: the wrong obs is already folded, so nothing is pending.
-	if got := s.UnreviewedDelta(LensDefault); got != 0 {
-		t.Fatalf("precondition: delta should be 0 (all folded), got %d", got)
-	}
 
 	deleted, err := s.DeleteObservation("wrong")
 	if err != nil || !deleted {
 		t.Fatalf("DeleteObservation: deleted=%v err=%v", deleted, err)
 	}
-
-	// The lens re-folds from scratch, so the promise is kept.
-	if got := s.ReviewRowid(LensDefault); got != 0 {
-		t.Fatalf("deleting an obs must reset that lens's review cursor, got %d", got)
+	if got := s.ReviewRowid(LensDefault); got != folded {
+		t.Fatalf("a delete must leave the review cursor at %d, got %d", folded, got)
 	}
-	if got := s.UnreviewedDelta(LensDefault); got != 1 {
-		t.Fatalf("the surviving obs must be re-offered to the fold, delta=%d want 1", got)
+	if got := s.UnreviewedDelta(LensDefault); got != 0 {
+		t.Fatalf("nothing may be re-offered to the fold after a delete, delta=%d", got)
 	}
-	// A SIBLING lens must be untouched — re-folding it would be pointless work.
-	if got := s.ReviewRowid("codereview"); got != 99 {
-		t.Fatalf("sibling lens cursor must not be reset, got %d", got)
-	}
-	// A no-op delete must not reset anything.
-	if err := s.StampReviewLens(LensDefault, 1); err != nil {
-		t.Fatal(err)
+	if left, _ := s.ReadObservationsSinceOrdered(LensDefault, 0); len(left) != 1 || left[0].ID != "keep" {
+		t.Fatalf("only the named obs is deleted, left %+v", left)
 	}
 	deleted, err = s.DeleteObservation("nonexistent")
+	if err != nil || deleted {
+		t.Fatalf("deleting a missing id: deleted=%v err=%v, want false, nil", deleted, err)
+	}
+}
+
+// MissingObservationIDs answers for the whole archive: an id another lens holds is not missing,
+// and duplicates or an empty query cost nothing.
+func TestMissingObservationIDs(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{
+		{ID: "here", Lens: LensDefault, Observation: "a"},
+		{ID: "elsewhere", Lens: "math", Observation: "b"},
+	})
+	got, err := s.MissingObservationIDs([]string{"here", "gone", "elsewhere", "gone2", "gone"})
 	if err != nil {
-		t.Fatalf("deleting a missing id must not error: %v", err)
+		t.Fatal(err)
 	}
-	if deleted {
-		t.Fatal("deleting a missing id must report deleted=false")
+	if want := map[string]bool{"gone": true, "gone2": true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("missing = %v, want %v", got, want)
 	}
-	if got := s.ReviewRowid(LensDefault); got != 1 {
-		t.Fatalf("a no-op delete must not reset the cursor, got %d", got)
+	if got, err := s.MissingObservationIDs(nil); err != nil || len(got) != 0 {
+		t.Fatalf("empty query: %v %v", got, err)
 	}
 }

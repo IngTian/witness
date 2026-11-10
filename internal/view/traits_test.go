@@ -748,3 +748,25 @@ func TestTraitPointsSortedByTime(t *testing.T) {
 		Weeks: []Week{}, Evidence: []Evidence{},
 	})
 }
+
+// A retire row (a review archived the facet when its evidence was deleted) confirms nothing, so
+// a facet a later review brought back must not grow a point on the day it was retired.
+func TestRetireRowIsNotAPoint(t *testing.T) {
+	ev := func(at string, to float64, kind string) store.ConfidenceEvent {
+		return store.ConfidenceEvent{Lens: "default", Dimension: "habits", Key: "back", At: at, To: to, Kind: kind}
+	}
+	in := &store.ViewInput{
+		Facets: []store.Facet{{Lens: "default", Dimension: "habits", Key: "back", LastSeen: "2026-07-20T12:00:00Z",
+			Versions: []store.FacetVersion{{ValidFrom: "2026-07-01T12:00:00Z", Confidence: 0.7}}}},
+		Log: []store.ConfidenceEvent{
+			ev("2026-07-01T12:00:00Z", 0.5, store.EventNew),
+			ev("2026-07-10T12:00:00Z", 0.5, store.EventRetire),
+			ev("2026-07-20T12:00:00Z", 0.7, store.EventReinforce),
+		},
+	}
+	m := Build(in, nil, time.Date(2026, 7, 25, 0, 0, 0, 0, est), est)
+	want := []Point{{At: "2026-07-01", Value: 0.5}, {At: "2026-07-20", Value: 0.7}}
+	if got := traitByKey(t, m, "back").Points; !reflect.DeepEqual(got, want) {
+		t.Errorf("Points %+v, want %+v", got, want)
+	}
+}

@@ -39,7 +39,8 @@ they exist for recovery and debugging, and everything they do also happens autom
   it. Re-runnable; each pass consolidates what it can see.
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
 - `witness observations record --session <id> --dimension <name> --observation <text>` — stage an active observation and kick the worker.
-- `witness observations delete <obs_id>` — prune a wrong observation.
+- `witness observations delete <obs_id>` — prune a wrong observation. It is removed now; facets that rested only on it
+  are retired at the next review, and nothing is re-read.
 - `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
   observations. (Hidden, like the rest of `worker`: review normally runs on its own schedule —
   `review_every` / `review_poignancy` — so reaching for this by hand is the exception. `--full`

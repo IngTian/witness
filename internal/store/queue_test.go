@@ -87,16 +87,16 @@ func TestConfidenceLogCount(t *testing.T) {
 // SQLITE_BUSY_SNAPSHOT (517) — a conflict busy_timeout CANNOT retry, because there is no
 // lock to wait for; the snapshot is simply stale. witness is multi-process (a capture hook
 // per user turn, a draining worker, an MCP server), so these must survive a concurrent
-// commit. The three read-then-write sites are StampReview, DeleteObservation and
-// PruneSessionsBefore; the other transactions in this package write first, which takes the
-// lock immediately, so they are already safe.
+// commit. The two read-then-write sites are StampReview and PruneSessionsBefore; the other
+// transactions in this package write first, which takes the lock immediately, so they are
+// already safe. (DeleteObservation was a third until it stopped reading the lens to reset its
+// review cursor; it is one DELETE now.)
 func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		run  func(*Store) error
 	}{
 		{"StampReview", func(s *Store) error { return s.StampReview() }},
-		{"DeleteObservation", func(s *Store) error { _, err := s.DeleteObservation("o1"); return err }},
 		{"PruneSessionsBefore", func(s *Store) error { _, _, err := s.PruneSessionsBefore("2025-01-01T00:00:00Z"); return err }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
