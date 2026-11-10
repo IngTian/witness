@@ -20,6 +20,10 @@ func cmdMCP() error {
 		return err
 	}
 	defer st.Close()
+	if lazyModel() {
+		defer setupLogging(st)() // the background download is otherwise silent
+		return mcp.Serve(context.Background(), st, startLazyEmbedder(), mcpOptions(st))
+	}
 	emb, err := embed.New()
 	if err != nil {
 		return err

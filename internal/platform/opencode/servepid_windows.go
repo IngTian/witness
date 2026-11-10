@@ -3,8 +3,6 @@
 package opencode
 
 import (
-	"errors"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -67,34 +65,4 @@ func processImageName(h windows.Handle) (string, error) {
 		return "", err
 	}
 	return windows.UTF16ToString(buf[:n]), nil
-}
-
-// processAlive reports whether pid names a live process.
-//
-// Windows has no signal-0 equivalent, and os.FindProcess is useless as a liveness test here:
-// it succeeds for a live pid AND is the very case pid reuse produces. So ask the OS for the
-// process's exit code — OpenProcess+GetExitCodeProcess via the syscall package — and treat
-// STILL_ACTIVE (259) as alive.
-//
-// It answers "is the OWNER still running", so failing toward "alive" is the safe direction: it
-// makes reapPriorServe decline to kill. An OpenProcess failure therefore returns true only
-// when the reason is ACCESS_DENIED (the process exists but belongs to a more privileged
-// account); a genuine "no such process" returns false.
-func processAlive(pid int) bool {
-	if pid <= 1 {
-		return false
-	}
-	const stillActive = 259
-	h, err := syscall.OpenProcess(syscall.PROCESS_QUERY_INFORMATION|syscall.SYNCHRONIZE, false, uint32(pid))
-	if err != nil {
-		// ERROR_ACCESS_DENIED means it EXISTS; anything else (typically
-		// ERROR_INVALID_PARAMETER for a dead pid) means it does not.
-		return errors.Is(err, syscall.ERROR_ACCESS_DENIED)
-	}
-	defer syscall.CloseHandle(h)
-	var code uint32
-	if err := syscall.GetExitCodeProcess(h, &code); err != nil {
-		return true // handle opened, state unknown: assume alive (declines the kill)
-	}
-	return code == stillActive
 }

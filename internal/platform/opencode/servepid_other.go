@@ -4,11 +4,8 @@ package opencode
 
 import (
 	"context"
-	"errors"
-	"os"
 	"os/exec"
 	"strconv"
-	"syscall"
 )
 
 // isOurServePID reports whether pid is a live witness-private `opencode serve`.
@@ -33,28 +30,4 @@ func isOurServePID(pid int) bool {
 		return false
 	}
 	return isStrayServeLine(string(out))
-}
-
-// processAlive reports whether pid names a live process.
-//
-// Unix: signal 0 is the portable liveness probe — it performs the permission and existence
-// checks without delivering anything. EPERM means the process EXISTS but belongs to another
-// user, which still answers "alive" (and is why the error is inspected rather than assumed
-// fatal). Only ESRCH means gone.
-//
-// It answers "is the OWNER still running", so a false positive is the safe direction: it makes
-// reapPriorServe decline to kill.
-func processAlive(pid int) bool {
-	if pid <= 1 {
-		return false
-	}
-	p, err := os.FindProcess(pid) // never errors on Unix, but check anyway
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPERM)
 }

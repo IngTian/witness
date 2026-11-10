@@ -48,7 +48,7 @@ ok "built $BIN"
 # --- [3/4] embedding model ----------------------------------------------------
 step 3 "Ensuring the embedding model"
 info "~448MB, fetched once; skipped if already present and intact"
-./scripts/fetch-model.sh
+"$BIN" model fetch
 ok "model ready"
 
 # --- [4/4] wire into the selected agent runtime --------------------------------

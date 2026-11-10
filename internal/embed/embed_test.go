@@ -91,7 +91,7 @@ func useRepoModel(t *testing.T) bool {
 // replaces invalid bytes, and recovers as a backstop.
 func TestEmbedHandlesNFDAndInvalidUTF8(t *testing.T) {
 	if !useRepoModel(t) {
-		t.Skip("no embedding model in this checkout (assets/e5-small); run scripts/fetch-model.sh")
+		t.Skip("no embedding model in this checkout (assets/e5-small); run `witness model fetch`")
 	}
 	// An inherited GOMLX_BACKEND=xla must not reach New's backend choice (#199 F002). With the
 	// model present, this is what proves New itself calls newBackend, not backends.New.

@@ -92,3 +92,28 @@ func TestExeRelativeCandidates(t *testing.T) {
 		}
 	})
 }
+
+// A first `witness model fetch` has no assets dir to probe for, so CreateDir anchors on prompts/,
+// which every layout ships beside the binary — never on the cwd the user happens to stand in.
+func TestCreateFromAnchorsOnPromptsBesideTheBinary(t *testing.T) {
+	sub := filepath.Join("assets", "e5-small")
+	repo := t.TempDir() // build layout: <repo>/bin/witness-* + <repo>/prompts
+	for _, d := range []string{"bin", "prompts"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := createFrom(filepath.Join(repo, "bin"), sub), filepath.Join(repo, sub); got != want {
+		t.Errorf("build layout: got %q, want %q", got, want)
+	}
+	inst := t.TempDir() // installed layout: <dir>/witness + <dir>/prompts
+	if err := os.MkdirAll(filepath.Join(inst, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := createFrom(inst, sub), filepath.Join(inst, sub); got != want {
+		t.Errorf("installed layout: got %q, want %q", got, want)
+	}
+	if got := createFrom(t.TempDir(), sub); got != sub { // `go run`: nothing beside the binary
+		t.Errorf("no bundle beside the binary: got %q, want the cwd fallback %q", got, sub)
+	}
+}

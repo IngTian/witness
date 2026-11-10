@@ -29,7 +29,7 @@ import (
 
 const (
 	// ponytail: Dim is one face of an UNSTAMPED embedding contract: multilingual-e5-small at
-	// revision 614241f (scripts/fetch-model.sh, npm/opencode/bin/model.js), a "query: " prefix
+	// revision 614241f (internal/model, npm/opencode/bin/model.js), a "query: " prefix
 	// on every input, masked mean-pool, L2-normalize, maxLen 512 tokens. Every stored L1 vector
 	// was made under it and nothing records that. Changing any part needs a re-embed of all of
 	// L1; merge.go copies embedding blobs verbatim between archives, so both sides must agree;
@@ -63,15 +63,21 @@ type Embedder struct {
 // hook, which has no shell to export CLAUDE_PLUGIN_ROOT, still finds the model
 // beside the installed binary), else the cwd-relative dev fallback.
 func assetsDir() string {
-	return bundle.Dir(filepath.Join("assets", "e5-small"), "WITNESS_ASSETS")
+	return bundle.Dir(assetsSubdir, "WITNESS_ASSETS")
 }
+
+var assetsSubdir = filepath.Join("assets", "e5-small")
 
 // AssetsDir returns the directory where model.onnx and tokenizer.json should
 // live. Commands use this to explain missing-model state without loading GoMLX.
 func AssetsDir() string { return assetsDir() }
 
+// FetchDir is where a download should put the model: AssetsDir, unless that is only the
+// cwd-relative fallback, in which case it is beside the binary (bundle.CreateDir).
+func FetchDir() string { return bundle.CreateDir(assetsSubdir, "WITNESS_ASSETS") }
+
 // ModelReady is a cheap integrity gate for auto-start decisions. It mirrors the
-// fetch script's coarse minimum-size checks so a partial download never causes
+// downloaders' coarse minimum-size checks so a partial download never causes
 // the heavy embedder path to start and fail repeatedly.
 func ModelReady() bool {
 	dir := assetsDir()
@@ -92,12 +98,12 @@ func New() (*Embedder, error) {
 
 	if !ModelReady() {
 		if _, err := os.Stat(modelPath); err != nil {
-			return nil, fmt.Errorf("embed model not found at %s (run scripts/fetch-model.sh): %w", modelPath, err)
+			return nil, fmt.Errorf("embed model not found at %s (run `witness model fetch`): %w", modelPath, err)
 		}
 		if _, err := os.Stat(tokPath); err != nil {
-			return nil, fmt.Errorf("embed tokenizer not found at %s (run scripts/fetch-model.sh): %w", tokPath, err)
+			return nil, fmt.Errorf("embed tokenizer not found at %s (run `witness model fetch`): %w", tokPath, err)
 		}
-		return nil, fmt.Errorf("embed model incomplete at %s (run scripts/fetch-model.sh)", dir)
+		return nil, fmt.Errorf("embed model incomplete at %s (run `witness model fetch`)", dir)
 	}
 
 	model, err := parser.ParseFile(modelPath)
