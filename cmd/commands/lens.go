@@ -530,9 +530,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	if profErr != nil {
 		fmt.Println(result(warnGlyph(), "backfilled lens "+name,
 			"facets refreshed, but the profile was NOT regenerated (the previous one is kept)"))
-		rtap.note(profErr) // a model error during it, if one was seen; else its own (missing prompts …)
-		fmt.Println("  " + kvRow("cause", rtap.cause(), ""))
-		fmt.Println(hint("diagnose", "witness doctor"))
+		printProfileCause(rtap, profErr)
 	} else if drifted == 0 {
 		fmt.Println(result(okGlyph(), "backfilled lens "+name, "facets + profile refreshed"))
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
@@ -226,6 +227,99 @@ func TestReviewSaysWhenTheProfileWasNotRegenerated(t *testing.T) {
 	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") ||
 		!strings.Contains(out, "cause") || strings.Contains(out, "profile regenerated\n") {
 		t.Fatalf("(%v)\n%s", err, out)
+	}
+}
+
+// portraitFailPlatform fails a claim batch (input "LENS: <name>\nFACETS: N") and a lens portrait
+// (input "LENS: <name>\n\nFACETS (dimension…") the way an oversized lens fails on claude -p, and
+// answers everything else with "[]". In-process: no real CLI is spawned.
+type portraitFailPlatform struct{ leakFakePlatform }
+
+func (portraitFailPlatform) Name() string                           { return "portraitfail" }
+func (portraitFailPlatform) SessionPrefix() string                  { return "portraitfail:" }
+func (portraitFailPlatform) NewRunner(store.Config) platform.Runner { return portraitFailRunner{} }
+
+type portraitFailRunner struct{ leakFakeRunner }
+
+func (portraitFailRunner) Run(_ context.Context, _, _, input string) (string, error) {
+	switch {
+	case strings.Contains(input, "LENS: test\nFACETS: "):
+		return "", errors.New("claim batch timed out")
+	case strings.Contains(input, "FACETS (dimension/key, confidence, value):"):
+		return "", errors.New("claude -p: exit status 1: Prompt is too long")
+	}
+	return "[]", nil
+}
+
+var registerPortraitFailOnce sync.Once
+
+// portraitFailArchive is an archive whose one lens, test, has a facet and an observation, routed
+// to portraitFailPlatform. It returns the screen lines a failed portrait must show (F095).
+func portraitFailArchive(t *testing.T) (st *store.Store, want []string) {
+	t.Helper()
+	registerPortraitFailOnce.Do(func() { platform.Register(portraitFailPlatform{}) })
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	t.Setenv(noDefaultLensEnv, "1")
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetConfigString("runner", "portraitfail"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RegisterLens("test", writeLensDir(t, "test", "Extract prompt.", "Review prompt.")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnableLens("test"); err != nil {
+		t.Fatal(err)
+	}
+	facets := []store.Facet{{Lens: "test", Dimension: "traits", Key: "k",
+		Versions: []store.FacetVersion{{Value: "a long value with no claim yet", Confidence: 0.9}}}}
+	if err := st.WriteFacets(facets); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendObservations([]store.Observation{{ID: store.ObservationID("s", "test", "o"),
+		TS: "2026-08-01T00:00:00Z", Session: "s", Lens: "test", Dimension: "traits",
+		Observation: "did a thing", Poignancy: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	return st, []string{
+		// The portrait's own error, not the claim batch's that the tap saw first.
+		kvRow("cause", "claude -p: exit status 1: Prompt is too long", ""),
+		kvRow("input", distill.InputSize(distill.PortraitInputChars(facets)["test"]), ""),
+		hint("if too large", "witness config set review_model <model> --lens test"),
+	}
+}
+
+// A portrait call that failed must show, on the screen that reports it, what it sent and the
+// review_model lever (F095). The cause row held the bare runner error the tap noted before
+// distill added either, so only witness.log, `witness profile` and get_profile had them.
+func TestReviewShowsAFailedPortraitsSizeAndLever(t *testing.T) {
+	st, want := portraitFailArchive(t)
+	st.Close()
+	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") {
+		t.Fatalf("(%v)\n%s", err, out)
+	}
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q:\n%s", w, out)
+		}
+	}
+}
+
+// `lens backfill` reports a failed portrait the same way.
+func TestLensBackfillShowsAFailedPortraitsSizeAndLever(t *testing.T) {
+	st, want := portraitFailArchive(t)
+	out, err := captureStdoutErr(t, func() error { return lensBackfill(st, "test", false, true) })
+	if err != nil || !strings.Contains(out, "the profile was NOT regenerated") {
+		t.Fatalf("(%v)\n%s", err, out)
+	}
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q:\n%s", w, out)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -52,13 +53,32 @@ func cmdReviewFull(full bool) error {
 	if profErr != nil {
 		// The facets landed; only the narrative did not. Say so rather than "profile regenerated".
 		fmt.Println(warnGlyph() + " " + done + " — the profile was NOT regenerated (the previous one is kept)")
-		tap.note(profErr) // a model error during it, if one was seen; else its own (missing prompts …)
-		fmt.Println("  " + kvRow("cause", tap.cause(), ""))
-		fmt.Println(hint("diagnose", "witness doctor"))
+		printProfileCause(tap, profErr)
 		return nil
 	}
 	fmt.Println(okGlyph() + " " + done + " — profile regenerated")
 	return nil
+}
+
+// printProfileCause prints, under a "profile was NOT regenerated" result, why. A failed portrait
+// call carries what it sent and the review_model lever (distill.InputSizeError, F095); both get
+// their own line, because the tap noted the bare runner error before distill added them, and the
+// one-line cause is cut long before them anyway. That call's own error is then the cause, not the
+// tap's first: a best-effort claim batch earlier in the run shares the tap.
+func printProfileCause(tap *causeTap, profErr error) {
+	var ie *distill.InputSizeError
+	if errors.As(profErr, &ie) {
+		tap = &causeTap{}
+		tap.note(ie.Err)
+	} else {
+		tap.note(profErr) // a model error during it, if one was seen; else its own (missing prompts …)
+	}
+	fmt.Println("  " + kvRow("cause", tap.cause(), ""))
+	if ie != nil {
+		fmt.Println("  " + kvRow("input", ie.Size, ""))
+		fmt.Println(hint("if too large", ie.Lever))
+	}
+	fmt.Println(hint("diagnose", "witness doctor"))
 }
 
 // forceReviewTapped runs an L2 review from the current observations, updates facets, and

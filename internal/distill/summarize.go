@@ -471,13 +471,27 @@ func approxCount(n int) string {
 // ponytail: names the lens by its data name; a legacy lens registered under another name needs
 // that name in --lens. Map it here if one turns up (distill has no registry to ask).
 func withInputSize(err error, input string, ln *lens.Lens) error {
-	scope := ""
+	lever := "witness config set review_model <model>"
 	if ln != nil {
-		scope = " --lens " + ln.Name
+		lever += " --lens " + ln.Name
 	}
-	return fmt.Errorf("%w (input %s; if that is more than the model's context window, use a larger-context model: witness config set review_model <model>%s)",
-		err, InputSize(utf8.RuneCountInString(input)), scope)
+	return &InputSizeError{Err: err, Size: InputSize(utf8.RuneCountInString(input)), Lever: lever}
 }
+
+// InputSizeError is withInputSize's error, typed so a screen can print Size and Lever on their own
+// lines: a one-line cause is cut long before them, since the runner's stderr comes first.
+type InputSizeError struct {
+	Err   error  // the call's own error
+	Size  string // what it sent, as InputSize renders it
+	Lever string // the command that switches the call to a larger-context model
+}
+
+func (e *InputSizeError) Error() string {
+	return fmt.Sprintf("%v (input %s; if that is more than the model's context window, use a larger-context model: %s)",
+		e.Err, e.Size, e.Lever)
+}
+
+func (e *InputSizeError) Unwrap() error { return e.Err }
 
 // renderFacetsForSummary formats one lens's active facets as readable input for
 // the summarizer prompt, with each confidence decayed to decaySeq.
