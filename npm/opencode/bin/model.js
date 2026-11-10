@@ -13,7 +13,8 @@ import { fileURLToPath } from "node:url"
 // Pin the exact HuggingFace revision (not a floating `main`): the SHA-256s below
 // are that revision's git-LFS oids, verified against the pointers. A floating ref
 // would silently drift the day upstream republishes the model — then every hash
-// check fails. Keep this commit + hashes in lockstep with scripts/fetch-model.sh.
+// check fails. Keep this commit + hashes in lockstep with internal/model/fetch.go
+// (TestPinsMatchModelJS fails when they drift).
 const MODEL_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
 const MODEL_MIN_BYTES = 400_000_000
 const TOKENIZER_MIN_BYTES = 1_000_000
@@ -294,8 +295,8 @@ export function restampLockOwner(lock, token) {
 // banner, exits, and the script NEVER runs. That silently left npm OpenCode users without
 // the embedding model forever — and with no model, autoWorkerShouldStart refuses to start
 // a worker whenever there is pending work, so distillation never happened at all. Nothing
-// else covered for it either: the npm package ships no assets, and embed.go's error tells
-// the user to run scripts/fetch-model.sh, which that package does not contain.
+// else covered for it either: the npm package ships no assets, and embed.go's error told
+// the user to run scripts/fetch-model.sh, which that package did not contain.
 //
 // Preference order:
 //  1. `bun run <script>` when we are demonstrably under Bun (globalThis.Bun) — the plugin's

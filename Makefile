@@ -57,8 +57,8 @@ npm-opencode-package:
 	npm pack ./npm/opencode --ignore-scripts --dry-run
 
 ## fetch-model: download the embedding model (~448MB, once; idempotent)
-fetch-model:
-	./scripts/fetch-model.sh
+fetch-model: build
+	$(BIN) model fetch
 
 ## install: build + fetch model + wire hooks/MCP into Claude Code (idempotent)
 install: build fetch-model

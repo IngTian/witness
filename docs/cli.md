@@ -11,7 +11,7 @@ The visible front door, exactly as `witness --help` groups it:
 | Read your archive | `status` · `profile` · `view` · `facets` · `observations` · `ingest` |
 | Lenses | `lens` |
 | Configure | `config` |
-| Setup | `doctor` · `install` · `wire` · `unwire` |
+| Setup | `doctor` · `install` · `model` · `wire` · `unwire` |
 | Maintenance | `cleanup` · `export` · `merge` · `compact` |
 
 Capture, the worker, and the MCP server are **internal** entry points invoked by
@@ -94,6 +94,12 @@ they exist for recovery and debugging, and everything they do also happens autom
   and distill them into the archive. Reads from stdin or a file. See the record contract in
   [`prompts/SCHEMA.md`](../prompts/SCHEMA.md#records-in-the-ingest-contract).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
+- `witness model fetch` — download the embedding model (multilingual-e5-small, ~470MB) once, pinned
+  to one revision and checked by SHA-256. `install.sh` and `make fetch-model` run it; re-running
+  checks the files instead of downloading them again. `WITNESS_ASSETS` picks the directory, and
+  `WITNESS_MODEL_BASE_URL` a mirror (it needs `WITNESS_MODEL_SHA256` and
+  `WITNESS_TOKENIZER_SHA256`). From npm, `npx @witness-ai/opencode mcp` downloads the model itself
+  in the background if it is missing (`WITNESS_SKIP_MODEL_DOWNLOAD=1` turns that off).
 - `witness config get|set|unset|list [--lens <name>]` — read or change the runner and models, for
   the default scope or one lens; `witness config path` prints where `config.toml` lives.
 

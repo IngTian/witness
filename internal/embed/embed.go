@@ -29,7 +29,7 @@ import (
 
 const (
 	// ponytail: Dim is one face of an UNSTAMPED embedding contract: multilingual-e5-small at
-	// revision 614241f (scripts/fetch-model.sh, npm/opencode/bin/model.js), a "query: " prefix
+	// revision 614241f (internal/model, npm/opencode/bin/model.js), a "query: " prefix
 	// on every input, masked mean-pool, L2-normalize, maxLen 512 tokens. Every stored L1 vector
 	// was made under it and nothing records that. Changing any part needs a re-embed of all of
 	// L1; merge.go copies embedding blobs verbatim between archives, so both sides must agree;
@@ -71,7 +71,7 @@ func assetsDir() string {
 func AssetsDir() string { return assetsDir() }
 
 // ModelReady is a cheap integrity gate for auto-start decisions. It mirrors the
-// fetch script's coarse minimum-size checks so a partial download never causes
+// downloaders' coarse minimum-size checks so a partial download never causes
 // the heavy embedder path to start and fail repeatedly.
 func ModelReady() bool {
 	dir := assetsDir()
@@ -92,12 +92,12 @@ func New() (*Embedder, error) {
 
 	if !ModelReady() {
 		if _, err := os.Stat(modelPath); err != nil {
-			return nil, fmt.Errorf("embed model not found at %s (run scripts/fetch-model.sh): %w", modelPath, err)
+			return nil, fmt.Errorf("embed model not found at %s (run `witness model fetch`): %w", modelPath, err)
 		}
 		if _, err := os.Stat(tokPath); err != nil {
-			return nil, fmt.Errorf("embed tokenizer not found at %s (run scripts/fetch-model.sh): %w", tokPath, err)
+			return nil, fmt.Errorf("embed tokenizer not found at %s (run `witness model fetch`): %w", tokPath, err)
 		}
-		return nil, fmt.Errorf("embed model incomplete at %s (run scripts/fetch-model.sh)", dir)
+		return nil, fmt.Errorf("embed model incomplete at %s (run `witness model fetch`)", dir)
 	}
 
 	model, err := parser.ParseFile(modelPath)

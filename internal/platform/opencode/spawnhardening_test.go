@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/IngTian/witness/internal/proc"
 )
 
 // Every `opencode` spawn must go through openCodeCommand.
@@ -125,7 +127,7 @@ func TestReapPriorServeDoesNotKillAnUnrelatedProcess(t *testing.T) {
 	// while a high pid is free on a fresh container but taken on a long-running desktop.
 	deadOwner := 0
 	for _, cand := range []int{0x7FFFFFF0, 0x7FFFFF00, 0x3FFFFFF0, 999983, 999979} {
-		if !processAlive(cand) {
+		if !proc.Alive(cand) {
 			deadOwner = cand
 			break
 		}
@@ -144,7 +146,7 @@ func TestReapPriorServeDoesNotKillAnUnrelatedProcess(t *testing.T) {
 	reapPriorServe(root) // must not signal our parent
 
 	// THE assertion: the victim is still alive. Everything else here is bookkeeping.
-	if !processAlive(victim) {
+	if !proc.Alive(victim) {
 		t.Fatalf("reapPriorServe killed pid %d, which was NOT a witness serve — a recycled pid in "+
 			"the record is then enough to destroy an unrelated process", victim)
 	}
@@ -201,28 +203,6 @@ func TestReapPriorServeSparesALiveSiblingsServe(t *testing.T) {
 	if _, err := os.Stat(pidFile); err != nil {
 		t.Errorf("a live sibling's serve record was deleted (%v) — that serve is now untracked and "+
 			"can never be reaped", err)
-	}
-}
-
-// processAlive must be right about BOTH answers, since each error direction is a distinct bug:
-// a false "dead" lets reapPriorServe kill a live sibling's serve, and a false "alive" makes it
-// decline to reap a genuine orphan forever.
-func TestProcessAliveDistinguishesLiveFromDead(t *testing.T) {
-	if !processAlive(os.Getpid()) {
-		t.Error("this process was reported DEAD — reapPriorServe would treat a live owner's serve " +
-			"as an orphan and kill it")
-	}
-	// pid 1 and below are never valid owners (init/launchd, or nonsense).
-	for _, pid := range []int{0, 1, -1} {
-		if processAlive(pid) {
-			t.Errorf("processAlive(%d) = true; pids <= 1 must never be treated as a live owner", pid)
-		}
-	}
-	// A pid that almost certainly does not exist must read as dead, or no orphan is ever reaped.
-	// (Not absolutely guaranteed free, so this is a soft check with a clear message.)
-	if processAlive(0x7FFFFFF0) {
-		t.Log("note: pid 0x7FFFFFF0 appears live on this machine; the dead-pid direction was not " +
-			"exercised. Re-run or pick another pid if this persists.")
 	}
 }
 

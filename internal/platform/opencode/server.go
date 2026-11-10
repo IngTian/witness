@@ -154,7 +154,7 @@ func reapPriorServe(runtimeRoot string) {
 	// after a failed waitHealthy), and treating that as reapable deletes the record for a serve
 	// that is still running. The record then describes nothing and the serve becomes
 	// unreapable, which on Windows means it leaks until reboot.
-	if rec.Owner > 1 && processAlive(rec.Owner) {
+	if rec.Owner > 1 && proc.Alive(rec.Owner) {
 		slog.Debug("proc reap: the recorded serve still has a live owner; not an orphan",
 			"serve", rec.Serve, "owner", rec.Owner)
 		return

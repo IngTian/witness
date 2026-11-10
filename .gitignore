@@ -39,7 +39,7 @@ docs/design/
 docs/superpowers/
 .superpowers/
 
-# Embedding model assets — fetched via scripts/fetch-model.sh, never committed
+# Embedding model assets — fetched via `witness model fetch`, never committed
 # (the .onnx is ~470MB). The repo ships code; users fetch the model once.
 assets/e5-small/*.onnx
 assets/e5-small/*.json
