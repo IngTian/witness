@@ -124,6 +124,8 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 		return err
 	}
 	if len(plans) == 0 {
+		// Judged and found nothing to merge: record it, or the doctor/status hint keeps asking.
+		stampCompactBaselines(st, lenses)
 		fmt.Println(skipGlyph() + " nothing to compact — no lens proposed a merge or retirement")
 		return nil
 	}
@@ -150,11 +152,11 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 	// short CLAIM. Merged survivors already got theirs from the merge call; this covers the
 	// facets compaction left alone.
 	//
-	// It belongs here rather than in the review because it is maintenance, the same as
-	// merging: adding model calls to every fold is a cost the user did not ask for. And the
-	// two halves do different work — merging cuts the facet COUNT, claims cut the per-facet
-	// payload — so a profile needs both to actually get smaller. Measured: compaction alone
-	// took a dimension 73% fewer facets but only 15% less text.
+	// Every review also writes claims before it folds, but capped per run
+	// (distill.AutoClaimBatches). Here it is unbounded, so one compaction leaves the whole
+	// profile claimed. The two halves do different work: merging cuts the facet COUNT,
+	// claims cut the per-facet payload. Measured: compaction alone took a dimension 73% fewer
+	// facets but only 15% less text.
 	cl := &distill.Claimer{
 		Store: st, Config: cfg,
 		Runner: rs.RunFor(nil), RunnerFor: rs.RunFor,
@@ -169,6 +171,7 @@ func cmdCompact(yes bool, lensOnly string, ask func(prompt string) bool) error {
 		}
 	}
 
+	stampCompactBaselines(st, lenses)
 	for _, p := range plans {
 		active, archived := st.LensFacetCounts(p.Lens)
 		fmt.Println(resultRow(okGlyph(), p.Lens, countOf(active, "active facet", "active facets"),

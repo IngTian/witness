@@ -3,7 +3,6 @@ package distill
 import (
 	"context"
 	"math"
-	"strings"
 	"testing"
 	"time"
 
@@ -131,45 +130,6 @@ func TestRunFullReRunSameClusterSkipsVerify(t *testing.T) {
 	}
 	if n > 1 {
 		t.Fatalf("re-run minted a duplicate facet: %d copies of key 'k'", n)
-	}
-}
-
-// TestRunFullDeferredCandidateReVerifiedNextRun: under a MaxVerify budget, a candidate
-// the budget never reached must NOT be marked seen — so a later unbudgeted run picks it
-// up (deferred ≠ dropped, the freshness-not-miss property).
-func TestRunFullDeferredCandidateReVerifiedNextRun(t *testing.T) {
-	s := newStore(t)
-	seedArc(t, s, "a", 6, []float32{1, 0, 0}) // arc 1
-	seedArc(t, s, "b", 6, []float32{0, 1, 0}) // arc 2 (orthogonal → distinct candidate)
-
-	var seen []string
-	verify := func(_ context.Context, _, _, input string) (string, error) {
-		// tag which arc by a member id present in the input
-		key := "other"
-		if strings.Contains(input, "a observation") {
-			key = "a"
-		} else if strings.Contains(input, "b observation") {
-			key = "b"
-		}
-		seen = append(seen, key)
-		return `[{"dimension":"thinking","key":"` + key + `","value":"v","confidence":0.7,"because_of":["x"],"contradicts_prior":false}]`, nil
-	}
-	r := emergentReviewer(s, verify)
-	r.MaxVerify = 1 // only the top candidate verifies this pass
-	if err := r.RunFull(context.Background(), time.Now()); err != nil {
-		t.Fatalf("first RunFull: %v", err)
-	}
-	if len(seen) != 1 {
-		t.Fatalf("budget=1 should verify exactly 1 candidate, got %d", len(seen))
-	}
-	// A second, unbudgeted run must verify the DEFERRED candidate (not re-verify the first).
-	r.MaxVerify = 0
-	before := len(seen)
-	if err := r.RunFull(context.Background(), time.Now()); err != nil {
-		t.Fatalf("second RunFull: %v", err)
-	}
-	if len(seen) <= before {
-		t.Fatalf("deferred candidate must be verified on the next run; no new verify calls (%d→%d)", before, len(seen))
 	}
 }
 

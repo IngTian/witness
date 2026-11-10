@@ -40,6 +40,13 @@ type Reviewer struct {
 	// Progress, when set, is called as each lens's fold windows complete; Where is the lens.
 	// nil is silent — the background drain leaves it nil.
 	Progress ProgressFunc
+	// Claims, when set, fills in missing facet claims for a lens BEFORE its fold: the automatic
+	// claim pass, bounded by Claims.MaxBatches. The review sends each facet's claim instead of
+	// its full value (Gist), so a lens without claims sends every facet in full — math's
+	// claim-less windows ran 1.14M chars and timed out. Before, not after: a pass gated on a
+	// successful fold could never unblock the fold that was failing. Best-effort (Claimer.Run
+	// never fails the review). nil (tests, the summary borrow) writes no claims.
+	Claims *Claimer
 
 	// events are the confidence changes applyFacet made since the last takeEvents — one per
 	// accepted assertion — waiting to be written in the same transaction as the facets they
@@ -131,6 +138,10 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 	for start := 0; start < len(obs); {
 		start = windowEnd(obs, start, budget)
 		ends = append(ends, start)
+	}
+	// Only a lens that is about to fold pays for claims: they exist to shrink this fold's payload.
+	if len(ends) > 0 && r.Claims != nil {
+		r.Claims.Run(ctx, ln)
 	}
 	tick := func(done int) {
 		if r.Progress != nil && len(ends) > 0 { // a lens with nothing to fold says nothing

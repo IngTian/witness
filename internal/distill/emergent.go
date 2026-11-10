@@ -393,9 +393,6 @@ type EmergentReviewer struct {
 	Config    store.Config
 	Runner    MineFunc                     // required; production wires a real runner, tests inject a fake
 	RunnerFor func(ln *lens.Lens) MineFunc // per-lens runner seam (#75); nil → Runner
-	// MaxVerify caps verify calls per lens per pass (the explicit LLM budget knob).
-	// 0 = unbounded (the first cold-start pass); a periodic re-run sets a ceiling.
-	MaxVerify int
 	// Progress, when set, is called as each lens's clustering steps and then its verify calls
 	// complete; Where is the lens. nil is silent.
 	Progress ProgressFunc
@@ -463,29 +460,18 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 				todo = append(todo, pendingMark{ln.Name, sig, c}) // unseen (idempotency skip)
 			}
 		}
-		verified, calls := 0, 0
+		calls := 0
 		tick := func() {
 			if r.Progress == nil || len(todo) == 0 {
 				return
 			}
-			total := len(todo)
-			if r.MaxVerify > 0 {
-				// A failed verify does not spend the budget, so each failure can add one call.
-				total = min(total, r.MaxVerify+calls-verified)
-			}
-			r.Progress(Progress{Where: ln.Name, Stages: []Stage{{Name: "verifying arcs", Done: calls, Total: total, Open: total < len(todo)}}})
+			r.Progress(Progress{Where: ln.Name, Stages: []Stage{{Name: "verifying arcs", Done: calls, Total: len(todo)}}})
 		}
 		tick()
 		for _, t := range todo {
-			if r.MaxVerify > 0 && verified >= r.MaxVerify {
-				break // budget exhausted — remaining candidates are DEFERRED (not marked seen)
-			}
 			sig, c := t.sig, t.cand
 			rf, ok, err := r.verify(ctx, ln, c)
 			calls++ // a failed call is still a call done
-			if err == nil {
-				verified++
-			}
 			tick()
 			if err != nil {
 				slog.Error("emergent: verify candidate", "lens", ln.Name, "err", err)

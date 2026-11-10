@@ -30,7 +30,9 @@ they exist for recovery and debugging, and everything they do also happens autom
   <dimension/key>` unfolds one facet into everything that was merged into it.
 - `witness compact [--lens <name>] [--yes]` — consolidate the profile: merge facets that describe
   one trait, retire ones that were never traits, and give each surviving facet a short `claim`
-  (the summary the review call reads instead of the full prose). **It prints the plan, then asks
+  (the summary the review call reads instead of the full prose). Claims don't wait for compact:
+  every review fills in a lens's missing claims before it folds, up to about 200 per run. Compaction
+  itself stays manual, and `status` and `doctor` suggest it once a lens has grown a lot. **It prints the plan, then asks
   `[y/N]`**; only `y` applies it, and the plan applied is exactly the one shown. `--yes` skips the
   question for scripts (`--apply`, its old name, still works). Nothing is deleted: a compacted facet is archived with its
   full version history and a link to the facet that absorbed it, so `--expand` can always unfold
