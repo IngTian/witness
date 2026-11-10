@@ -469,7 +469,7 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 	// Derived caches about the data just deleted. Exact key for profile_sig; prefix match
 	// for emerge_seen (one row per cluster signature). A sibling lens is untouched — the
 	// prefix ends with ':' so "emerge_seen:math:" can never match "emerge_seen:mathsy:".
-	if _, err = tx.Exec(`DELETE FROM meta WHERE key = ?`, ProfileSigKey(lens)); err != nil {
+	if _, err = tx.Exec(`DELETE FROM meta WHERE key IN (?, ?)`, ProfileSigKey(lens), CompactBaselineKey(lens)); err != nil {
 		return 0, 0, err
 	}
 	if _, err = tx.Exec(

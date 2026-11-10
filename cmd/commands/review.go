@@ -7,8 +7,17 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
+
+// autoClaimer is the bounded claim pass a review runs before each lens's fold, so a lens that was
+// never compacted still gets claims and its review payload shrinks instead of timing out. Both
+// review paths (`witness worker review` and the drain) build their Reviewer with it, so neither
+// can forget it. It rides the same runners as the fold.
+func autoClaimer(st *store.Store, cfg store.Config, run distill.MineFunc, runFor func(*lens.Lens) distill.MineFunc) *distill.Claimer {
+	return &distill.Claimer{Store: st, Config: cfg, Runner: run, RunnerFor: runFor, MaxBatches: distill.AutoClaimBatches}
+}
 
 // review.go holds cmdReviewFull and forceReviewTapped: the implementation functions for the
 // unconditional review pass. The old top-level `review` command was removed from the
@@ -88,7 +97,9 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 	// lens had 109 windows waiting. The drain (worker.go) builds its own Reviewer and draws the same
 	// line only for a foreground run (lens backfill, worker run); a detached worker stays silent.
 	fold := &phaseProgress{start: startProgress}
-	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runFor, Progress: fold.update}
+	claims := autoClaimer(st, cfg, runFn, runFor)
+	claims.Progress = fold.update
+	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runFor, Progress: fold.update, Claims: claims}
 	err = r.Run(ctx, time.Now())
 	fold.finish()
 	if err != nil {

@@ -30,17 +30,29 @@ import (
 // of facets whose value changed in a fold) is a fraction of one call, and a first full pass over
 // a mature archive is tens of calls rather than thousands.
 //
-// It runs only from `witness compact`, unbounded (MaxBatches 0): the user asked, and a first
-// pass over a mature archive is tens of calls. The review never runs it — draining 2,000 claims
-// inside one fold would turn a routine review into an hours-long job. Until a facet has a claim,
-// every consumer falls back to its value (store.FacetVersion.Gist), so a half-claimed archive is
-// correct, just not yet small.
+// It runs from two places:
+//   - `witness compact`, unbounded (MaxBatches 0): the user asked, and a first pass over a mature
+//     archive is tens of calls.
+//   - Every review, automatically, BEFORE each lens's fold, bounded by AutoClaimBatches.
+//
+// The automatic pass reverses an earlier "maintenance only" stance. Leaving claims to an explicit
+// compact meant an archive that was never compacted never got any: the default lens stalled for
+// 24 days on 2.4M-char folds, and math's claim-less windows (1.14M chars) kept timing out, with
+// no way for either to heal itself. Draining 2,000 claims inside one fold would still be an
+// hours-long job, hence the per-run bound: a big backlog converges over several reviews.
+//
+// Until a facet has a claim, every consumer falls back to its value (store.FacetVersion.Gist), so
+// a half-claimed archive is correct, just not yet small.
 
-// Claimer writes the short claims. Its own type rather than a method on Reviewer, because
-// claims are MAINTENANCE — run when the user asks, like compaction — and the review path
-// deliberately no longer triggers them: adding one or two silent model calls to every fold is a
-// cost the user did not ask for, and the same reasoning that keeps compaction on-demand applies
-// here. The review call READS claims (store.FacetVersion.Gist); it does not produce them.
+// AutoClaimBatches bounds the automatic claim pass a review runs before each lens's fold: about
+// 8 × 25 = 200 claims per lens per review. Math's 879 claim-less facets catch up in about five
+// reviews, each smaller than the last. The steady state is the few facets each fold creates, so
+// usually zero or one small call.
+const AutoClaimBatches = 8
+
+// Claimer writes the short claims. It is its own type, rather than a method on Reviewer, because
+// `witness compact` drives it too. The review call READS claims (store.FacetVersion.Gist); the
+// review path produces them only through this type, before it folds (Reviewer.Claims).
 type Claimer struct {
 	Store     store.CompactStore
 	Config    store.Config

@@ -290,6 +290,11 @@ func cmdDoctor(asJSON bool) error {
 		warn("nothing captured yet — no editor is feeding this archive")
 		fix("wire editor", wireCommand())
 	}
+	// Compaction is manual (it merges facets and asks first); doctor only points at it.
+	for _, n := range compactionNudges(st) {
+		row("compact", n.text(), "")
+		fix("compact", n.command())
+	}
 	// "N drifted" is the CURRENTLY-outstanding count (#69-2): distinct sessions whose
 	// last mine of some lens drifted and hasn't cleanly re-mined since. It drops as
 	// sessions recover, unlike the lifetime "drift events" total surfaced in the

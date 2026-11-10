@@ -26,6 +26,11 @@ func ProfileSigKey(lens string) string      { return "profile_sig:" + lens }
 func EmergeSeenPrefix(lens string) string   { return "emerge_seen:" + lens + ":" }
 func EmergeSeenKey(lens, sig string) string { return EmergeSeenPrefix(lens) + sig }
 
+// CompactBaselineKey holds a lens's active facet count as `witness compact` left it, so doctor
+// and status can say when the lens has grown enough to compact again. Compaction stays manual;
+// this only lets the hint know where it last stood.
+func CompactBaselineKey(lens string) string { return "compact_baseline:" + lens }
+
 // The global review-cadence stamps StampReview writes.
 const (
 	reviewTSKey       = "review_ts"        // when the last review ran

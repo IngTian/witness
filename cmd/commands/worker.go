@@ -350,13 +350,15 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 			if !ensureRunners() {
 				return
 			}
-			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runForLens}
+			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runForLens,
+				Claims: autoClaimer(st, cfg, runFn, runForLens)}
 			// A foreground drain (lens backfill, worker run) reviews after it mines: the same
 			// fold line and profile spinner as `witness worker review`, or that stretch is minutes
 			// of silence after the mining line clears. A detached worker stays silent.
 			fold := &phaseProgress{start: startProgress}
 			if progressWhere != "" {
 				r.Progress = fold.update
+				r.Claims.Progress = fold.update
 			}
 			err := r.Run(ctx, time.Now())
 			fold.finish()

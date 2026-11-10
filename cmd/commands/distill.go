@@ -451,6 +451,9 @@ func cmdDistillStatus(asJSON bool) error {
 	fmt.Println("  " + kvRow("queue", queueLine, ""))
 	fmt.Println("  " + kvRow("fresh", "raw "+timeOrNever(lastRaw)+" · distilled "+timeOrNever(lastDistilled), behind(lastRaw, lastDistilled)))
 	fmt.Println()
+	for _, n := range compactionNudges(st) { // manual by design; this only points at it
+		fmt.Println(hint("compact", n.command()) + dim("  "+n.text()))
+	}
 	switch {
 	case stat.Sessions == 0:
 		fmt.Println(warnGlyph() + " nothing captured yet — connect an editor")

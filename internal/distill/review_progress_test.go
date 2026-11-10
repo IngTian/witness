@@ -70,15 +70,13 @@ func TestReviewProgressCountsEveryWindow(t *testing.T) {
 // real lens) and then its verify calls, each with a total known before the first step.
 func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 	s := newStore(t)
-	// Three arcs, so a budget of 1 leaves arcs unverified: a total that grew on a SUCCESS (not only
-	// on a failure) would end short of it, at 2/3.
 	seedArc(t, s, "a", 6, []float32{1, 0, 0})
 	seedArc(t, s, "b", 6, []float32{0, 1, 0})
 	seedArc(t, s, "c", 6, []float32{0, 0, 1})
 	obs, _ := s.ReadObservations("math")
 	ranked := len(obs) // every seeded observation is embedded, so each one is ranked
 
-	run := func(maxVerify, failOn int) (evs []Progress, calls int) {
+	run := func(failOn int) (evs []Progress, calls int) {
 		r := emergentReviewer(s, func(context.Context, string, string, string) (string, error) {
 			calls++
 			if calls == failOn {
@@ -88,7 +86,6 @@ func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 		})
 		// A lens with no observations has nothing to cluster and must say nothing.
 		r.Lenses = append(r.Lenses, &lens.Lens{Name: "quiet", Emerge: "EMERGE", Review: "REVIEW"})
-		r.MaxVerify = maxVerify
 		r.Progress = func(p Progress) { evs = append(evs, p) }
 		if err := r.RunFull(context.Background(), time.Now()); err != nil {
 			t.Fatal(err)
@@ -111,9 +108,9 @@ func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 		return
 	}
 
-	// Budget 1, first verify fails: a failure does not spend the budget, so exactly one more
-	// call follows, and the total must grow to meet it rather than stall at 1/1 or end at 2/1.
-	evs, calls := run(1, 1)
+	// First pass, first verify fails: all three arcs are tried, the total is fixed at 3 from the
+	// first event, and the failed call still counts as done.
+	evs, calls := run(1)
 	cl, vf := split(evs)
 	if len(cl) != ranked+1 {
 		t.Fatalf("want one clustering event per ranked observation plus the start (%d), got %d", ranked+1, len(cl))
@@ -124,31 +121,25 @@ func TestEmergentProgressCountsClusteringAndVerifies(t *testing.T) {
 			t.Fatalf("clustering event %d: %+v / %+v", i, c, v)
 		}
 	}
-	if len(vf) == 0 || calls != 2 {
-		t.Fatalf("budget 1 with one failure: want 2 calls and verify progress, got %d calls, %d events", calls, len(vf))
-	}
-	if f := stage(t, vf[0], "verifying arcs"); f.Done != 0 || f.Total != 1 || !f.Open {
-		t.Errorf("under a budget the first total is the budget, Open while unseen arcs remain: %+v", f)
-	}
-	if l := stage(t, vf[len(vf)-1], "verifying arcs"); l.Done != calls || l.Total != calls {
-		t.Errorf("verify progress ended at %d/%d after %d calls", l.Done, l.Total, calls)
-	}
-
-	// Two arcs are still unseen (the failed one was not marked, the third was past the budget): an
-	// unbudgeted run verifies exactly those, with that total fixed from the first event.
-	evs, calls = run(0, 0)
-	_, vf = split(evs)
-	if calls != 2 || len(vf) == 0 {
-		t.Fatalf("want the 2 remaining arcs verified, got %d calls", calls)
+	if calls != 3 || len(vf) == 0 {
+		t.Fatalf("want all 3 arcs verified on the first pass, got %d calls, %d events", calls, len(vf))
 	}
 	for _, e := range vf {
-		if v := stage(t, e, "verifying arcs"); v.Total != calls || v.Open || e.Where != "math" {
-			t.Fatalf("unbudgeted verify total must be exact and fixed: %+v after %d calls", e, calls)
+		if v := stage(t, e, "verifying arcs"); v.Total != 3 || v.Open {
+			t.Fatalf("verify total must be exact and fixed from the first event: %+v", e)
 		}
+	}
+	if l := stage(t, vf[len(vf)-1], "verifying arcs"); l.Done != 3 {
+		t.Errorf("verify progress ended at %d/3; a failed call is still a call done", l.Done)
+	}
+
+	// The failed arc was not marked seen, so the next pass verifies exactly that one.
+	if _, calls = run(0); calls != 1 {
+		t.Fatalf("want the 1 failed arc re-verified, got %d calls", calls)
 	}
 
 	// Everything judged: no verify calls, so no verify progress.
-	if evs, calls = run(0, 0); calls != 0 {
+	if evs, calls = run(0); calls != 0 {
 		t.Fatalf("every arc is seen; want 0 calls, got %d", calls)
 	}
 	if _, vf = split(evs); len(vf) != 0 {
