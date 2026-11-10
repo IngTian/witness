@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -872,8 +873,18 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 	return nil
 }
 
-// ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 1.18.0+). Do not
-// fall back to a shared user DB: an unavailable capability leaves L0 pending for retry.
+// ErrOpenCodeV2 marks an OpenCode v2 install or database. v2 removed what this package relies
+// on — `serve --pure`, the v1 server routes and plugin API, the v1 tables — and an ungated v2
+// failed SILENTLY: the gate passed 2.x as "newer", the importer read v1 tables v2 had frozen,
+// and wire reported success for a plugin v2 never loads. So it is refused by name, and callers
+// that tolerate other gate failures (wire, when OpenCode is merely absent) can single it out.
+var ErrOpenCodeV2 = errors.New("OpenCode v2 is not supported yet: witness works with OpenCode v1 " +
+	"(1.18 or newer, below 2.0); install v1.19.5 with `npm i -g opencode-ai@1.19.5` " +
+	"(see https://github.com/IngTian/witness/issues/218)")
+
+// ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 1.18.0 up to, not
+// including, 2.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
+// pending for retry.
 func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
 	// Bound the probe: a hung `opencode --version` would otherwise block Open (and doctor)
 	// for as long as the deadline-less drain ctx lives, holding the machine-wide WorkerLock.
@@ -884,7 +895,10 @@ func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
 		return fmt.Errorf("opencode native session isolation unavailable; upgrade to OpenCode 1.18.0+: %w", err)
 	}
 	v := strings.TrimSpace(string(out))
-	major, minor, _, parsed := parseOpenCodeVersion(v)
+	major, minor, patch, parsed := parseOpenCodeVersion(v)
+	if parsed && major >= 2 {
+		return fmt.Errorf("found OpenCode %d.%d.%d: %w", major, minor, patch, ErrOpenCodeV2)
+	}
 	if !parsed || major < 1 || (major == 1 && minor < 18) {
 		return fmt.Errorf("opencode native session isolation unavailable in %q; upgrade to OpenCode 1.18.0+", v)
 	}

@@ -779,6 +779,11 @@ func mcpServerRegistered(out, name string) bool {
 // argv array (no shell), and both the plugin source and the MCP config JSON-encode the
 // path, so a Windows path's backslashes are escaped correctly by construction.
 func cmdInstallOpenCode() (wireOutcome, error) {
+	// Before anything is copied or written: on Windows resolveOpenCodeInstall installs the
+	// bundle, and a refusal must leave the machine as it found it.
+	if err := openCodeV2Check(); err != nil {
+		return wireOutcome{}, err
+	}
 	target, err := resolveOpenCodeInstall()
 	if err != nil {
 		return wireOutcome{}, err

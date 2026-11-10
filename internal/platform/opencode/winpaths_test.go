@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -102,7 +103,11 @@ func TestParseOpenCodeVersionShapes(t *testing.T) {
 		{"too old is parsed but must fail the gate", "1.17.9", true, 1, 17, false},
 		{"prerelease suffix", "1.18.14-beta.2", true, 1, 18, true},
 		{"quoted in a json-ish blob", `{ version: '1.19.0' }`, true, 1, 19, true},
-		{"future major", "2.0.0", true, 2, 0, true},
+		// OpenCode v2 removed what witness relies on (`serve --pure`, the v1 server routes and
+		// plugin API, the v1 tables), so it must fail the gate, not slip through as "newer" (#218).
+		{"v2 is refused", "2.0.0", true, 2, 0, false},
+		{"v2's real --version output", "opencode v2.2.6\n", true, 2, 2, false},
+		{"latest v1", "1.19.5", true, 1, 19, true},
 		{"clock timestamps only", "17:41:48.929 starting\n17:41:49.001 ready", false, 0, 0, false},
 		{"not found at all", "opencode: command not found", false, 0, 0, false},
 	} {
@@ -121,6 +126,36 @@ func TestParseOpenCodeVersionShapes(t *testing.T) {
 			}
 			if ok && (major != tc.major || minor != tc.minor) {
 				t.Errorf("parsed %d.%d, want %d.%d", major, minor, tc.major, tc.minor)
+			}
+		})
+	}
+}
+
+// `wire opencode` blocks ONLY on v2 (#218): a missing or too-old OpenCode must keep wiring as
+// it always has (the user may install OpenCode afterwards), so the v2 refusal has to be
+// distinguishable from every other gate failure.
+func TestOpenCodeV2RefusalIsDistinguishable(t *testing.T) {
+	prev := openCodeVersionCommand
+	t.Cleanup(func() { openCodeVersionCommand = prev })
+	for _, tc := range []struct {
+		name   string
+		out    string
+		runErr error
+		wantV2 bool
+	}{
+		{"v2", "opencode v2.2.7\n", nil, true},
+		{"too-old v1", "1.17.9", nil, false},
+		{"not installed", "", errors.New(`exec: "opencode": executable file not found in $PATH`), false},
+		{"supported v1", "1.19.5", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte(tc.out), tc.runErr }
+			err := ValidateOpenCodeCapability(context.Background(), "")
+			if got := errors.Is(err, ErrOpenCodeV2); got != tc.wantV2 {
+				t.Fatalf("errors.Is(err, ErrOpenCodeV2) = %v, want %v (err=%v)", got, tc.wantV2, err)
+			}
+			if tc.wantV2 && !strings.Contains(err.Error(), "2.2.7") {
+				t.Errorf("the refusal should name the version it found: %v", err)
 			}
 		})
 	}

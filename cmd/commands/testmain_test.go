@@ -43,6 +43,9 @@ func TestMain(m *testing.M) {
 	// then calls ensureOnUserPath, which writes HKCU\Environment, and no env var redirects that —
 	// so no test may let installSelf succeed on Windows.
 	_ = os.Setenv("LOCALAPPDATA", filepath.Join(root, "localappdata"))
+	// `wire opencode` probes `opencode --version` to refuse v2 (#218). Package-wide for the same
+	// reason as above: no test may spawn the user's real opencode, including future ones.
+	openCodeV2Check = func() error { return nil }
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)
