@@ -174,11 +174,38 @@ func lensList(st *store.Store) error {
 // install no longer seeds content and a deliberately-removed default stays gone, this is the sole
 // "bring default back" path.
 func lensLoadDefault(st *store.Store) error {
+	old, _ := lens.LoadRegistered(store.LensDefault, st.LensesDir())
 	if err := seedDefaultLens(st); err != nil {
 		return fmt.Errorf("load default lens: %w", err)
 	}
 	fmt.Println(result(okGlyph(), "loaded the built-in default lens", "registered + enabled"))
+	warnDroppedSettings(st, store.LensDefault, old)
 	return nil
+}
+
+// warnDroppedSettings names each per-lens setting a re-register just erased (F048). `config set
+// --lens` writes the REGISTERED lens.json, and a register replaces that whole copy with the
+// source's, so a pinned model or runner vanished with only "[ok] registered" to show for it —
+// noticed, if ever, as worse facets or a different bill. old is the lens before the register
+// (nil when it was not registered or did not load: nothing to lose).
+func warnDroppedSettings(st *store.Store, name string, old *lens.Lens) {
+	if old == nil {
+		return
+	}
+	now, err := lens.LoadRegistered(name, st.LensesDir())
+	if err != nil {
+		now = &lens.Lens{}
+	}
+	for _, s := range []struct{ key, was, is string }{
+		{"runner", old.Runner, now.Runner},
+		{"mine_model", old.ExtractModel, now.ExtractModel},
+		{"review_model", old.ReviewModel, now.ReviewModel},
+	} {
+		if s.was != "" && s.was != s.is {
+			fmt.Println(result(warnGlyph(), "dropped "+s.key+" = "+s.was, "lens "+name))
+			fmt.Println(hint("re-apply", "witness config set "+s.key+" "+s.was+" --lens "+name))
+		}
+	}
 }
 
 func lensRegister(st *store.Store, name, dir string) error {
@@ -192,6 +219,7 @@ func lensRegister(st *store.Store, name, dir string) error {
 	} else if !fi.IsDir() {
 		return fmt.Errorf("%s is a file, not a lens directory %s", dir, want)
 	}
+	old, _ := lens.LoadRegistered(name, st.LensesDir())
 	if err := st.RegisterLens(name, dir); err != nil {
 		return err
 	}
@@ -200,6 +228,7 @@ func lensRegister(st *store.Store, name, dir string) error {
 		note = fmt.Sprintf("mines as %q", l.Name)
 	}
 	fmt.Println(result(okGlyph(), "registered lens "+name, note))
+	warnDroppedSettings(st, name, old)
 	if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
 		fmt.Println(hint("turn it on", "witness lens enable "+name))
 	}
