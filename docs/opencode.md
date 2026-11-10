@@ -4,6 +4,13 @@ From-source wiring and the isolated-runtime model. **Installing from npm** (`@wi
 supported platforms, first-run model download) is documented in the
 [npm package README](../npm/opencode/README.md).
 
+> **OpenCode v1 only (1.18 or newer, below 2.0).** OpenCode v2 (`@opencode/cli`) changed the
+> server, plugin and storage formats witness depends on, so witness refuses it by name: `doctor`,
+> `wire opencode` and `import --agent opencode` stop with "OpenCode v2 is not supported yet"
+> instead of silently capturing nothing. v2 support is tracked in
+> [#218](https://github.com/IngTian/witness/issues/218); until then use OpenCode v1.19.5
+> (`npm i -g opencode-ai@1.19.5`).
+
 ### OpenCode support
 
 OpenCode support has two pieces:

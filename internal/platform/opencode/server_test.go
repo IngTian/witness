@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -63,9 +64,10 @@ func TestValidateOpenCodeCapability(t *testing.T) {
 	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
+	// v2 is refused by name (#218), not passed as "newer": it removed what witness relies on.
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.0.0\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
-		t.Fatal(err)
+	if err := ValidateOpenCodeCapability(context.Background(), ""); !errors.Is(err, ErrOpenCodeV2) {
+		t.Fatalf("v2 error = %v, want ErrOpenCodeV2", err)
 	}
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("version unknown\n"), nil }
 	if err := ValidateOpenCodeCapability(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "upgrade") {

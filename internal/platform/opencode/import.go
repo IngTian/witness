@@ -110,6 +110,9 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
+	if err := refuseV2Database(ctx, db); err != nil {
+		return stats, err
+	}
 	sessions, err := im.sessions(ctx, db, sessionIDs)
 	if err != nil {
 		return stats, err
@@ -136,6 +139,37 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 		}
 	}
 	return stats, nil
+}
+
+// refuseV2Database stops the import when OpenCode v2 owns the database. v2 migrates opencode.db
+// IN PLACE into new tables (session_v2, …) and stops writing the v1 ones this importer reads, so
+// a v1 read of a v2-active database is a frozen snapshot: capture would stop and every import
+// would report "up to date". The signal is which table holds the NEWEST activity, not whether
+// session_v2 exists: a user who tried v2 and went back to v1 keeps writing the v1 tables (#218).
+func refuseV2Database(ctx context.Context, db *sql.DB) error {
+	var hasV2, hasV1 int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`).Scan(&hasV2); err != nil || hasV2 == 0 {
+		return nil // no v2 tables; an unreadable schema is reported by the session query itself
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session'`).Scan(&hasV1); err != nil {
+		return err
+	}
+	if hasV1 == 0 {
+		return fmt.Errorf("this opencode database was created by OpenCode v2: %w", ErrOpenCodeV2)
+	}
+	var newestV1, newestV2 int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(time_updated), 0) FROM session`).Scan(&newestV1); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(time_updated), 0) FROM session_v2`).Scan(&newestV2); err != nil {
+		return err
+	}
+	if newestV2 > newestV1 {
+		return fmt.Errorf("OpenCode v2 has migrated this opencode database and is writing it (its v1 tables stopped updating): %w", ErrOpenCodeV2)
+	}
+	return nil
 }
 
 // sqliteURI opens the user's own OpenCode database READ-ONLY with a shared cache.

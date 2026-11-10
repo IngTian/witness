@@ -2,11 +2,14 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/IngTian/witness/internal/platform/opencode"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 )
 
@@ -438,6 +441,29 @@ func TestOpenCodeConfigPathHonoursXDGConfigHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	if got, want := opencodeConfigPath(), filepath.Join(home, ".config", "opencode", "opencode.json"); got != want {
 		t.Errorf("with neither set: got %s, want %s", got, want)
+	}
+}
+
+// OpenCode v2 never loads witness's plugin, so `wire opencode` against it used to write the
+// plugin + MCP entry and report success while nothing was ever captured (#218, the #10 shape).
+// It must refuse with the v2 error and leave OpenCode's config untouched.
+func TestWireOpenCodeRefusesV2AndWritesNothing(t *testing.T) {
+	home, xdg := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	prev := openCodeV2Check
+	t.Cleanup(func() { openCodeV2Check = prev })
+	openCodeV2Check = func() error { return fmt.Errorf("found OpenCode 2.2.7: %w", opencode.ErrOpenCodeV2) }
+
+	_, err := cmdInstallOpenCode()
+	if !errors.Is(err, opencode.ErrOpenCodeV2) {
+		t.Fatalf("wire opencode on v2: err = %v, want ErrOpenCodeV2", err)
+	}
+	if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
+		t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
 	}
 }
 

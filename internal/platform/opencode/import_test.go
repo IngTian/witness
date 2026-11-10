@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,6 +228,53 @@ func seedOpenCodeDB(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// OpenCode v2 migrates a v1 opencode.db IN PLACE into new tables (session_v2, …) and stops
+// writing the v1 ones, so reading them yields a frozen snapshot: capture silently stops. A user
+// who tried v2 and went back to v1 keeps writing the v1 tables, so the mere presence of
+// session_v2 is not the signal — which table holds the NEWEST activity is (#218).
+func TestImportRefusesADatabaseOpenCodeV2Is(t *testing.T) {
+	cases := []struct {
+		name   string
+		stmt   string // applied on top of seedOpenCodeDB (v1 session ses_test, time_updated 5000)
+		wantV2 bool
+	}{
+		{"v2 migrated it and is writing", `CREATE TABLE session_v2 (id text PRIMARY KEY, time_updated integer NOT NULL);
+			INSERT INTO session_v2 VALUES ('ses_test', 5000), ('ses_new_in_v2', 9000);`, true},
+		{"fresh v2 database, no v1 tables", `DROP TABLE part; DROP TABLE message; DROP TABLE session;
+			CREATE TABLE session_v2 (id text PRIMARY KEY, time_updated integer NOT NULL);
+			INSERT INTO session_v2 VALUES ('ses_new_in_v2', 9000);`, true},
+		{"tried v2, back on v1", `CREATE TABLE session_v2 (id text PRIMARY KEY, time_updated integer NOT NULL);
+			INSERT INTO session_v2 VALUES ('ses_test', 4000);`, false},
+		{"just migrated, nothing new yet", `CREATE TABLE session_v2 (id text PRIMARY KEY, time_updated integer NOT NULL);
+			INSERT INTO session_v2 VALUES ('ses_test', 5000);`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := seedOpenCodeDB(t)
+			mutateOpenCodeDB(t, dbPath, tc.stmt)
+			t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+			st, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			stats, err := (&Importer{Store: st, DBPath: dbPath}).Import(context.Background(), nil)
+			if tc.wantV2 {
+				if !errors.Is(err, ErrOpenCodeV2) {
+					t.Fatalf("err = %v, want ErrOpenCodeV2 (a frozen read must not look like 'up to date')", err)
+				}
+				if stats.Sessions != 0 || st.RawCount(SessionPrefix+"ses_test") != 0 {
+					t.Fatalf("nothing may be imported from a v2 database: stats=%+v", stats)
+				}
+				return
+			}
+			if err != nil || stats.Sessions != 1 {
+				t.Fatalf("a v1-active database must import as before: stats=%+v err=%v", stats, err)
+			}
+		})
+	}
 }
 
 func seedMutableOpenCodeDB(t *testing.T) string {
