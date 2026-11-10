@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -333,7 +334,8 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc *mergeSide, re
 	if err != nil {
 		return fmt.Errorf("classify sessions: %w", err)
 	}
-	if err := dropSharedMined(ctx, tx, rep); err != nil {
+	dropped, err := dropSharedMined(ctx, tx, rep)
+	if err != nil {
 		return fmt.Errorf("skip already-mined sessions: %w", err)
 	}
 	if err := mergeL0(ctx, tx, kinds, rep); err != nil {
@@ -359,6 +361,7 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc *mergeSide, re
 		return err
 	}
 	merged := mergeFacets(base, inc, m, arrivingForBase, arrivingForInc, now, &rep.Facets)
+	stripDroppedCitations(merged, dropped, base.facets)
 	if err := writeFacetsTx(tx, merged); err != nil {
 		return fmt.Errorf("write facets: %w", err)
 	}
@@ -654,7 +657,9 @@ func dropImporterKeys(ctx context.Context, tx *sql.Tx, sess string) error {
 // (session, lens) index, it scanned the whole lens per incoming row — quadratic, ~15 minutes at
 // 75k observations a side, with the archive's write lock held and every capture hook in that window
 // losing its turn to SQLITE_BUSY.
-func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
+//
+// It returns the obs_ids rules 1 and 3 dropped, for stripDroppedCitations.
+func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[string]bool, error) {
 	for _, q := range []string{
 		`CREATE TEMP TABLE merge_mined(session TEXT NOT NULL, lens TEXT NOT NULL, PRIMARY KEY(session, lens)) WITHOUT ROWID`,
 		`INSERT OR IGNORE INTO temp.merge_mined(session, lens)
@@ -662,36 +667,69 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 		   UNION SELECT session, lens FROM main.observations WHERE source <> 'active'`,
 	} {
 		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	const minedHere = `EXISTS (SELECT 1 FROM temp.merge_mined k WHERE k.session = %[1]s.session AND k.lens = %[1]s.lens)`
 	const notHeld = `NOT EXISTS (SELECT 1 FROM main.observations same WHERE same.obs_id = inc.observations.obs_id)`
 
-	res, err := tx.ExecContext(ctx, `DELETE FROM inc.observations WHERE source <> 'active' AND `+
-		fmt.Sprintf(minedHere, "inc.observations")+` AND `+notHeld)
+	shared, err := queryStrings(ctx, tx, `DELETE FROM inc.observations WHERE source <> 'active' AND `+
+		fmt.Sprintf(minedHere, "inc.observations")+` AND `+notHeld+` RETURNING obs_id`)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	n, _ := res.RowsAffected()
-	rep.Observations.SharedMined = int(n)
+	rep.Observations.SharedMined = len(shared)
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM inc.progress WHERE `+fmt.Sprintf(minedHere, "inc.progress")); err != nil {
-		return err
+		return nil, err
 	}
 
-	res, err = tx.ExecContext(ctx, `DELETE FROM inc.observations WHERE source <> 'active'
+	orphans, err := queryStrings(ctx, tx, `DELETE FROM inc.observations WHERE source <> 'active'
 		AND NOT EXISTS (SELECT 1 FROM inc.progress p WHERE p.session = inc.observations.session AND p.lens = inc.observations.lens)
 		AND NOT EXISTS (SELECT 1 FROM inc.raw r WHERE r.session = inc.observations.session)
 		AND EXISTS (SELECT 1 FROM main.raw r WHERE r.session = inc.observations.session)
 		AND NOT EXISTS (SELECT 1 FROM main.progress p WHERE p.session = inc.observations.session AND p.lens = inc.observations.lens)
-		AND `+notHeld)
+		AND `+notHeld+` RETURNING obs_id`)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	n, _ = res.RowsAffected()
-	rep.Observations.Orphaned = int(n)
-	return nil
+	rep.Observations.Orphaned = len(orphans)
+	dropped := make(map[string]bool, len(shared)+len(orphans))
+	for _, id := range append(shared, orphans...) {
+		dropped[id] = true
+	}
+	return dropped, nil
+}
+
+// stripDroppedCitations removes, from every version of the merged facets, the ids dropSharedMined
+// skipped. Left in, they are ids this archive never holds, and the next review's
+// pruneDeletedEvidence reads a missing id as a deleted one: it retired facets this merge imported
+// on purpose, under a reason saying their evidence was deleted. A facet left citing nothing arrives
+// never-cited, which the prune leaves alone; a duplicate of one of ours is compaction's to merge.
+//
+// It runs on the merged result, not on the incoming facets beforehand: evidenceTime reads these ids,
+// so stripping them first would change which copy wins a same-key clash and which chain extension
+// is adopted. Ids our own facets cite are kept: one of those we do not hold is an observation
+// deleted here (the incoming backup still has it), and the prune must still retire what rested on
+// it. Ids the incoming archive deleted itself were never in its observations, so they are not in
+// `dropped` and the prune still handles them.
+func stripDroppedCitations(merged []Facet, dropped map[string]bool, ours []Facet) {
+	for _, f := range ours {
+		for _, v := range f.Versions {
+			for _, id := range v.BecauseOf {
+				delete(dropped, id)
+			}
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	for i := range merged {
+		for j := range merged[i].Versions {
+			v := &merged[i].Versions[j]
+			v.BecauseOf = slices.DeleteFunc(v.BecauseOf, func(id string) bool { return dropped[id] })
+		}
+	}
 }
 
 // mergeL0 merges transcripts, session metadata, mining progress, importer keys, the staged buffer

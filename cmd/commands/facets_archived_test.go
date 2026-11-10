@@ -121,7 +121,7 @@ func TestExpandAnArchivedFacetPointsAtWhereItWent(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "retired by compaction") || strings.Contains(out, "whole story") {
+	if !strings.Contains(out, "retired — not merged into another facet") || strings.Contains(out, "whole story") {
 		t.Errorf("a retired facet says so, and only that:\n%s", out)
 	}
 }

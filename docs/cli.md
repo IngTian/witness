@@ -26,7 +26,7 @@ they exist for recovery and debugging, and everything they do also happens autom
   behind each facet; keep it as private as the archive. `export --all` leaves it out, since it is
   rebuilt from what the backup holds.
 - `witness facets [lens]` — print the active structured facets (CLI equivalent of MCP `get_facets`).
-  `--all` also lists facets archived by compaction, saying where each one went; `--expand
+  `--all` also lists archived facets, saying where each one went; `--expand
   <dimension/key>` unfolds one facet into everything that was merged into it.
 - `witness compact [--lens <name>] [--yes]` — consolidate the profile: merge facets that describe
   one trait, retire ones that were never traits, and give each surviving facet a short `claim`
