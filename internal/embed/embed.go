@@ -63,12 +63,18 @@ type Embedder struct {
 // hook, which has no shell to export CLAUDE_PLUGIN_ROOT, still finds the model
 // beside the installed binary), else the cwd-relative dev fallback.
 func assetsDir() string {
-	return bundle.Dir(filepath.Join("assets", "e5-small"), "WITNESS_ASSETS")
+	return bundle.Dir(assetsSubdir, "WITNESS_ASSETS")
 }
+
+var assetsSubdir = filepath.Join("assets", "e5-small")
 
 // AssetsDir returns the directory where model.onnx and tokenizer.json should
 // live. Commands use this to explain missing-model state without loading GoMLX.
 func AssetsDir() string { return assetsDir() }
+
+// FetchDir is where a download should put the model: AssetsDir, unless that is only the
+// cwd-relative fallback, in which case it is beside the binary (bundle.CreateDir).
+func FetchDir() string { return bundle.CreateDir(assetsSubdir, "WITNESS_ASSETS") }
 
 // ModelReady is a cheap integrity gate for auto-start decisions. It mirrors the
 // downloaders' coarse minimum-size checks so a partial download never causes

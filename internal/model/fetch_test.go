@@ -191,7 +191,9 @@ func TestLockFollowsModelJS(t *testing.T) {
 		age  time.Duration
 		busy bool
 	}{
-		{"live owner on this host", fmt.Sprintf("tok %d %s\n", os.Getpid(), host), 0, true},
+		{"live owner on this host", fmt.Sprintf("tok %d %s\n", os.Getppid(), host), 0, true},
+		{"our own pid: a dead predecessor's, after pid reuse", fmt.Sprintf("tok %d %s\n", os.Getpid(), host), 0, false},
+		{"pid 1 is left to the 12h rule, as model.js leaves it", fmt.Sprintf("tok 1 %s\n", host), 0, true},
 		{"dead owner on this host", fmt.Sprintf("tok %d %s\n", 0x7FFFFFF0, host), 0, false},
 		{"fresh lock from another host", fmt.Sprintf("tok %d other-host\n", os.Getpid()), 0, true},
 		{"12h-old lock from another host", fmt.Sprintf("tok %d other-host\n", os.Getpid()), 13 * time.Hour, false},

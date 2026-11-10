@@ -44,6 +44,9 @@ docs/superpowers/
 assets/e5-small/*.onnx
 assets/e5-small/*.json
 assets/e5-small/*.onnx_data
+# a download in progress, or one that was killed
+assets/e5-small/*.part
+assets/e5-small/.download.lock
 
 # Compiled binaries (anchor to root so cmd/witness/ source is NOT ignored)
 /bin/

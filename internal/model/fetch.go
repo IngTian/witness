@@ -222,7 +222,10 @@ func lock(dir string) (release func(), err error) {
 
 func lockStale(path, host string) bool {
 	if body, err := os.ReadFile(path); err == nil && lockField(body, 2) == host {
-		if pid, err := strconv.Atoi(lockField(body, 1)); err == nil && pid > 0 && !proc.Alive(pid) {
+		// Our own pid can only be a dead predecessor's (a restarted container reuses pids), since
+		// one process never runs two downloads. pid 1 is left to the 12h rule, as model.js leaves
+		// it: proc.Alive calls it dead, but in a container it is the live plugin host.
+		if pid, err := strconv.Atoi(lockField(body, 1)); err == nil && (pid == os.Getpid() || pid > 1 && !proc.Alive(pid)) {
 			return true
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
@@ -45,7 +46,7 @@ checked, not downloaded again, so re-running is cheap and repairs a damaged copy
 }
 
 func cmdModelFetch() error {
-	dir, err := filepath.Abs(embed.AssetsDir())
+	dir, err := filepath.Abs(embed.FetchDir())
 	if err != nil {
 		return err
 	}
@@ -80,44 +81,64 @@ func lazyModel() bool {
 // "still downloading" until it lands. Only search embeds, so every other tool works from the
 // first call.
 func startLazyEmbedder() *lazyEmbedder {
-	l := &lazyEmbedder{dir: embed.AssetsDir()}
+	l := &lazyEmbedder{dir: embed.FetchDir()}
 	if os.Getenv(model.SkipEnv) == "1" {
+		l.off = true
 		l.err = fmt.Errorf("%s=1 turns the download off", model.SkipEnv)
 		return l
 	}
 	slog.Info("mcp: the embedding model is missing; downloading it in the background", "dir", l.dir)
-	go l.fetch()
+	l.mu.Lock()
+	l.startFetch()
+	l.mu.Unlock()
 	return l
 }
+
+// fetchRetry spaces out the download attempts a server makes. It lives for a whole editor
+// session, so one failure must not be final: the network comes back, and a downloader that held
+// the lock (the plugin's, when OpenCode quits) can stop half way and release it. A var so tests
+// can shorten it.
+var fetchRetry = time.Minute
 
 // lazyEmbedder loads the model on the first search after it is in place — whoever put it there:
 // this server's fetch, the plugin's downloader, or `witness model fetch`.
 type lazyEmbedder struct {
-	dir string
-	mu  sync.Mutex
-	emb *embed.Embedder
-	err error // why the background fetch gave up, once it has
+	dir      string
+	off      bool // WITNESS_SKIP_MODEL_DOWNLOAD: never fetch
+	mu       sync.Mutex
+	emb      *embed.Embedder
+	err      error // why the last fetch failed; nil while none has
+	fetching bool
+	retryAt  time.Time
 }
 
-func (l *lazyEmbedder) fetch() {
-	err := model.Fetch(context.Background(), l.dir, nil)
-	if errors.Is(err, model.ErrBusy) {
-		return // another downloader is on it; Embed sees its files when they land
-	}
-	if err != nil {
-		slog.Error("mcp: embedding model download failed", "dir", l.dir, "err", err)
+// startFetch starts a download. Caller holds mu.
+func (l *lazyEmbedder) startFetch() {
+	l.fetching = true
+	go func() {
+		err := model.Fetch(context.Background(), l.dir, nil)
 		l.mu.Lock()
-		l.err = err
-		l.mu.Unlock()
-		return
-	}
-	slog.Info("mcp: embedding model ready", "dir", l.dir)
+		defer l.mu.Unlock()
+		l.fetching, l.retryAt = false, time.Now().Add(fetchRetry)
+		switch {
+		case errors.Is(err, model.ErrBusy):
+			// Another downloader is on it; Embed sees its files when they land, or retries.
+		case err != nil:
+			slog.Error("mcp: embedding model download failed", "dir", l.dir, "err", err)
+			l.err = err
+		default:
+			slog.Info("mcp: embedding model ready", "dir", l.dir)
+		}
+	}()
 }
 
 func (l *lazyEmbedder) Embed(text string) ([]float32, error) {
 	l.mu.Lock()
 	if l.emb == nil {
 		if !embed.ModelReady() {
+			if !l.off && !l.fetching && !time.Now().Before(l.retryAt) {
+				l.startFetch()
+			}
 			err := l.err
 			l.mu.Unlock()
 			if err != nil {

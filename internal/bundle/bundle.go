@@ -52,6 +52,14 @@ func Dir(subdir, envOverride string) string {
 // caller then falls back, so behavior is unchanged when assets aren't laid out
 // this way.
 func exeRelative(subdir string) (string, bool) {
+	dir, ok := exeDir()
+	if !ok {
+		return "", false
+	}
+	return probeFrom(dir, subdir)
+}
+
+func exeDir() (string, bool) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", false
@@ -59,7 +67,31 @@ func exeRelative(subdir string) (string, bool) {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-	return probeFrom(filepath.Dir(exe), subdir)
+	return filepath.Dir(exe), true
+}
+
+// CreateDir is where to CREATE subdir: Dir's answer, except for its cwd-relative fallback. Dir
+// can only probe for a directory that already exists, so before the first `witness model fetch`
+// it falls back to the cwd, and the model would land wherever the user happened to stand. Here
+// the bundle root is instead found by prompts/, which every layout ships beside the binary, so
+// the new dir appears exactly where Dir's exe-relative probe will look next time. With no
+// prompts/ near the binary (`go run`), the cwd fallback stands.
+func CreateDir(subdir, envOverride string) string {
+	d := Dir(subdir, envOverride)
+	if d != subdir {
+		return d
+	}
+	if dir, ok := exeDir(); ok {
+		return createFrom(dir, subdir)
+	}
+	return subdir
+}
+
+func createFrom(exeDir, subdir string) string {
+	if prompts, ok := probeFrom(exeDir, "prompts"); ok {
+		return filepath.Join(filepath.Dir(prompts), subdir)
+	}
+	return subdir
 }
 
 // probeFrom returns the first of the two supported layouts under exeDir that

@@ -68,7 +68,7 @@ func TestModelFetchNamesABusyLockAndHowToRetry(t *testing.T) {
 	t.Setenv("WITNESS_ASSETS", dir)
 	modelMirror(t, serveStandIns)
 	host, _ := os.Hostname()
-	if err := os.WriteFile(filepath.Join(dir, ".download.lock"), fmt.Appendf(nil, "tok %d %s\n", os.Getpid(), host), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".download.lock"), fmt.Appendf(nil, "tok %d %s\n", os.Getppid(), host), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := runCLI(t, "model", "fetch")
@@ -136,6 +136,60 @@ func TestLazyEmbedderSaysDownloadingThenWhyItFailed(t *testing.T) {
 	_, err := l.Embed("q")
 	if err == nil || !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "model fetch") {
 		t.Fatalf("after a failed fetch err = %v, want the cause and the command to fix it", err)
+	}
+}
+
+// waitIdle waits for the lazy embedder's download attempt to end.
+func waitIdle(t *testing.T, l *lazyEmbedder) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		l.mu.Lock()
+		busy := l.fetching
+		l.mu.Unlock()
+		if !busy {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the download attempt never ended")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The server lives for a whole editor session, so neither a busy lock nor a failed download may
+// be final: the plugin's downloader stops half way when OpenCode quits, and networks come back.
+func TestLazyEmbedderRetriesAfterABusyLockAndAFailure(t *testing.T) {
+	old := fetchRetry
+	fetchRetry = 0
+	t.Cleanup(func() { fetchRetry = old })
+	dir := t.TempDir()
+	t.Setenv("WITNESS_ASSETS", dir)
+	t.Setenv(model.SkipEnv, "")
+	host, _ := os.Hostname()
+	lock := filepath.Join(dir, ".download.lock")
+	if err := os.WriteFile(lock, fmt.Appendf(nil, "tok %d %s\n", os.Getppid(), host), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hits := modelMirror(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	})
+	l := startLazyEmbedder()
+	waitIdle(t, l)
+	if hits.Load() != 0 {
+		t.Fatalf("downloaded past another live downloader's lock (%d requests)", hits.Load())
+	}
+	_ = os.Remove(lock) // that downloader stopped half way
+	_, _ = l.Embed("q")
+	waitIdle(t, l)
+	n := hits.Load()
+	if n == 0 {
+		t.Fatal("never tried again once the lock was released: search says \"still downloading\" forever")
+	}
+	_, _ = l.Embed("q") // that attempt got a 503
+	waitIdle(t, l)
+	if hits.Load() == n {
+		t.Fatal("never tried again after a failed download")
 	}
 }
 
