@@ -13,7 +13,7 @@ func TestPlumbingCommandsHidden(t *testing.T) {
 	obs := newObservationsCmd()
 	for _, s := range obs.Commands() {
 		switch s.Name() {
-		case "record", "delete":
+		case "delete":
 			if !s.Hidden {
 				t.Errorf("observations %s must be hidden (MCP-parity, not a human verb)", s.Name())
 			}

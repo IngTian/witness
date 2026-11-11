@@ -4,20 +4,12 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/IngTian/witness/internal/vector"
 	"github.com/spf13/cobra"
-)
-
-const (
-	maxCLIStagedPerSession = 200
-	// maxCLIStagedTotal mirrors the MCP server's global bound so both writers into `staged`
-	// share one ceiling on the buffer, rather than each policing only its own sessions.
-	maxCLIStagedTotal = 5000
 )
 
 func newObservationsCmd() *cobra.Command {
@@ -45,25 +37,8 @@ func newObservationsCmd() *cobra.Command {
 	search.Flags().IntVarP(&searchK, "limit", "k", 8, "max results")
 	search.Flags().BoolVarP(&searchJSON, "json", "j", false, "output as JSON")
 
-	var recordSession, recordLens, recordDimension, recordObservation, recordEvidence string
-	var recordPoignancy int
-	record := &cobra.Command{
-		Use:    "record --session <id> --dimension <name> --observation <text>",
-		Short:  "Record an active observation for a session.",
-		Long:   "Stage an active observation for the worker to append to L1, matching the MCP record_observation behavior.",
-		Args:   cobra.NoArgs,
-		Hidden: true,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return cmdObservationRecord(recordSession, recordLens, recordDimension, recordObservation, recordEvidence, recordPoignancy)
-		},
-	}
-	record.Flags().StringVar(&recordSession, "session", "", "session id to attach the observation to")
-	record.Flags().StringVar(&recordLens, "lens", store.LensDefault, "lens tag")
-	record.Flags().StringVar(&recordDimension, "dimension", "", "dimension within the lens")
-	record.Flags().StringVar(&recordObservation, "observation", "", "one-sentence observation")
-	record.Flags().StringVar(&recordEvidence, "evidence", "", "short evidence anchor")
-	record.Flags().IntVar(&recordPoignancy, "poignancy", 5, "salience from 1 to 10")
-
+	// No `record` sibling: MCP record_observation is the one write path, with the input checks
+	// (size caps, lens-name screening) a hand-copied CLI writer had skipped (#199 F049).
 	deleteCmd := &cobra.Command{
 		Use:    "delete <obs_id>",
 		Short:  "Delete one observation.",
@@ -75,7 +50,7 @@ func newObservationsCmd() *cobra.Command {
 		},
 	}
 
-	obsCmd.AddCommand(search, record, deleteCmd)
+	obsCmd.AddCommand(search, deleteCmd)
 	return obsCmd
 }
 
@@ -204,72 +179,6 @@ func renderObservationHits(lensName, query string, hits []vector.Hit, registered
 		}
 		fmt.Printf("         %s\n", dim(ids))
 	}
-}
-
-func cmdObservationRecord(session, lensName, dimension, observation, evidence string, poignancy int) error {
-	session = strings.TrimSpace(session)
-	lensName = strings.TrimSpace(lensName)
-	dimension = strings.TrimSpace(dimension)
-	observation = strings.TrimSpace(observation)
-	evidence = strings.TrimSpace(evidence)
-	if lensName == "" {
-		lensName = store.LensDefault
-	}
-	if session == "" || observation == "" {
-		return fmt.Errorf("--session and --observation are required")
-	}
-	if dimension == "" {
-		return fmt.Errorf("--dimension is required")
-	}
-	if poignancy < 1 {
-		poignancy = 5
-	}
-	if poignancy > 10 {
-		poignancy = 10
-	}
-	st, err := store.Open()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	// Stage under the lens's MINED name: the row drains into L1 verbatim and the review reads the
-	// lens by that name, so the registered name here would orphan the observation.
-	dataName := lens.DataName(st, lensName)
-	o := store.Observation{
-		ID:          store.ObservationID(session, dataName, observation),
-		TS:          time.Now().UTC().Format(time.RFC3339),
-		Session:     session,
-		Lens:        dataName,
-		Dimension:   dimension,
-		Observation: observation,
-		Evidence:    evidence,
-		Poignancy:   poignancy,
-		Source:      "active",
-	}
-	// The CLI path is human-driven (one `witness observations record` per invocation), so the
-	// agent-rotates-the-session-id evasion the MCP path guards against does not apply here.
-	// It still passes the same TOTAL cap so both writers share one bound on the staged buffer.
-	inserted, err := st.StageObservationCapped(o, maxCLIStagedPerSession, maxCLIStagedTotal)
-	if err != nil {
-		return err
-	}
-	if !inserted {
-		// Duplicate vs. cap: check the dedup case first so a re-recorded obs at the
-		// cap isn't mislabeled a quota error (mirrors the MCP path).
-		if st.StagedExists(session, o.ID) {
-			fmt.Println(result(skipGlyph(), fmt.Sprintf("already recorded %s/%s %s", lensName, dimension, o.ID), "nothing staged"))
-			return nil
-		}
-		return fmt.Errorf("too many staged observations for session %s (limit %d)", session, maxCLIStagedPerSession)
-	}
-	if !spawnDetachedOK("worker-run") {
-		// Staged is durable — the next capture or `worker run` folds it in — so this is a warning.
-		fmt.Println(result(warnGlyph(), fmt.Sprintf("recorded %s/%s %s", lensName, dimension, o.ID), "the worker did not start"))
-		fmt.Println(hint("fold it in", "witness worker run"))
-		return nil
-	}
-	fmt.Println(result(okGlyph(), fmt.Sprintf("recorded %s/%s %s", lensName, dimension, o.ID), "worker started in the background"))
-	return nil
 }
 
 func cmdObservationDelete(obsID string) error {
