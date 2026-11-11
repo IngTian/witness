@@ -100,7 +100,7 @@ The config tree has TWO scopes:
   • PER-LENS scope (--lens <name>): a lens's runner/model overrides; empty = inherit from default.
 
 Canonical keys:
-  runner        distillation runtime: "claude" or "opencode" (also set by ` + "`witness wire <editor>`" + `)
+  runner        distillation runtime: ` + runnerChoice() + ` (also set by ` + "`witness wire <editor>`" + `)
   mine_model    MINING model — L0 turns → L1 observations, per session (frequent, dominant cost). Empty = the runner's default.
   review_model  REVIEW model — L1 observations → L2 facets + L4 profile, batched. Empty = falls back to mine_model, so one setting covers the whole pipeline.
 

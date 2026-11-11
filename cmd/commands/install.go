@@ -35,7 +35,7 @@ not seed content — the built-in "default" lens is added automatically the firs
 time your archive is opened.
 
   runner    wire writes a sensible default (matching the editor); change it
-            any time with: witness config set runner <claude|opencode>
+            any time with: witness config set runner ` + runnerChoice() + `
             Codex runs no model, so wiring it leaves the runner alone.
   codex     Codex hooks are inert until you approve them with /hooks in Codex;
             wiring cannot grant that trust for you.
@@ -61,6 +61,12 @@ func editorArg(verb string) cobra.PositionalArgs {
 		return nil
 	}
 }
+
+// runnerChoice is the runner placeholder in user-facing text, built from the registry (#199
+// F005). The hand-typed `<claude|opencode>` lists were right only until a runner is added or
+// dropped, and then one screen contradicted the registry-built hint printed beside them.
+// Command help can call it: newRootCmd runs after the adapters' init has filled the registry.
+func runnerChoice() string { return "<" + strings.Join(platform.RunnerNames(), "|") + ">" }
 
 // unknownEditor is the one wording for an editor witness cannot wire, in the registry's order.
 func unknownEditor(target string) error {
@@ -597,7 +603,7 @@ func cmdInstall(args []string) error {
 	for _, h := range out.hints {
 		fmt.Println(hint(h[0], h[1]))
 	}
-	fmt.Println(hint("change runner", "witness config set runner <"+strings.Join(platform.RunnerNames(), "|")+">"))
+	fmt.Println(hint("change runner", "witness config set runner "+runnerChoice()))
 	switch len(lenses) {
 	case 0:
 		fmt.Println(hint("add a lens", "witness lens load-default"))

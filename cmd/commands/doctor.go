@@ -272,7 +272,7 @@ func cmdDoctor(asJSON bool) error {
 	// `witness install` took a <claude|opencode> target before the install/wire split; it is
 	// now Args: cobra.NoArgs, so the old hint names a form that errors. Switching the runner
 	// is `config set runner` — what wire's own help points at — not a re-wire of the editor.
-	fix("set runner", "witness config set runner <claude|opencode>")
+	fix("set runner", "witness config set runner "+runnerChoice())
 	fix("set a model", "witness config set <mine_model|review_model> <model>")
 
 	fmt.Println()
