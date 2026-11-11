@@ -101,6 +101,10 @@ func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 		return dir
 	}
 	reg := func(cfg string) func() error { return func() error { return lensRegister(st, "math", src(cfg)) } }
+	// A setting unchanged or never set loses nothing, so it gets no line at all — not even a
+	// hint: printed alone, "re-apply witness config set runner  --lens math" is noise on every
+	// ordinary register.
+	nothingLost := []string{"[!]", "re-apply", "keep yours", "witness config set"}
 	for _, step := range []struct {
 		name      string
 		run       func() error
@@ -113,7 +117,7 @@ func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 			hint("keep yours", "witness config set review_model claude-a --lens math"),
 		}, []string{"dropped runner", "replaced runner"}},
 		// Keeps both values but does not load (dimensions must be a list): nothing was lost.
-		{"keeps both, does not load", reg(`{"dimensions":"x","runner":"opencode","review_model":"claude-b"}`), nil, []string{"[!]"}},
+		{"keeps both, does not load", reg(`{"dimensions":"x","runner":"opencode","review_model":"claude-b"}`), nil, nothingLost},
 		// The copy that left does not load, and still has both values to lose.
 		{"from a copy that does not load", reg(`{}`), []string{
 			"[!] dropped runner = opencode  (lens math)",
@@ -123,14 +127,15 @@ func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 			"[!] dropped review_model = claude-strong  (lens default)",
 			"witness config set review_model claude-strong --lens default",
 		}, nil},
+		{"load-default again, nothing set", func() error { return lensLoadDefault(st) }, nil, nothingLost},
 		// A hand-edited registered lens.json padded with whitespace the loader trims: nothing changes.
 		{"differs only by whitespace", func() error {
 			if err := os.WriteFile(filepath.Join(st.LensesDir(), "math", "lens.json"),
-				[]byte(`{"runner":" ","review_model":" claude-b "}`), 0o600); err != nil {
+				[]byte(`{"runner":" ","extract_model":" opus ","review_model":" claude-b "}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			return lensRegister(st, "math", src(`{"review_model":"claude-b"}`))
-		}, nil, []string{"[!]"}},
+			return lensRegister(st, "math", src(`{"extract_model":"opus","review_model":"claude-b"}`))
+		}, nil, nothingLost},
 	} {
 		out := captureStdout(t, func() {
 			if err := step.run(); err != nil {
