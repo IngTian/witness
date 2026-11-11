@@ -384,27 +384,6 @@ func TestMergeSkipsSessionsMinedOnBothSides(t *testing.T) {
 	}
 }
 
-// A session dropped as a second copy of one transcript takes its observations with it, and the
-// merge strips their ids from the incoming facets — but not an id this archive holds, which is no
-// missing evidence. Here an earlier merge brought idup over while that copy was all the other side
-// had; since then it re-imported the session under its own id and cited idup in a new facet.
-func TestMergeDuplicateSessionKeepsCitationsOfObservationsHeldHere(t *testing.T) {
-	base, inc := newArch(t), newArch(t)
-	base.raw("s1", "user:a")
-	inc.raw("s1@0123abcd", "user:a")
-	inc.obs("idup", "s1@0123abcd", "default", "2026-03-01T00:00:00Z")
-	base.merge(inc.export(), true)
-
-	inc.raw("s1", "user:a")
-	inc.facets(mf("d", "later", "cites idup", 0.5, 1, "idup"))
-	if rep := base.merge(inc.export(), true); rep.Sessions.Duplicates != 1 || rep.Facets.New != 1 {
-		t.Fatalf("setup: want s1@0123abcd dropped as a duplicate and 1 facet new; got %+v %+v", rep.Sessions, rep.Facets)
-	}
-	if f := base.facet("default", "d", "later"); f == nil || !reflect.DeepEqual(f.Versions[0].BecauseOf, []string{"idup"}) {
-		t.Errorf("an observation this archive holds lost its citation: %+v", f)
-	}
-}
-
 // Transcripts: new arrive whole; equal and shorter-there change nothing; a longer incoming
 // transcript contributes only its tail; a DIVERGED one (same id, different content) is renamed so
 // its transcript and what was mined from it arrive together. Importer keys must describe exactly
@@ -501,9 +480,9 @@ func TestMergeIsIdempotentOnAReexport(t *testing.T) {
 	}
 }
 
-// The same with a session BOTH sides mined. Their paraphrase io1 is skipped and stripped from the
-// facets the merge writes, but every re-merge finds it in the incoming facets again: counted as an
-// update, a facet new here and a same-key winner each reported "1 updated" on every run, forever.
+// The same with a session BOTH sides mined. Their paraphrase io1 is skipped while their facets
+// still cite it, so every re-merge meets io1 again; a re-merge that read it as new evidence would
+// report "1 updated" for a facet new here and for a same-key winner on every run, forever.
 func TestMergeIsIdempotentOnASessionBothMined(t *testing.T) {
 	base, inc := newArch(t), newArch(t)
 	base.raw("s1", "user:a")

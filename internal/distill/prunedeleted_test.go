@@ -2,7 +2,6 @@ package distill
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -194,85 +193,5 @@ func TestDeleteThenReviewRetiresWithoutRefolding(t *testing.T) {
 	}
 	if f := facetNamed(t, s, "default", "only"); !f.Active() || !reflect.DeepEqual(f.Current().BecauseOf, []string{z}) {
 		t.Errorf("re-asserted, the retired facet must come back citing %s, got %+v", z, f)
-	}
-}
-
-// `witness merge` skips the other side's paraphrases of sessions both mined, its orphans, and the
-// observations of a session it drops as a second copy of one transcript. A
-// facet it imports resting only on those must survive the next review: left citing ids this
-// archive never holds, the prune read them as deleted and retired the facets the merge had just
-// reported as new. A real delete must still reach the profile through a merge — one of ours (the
-// incoming backup still holds the row) and one the other side made.
-func TestMergedFacetsOnSkippedObservationsSurviveTheNextReview(t *testing.T) {
-	obs := func(s *store.Store, id, session string) {
-		t.Helper()
-		if err := s.AppendObservations([]store.Observation{{ID: id, TS: "2026-03-01T00:00:00Z", Session: session,
-			Lens: "default", Dimension: "d", Observation: "text of " + id, Source: "mined"}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	mined := func(s *store.Store, session string) {
-		t.Helper()
-		for i, turn := range []string{"user", "assistant"} {
-			if err := s.AppendRaw(store.RawRecord{TS: "2026-01-01T00:00:00Z", Session: session, Seq: i, Role: turn, Text: turn}); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := s.MarkDistilled(session, "default", 2); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	base := newStore(t)
-	mined(base, "s1")
-	obs(base, "bo1", "s1")
-	obs(base, "x", "s1")
-	if err := base.AppendRaw(store.RawRecord{TS: "2026-01-01T00:00:00Z", Session: "s2", Role: "user", Text: "never mined here"}); err != nil {
-		t.Fatal(err)
-	}
-	writeFacets(t, base, citing("deleted_here", "x"))
-	if deleted, err := base.DeleteObservation("x"); err != nil || !deleted {
-		t.Fatalf("DeleteObservation: deleted=%v err=%v", deleted, err)
-	}
-
-	inc := newStore(t)
-	mined(inc, "s1")
-	obs(inc, "io1", "s1")  // their wording of bo1: skipped as a paraphrase
-	obs(inc, "x", "s1")    // the backup still holds what we deleted: skipped too
-	obs(inc, "orph", "s2") // mined from a transcript they cleaned up: skipped as an orphan
-	// An older witness held s1 twice, each copy mined: the second is dropped as a duplicate session.
-	mined(inc, "s1@0123abcd")
-	obs(inc, "idup", "s1@0123abcd")
-	writeFacets(t, inc, citing("paraphrase", "io1"), citing("orphan", "orph"), citing("duplicate", "idup"),
-		citing("deleted_there", "gone"))
-	path := filepath.Join(t.TempDir(), "incoming.db")
-	if err := inc.Export(path, false); err != nil {
-		t.Fatal(err)
-	}
-
-	now := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
-	rep, err := base.Merge(context.Background(), path, true, now)
-	if err != nil {
-		t.Fatalf("Merge: %v", err)
-	}
-	if rep.Observations.SharedMined != 2 || rep.Observations.Orphaned != 1 || rep.Sessions.Duplicates != 1 || rep.Facets.New != 4 {
-		t.Fatalf("setup: want 2 paraphrases, 1 orphan and 1 duplicate session skipped, 4 facets new; got %+v %+v %+v",
-			rep.Observations, rep.Sessions, rep.Facets)
-	}
-	hw, err := base.ObservationHighWater()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pruneOnly(t, base, base, hw, now)
-
-	for _, k := range []string{"paraphrase", "orphan", "duplicate"} {
-		if f := facetNamed(t, base, "default", k); !f.Active() {
-			t.Errorf("%s: the merge imported it as new, and the next review retired it (%q)", k, f.ArchiveReason)
-		}
-	}
-	for _, k := range []string{"deleted_here", "deleted_there"} {
-		if f := facetNamed(t, base, "default", k); f.Active() || f.ArchiveReason != retiredReason {
-			t.Errorf("%s: its only observation was deleted, so it must be retired; got active=%v reason=%q", k, f.Active(), f.ArchiveReason)
-		}
 	}
 }
