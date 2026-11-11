@@ -12,11 +12,14 @@ The visible front door, exactly as `witness --help` groups it:
 | Lenses | `lens` |
 | Configure | `config` |
 | Setup | `doctor` · `install` · `model` · `wire` · `unwire` |
-| Maintenance | `cleanup` · `export` · `merge` · `compact` |
+| Maintenance | `cleanup` · `export` · `merge` · `compact` · `worker` |
 
-Capture, the worker, and the MCP server are **internal** entry points invoked by
-Claude Code/OpenCode, not typed by hand. `witness import` and `witness worker …` are hidden:
-they exist for recovery and debugging, and everything they do also happens automatically.
+Capture, the automatic worker runs, and the MCP server are **internal** entry points invoked by
+Claude Code, OpenCode and Codex, not typed by hand. `witness worker …` is the operator side of
+that worker, and `witness import` is hidden plugin and hook plumbing. Three jobs happen only when
+you run them: distilling while `auto_distill = false` (`witness worker run`), the long-arc pass
+(`witness worker review --full`), and importing Codex history from before you wired it
+(`witness import --agent codex`).
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
 - `witness view [--no-open] [--out <path>]` — write the archive as one self-contained HTML page
@@ -41,9 +44,9 @@ they exist for recovery and debugging, and everything they do also happens autom
 - `witness observations delete <obs_id>` — prune a wrong observation. It is removed now; facets that rested only on it
   are retired at the next review, and nothing is re-read.
 - `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
-  observations. (Hidden, like the rest of `worker`: review normally runs on its own schedule —
-  `review_every` / `review_poignancy` — so reaching for this by hand is the exception. `--full`
-  also runs the emergent long-arc pass.)
+  observations. Review normally runs on its own schedule (`review_every` / `review_poignancy`),
+  so reaching for this by hand is the exception. `--full` also runs the emergent long-arc pass,
+  which nothing runs automatically.
 - `witness lens register|deregister|enable|disable|list` — manage lenses.
 - `witness lens show <name>` — print one lens's settings and a prompt excerpt (`--prompts` prints
   both prompts in full).
@@ -55,12 +58,11 @@ they exist for recovery and debugging, and everything they do also happens autom
   auto-seeded once on first use and fully deletable, so this is how you bring it back).
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
-- `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
 - `witness import --agent codex` — import Codex sessions; see [Codex capture](codex-capture.md).
 - `witness status` — what has been captured, whether the worker is running, and how fresh the
   distilled data is (`--json` for scripts).
 - `witness worker run` / `witness worker stop` — the operator escape hatch for the background
-  distillation worker (hidden from `--help`; normally it runs off editor hooks). `run` drains in
+  distillation worker (normally it runs off editor hooks). `run` drains in
   the foreground, `--detach` backgrounds it. With `--detach` it accepts `--since`/`--until` to
   select pending sessions by their latest raw timestamp — for example
   `witness worker run --detach --since 7d` distills sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates

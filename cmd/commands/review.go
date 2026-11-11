@@ -22,7 +22,7 @@ func autoClaimer(st *store.Store, cfg store.Config, run distill.MineFunc, runFor
 
 // review.go holds cmdReviewFull and forceReviewTapped: the implementation functions for the
 // unconditional review pass. The old top-level `review` command was removed from the
-// visible front door (#102); the functionality migrated to the hidden `worker review`
+// visible front door (#102); the functionality migrated to the `worker review`
 // subcommand, but the implementation functions remain here, called by worker_group.go
 // and lens.go (backfill's forced review).
 

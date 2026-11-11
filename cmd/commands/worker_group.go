@@ -6,17 +6,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newWorkerCmd is the HIDDEN operator group for the distillation worker. A normal
-// user never touches it — the worker runs off editor hooks. It exists as an escape
-// hatch: force a full re-distill, stop a run, or force a review. Hidden (not in
-// `witness --help`) but `witness worker --help` works. Replaces the old top-level
-// `distill` + `review` verbs (the pipeline vocabulary left the front door).
+// newWorkerCmd is the operator group for the distillation worker. Normally the worker
+// runs off editor hooks, but some jobs happen ONLY here: distilling at all with
+// auto_distill = false, the long-arc pass (`review --full`), stopping a run. It was
+// hidden until #199 (F046), while doctor, status, compact, lens and the MCP server all
+// printed `witness worker …` hints — so the CLI named a command its own --help said did
+// not exist. Listed under Maintenance. Replaces the old top-level `distill` + `review`
+// verbs (the pipeline vocabulary left the front door).
 func newWorkerCmd() *cobra.Command {
 	w := &cobra.Command{
-		Use:    "worker",
-		Short:  "Operator controls for the background distillation worker.",
-		Hidden: true,
-		RunE:   groupRunE, // `witness worker stpo` is an unknown command, not its help page and exit 0
+		Use:     "worker",
+		Short:   "Operator controls for the background distillation worker.",
+		GroupID: groupAdmin,
+		RunE:    groupRunE, // `witness worker stpo` is an unknown command, not its help page and exit 0
 	}
 
 	var quiet, detach, waitBackoffs bool
