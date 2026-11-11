@@ -468,12 +468,16 @@ func approxCount(n int) string {
 // merged text, which cuts the count, not the characters. ln is the lens whose review_model made
 // the call; nil (the unified portrait, an orphan lens) means the default review_model.
 //
-// ponytail: names the lens by its data name; a legacy lens registered under another name needs
-// that name in --lens. Map it here if one turns up (distill has no registry to ask).
+// --lens takes the REGISTERED name, which a lens whose lens.json `name` differs from it (one
+// registered from a pre-F153 corpus-example mines as "regime") does not share with its data name.
 func withInputSize(err error, input string, ln *lens.Lens) error {
 	lever := "witness config set review_model <model>"
 	if ln != nil {
-		lever += " --lens " + ln.Name
+		name := ln.Registered
+		if name == "" {
+			name = ln.Name // built in code, not loaded from the registry
+		}
+		lever += " --lens " + name
 	}
 	return &InputSizeError{Err: err, Size: InputSize(utf8.RuneCountInString(input)), Lever: lever}
 }

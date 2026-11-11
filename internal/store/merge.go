@@ -711,6 +711,8 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 //	                               a copied worker_pid is what `distill stop` would signal
 //	mine_drift_*, default_lens_migrated_v1a, profile_sig:*  local bookkeeping; profile_sig is stale
 //	                               anyway once the facets change, so the portrait regenerates
+//	deleted_obs_pending            the other side's unreviewed deletes: a merge is not a sync, so its
+//	                               facets arrive citing them, as they stood there
 func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *MergeReport) error {
 	// raw: new sessions whole, in their original order (seq is copied — LastDistilledRawTS
 	// compares it); a longer incoming transcript contributes only the tail we lack.

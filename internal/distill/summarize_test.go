@@ -497,6 +497,21 @@ func TestSummarizerFailureNamesInputSizeAndLever(t *testing.T) {
 	}
 }
 
+// --lens takes the registered name. A lens registered from a pre-F153 corpus-example mines as
+// "regime" but is "corpus-example" to every command; the lever must name the one that works.
+func TestSummarizerLeverNamesTheRegisteredLens(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	fail := func(context.Context, string, string, string) (string, error) { return "", fmt.Errorf("too long") }
+	sm := &Summarizer{Store: s, Lenses: []*lens.Lens{{Name: "math", Registered: "example"}},
+		LensPrompt: "L", UnifiedPrompt: "U", Run: fail}
+	err := sm.Summarize(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "witness config set review_model <model> --lens example)") ||
+		strings.Contains(err.Error(), "--lens math") {
+		t.Fatalf("the lever must name the registered lens, got:\n%v", err)
+	}
+}
+
 func TestInputSize(t *testing.T) {
 	for n, want := range map[int]string{
 		2_419_532: "2.42M chars (~605k tokens)",

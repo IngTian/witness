@@ -48,6 +48,7 @@ import (
 //     are meaningful only together with (or under a matching) Runner.
 type Lens struct {
 	Name         string // tag written onto observations/facets
+	Registered   string // the registry name a command takes (`config set --lens`); "" when not loaded from the registry
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
@@ -267,6 +268,7 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	if store.ReservedLensName(l.Name) {
 		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its lens.json name impersonates the cross-lens 'unified' profile); rename it", name, l.Name)
 	}
+	l.Registered = name
 	return l, nil
 }
 
