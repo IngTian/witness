@@ -173,17 +173,17 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 	// NO <2-LENS SKIP (issue #100). It used to return here when fewer than two lenses had
 	// facets, reasoning that a cross-lens portrait of ONE lens merely restates that lens's
-	// summary for an extra LLM call. Sound while summaries were PUSHED on every review: the
-	// call was unconditional, so dodging it mattered.
+	// summary for an extra LLM call, and summaries are PUSHED on every review, so the call is
+	// unconditional.
 	//
-	// Read-time generation removes the premise — an unread summary costs nothing — and the rule
-	// actively broke the case #100 exists to serve: a SINGLE-LENS archive (a market feed, say)
-	// whose whole point is a differently-framed portrait via an overridden unified.md. Verified
-	// live before deleting: one lens with facets produced NO unified profile at all, silently,
+	// The push stayed beside read-time generation (#199 F019), so that call is still paid after
+	// each review; the rule went anyway because it actively broke the case #100 exists to serve:
+	// a SINGLE-LENS archive (a market feed, say) whose whole point is a differently-framed
+	// portrait via an overridden unified.md. Verified live before deleting: one lens with facets produced NO unified profile at all, silently,
 	// and it deleted any portrait a previous multi-lens state had left.
 	//
 	// A user who overrides unified.md wants a re-framing, not a restatement. Whether that is
-	// worth one call on a one-lens archive is their call, and it now costs nothing until read.
+	// worth one call per review on a one-lens archive is their call.
 	//
 	// The zero-facets case above still clears the portrait, and reapOrphanProfiles still reaps a
 	// lens whose facets are gone — those answer "this narrative describes data that no longer
