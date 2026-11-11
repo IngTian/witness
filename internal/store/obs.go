@@ -217,11 +217,15 @@ func (o *obsIO) DeleteObservation(obsID string) (bool, error) {
 // removed that no review has pruned from the facets yet.
 const deletedObsPendingKey = "deleted_obs_pending"
 
-// PendingDeletedObservations is the pending-delete list (see DeleteObservation); empty when there is
-// none, which is every review's common case.
+// PendingDeletedObservations is the pending-delete list (see DeleteObservation) less any id that
+// names an observation again: a merge can re-import a deleted row from a backup under the same
+// content-hash id, and pruning its citations then would retire facets resting on live evidence.
+// Such an id just stays listed, harmless, until it is deleted again. Empty in every review's
+// common case.
 func (o *obsIO) PendingDeletedObservations() ([]string, error) {
 	return queryStrings(context.Background(), o.db,
-		`SELECT DISTINCT value FROM json_each((SELECT value FROM meta WHERE key = ?))`, deletedObsPendingKey)
+		`SELECT DISTINCT value FROM json_each((SELECT value FROM meta WHERE key = ?))
+		 WHERE value NOT IN (SELECT obs_id FROM observations)`, deletedObsPendingKey)
 }
 
 // (ReadObservationsLite and ReadObservationsSince used to live here — 96 lines, both with zero

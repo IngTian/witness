@@ -128,6 +128,23 @@ func TestPruneStripsOnlyDeletedIDs(t *testing.T) {
 	assertLog(t, s, nil)
 }
 
+// A delete that has been undone — a merge re-imported the row from a backup, or a re-mine produced
+// the same content-hash id — is no delete any more: the facet resting on it keeps its citation.
+func TestPruneSkipsADeletedIDThatExistsAgain(t *testing.T) {
+	s := newStore(t)
+	back := deletedObs(t, s, "default", "back")
+	seq := stageObs(t, s, "default", "back") // same session, lens and text: the same obs_id
+	writeFacets(t, s, citing("k", back))
+
+	pruneOnly(t, s, s, seq, time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC))
+
+	if got := facetNamed(t, s, "default", "k"); !got.Active() || !reflect.DeepEqual(got.Versions[0].BecauseOf, []string{back}) {
+		t.Errorf("a facet citing a re-imported observation must keep it: active=%v cites %v (%q)",
+			got.Active(), got.Versions[0].BecauseOf, got.ArchiveReason)
+	}
+	assertLog(t, s, nil)
+}
+
 // A facet whose current version cited something and now cites nothing is retired, and the log
 // says so. One that never cited anything is left exactly as it was, and one compaction already
 // archived is stripped but not retired again.
