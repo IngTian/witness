@@ -190,8 +190,9 @@ func lensLoadDefault(st *store.Store) error {
 // --lens` writes the REGISTERED lens.json, and a register replaces that whole copy with the
 // source's, so a pinned model or runner vanished with only "[ok] registered" to show for it —
 // noticed, if ever, as worse facets or a different bill. old is lensSettings before the register.
-// A value the new source changes is named as replaced, with no re-apply hint: running it would
-// undo a deliberate edit to the source.
+// A value the new source changes is named as replaced, and the restore is offered as a choice,
+// not an instruction: the old value may be a pin an unchanged source never had (the common case),
+// or the source may have been edited on purpose. Only the person knows which.
 func warnDroppedSettings(st *store.Store, name string, old lens.LensConfig) {
 	now := lensSettings(st, name)
 	for _, s := range []struct{ key, was, is string }{
@@ -199,14 +200,17 @@ func warnDroppedSettings(st *store.Store, name string, old lens.LensConfig) {
 		{"mine_model", old.ExtractModel, now.ExtractModel},
 		{"review_model", old.ReviewModel, now.ReviewModel},
 	} {
+		label := "re-apply"
 		switch {
 		case s.was == "" || s.was == s.is:
+			continue
 		case s.is != "":
 			fmt.Println(result(warnGlyph(), "replaced "+s.key+" "+s.was+" → "+s.is, "lens "+name))
+			label = "keep yours"
 		default:
 			fmt.Println(result(warnGlyph(), "dropped "+s.key+" = "+s.was, "lens "+name))
-			fmt.Println(hint("re-apply", "witness config set "+s.key+" "+shellArg(s.was)+" --lens "+name))
 		}
+		fmt.Println(hint(label, "witness config set "+s.key+" "+shellArg(s.was)+" --lens "+name))
 	}
 }
 
@@ -214,10 +218,14 @@ func warnDroppedSettings(st *store.Store, name string, old lens.LensConfig) {
 // does not load (an emptied extract.md, a wrong-typed field) still loses its pinned values to a
 // re-register, and is how load-default's "re-seed it after editing broke it" is reached. Best
 // effort: unregistered or unreadable is the zero config (nothing to lose), and json.Unmarshal
-// still fills the well-typed fields when another one has the wrong type.
+// still fills the well-typed fields when another one has the wrong type. Trimmed as the loader
+// trims them, so a value padded by a hand edit is not reported as changed or dropped.
 func lensSettings(st *store.Store, name string) (c lens.LensConfig) {
 	data, _ := os.ReadFile(filepath.Join(st.LensesDir(), name, lens.ConfigFile))
 	_ = json.Unmarshal(data, &c)
+	c.Runner = strings.TrimSpace(c.Runner)
+	c.ExtractModel = strings.TrimSpace(c.ExtractModel)
+	c.ReviewModel = strings.TrimSpace(c.ReviewModel)
 	return c
 }
 
@@ -512,7 +520,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// its re-mined observations and a --fresh backfill would be left with the empty facets
 	// it dropped. Reviewing unconditionally keeps L2 + L4 consistent with L1 either way.
 	fmt.Println(dim("re-mine complete; reviewing to refresh the lens's facets + profile…"))
-	// A fresh tap: the profile's cause must be the profile's, not an error the drain survived.
+	// A fresh tap: a failed review's cause must be the review's, not an error the drain survived.
 	rtap := &causeTap{}
 	ranReview, profErr, err := forceReviewTapped(st2, false, rtap)
 	if err != nil {
@@ -530,7 +538,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	if profErr != nil {
 		fmt.Println(result(warnGlyph(), "backfilled lens "+name,
 			"facets refreshed, but the profile was NOT regenerated (the previous one is kept)"))
-		printProfileCause(rtap, profErr)
+		printProfileCause(profErr)
 	} else if drifted == 0 {
 		fmt.Println(result(okGlyph(), "backfilled lens "+name, "facets + profile refreshed"))
 	}

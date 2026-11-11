@@ -71,8 +71,9 @@ func TestOldFormatHintQuotesThePath(t *testing.T) {
 // F048: `config set --lens` writes the registered lens.json, which a re-register replaces whole,
 // so a pinned model or runner vanished behind a bare "[ok] registered". Each lost setting must be
 // named with the command that puts it back (quoted for a shell); one the new source keeps is not
-// lost, and one it changes is named as replaced, with no hint that would undo the change. Only
-// lens.json is compared, so a lens that does not load, before or after, is no exception.
+// lost, and one it changes is named as replaced, with the same command offered as a choice: the
+// old value may be a pin the unchanged source never had. Only lens.json is compared, trimmed the
+// way the loader trims it, so a lens that does not load, before or after, is no exception.
 func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 	st := readFixture(t)
 	if err := st.RegisterLens("math", writeLensDir(t, "", "mine math", "fold math")); err != nil {
@@ -109,7 +110,8 @@ func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 			"[!] dropped mine_model = opus[1m]  (lens math)",
 			"witness config set mine_model 'opus[1m]' --lens math",
 			"[!] replaced review_model claude-a → claude-b  (lens math)",
-		}, []string{"dropped runner", "replaced runner", "review_model claude-a --lens"}},
+			hint("keep yours", "witness config set review_model claude-a --lens math"),
+		}, []string{"dropped runner", "replaced runner"}},
 		// Keeps both values but does not load (dimensions must be a list): nothing was lost.
 		{"keeps both, does not load", reg(`{"dimensions":"x","runner":"opencode","review_model":"claude-b"}`), nil, []string{"[!]"}},
 		// The copy that left does not load, and still has both values to lose.
@@ -121,6 +123,14 @@ func TestReRegisterWarnsAboutDroppedSettings(t *testing.T) {
 			"[!] dropped review_model = claude-strong  (lens default)",
 			"witness config set review_model claude-strong --lens default",
 		}, nil},
+		// A hand-edited registered lens.json padded with whitespace the loader trims: nothing changes.
+		{"differs only by whitespace", func() error {
+			if err := os.WriteFile(filepath.Join(st.LensesDir(), "math", "lens.json"),
+				[]byte(`{"runner":" ","review_model":" claude-b "}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return lensRegister(st, "math", src(`{"review_model":"claude-b"}`))
+		}, nil, []string{"[!]"}},
 	} {
 		out := captureStdout(t, func() {
 			if err := step.run(); err != nil {

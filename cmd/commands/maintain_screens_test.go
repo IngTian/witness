@@ -230,9 +230,10 @@ func TestReviewSaysWhenTheProfileWasNotRegenerated(t *testing.T) {
 	}
 }
 
-// portraitFailPlatform fails a claim batch (input "LENS: <name>\nFACETS: N") and a lens portrait
-// (input "LENS: <name>\n\nFACETS (dimension…") the way an oversized lens fails on claude -p, and
-// answers everything else with "[]". In-process: no real CLI is spawned.
+// portraitFailPlatform fails every claim batch (input "LENS: <name>\nFACETS: N") and a lens
+// portrait (input "LENS: <name>\n\nFACETS (dimension…"): alpha's with a timeout, blank's by
+// answering whitespace, any other the way an oversized lens fails on claude -p. Everything else
+// gets "[]". In-process: no real CLI is spawned.
 type portraitFailPlatform struct{ leakFakePlatform }
 
 func (portraitFailPlatform) Name() string                           { return "portraitfail" }
@@ -243,8 +244,12 @@ type portraitFailRunner struct{ leakFakeRunner }
 
 func (portraitFailRunner) Run(_ context.Context, _, _, input string) (string, error) {
 	switch {
-	case strings.Contains(input, "LENS: test\nFACETS: "):
+	case strings.Contains(input, "\nFACETS: "):
 		return "", errors.New("claim batch timed out")
+	case strings.Contains(input, "LENS: alpha\n\nFACETS (dimension"):
+		return "", errors.New("claude -p: signal: killed")
+	case strings.Contains(input, "LENS: blank\n\nFACETS (dimension"):
+		return "   ", nil
 	case strings.Contains(input, "FACETS (dimension/key, confidence, value):"):
 		return "", errors.New("claude -p: exit status 1: Prompt is too long")
 	}
@@ -253,9 +258,9 @@ func (portraitFailRunner) Run(_ context.Context, _, _, input string) (string, er
 
 var registerPortraitFailOnce sync.Once
 
-// portraitFailArchive is an archive whose one lens, test, has a facet and an observation, routed
-// to portraitFailPlatform. It returns the screen lines a failed portrait must show (F095).
-func portraitFailArchive(t *testing.T) (st *store.Store, want []string) {
+// portraitFailArchive is an archive whose lenses (just test, if none is named) each have a facet
+// and an observation, routed to portraitFailPlatform.
+func portraitFailArchive(t *testing.T, lenses ...string) *store.Store {
 	t.Helper()
 	registerPortraitFailOnce.Do(func() { platform.Register(portraitFailPlatform{}) })
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
@@ -268,27 +273,42 @@ func portraitFailArchive(t *testing.T) (st *store.Store, want []string) {
 	if err := st.SetConfigString("runner", "portraitfail"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.RegisterLens("test", writeLensDir(t, "test", "Extract prompt.", "Review prompt.")); err != nil {
-		t.Fatal(err)
+	if len(lenses) == 0 {
+		lenses = []string{"test"}
 	}
-	if err := st.EnableLens("test"); err != nil {
-		t.Fatal(err)
+	var facets []store.Facet
+	for _, l := range lenses {
+		if err := st.RegisterLens(l, writeLensDir(t, l, "Extract prompt.", "Review prompt.")); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.EnableLens(l); err != nil {
+			t.Fatal(err)
+		}
+		facets = append(facets, portraitFailFacet(l))
+		if err := st.AppendObservations([]store.Observation{{ID: store.ObservationID("s", l, "o"),
+			TS: "2026-08-01T00:00:00Z", Session: "s", Lens: l, Dimension: "traits",
+			Observation: "did a thing", Poignancy: 5}}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	facets := []store.Facet{{Lens: "test", Dimension: "traits", Key: "k",
-		Versions: []store.FacetVersion{{Value: "a long value with no claim yet", Confidence: 0.9}}}}
 	if err := st.WriteFacets(facets); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AppendObservations([]store.Observation{{ID: store.ObservationID("s", "test", "o"),
-		TS: "2026-08-01T00:00:00Z", Session: "s", Lens: "test", Dimension: "traits",
-		Observation: "did a thing", Poignancy: 5}}); err != nil {
-		t.Fatal(err)
-	}
-	return st, []string{
-		// The portrait's own error, not the claim batch's that the tap saw first.
-		kvRow("cause", "claude -p: exit status 1: Prompt is too long", ""),
-		kvRow("input", distill.InputSize(distill.PortraitInputChars(facets)["test"]), ""),
-		hint("if too large", "witness config set review_model <model> --lens test"),
+	return st
+}
+
+func portraitFailFacet(l string) store.Facet {
+	return store.Facet{Lens: l, Dimension: "traits", Key: "k",
+		Versions: []store.FacetVersion{{Value: "a long value with no claim yet", Confidence: 0.9}}}
+}
+
+// portraitFailLines are the screen lines lens l's failed portrait must show (F095): the portrait's
+// own error, not the claim batch's that the tap saw first, then its size and lever.
+func portraitFailLines(l, cause string) []string {
+	return []string{
+		kvRow("cause", cause, ""),
+		kvRow("input", distill.InputSize(distill.PortraitInputChars([]store.Facet{portraitFailFacet(l)})[l]), ""),
+		hint("if too large", "witness config set review_model <model> --lens "+l),
 	}
 }
 
@@ -296,7 +316,7 @@ func portraitFailArchive(t *testing.T) (st *store.Store, want []string) {
 // review_model lever (F095). The cause row held the bare runner error the tap noted before
 // distill added either, so only witness.log, `witness profile` and get_profile had them.
 func TestReviewShowsAFailedPortraitsSizeAndLever(t *testing.T) {
-	st, want := portraitFailArchive(t)
+	st, want := portraitFailArchive(t), portraitFailLines("test", "claude -p: exit status 1: Prompt is too long")
 	st.Close()
 	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
 	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") {
@@ -311,7 +331,7 @@ func TestReviewShowsAFailedPortraitsSizeAndLever(t *testing.T) {
 
 // `lens backfill` reports a failed portrait the same way.
 func TestLensBackfillShowsAFailedPortraitsSizeAndLever(t *testing.T) {
-	st, want := portraitFailArchive(t)
+	st, want := portraitFailArchive(t), portraitFailLines("test", "claude -p: exit status 1: Prompt is too long")
 	out, err := captureStdoutErr(t, func() error { return lensBackfill(st, "test", false, true) })
 	if err != nil || !strings.Contains(out, "the profile was NOT regenerated") {
 		t.Fatalf("(%v)\n%s", err, out)
@@ -320,6 +340,34 @@ func TestLensBackfillShowsAFailedPortraitsSizeAndLever(t *testing.T) {
 		if !strings.Contains(out, w) {
 			t.Errorf("missing %q:\n%s", w, out)
 		}
+	}
+}
+
+// Every portrait call that failed is named with its own size and lever: the screen once showed
+// only the first lens's, so the one that overflowed the context window could be the one left off.
+func TestReviewShowsEveryFailedPortrait(t *testing.T) {
+	portraitFailArchive(t, "alpha", "test").Close()
+	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") {
+		t.Fatalf("(%v)\n%s", err, out)
+	}
+	for _, w := range append(portraitFailLines("alpha", "claude -p: signal: killed"),
+		portraitFailLines("test", "claude -p: exit status 1: Prompt is too long")...) {
+		if !strings.Contains(out, w) {
+			t.Errorf("missing %q:\n%s", w, out)
+		}
+	}
+}
+
+// A portrait that failed without a model error (here the model answered whitespace) is shown by
+// its own error. It used to be shown by the tap's first, which was an unrelated claim batch's.
+func TestReviewShowsAFailedPortraitsOwnErrorWhenNoCallFailed(t *testing.T) {
+	portraitFailArchive(t, "blank").Close()
+	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") ||
+		!strings.Contains(out, kvRow("cause", "summarize lens blank: the model returned an empty summary", "")) ||
+		strings.Contains(out, "claim batch") {
+		t.Fatalf("(%v)\n%s", err, out)
 	}
 }
 

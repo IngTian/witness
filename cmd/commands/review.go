@@ -53,30 +53,37 @@ func cmdReviewFull(full bool) error {
 	if profErr != nil {
 		// The facets landed; only the narrative did not. Say so rather than "profile regenerated".
 		fmt.Println(warnGlyph() + " " + done + " — the profile was NOT regenerated (the previous one is kept)")
-		printProfileCause(tap, profErr)
+		printProfileCause(profErr)
 		return nil
 	}
 	fmt.Println(okGlyph() + " " + done + " — profile regenerated")
 	return nil
 }
 
-// printProfileCause prints, under a "profile was NOT regenerated" result, why. A failed portrait
-// call carries what it sent and the review_model lever (distill.InputSizeError, F095); both get
-// their own line, because the tap noted the bare runner error before distill added them, and the
-// one-line cause is cut long before them anyway. That call's own error is then the cause, not the
-// tap's first: a best-effort claim batch earlier in the run shares the tap.
-func printProfileCause(tap *causeTap, profErr error) {
-	var ie *distill.InputSizeError
-	if errors.As(profErr, &ie) {
-		tap = &causeTap{}
-		tap.note(ie.Err)
-	} else {
-		tap.note(profErr) // a model error during it, if one was seen; else its own (missing prompts …)
+// printProfileCause prints, under a "profile was NOT regenerated" result, why: every failure
+// Summarize joined (one per lens, and the cross-lens portrait), so the lens that outgrew its
+// model's context window is never hidden behind another lens's timeout. A failed portrait call
+// carries what it sent and the review_model lever (distill.InputSizeError, F095); both get their
+// own line, because the one-line cause is cut long before them. Each cause is the failure's own
+// error, never the review's tap: a best-effort claim batch earlier in the run shares that tap, and
+// would stand in for a portrait that failed without a model error (an empty answer, no prompts).
+func printProfileCause(profErr error) {
+	errs := []error{profErr}
+	if j, ok := profErr.(interface{ Unwrap() []error }); ok {
+		errs = j.Unwrap()
 	}
-	fmt.Println("  " + kvRow("cause", tap.cause(), ""))
-	if ie != nil {
-		fmt.Println("  " + kvRow("input", ie.Size, ""))
-		fmt.Println(hint("if too large", ie.Lever))
+	for _, err := range errs {
+		var ie *distill.InputSizeError
+		if errors.As(err, &ie) {
+			err = ie.Err // the lever's --lens, or its absence for the unified portrait, says which call
+		}
+		one := &causeTap{} // only for its one-line rendering
+		one.note(err)
+		fmt.Println("  " + kvRow("cause", one.cause(), ""))
+		if ie != nil {
+			fmt.Println("  " + kvRow("input", ie.Size, ""))
+			fmt.Println(hint("if too large", ie.Lever))
+		}
 	}
 	fmt.Println(hint("diagnose", "witness doctor"))
 }
