@@ -607,3 +607,15 @@ func TestWiringACaptureOnlyVenueDoesNotBindItAsRunner(t *testing.T) {
 		t.Errorf("wiring a capture-only venue bound runner=%q; the engine cannot resolve it, so every later drain fails and distillation silently stops", got)
 	}
 }
+
+// The hooks import only the session that fired them, so the wire result must point at the
+// by-hand history import — `import` itself is hidden from --help (#199 F046).
+func TestCodexWireResultHintsTheHistoryImport(t *testing.T) {
+	want := [2]string{"past sessions", "witness import --agent codex"}
+	for _, h := range codexWiredOutcome().hints {
+		if h == want {
+			return
+		}
+	}
+	t.Errorf("wire codex result hints %v, missing %v", codexWiredOutcome().hints, want)
+}

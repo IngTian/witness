@@ -40,9 +40,9 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - `cmd/witness/` — tiny entry point; calls `commands.Run()`.
 - `cmd/commands/` — the cobra tree, mostly one command per file. The command list is
   `witness --help`, grouped as in `newRootCmd` (`root.go`); don't copy it here. Hidden:
-  the hook entry points `capture`/`session-start`/`session-end`, `mcp`, `import`, the
-  worker plumbing `worker-run`/`worker-kick`/`worker-wakeup`, and the operator `worker`
-  group. `distill.go`/`review.go` keep the names of removed verbs; they back `worker run`,
+  the hook entry points `capture`/`session-start`/`session-end`, `mcp`, `import`, and the
+  worker plumbing `worker-run`/`worker-kick`/`worker-wakeup`. The operator `worker` group
+  is listed under Maintenance. `distill.go`/`review.go` keep the names of removed verbs; they back `worker run`,
   `worker review` and `status`. Shared helpers in `cli.go`; terminal styling in `style.go`.
 - `internal/store/` — SQLite data model; the DB is the work queue. `raw`
   (L0), `observations` (L1), `facets`/`facet_versions` (L2, bi-temporal),

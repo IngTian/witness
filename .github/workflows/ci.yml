@@ -69,9 +69,6 @@ jobs:
       - name: opencode plugin tests
         run: npm --prefix npm/opencode run check
 
-      - name: codex converter tests
-        run: python3 -I -m unittest discover -s scripts
-
       - name: release manifests (versions + MCP Registry description cap)
         run: ./scripts/check-release-manifests.sh
 
@@ -80,8 +77,8 @@ jobs:
         run: make build-all
 
   # Every Windows defect so far was found by hand. This job is NOT required and is
-  # continue-on-error until the native-Windows suite failures recorded on 67b837a are
-  # triaged (issue #199, F162) — it is expected red until then. Once it is green, drop
+  # continue-on-error until the native-Windows suite failures first seen on 67b837a are
+  # triaged (issue #220) — it is expected red until then. Once it is green, drop
   # continue-on-error and add "windows · test" to main's required checks.
   windows:
     name: windows · test

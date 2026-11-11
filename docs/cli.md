@@ -12,11 +12,14 @@ The visible front door, exactly as `witness --help` groups it:
 | Lenses | `lens` |
 | Configure | `config` |
 | Setup | `doctor` · `install` · `model` · `wire` · `unwire` |
-| Maintenance | `cleanup` · `export` · `merge` · `compact` |
+| Maintenance | `cleanup` · `export` · `merge` · `compact` · `worker` |
 
-Capture, the worker, and the MCP server are **internal** entry points invoked by
-Claude Code/OpenCode, not typed by hand. `witness import` and `witness worker …` are hidden:
-they exist for recovery and debugging, and everything they do also happens automatically.
+Capture, the automatic worker runs, and the MCP server are **internal** entry points invoked by
+Claude Code, OpenCode and Codex, not typed by hand. `witness worker …` is the operator side of
+that worker, and `witness import` is hidden plugin and hook plumbing. Three jobs happen only when
+you run them: distilling while `auto_distill = false` (`witness worker run`), the long-arc pass
+(`witness worker review --full`), and importing Codex history from before you wired it
+(`witness import --agent codex`).
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
 - `witness view [--no-open] [--out <path>]` — write the archive as one self-contained HTML page
@@ -38,13 +41,14 @@ they exist for recovery and debugging, and everything they do also happens autom
   full version history and a link to the facet that absorbed it, so `--expand` can always unfold
   it. Re-runnable; each pass consolidates what it can see.
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
-- `witness observations record --session <id> --dimension <name> --observation <text>` — stage an active observation and kick the worker.
 - `witness observations delete <obs_id>` — prune a wrong observation. It is removed now; facets that rested only on it
   are retired at the next review, and nothing is re-read.
+- `witness worker candidates <lens>` — dry-run the long-arc clustering for one lens: prints the
+  candidate arcs it would verify, with no model call and nothing written.
 - `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
-  observations. (Hidden, like the rest of `worker`: review normally runs on its own schedule —
-  `review_every` / `review_poignancy` — so reaching for this by hand is the exception. `--full`
-  also runs the emergent long-arc pass.)
+  observations. Review normally runs on its own schedule (`review_every` / `review_poignancy`),
+  so reaching for this by hand is the exception. `--full` also runs the emergent long-arc pass,
+  which nothing runs automatically.
 - `witness lens register|deregister|enable|disable|list` — manage lenses.
 - `witness lens show <name>` — print one lens's settings and a prompt excerpt (`--prompts` prints
   both prompts in full).
@@ -56,12 +60,11 @@ they exist for recovery and debugging, and everything they do also happens autom
   auto-seeded once on first use and fully deletable, so this is how you bring it back).
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
-- `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
 - `witness import --agent codex` — import Codex sessions; see [Codex capture](codex-capture.md).
 - `witness status` — what has been captured, whether the worker is running, and how fresh the
   distilled data is (`--json` for scripts).
 - `witness worker run` / `witness worker stop` — the operator escape hatch for the background
-  distillation worker (hidden from `--help`; normally it runs off editor hooks). `run` drains in
+  distillation worker (normally it runs off editor hooks). `run` drains in
   the foreground, `--detach` backgrounds it. With `--detach` it accepts `--since`/`--until` to
   select pending sessions by their latest raw timestamp — for example
   `witness worker run --detach --since 7d` distills sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates
@@ -82,9 +85,12 @@ they exist for recovery and debugging, and everything they do also happens autom
   archived beside it; duplicates under different keys are left for `witness compact`. A one-time
   consolidation, not a sync — merged back and forth, two machines grow an archived copy of every facet
   both changed, every round.
-- `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
-  default data root). Creates the directory structure and database schema. Typically called once per
-  machine; `install.sh` handles this for source-checkout users.
+- `witness install [--path <dir>]` — provision a witness archive at the specified path (or the
+  default data root) without wiring any editor. Creates the directory structure and database schema.
+  An archive chosen with `--path` or `WITNESS_HOME` starts with no lenses, for a library or data
+  source; the default data root gets the built-in `default` lens like any first open
+  (`WITNESS_NO_DEFAULT_LENS=1` keeps it blank). A personal machine does not need it: `install.sh`
+  runs `witness wire`, which opens the archive itself.
 - `witness wire <claude|opencode|codex>` — wire the editor integration (hooks + MCP for Claude Code;
   plugin + MCP for OpenCode; hooks for Codex). Source-checkout command; `install.sh` calls this for
   you. Re-running it is safe: it replaces its own entries and preserves any hooks you wrote yourself.
@@ -95,6 +101,10 @@ they exist for recovery and debugging, and everything they do also happens autom
   and distill them into the archive. Reads from stdin or a file. See the record contract in
   [`prompts/SCHEMA.md`](../prompts/SCHEMA.md#records-in-the-ingest-contract).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
+  In `doctor --json`'s `config` block, `triage_model` and `distill_model` are the raw config.toml
+  fields; `runner`, `mine_model` and `review_model` are what actually runs, each model with a
+  `_from` key saying where it came from. An empty model (and `_from`) means none is set, so the
+  runner uses its own default (`doctor` prints "runner default").
 - `witness model fetch` — download the embedding model (multilingual-e5-small, ~470MB) once, pinned
   to one revision and checked by SHA-256. `install.sh` and `make fetch-model` run it; re-running
   checks the files instead of downloading them again. `WITNESS_ASSETS` picks the directory, and
@@ -124,7 +134,7 @@ review_max_chars = 16000      # safety ceiling: max observation chars folded in 
 
 Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
 `claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
-`runner = "opencode"`. Leaving both empty is the safe default and what `witness install` writes;
+`runner = "opencode"`. Leaving both empty is the safe default and what `witness wire` writes;
 note that an empty `triage_model` under the claude runner inherits your *ambient interactive*
 model, which may be heavier than you want for per-session mining, so pinning a light one is
 usually worth it.

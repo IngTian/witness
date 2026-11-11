@@ -60,8 +60,10 @@ case "$TARGET" in
   codex)    LABEL="Codex lifecycle hooks" ;;
 esac
 step 4 "Wiring $LABEL"
+# No "✓ registered" after this: wire exits 0 with a warning when `claude mcp add` fails
+# (capture still works), and a green tick under that warning told people agents could read
+# the profile when they could not. wire's own last line states the real outcome.
 "$BIN" wire "$TARGET"
-ok "$LABEL registered"
 
 # --- optional: put `witness` on PATH for the human subcommands ----------------
 # (profile, doctor, lens, cleanup). Hooks + MCP invoke the shim directly and don't
@@ -82,7 +84,7 @@ else
       mkdir -p "$HOME/.local/bin"
       cat > "$HOME/.local/bin/witness" <<EOF
 #!/usr/bin/env bash
-# Launcher for the witness CLI — execs the plugin shim by its real path.
+# Launcher for the witness CLI — execs the hook shim by its real path.
 exec "$ROOT/hooks/witness.sh" "\$@"
 EOF
       chmod +x "$HOME/.local/bin/witness"

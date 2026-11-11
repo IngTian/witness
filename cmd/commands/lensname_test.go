@@ -1,19 +1,16 @@
 package commands
 
 import (
-	"context"
 	"strings"
 	"testing"
 
-	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
 // A lens registered as corpus-example mines as "regime" (its lens.json name). Every command takes
 // the registered name, so each one must map it to the mined name before touching data: these
-// three used the registered name as given, and so refused, found nothing, or filed an
-// observation under a name no review reads.
+// two used the registered name as given, and so refused or found nothing.
 
 // compact --lens corpus-example said "not enabled" and exited 1 for an enabled lens.
 func TestCompactTakesTheRegisteredName(t *testing.T) {
@@ -63,51 +60,6 @@ func TestCandidatesTakesTheRegisteredName(t *testing.T) {
 	}
 }
 
-// observations record --lens corpus-example staged a row that drained into L1 under
-// "corpus-example" — orphaned, since the review reads the lens under its mined name.
-func TestObservationRecordReachesTheReview(t *testing.T) {
-	t.Setenv(noDefaultLensEnv, "1")
-	st := readFixture(t)
-	registerRenamedLens(t, st, "corpus-example", "regime")
-	if err := st.EnableLens("corpus-example"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := captureStdoutErr(t, func() error {
-		return cmdObservationRecord("s1", "corpus-example", "regimes", "turns when rates move", "", 6)
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Drain it the way the worker does. The session has no raw turns, so nothing is mined and
-	// the runner must never be called; only the staged row moves into L1.
-	lenses := activeLenses(st)
-	if len(lenses) != 1 {
-		t.Fatalf("active lenses %v", lenses)
-	}
-	w := &distill.Worker{Store: st, Embedder: fakeTestEmbedder{}, Lenses: lenses, Config: st.LoadConfig(),
-		Run: func(context.Context, string, string, string) (string, error) {
-			t.Fatal("a staged-only drain called the runner")
-			return "", nil
-		}}
-	m, err := w.MineSession(context.Background(), "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.CommitMining(m); err != nil {
-		t.Fatal(err)
-	}
-
-	// What the reviewer folds (reviewer.go: ReadObservationsSinceOrdered(ln.Name, ReviewRowid)).
-	ln := lenses[0]
-	obs, err := st.ReadObservationsSinceOrdered(ln.Name, st.ReviewRowid(ln.Name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(obs) != 1 || obs[0].Observation != "turns when rates move" {
-		t.Fatalf("the review of %q must see the recorded observation, got %+v", ln.Name, obs)
-	}
-}
-
 // The MCP tools apply whatever mapping cmd injects (internal/mcp tests drive that with a fake);
 // this pins that cmd injects the real one, and the wire command the CLI prints.
 func TestMCPGetsTheLensMappingAndTheWireCommand(t *testing.T) {
@@ -121,7 +73,3 @@ func TestMCPGetsTheLensMappingAndTheWireCommand(t *testing.T) {
 		t.Errorf("wire %q (want %q), refresh set %v", opts.Wire, wireCommand(), opts.Refresh != nil)
 	}
 }
-
-type fakeTestEmbedder struct{}
-
-func (fakeTestEmbedder) Embed(string) ([]float32, error) { return []float32{0.1, 0.2, 0.3}, nil }

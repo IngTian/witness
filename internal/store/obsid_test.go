@@ -2,7 +2,7 @@ package store
 
 import "testing"
 
-// The L1 dedup identity. Every writer (worker, MCP record_observation, the CLI) mints ids through
+// The L1 dedup identity. Every writer (worker, MCP record_observation) mints ids through
 // ObservationID, and existing archives already hold ids in this exact form — a change here
 // silently duplicates every re-recorded observation and orphans emerge_seen marks. The vector
 // is sha1("sess|default|hello")[:6] in hex, computed independently.

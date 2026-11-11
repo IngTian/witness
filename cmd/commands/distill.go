@@ -13,7 +13,7 @@ import (
 
 // distill.go holds the cmd* implementation functions for distillation worker control.
 // The old top-level `distill` command was removed from the visible front door (#102);
-// the functionality migrated to the hidden `worker` group and `status` command, but
+// the functionality migrated to the `worker` group and `status` command, but
 // the implementation functions (cmdDistillStart/Backfill/Status/Stop) remain here,
 // called by worker_group.go and status.go.
 

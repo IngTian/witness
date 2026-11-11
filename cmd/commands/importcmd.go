@@ -44,8 +44,9 @@ func newImportCmd() *cobra.Command {
 	c.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
 	c.Flags().BoolVar(&auto, "auto", false, "use the automatic worker gate (only start if auto_distill is on and no worker is running)")
 	_ = c.Flags().MarkHidden("auto")
+	// --no-kick stays visible: docs/codex-capture.md tells people to use it for a capture-only
+	// history import, and `import --help` hid it (#199 F046). --hook/--auto are plumbing.
 	c.Flags().BoolVar(&noKick, "no-kick", false, "import L0 without starting a worker")
-	_ = c.Flags().MarkHidden("no-kick")
 	return c
 }
 

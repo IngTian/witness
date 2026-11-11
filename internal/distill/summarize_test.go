@@ -176,10 +176,9 @@ func TestSummarizerRegeneratesWhenUnifiedPromptChanges(t *testing.T) {
 // A ONE-LENS archive still gets its cross-lens portrait (issue #100).
 //
 // This test previously asserted the OPPOSITE: that dropping to one lens must not regenerate the
-// portrait, and must delete any existing one. That rule was correct while summaries were PUSHED
-// on every review — a cross-lens synthesis of a single lens just restates it, so the call was
-// waste. Read-time generation removes the premise (an unread summary costs nothing) and the rule
-// actively broke the case #100 exists to serve: a single-lens archive (a market feed) whose whole
+// portrait, and must delete any existing one. Summaries are PUSHED on every review (still, #199
+// F019), and a cross-lens synthesis of a single lens just restates it, so the call looked like
+// waste. But the rule actively broke the case #100 exists to serve: a single-lens archive (a market feed) whose whole
 // point is a differently-framed portrait via an overridden unified.md. It produced NOTHING,
 // silently, and deleted whatever a previous multi-lens state had left.
 //

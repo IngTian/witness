@@ -7,13 +7,21 @@ import (
 )
 
 func TestPlumbingCommandsHidden(t *testing.T) {
-	if !newImportCmd().Hidden {
+	imp := newImportCmd()
+	if !imp.Hidden {
 		t.Error("import must be hidden (plugin/hook plumbing, not a user verb)")
+	}
+	// But a person running it for Codex history must see --no-kick: codex-capture.md tells
+	// them to use it (#199 F046). --hook and --auto are the hooks' and plugin's plumbing.
+	for flag, hidden := range map[string]bool{"no-kick": false, "hook": true, "auto": true} {
+		if f := imp.Flags().Lookup(flag); f == nil || f.Hidden != hidden {
+			t.Errorf("import --%s: want hidden=%v (flag %v)", flag, hidden, f)
+		}
 	}
 	obs := newObservationsCmd()
 	for _, s := range obs.Commands() {
 		switch s.Name() {
-		case "record", "delete":
+		case "delete":
 			if !s.Hidden {
 				t.Errorf("observations %s must be hidden (MCP-parity, not a human verb)", s.Name())
 			}
@@ -34,7 +42,7 @@ func TestRootSurface(t *testing.T) {
 		}
 	}
 	// present:
-	for _, want := range []string{"profile", "status", "lens", "config", "ingest", "install", "wire", "unwire", "doctor", "export", "merge", "cleanup"} {
+	for _, want := range []string{"profile", "status", "lens", "config", "ingest", "install", "wire", "unwire", "doctor", "export", "merge", "cleanup", "worker"} {
 		if !visible[want] {
 			t.Errorf("expected visible command %q", want)
 		}
@@ -70,7 +78,7 @@ func TestJSONOutputHasNoANSI(t *testing.T) {
 
 func TestInternalWorkerCommandResolution(t *testing.T) {
 	// Regression guard for C1: the internal worker token `worker-run` must resolve to
-	// the flag-bearing command (--auto/--since/--until), NOT to the hidden operator group
+	// the flag-bearing command (--auto/--since/--until), NOT to the operator group
 	// `worker` (which has run/stop/review subcommands but no flags). A name collision
 	// kills automatic distillation: hooks spawn `worker-run --auto`, and a misroute to
 	// the group errors ("unknown flag: --auto").
@@ -88,7 +96,7 @@ func TestInternalWorkerCommandResolution(t *testing.T) {
 		t.Error("worker-run command must carry the --auto flag (proves it's the internal worker, not a group)")
 	}
 
-	// Assert the hidden operator group still resolves correctly.
+	// Assert the operator group still resolves correctly.
 	groupCmd, _, err := root.Find([]string{"worker"})
 	if err != nil {
 		t.Fatalf("worker group must resolve: %v", err)

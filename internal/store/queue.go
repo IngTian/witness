@@ -351,8 +351,8 @@ func (q *queue) LensDataCounts(lens string) (obs, facets int) {
 }
 
 // ActiveObservationCount reports how many of a lens's L1 observations were RECORDED
-// in-session (source='active', via the MCP record_observation tool / `observations
-// record`) rather than mined by the worker. These are NOT reproducible by a re-mine —
+// in-session (source='active', via the MCP record_observation tool) rather than mined by
+// the worker. These are NOT reproducible by a re-mine —
 // they were passed through verbatim from the agent and have no L0 turn the miner would
 // re-extract them from — so a `lens backfill --fresh` (which drops all of a lens's obs)
 // destroys them irrecoverably. The CLI counts these to warn before a --fresh drop, so

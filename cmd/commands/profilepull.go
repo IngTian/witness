@@ -11,15 +11,18 @@ import (
 
 // Read-time (PULL) profile regeneration — issue #100.
 //
-// The L4 narrative used to be pushed: every review regenerated every summary whether or not
-// anyone would ever read it. That is what made cost, dirty-tracking, and worker liveness the
-// dominant concerns of this layer — N+1 serial LLM calls in the worker's tail, a <2-lens rule
-// to dodge one duplicate call, and a background sweep to delete summaries that might be stale.
+// The L4 narrative used to be only pushed: every review regenerated every summary whether or not
+// anyone would ever read it. #100 added regeneration on read, but the push stayed (and #195
+// chained the sentence-source resolver onto it), so BOTH paths regenerate: the worker rebuilds
+// every stale summary after each review, and `witness profile` / MCP get_profile rebuild what
+// they are asked for, if and only if it is still stale, before serving it. An unread profile is
+// therefore NOT free: each review pays for its rebuild. The push is kept on purpose (#199 F019):
+// it keeps `witness view` and the sentence links current, and reads after a review are cached.
 //
 // Measured on a real `claude -p` (3 sessions, 4 facets, one lens): a cached read is 0.02s and a
-// regeneration is 13.3s. 13s is acceptable to block an interactive command or an MCP tool call,
-// so generation moves to the read: `witness profile` and MCP get_profile regenerate what they
-// are asked for, if and only if it is stale, and serve it. An unread profile costs nothing.
+// regeneration is 13.3s, acceptable to block an interactive command or an MCP tool call. A
+// rebuild's input grows with the facets, so on a large archive it takes minutes, a wait a read
+// pays only when the push has not already refreshed that portrait.
 //
 // LAZINESS IS PER SUMMARY. Asking for one profile must not regenerate the whole set, or a
 // many-lens archive would pay N*13s for a single read. distill.Summarizer already skips any

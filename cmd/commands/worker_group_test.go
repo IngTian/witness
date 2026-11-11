@@ -11,8 +11,10 @@ func TestWorkerGroupShape(t *testing.T) {
 	if c.Use != "worker" {
 		t.Fatalf("Use = %q, want worker", c.Use)
 	}
-	if !c.Hidden {
-		t.Error("worker group must be hidden (operator escape hatch, not front door)")
+	// Listed, not hidden (#199 F046): witness's own hints send people to `witness worker …`,
+	// and with auto_distill = false it is the only way to distill.
+	if c.Hidden || c.GroupID != groupAdmin {
+		t.Errorf("worker group must be listed under Maintenance; Hidden=%v GroupID=%q", c.Hidden, c.GroupID)
 	}
 	subs := map[string]bool{}
 	for _, s := range c.Commands() {

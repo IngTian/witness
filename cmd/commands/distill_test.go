@@ -135,7 +135,7 @@ func TestDistillStartWaitBackoffsRequiresAll(t *testing.T) {
 // newDistillStartForWaitBackoffsTest exercises the RunE guard for --wait-backoffs
 // with --detach (the background spawn path has no retry loop) by driving the worker
 // run command with both flags. Since the old `distill` command was removed from root,
-// this now tests the hidden `worker run` command which has the same flags.
+// this now tests the `worker run` command which has the same flags.
 func newDistillStartForWaitBackoffsTest(t *testing.T) error {
 	t.Helper()
 	cmd := newWorkerCmd()

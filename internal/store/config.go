@@ -509,7 +509,7 @@ func (c *configFile) EnsureConfigFile() error {
 # Automatic distillation is laptop-friendly without keeping the embed model
 # resident: hooks capture immediately, a single-flight lock ensures just one worker
 # runs, and it drains the whole queue (re-checking for new work as it goes) then
-# exits. Set false to distill only on demand via ` + "`witness worker run`" + ` (hidden).
+# exits. Set false to distill only on demand via ` + "`witness worker run`" + `.
 # auto_distill = ` + strconv.FormatBool(d.AutoDistill) + `
 
 # Sessions mined in parallel per drain (backfill speed). The embedder loads once

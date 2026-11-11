@@ -17,14 +17,16 @@ import (
 )
 
 // Dir resolves the on-disk directory for a bundled asset subtree. subdir is the
-// path under the plugin root (e.g. "prompts" or filepath.Join("assets",
+// path under the asset root (e.g. "prompts" or filepath.Join("assets",
 // "e5-small")). envOverride, when non-empty, names an env var checked first that
 // points DIRECTLY at the resolved dir (e.g. WITNESS_PROMPTS, WITNESS_ASSETS).
 //
 // Resolution order, first hit wins:
 //  1. $envOverride, if set — an explicit, fully-resolved override.
-//  2. $CLAUDE_PLUGIN_ROOT/subdir — set by Claude Code when witness runs as a
-//     plugin, and by the Unix hook shim for a working-copy install.
+//  2. $CLAUDE_PLUGIN_ROOT/subdir — exported by the Unix hook shim
+//     (hooks/witness.sh) as its checkout root, for a working-copy install. The
+//     name is Claude Code's plugin variable; witness no longer ships a Claude Code plugin, but
+//     the shim and these lookups still agree on it.
 //  3. exe-relative: the first of <exeDir>/subdir or <exeDir>/../subdir that
 //     exists. This covers both an installed layout (witness + assets/ siblings)
 //     and the build layout (bin/witness-os-arch under the repo, assets/ one up).

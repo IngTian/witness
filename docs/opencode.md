@@ -48,7 +48,7 @@ witness lens register math prompts/lens/example   # optional: register an extra 
 witness lens enable math
 witness import --agent opencode    # reconciles ~/.local/share/opencode/opencode.db and returns
 witness status                    # watch non-blocking distillation progress
-witness worker review              # forces L2 facets + L4 markdown profiles (hidden cmd)
+witness worker review              # forces L2 facets + L4 markdown profiles
 witness profile math               # per-lens L4 report
 witness profile                    # unified L4 report
 ```
