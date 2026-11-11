@@ -308,6 +308,30 @@ func TestFacetsReadsALensByItsRegisteredName(t *testing.T) {
 	}
 }
 
+// `witness facets --lens math` died on "unknown flag" while `observations search q --lens math`
+// worked (#199 F051). On facets and profile --lens is a hidden alias of the [lens] argument.
+func TestFacetsAndProfileTakeAHiddenLensAlias(t *testing.T) {
+	readFixture(t)
+	t.Setenv("PATH", t.TempDir()) // profile's refresh must find no runner to spawn
+	for _, cmd := range []string{"facets", "profile"} {
+		out, err := runCLI(t, cmd, "--lens", "math", "--json")
+		if err != nil || !strings.Contains(out, `"lens": "math"`) {
+			t.Errorf("%s --lens math: err=%v, want the math lens\n%s", cmd, err, out)
+		}
+		if _, err := runCLI(t, cmd, "math", "--lens", "math", "--json"); err != nil {
+			t.Errorf("%s math --lens math: one lens named twice is fine, got %v", cmd, err)
+		}
+		_, err = runCLI(t, cmd, "default", "--lens", "math")
+		if err == nil || !strings.Contains(err.Error(), `"default"`) || !strings.Contains(err.Error(), `"math"`) {
+			t.Errorf("%s default --lens math: want an error naming both lenses, got %v", cmd, err)
+		}
+		help, _ := runCLI(t, cmd, "--help")
+		if !strings.Contains(help, cmd+" [lens]") || strings.Contains(help, "--lens") {
+			t.Errorf("%s --help must show one spelling, [lens]:\n%s", cmd, help)
+		}
+	}
+}
+
 // `lens try` with every session failing printed "0 observation(s) across 2 session(s)" and exited 0.
 func TestLensTryFailsOnlyWhenEverySessionFailed(t *testing.T) {
 	boom := errors.New("claude runner disabled")

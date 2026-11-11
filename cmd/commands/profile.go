@@ -26,7 +26,7 @@ func newProfileCmd() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVarP(&asJSON, "json", "j", false, "output as JSON")
-	return c
+	return withLensAlias(c)
 }
 
 // cmdProfile prints the L4 narrative summary for a lens — the cross-lens unified

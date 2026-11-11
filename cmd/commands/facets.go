@@ -33,6 +33,28 @@ func newFacetsCmd() *cobra.Command {
 	c.Flags().BoolVarP(&asJSON, "json", "j", false, "output as JSON")
 	c.Flags().BoolVar(&all, "all", false, "include archived facets (marked with where they went)")
 	c.Flags().StringVar(&expand, "expand", "", "unfold one facet (dimension/key) into everything merged into it")
+	return withLensAlias(c)
+}
+
+// withLensAlias gives a command that takes the lens as its [lens] argument a hidden --lens
+// meaning the same thing (#199 F051). `observations search` and `compact` take --lens, so
+// `witness facets --lens math` was the natural next guess, and it died on a bare "unknown
+// flag". Hidden so --help keeps one spelling, the way compact keeps --apply. Two different
+// lenses is an error rather than a silent pick: either choice would answer for the wrong lens.
+func withLensAlias(c *cobra.Command) *cobra.Command {
+	var flag string
+	c.Flags().StringVar(&flag, "lens", "", "same as the [lens] argument")
+	_ = c.Flags().MarkHidden("lens")
+	run := c.RunE
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if f := strings.TrimSpace(flag); f != "" {
+			if len(args) > 0 && strings.TrimSpace(args[0]) != "" && strings.TrimSpace(args[0]) != f {
+				return fmt.Errorf("two lenses given: %q as the argument and %q as --lens; name one", strings.TrimSpace(args[0]), f)
+			}
+			args = []string{f}
+		}
+		return run(cmd, args)
+	}
 	return c
 }
 
