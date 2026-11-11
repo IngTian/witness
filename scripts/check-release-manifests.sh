@@ -17,9 +17,6 @@ check() {
   fi
 }
 check "npm/opencode/package.json" "$(node -p "require('./npm/opencode/package.json').version")"
-# The two Claude-plugin manifests carry their own version and silently drift if bumped separately.
-check ".claude-plugin/plugin.json" "$(node -p "require('./.claude-plugin/plugin.json').version")"
-check ".claude-plugin/marketplace.json" "$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].version")"
 # server.json feeds the MCP Registry publish. Both its own version and the npm package reference
 # must track the tag, or the registry would reject a stale version or point at the wrong package.
 check "server.json" "$(node -p "require('./server.json').version")"

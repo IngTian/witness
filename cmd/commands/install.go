@@ -154,17 +154,14 @@ func execInvocation(exe string) hookInvocation { return hookInvocation{execForm:
 // POSIX-escaping any embedded single quote (close the quote, backslash-escape the
 // quote, reopen). Claude Code runs hook commands through a shell, so an absolute
 // path containing a space or shell metacharacter (e.g. ~/My Projects/...) would
-// otherwise word-split and the hook would silently fail. The plugin path
-// (hooks/hooks.json) uses double quotes because it needs ${CLAUDE_PLUGIN_ROOT}
-// expanded; here the shim is an already-resolved literal path, so single quotes
-// (no expansion) are safest.
+// otherwise word-split and the hook would silently fail. The shim is an
+// already-resolved literal path, so single quotes (no expansion) are safest.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // witnessHookSpecs is the canonical hook wiring for the given invocation. On Unix
-// (shell form) it renders `'<shim>' <token>` command strings, kept in lockstep
-// with hooks/hooks.json (the plugin-install path uses that file). On Windows
+// (shell form) it renders `'<shim>' <token>` command strings. On Windows
 // (exec form) it renders {command: <exe>, args: [<token>]} so CC spawns the
 // binary directly with no shell.
 func witnessHookSpecs(inv hookInvocation) []hookSpec {
