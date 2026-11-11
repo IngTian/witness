@@ -90,7 +90,8 @@ func TestConfidenceLogCount(t *testing.T) {
 // commit. The two read-then-write sites are StampReview and PruneSessionsBefore; the other
 // transactions in this package write first, which takes the lock immediately, so they are
 // already safe. (DeleteObservation was a third until it stopped reading the lens to reset its
-// review cursor; it is one DELETE now.)
+// review cursor; it writes first now, the DELETE and then the pending-delete upsert. So does
+// WriteFacetsPruned: the facet REPLACE comes before the list update.)
 func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 	for _, tc := range []struct {
 		name string

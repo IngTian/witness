@@ -22,8 +22,9 @@ import (
 // laptop, moving to a machine that already has its own archive), not a sync. Restoring by copying
 // a backup into the data dir replaces the destination; this keeps both.
 //
-// WHY IT IS NOT A SYNC. There are no tombstones (cleanup and delete_observation leave no record),
-// so a session or observation deleted on one side comes back from the other; and two machines
+// WHY IT IS NOT A SYNC. There are no tombstones that cross (cleanup leaves no record, and
+// delete_observation's lives in this archive's meta only until its next review), so a session or
+// observation deleted on one side comes back from the other; and two machines
 // that keep capturing between merges each grow a genuinely diverged chain for every facet both
 // touched, which this resolves by archiving one copy — one more archived copy per facet per round.
 // Re-merging the same source, and merging back, are handled (every rule below is idempotent on

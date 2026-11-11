@@ -10,8 +10,8 @@ const (
 	EventReinforce  = "reinforce"
 	EventDowngrade  = "downgrade"
 	EventCompaction = "compaction"
-	// EventRetire: a review retired the facet because no observation it cited is in the archive
-	// any more. Its own kind, not "compaction" (no model judged anything) and not "downgrade"
+	// EventRetire: a review retired the facet because every observation it cited was deleted
+	// (delete_observation). Its own kind, not "compaction" (no model judged anything) and not "downgrade"
 	// (confidence did not move: From is the decayed value it held, To the stored one, unchanged).
 	// Every other kind is a CONFIRMED value, which is how the view draws log rows, so the view
 	// skips this one (view/traits.go); page.js never sees kinds.

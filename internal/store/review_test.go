@@ -239,8 +239,8 @@ func TestReviewDue(t *testing.T) {
 // Deleting an observation must NOT move any review cursor. It used to clear the lens's, so the
 // next review "re-derived from what's left" by re-folding the whole lens — ~650 model calls on a
 // 20k-observation lens, and the facet the deleted obs grounded still survived, since evidence only
-// grows. The facet is now cleaned up by the next review's id sweep (distill's
-// pruneDeletedEvidence), and nothing is re-read.
+// grows. The facet is now cleaned up by the next review, which strips the ids the delete recorded
+// (distill's pruneDeletedEvidence), and nothing is re-read.
 func TestDeleteObservationKeepsTheReviewCursor(t *testing.T) {
 	s := tempStore(t)
 	s.AppendObservations([]Observation{
@@ -272,22 +272,64 @@ func TestDeleteObservationKeepsTheReviewCursor(t *testing.T) {
 	}
 }
 
-// MissingObservationIDs answers for the whole archive: an id another lens holds is not missing,
-// and duplicates or an empty query cost nothing.
-func TestMissingObservationIDs(t *testing.T) {
+// A delete records exactly the ids it removed, in its own transaction: a delete whose record
+// fails must not happen, or the next review never learns of it and the facets resting on the row
+// stand forever. WriteFacetsPruned takes off only the ids it was handed, in the facet write's
+// transaction, so a delete that lands after the review read the list survives the clear.
+func TestDeleteObservationRecordsWhatItDeleted(t *testing.T) {
 	s := tempStore(t)
 	s.AppendObservations([]Observation{
-		{ID: "here", Lens: LensDefault, Observation: "a"},
-		{ID: "elsewhere", Lens: "math", Observation: "b"},
+		{ID: "a", Lens: LensDefault, Observation: "a"},
+		{ID: "b", Lens: "math", Observation: "b"},
+		{ID: "c", Lens: LensDefault, Observation: "c"},
 	})
-	got, err := s.MissingObservationIDs([]string{"here", "gone", "elsewhere", "gone2", "gone"})
-	if err != nil {
+	pending := func() []string {
+		t.Helper()
+		ids, err := s.PendingDeletedObservations()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+	if got := pending(); len(got) != 0 {
+		t.Fatalf("nothing deleted yet, pending = %v", got)
+	}
+	for _, id := range []string{"a", "nope", "b"} {
+		if _, err := s.DeleteObservation(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := pending(); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("pending = %v, want the two ids actually deleted", got)
+	}
+
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_meta BEFORE UPDATE ON meta BEGIN SELECT RAISE(ABORT,'forced'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if want := map[string]bool{"gone": true, "gone2": true}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("missing = %v, want %v", got, want)
+	if deleted, err := s.DeleteObservation("c"); err == nil || deleted {
+		t.Fatalf("a delete whose record failed: deleted=%v err=%v, want an error", deleted, err)
 	}
-	if got, err := s.MissingObservationIDs(nil); err != nil || len(got) != 0 {
-		t.Fatalf("empty query: %v %v", got, err)
+	if got, _ := s.ReadObservations(""); len(got) != 1 || got[0].ID != "c" {
+		t.Fatalf("a delete whose record failed must not delete the row, left %+v", got)
+	}
+	facets := []Facet{{Lens: LensDefault, Dimension: "d", Key: "k", Versions: []FacetVersion{{Value: "v", ValidFrom: "2026-01-01T00:00:00Z"}}}}
+	if err := s.WriteFacetsPruned(facets, nil, []string{"a"}); err == nil {
+		t.Fatal("a clear that failed must fail the write")
+	}
+	if got, _ := s.ReadFacets(); len(got) != 0 {
+		t.Fatalf("the facets must not land without the clear, got %+v", got)
+	}
+	if _, err := s.db.Exec(`DROP TRIGGER reject_meta`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.WriteFacetsPruned(facets, nil, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pending(); !reflect.DeepEqual(got, []string{"b"}) {
+		t.Fatalf("pending = %v after pruning a, want only b", got)
+	}
+	if got, _ := s.ReadFacets(); len(got) != 1 {
+		t.Fatalf("the facets must land with the clear, got %+v", got)
 	}
 }

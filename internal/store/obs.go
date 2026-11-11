@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
@@ -181,50 +182,46 @@ func (o *obsIO) AppendObservations(obs []Observation) error {
 // watermark won't re-mine an already-distilled delta, and obs_id dedup would catch it
 // even if it did.
 //
-// It touches nothing else, on purpose. It used to clear the lens's review cursor so the
-// next review would "re-derive from what's left" — which re-folded the whole lens (about
-// 650 model calls on a 20k-observation lens, a day holding the worker lock) and still
-// could not drop the facet: evidence only grows (mergeIDs) and absence never retracts. The
-// facets it supported are cleaned up instead at the start of the next review, under the
-// worker lock (Reviewer.pruneDeletedEvidence): the id is stripped from every facet citing
-// it, and a facet left citing nothing is retired. Doing that here would race the reviewer,
-// which holds the whole facet table in memory and writes it back as a replace.
+// It moves no review cursor, on purpose. It used to clear the lens's so the next review would
+// "re-derive from what's left" — which re-folded the whole lens (about 650 model calls on a
+// 20k-observation lens, a day holding the worker lock) and still could not drop the facet:
+// evidence only grows (mergeIDs) and absence never retracts. Instead it records the id on the
+// pending-delete list in the same transaction, and the next review, under the worker lock, strips
+// exactly those ids from every facet and retires a facet left citing nothing
+// (Reviewer.pruneDeletedEvidence). Doing that here would race the reviewer, which holds the whole
+// facet table in memory and writes it back as a replace. The list, not "every cited id that is not
+// an observation", is what makes a delete a delete: an id the model invented, or one `witness
+// merge` skipped because this archive holds the same evidence under its own id, is no delete.
 func (o *obsIO) DeleteObservation(obsID string) (bool, error) {
-	res, err := o.db.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
+	tx, err := o.db.Begin()
 	if err != nil {
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return false, err
+	}
+	// '$[#]' appends. Upsert, so the first delete creates the list.
+	if _, err := tx.Exec(`INSERT INTO meta(key, value) VALUES (?, json_array(?))
+		ON CONFLICT(key) DO UPDATE SET value = json_insert(value, '$[#]', ?)`, deletedObsPendingKey, obsID, obsID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
-// MissingObservationIDs returns the ids in ids that name no observation in the archive —
-// in any lens, since a facet's citations are checked against the whole archive. One
-// query, whatever len(ids) is: the ids ride in as a single JSON array (json_each), so a
-// lens citing 30k ids hits no bound-parameter limit, and each is one probe of the obs_id
-// UNIQUE index. obs_id is NOT NULL, so NOT IN has no NULL trap.
-func (o *obsIO) MissingObservationIDs(ids []string) (map[string]bool, error) {
-	missing := map[string]bool{}
-	if len(ids) == 0 {
-		return missing, nil
-	}
-	b, err := json.Marshal(ids)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := o.db.Query(`SELECT value FROM json_each(?) WHERE value NOT IN (SELECT obs_id FROM observations)`, string(b))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		missing[id] = true
-	}
-	return missing, rows.Err()
+// deletedObsPendingKey is the meta row holding, as a JSON array, the obs_ids DeleteObservation
+// removed that no review has pruned from the facets yet.
+const deletedObsPendingKey = "deleted_obs_pending"
+
+// PendingDeletedObservations is the pending-delete list (see DeleteObservation); empty when there is
+// none, which is every review's common case.
+func (o *obsIO) PendingDeletedObservations() ([]string, error) {
+	return queryStrings(context.Background(), o.db,
+		`SELECT DISTINCT value FROM json_each((SELECT value FROM meta WHERE key = ?))`, deletedObsPendingKey)
 }
 
 // (ReadObservationsLite and ReadObservationsSince used to live here — 96 lines, both with zero

@@ -56,18 +56,6 @@ func assertLog(t *testing.T, s *store.Store, want []store.ConfidenceEvent) {
 	}
 }
 
-// stageCited makes the ids the fixtures cite ("o1" from openFacet, "x" from facetReply) real
-// observations. A review strips cited ids that do not exist and retires a facet left citing
-// none (pruneDeletedEvidence), which would log a retirement these tests are not about.
-func stageCited(t *testing.T, s *store.Store) {
-	t.Helper()
-	if err := s.AppendObservations([]store.Observation{
-		{ID: "o1", Lens: "default", Observation: "o1"}, {ID: "x", Lens: "default", Observation: "x"},
-	}); err != nil {
-		t.Fatalf("AppendObservations: %v", err)
-	}
-}
-
 func writeFacets(t *testing.T, s *store.Store, fs ...store.Facet) {
 	t.Helper()
 	if err := s.WriteFacets(fs); err != nil {
@@ -89,7 +77,6 @@ func openFacet(dim, key, value string, conf float64, clock int64) store.Facet {
 // once written would be written again by every later fold and show up as a duplicate row.
 func TestReviewLogsEachBranch(t *testing.T) {
 	s := newStore(t)
-	stageCited(t, s)
 	gone := openFacet("d", "gone", "used to pair", 0.6, 0)
 	gone.Versions[0].ValidTo = "2026-01-02T00:00:00Z" // every version closed → the next assertion reopens
 	writeFacets(t, s, gone)
@@ -139,7 +126,6 @@ func TestReviewLogsEachBranch(t *testing.T) {
 // as a reinforcement that moved nothing, not silently skipped.
 func TestReviewLogsUnchangedAssertionAsReinforce(t *testing.T) {
 	s := newStore(t)
-	stageCited(t, s)
 	writeFacets(t, s, openFacet("d", "k", "prefers Go", 0.9, 0))
 	reply := facetReply("d", "k", "prefers Go") // the stored value and confidence, unchanged
 	r := &Reviewer{Store: s, Lenses: defaultLens(), Runner: answering(&reply)}
@@ -157,7 +143,6 @@ func TestReviewLogsUnchangedAssertionAsReinforce(t *testing.T) {
 // a row for it would chart a confidence change the facet never had.
 func TestReviewLogsOneEventPerAcceptedFacet(t *testing.T) {
 	s := newStore(t)
-	stageCited(t, s)
 	writeFacets(t, s, openFacet("d", "k", "prefers Go", 0.9, 0))
 	reply := mustJSON([]reviewedFacet{
 		{Dimension: "d", Key: "k", Value: "", Confidence: 0.3, Contradicts: true}, // empty value
@@ -181,7 +166,6 @@ func TestReviewLogsOneEventPerAcceptedFacet(t *testing.T) {
 // on the survivor that really changed.
 func TestReviewLogsRedirectUnderSurvivor(t *testing.T) {
 	s := newStore(t)
-	stageCited(t, s)
 	old := openFacet("d", "old", "old wording", 0.9, 0)
 	old.ArchivedAt = "2026-10-01T00:00:00Z"
 	old.MergedInto = store.FacetRef("e", "survivor")
