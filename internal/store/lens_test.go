@@ -268,78 +268,6 @@ func TestRegisterLensSwapFailureRestoresOrSaysWhereItIs(t *testing.T) {
 	}
 }
 
-// writeLegacyLensDir lays down a pre-#75 single-file lens.md registry dir (for migration
-// tests). Returns the dir.
-func writeLegacyLensDir(t *testing.T, s *Store, name, body string) string {
-	t.Helper()
-	dir := filepath.Join(s.LensesDir(), name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "lens.md"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
-// migrateLegacyLenses converts a pre-#75 lens.md dir into the new lens.json + extract.md +
-// review.md format, non-destructively (lens.md stays), and idempotently. After migration
-// the lens is a normal registered lens — no downstream code needs an old-format branch.
-func TestMigrateLegacyLenses(t *testing.T) {
-	s := tempStore(t)
-	dir := writeLegacyLensDir(t, s, "codereview",
-		"# name: codereview\n# dimensions: rigor, taste\n## EXTRACT\nmine code review\n## REVIEW\nsynthesize facets\n")
-
-	// Precondition: not visible as registered (no extract.md yet).
-	if slices.Contains(s.RegisteredLenses(), "codereview") {
-		t.Fatal("precondition: a lens.md-only dir should not be registered before migration")
-	}
-
-	if n := s.migrateLegacyLenses(); n != 1 {
-		t.Fatalf("want 1 lens migrated, got %d", n)
-	}
-
-	// The new files exist and the old one is left in place (non-destructive).
-	for _, fn := range []string{"extract.md", "review.md", "lens.json", "lens.md"} {
-		if _, err := os.Stat(filepath.Join(dir, fn)); err != nil {
-			t.Fatalf("after migration %s should exist: %v", fn, err)
-		}
-	}
-	// It now appears as a normal registered lens (store-level check; the lens package's
-	// LoadRegistered is exercised in internal/lens tests — store must not import lens).
-	if !slices.Contains(s.RegisteredLenses(), "codereview") {
-		t.Fatal("migrated lens must appear in RegisteredLenses")
-	}
-	// The prompt bodies and the header's dimensions were carried across.
-	ext, _ := os.ReadFile(filepath.Join(dir, "extract.md"))
-	rev, _ := os.ReadFile(filepath.Join(dir, "review.md"))
-	cfg, _ := os.ReadFile(filepath.Join(dir, "lens.json"))
-	if !strings.Contains(string(ext), "mine code review") || !strings.Contains(string(rev), "synthesize facets") {
-		t.Fatalf("migrated prompts not carried across: extract=%q review=%q", ext, rev)
-	}
-	if !strings.Contains(string(cfg), "rigor") || !strings.Contains(string(cfg), "taste") {
-		t.Fatalf("migrated dimensions not in lens.json: %s", cfg)
-	}
-
-	// Idempotent: a second pass converts nothing (extract.md now present → skipped).
-	if n := s.migrateLegacyLenses(); n != 0 {
-		t.Fatalf("second migration pass must be a no-op, converted %d", n)
-	}
-}
-
-// An unconvertible legacy file (no EXTRACT section) is left untouched, not written as a
-// broken new-format lens.
-func TestMigrateLegacyLensesSkipsUnconvertible(t *testing.T) {
-	s := tempStore(t)
-	dir := writeLegacyLensDir(t, s, "broken", "# name: broken\n(no sections here)\n")
-	if n := s.migrateLegacyLenses(); n != 0 {
-		t.Fatalf("an EXTRACT-less legacy file must not convert, got %d", n)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "extract.md")); !os.IsNotExist(err) {
-		t.Fatalf("no extract.md should be written for an unconvertible legacy file")
-	}
-}
-
 // SetLensModel round-trips per-lens models through lens.json without touching prompts,
 // and an empty value clears the field (the lens rides the default again).
 func TestSetLensModelRoundTrip(t *testing.T) {
@@ -591,5 +519,78 @@ func TestRegisterRejectsResolvedNameCollision(t *testing.T) {
 	// Exact-case re-register (resolved name == existing) is still allowed (intentional overwrite).
 	if err := s.RegisterLens("default", writeLensSrcDir(t, "default", "new-extract", "new-review")); err != nil {
 		t.Fatalf("exact-case re-register of 'default' must be allowed: %v", err)
+	}
+}
+
+// The #101 guard used to run only when the CANDIDATE's two names differed, so it caught
+// probe-after-default but not this order: `regime` (no lens.json name) registered AFTER a
+// corpus-example that mines as "regime" passed, and both lenses wrote one "regime" archive.
+func TestRegisterRejectsResolvedNameCollisionInEitherOrder(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("corpus-example", writeLensSrcDir(t, "regime", "x", "y")); err != nil {
+		t.Fatalf("register corpus-example: %v", err)
+	}
+	// The candidate has no lens.json name, so the refusal must blame the one that does.
+	if err := s.RegisterLens("regime", writeLensSrcDir(t, "", "x", "y")); err == nil || !strings.Contains(err.Error(), "share") ||
+		!strings.Contains(err.Error(), `is the lens.json name existing lens "corpus-example"`) {
+		t.Fatalf("regime after corpus-example (mines as regime) must be refused as shared data, got %v", err)
+	}
+	// A handle equal to another lens's data name is refused whatever the candidate mines as:
+	// in the other order it is the "shadows the registry handle" refusal.
+	if err := s.RegisterLens("regime", writeLensSrcDir(t, "other", "x", "y")); err == nil {
+		t.Fatal("a lens named after another lens's data name must be refused")
+	}
+	if slices.Contains(s.RegisteredLenses(), "regime") {
+		t.Fatal("a refused lens must not be registered")
+	}
+}
+
+// The collision check reads every other registered lens, so one broken lens.json must not block
+// unrelated registrations (the first-open default seed among them); it still blocks its own name.
+func TestAnUnreadableNeighbourBlocksOnlyItsOwnName(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("broken", writeLensSrcDir(t, "", "x", "y")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.LensesDir(), "broken", "lens.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterLens("fine", writeLensSrcDir(t, "", "x", "y")); err != nil {
+		t.Fatalf("an unrelated lens must register despite a broken neighbour: %v", err)
+	}
+	if err := s.RegisterLens("other", writeLensSrcDir(t, "broken", "x", "y")); err == nil {
+		t.Fatal("a lens that would mine under the broken lens's handle must still be refused")
+	}
+}
+
+// F153: re-registering from a copy that drops or edits lens.json's `name` silently moved the
+// lens's data key, stranding everything mined under the old one. Refuse it while the old name
+// holds data, and say how to keep it; with nothing stranded, or the same data name, it succeeds.
+func TestReRegisterRefusesToStrandData(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "regime", "x", "y")); err != nil {
+		t.Fatal(err)
+	}
+	// No data under "regime" yet: the move strands nothing, so it is allowed (and moved back).
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "", "x", "y")); err != nil {
+		t.Fatalf("re-register with no data under the old name must succeed: %v", err)
+	}
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "regime", "x", "y")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendObservations([]Observation{{ID: "o1", Session: "s1", Lens: "regime", Dimension: "d", Observation: "o"}}); err != nil {
+		t.Fatal(err)
+	}
+	src := writeLensSrcDir(t, "", "new-extract", "y")
+	err := s.RegisterLens("ce", src)
+	if err == nil || !strings.Contains(err.Error(), `register "ce" from a copy of `+src+` whose lens.json sets "name": "regime"`) {
+		t.Fatalf("re-register that strands data must be refused and name the fix, got %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(s.LensesDir(), "ce", "extract.md")); string(got) != "x" {
+		t.Fatalf("a refused re-register must leave the registered copy alone, extract.md = %q", got)
+	}
+	// Keeping the data name is the ordinary update.
+	if err := s.RegisterLens("ce", writeLensSrcDir(t, "regime", "new-extract", "y")); err != nil {
+		t.Fatalf("re-register that keeps the data name must succeed: %v", err)
 	}
 }

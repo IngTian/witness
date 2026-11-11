@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -104,12 +105,6 @@ func Open() (*Store, error) {
 	// Idempotent + best-effort (see adoptRunnerBound); needs s.db, so it runs after
 	// openDB. Keeps the "is a runner bound?" decision out of every config read.
 	s.adoptRunnerBound()
-	// One-shot: convert any pre-#75 single-file lens.md registry dirs to the new
-	// lens.json + extract.md + review.md format (issue #75). Idempotent + non-destructive
-	// (see migrateLegacyLenses); best-effort like the config template — a filesystem
-	// hiccup must not fail an Open. Keeps legacy handling in ONE frozen place (lensmigrate.go)
-	// instead of scattering old-format checks across the codebase, mirroring the DB migration.
-	_ = s.migrateLegacyLenses()
 	// One-shot (#44 slice 1a + #102): on the FIRST open of an archive that wants it — a
 	// brand-new personal install OR one that predates 1a (ran under the old always-on
 	// "default") — auto-seed "default" as an ordinary registered+enabled lens, so a fresh
@@ -187,6 +182,30 @@ func (s *Store) Close() error {
 // is visible rather than silent. Combines the obsIO count with the configFile watermark.
 func (s *Store) UnreviewedDelta(lens string) int {
 	return s.unreviewedDeltaSince(lens, s.ReviewRowid(lens))
+}
+
+// RegisterLens is lensReg.RegisterLens plus the one check the filesystem leaf can't make:
+// a RE-register must not change the name an existing lens's data is stored under (F153).
+// That name is lens.json's `name`, else the registry name, so re-registering from a copy
+// that drops or edits `name` silently moved every later write to a new key, leaving the
+// observations and facets already mined stranded under the old one, read by nothing.
+// A lens with no data under its old name moves freely: nothing is stranded. Every
+// re-register (lens register, load-default) routes through here; merge registers only
+// lenses not yet registered.
+func (s *Store) RegisterLens(name, srcDir string) error {
+	if slices.Contains(s.RegisteredLenses(), name) {
+		oldName, err1 := s.resolveNameFromRegistry(name)
+		newName, err2 := ResolveLensName(srcDir, name)
+		if err1 == nil && err2 == nil && oldName != newName {
+			if obs, facets := s.LensDataCounts(oldName); obs+facets > 0 {
+				// The fix names a copy, not srcDir itself: on load-default srcDir is the shipped
+				// bundle, which no user should edit.
+				return fmt.Errorf("re-registering lens %q would store its data under %q instead of %q, stranding %d observations and %d facets; to keep them, register %q from a copy of %s whose %s sets \"name\": %q",
+					name, newName, oldName, obs, facets, name, srcDir, LensConfigFile, oldName)
+			}
+		}
+	}
+	return s.lensReg.RegisterLens(name, srcDir)
 }
 
 // EmptyReason explains why a lens has nothing to show. The three cases have COMPLETELY

@@ -295,6 +295,14 @@ func cmdDoctor(asJSON bool) error {
 		row("compact", n.text(), "")
 		fix("compact", n.command())
 	}
+	// A lens left in the pre-v0.3.0 format never mines, and nothing else here would say so.
+	for _, name := range st.OldFormatLenses() {
+		warn("lens " + name + ": " + oldLensFormat)
+		fix("re-register", reRegisterOldLens(st, name))
+	}
+	if defaultLensStale(st) {
+		warn(defaultLensStaleMsg)
+	}
 	// "N drifted" is the CURRENTLY-outstanding count (#69-2): distinct sessions whose
 	// last mine of some lens drifted and hasn't cleanly re-mined since. It drops as
 	// sessions recover, unlike the lifetime "drift events" total surfaced in the
@@ -317,6 +325,18 @@ func cmdDoctor(asJSON bool) error {
 		because("full log: " + tildePath(st.LogPath()))
 	}
 	row("profile", dim("collect-only, never injected; read with witness profile or MCP get_profile"), "")
+	// What each portrait call sends (F095): every active facet's full text in one request. Info,
+	// never a warning: witness does not know the model's context window, so any threshold would
+	// nag a working 2.5M-char lens forever or stay silent for a 200k-window model. A failed call
+	// names this size and the fix itself; this row is for checking headroom before that.
+	if facets, err := st.ReadActiveFacets(); err == nil {
+		sizes := distill.PortraitInputChars(facets)
+		for _, ln := range activeLensNames(st) {
+			if n := sizes[ln]; n > 0 {
+				row("portrait input", shown(ln)+": "+distill.InputSize(n), "")
+			}
+		}
+	}
 	// Per-lens unreviewed backlog (#123): observations mined past the lens's review
 	// watermark but not yet folded into facets. Normally small (steady-state deltas fold
 	// in one window). A LARGE, persistent backlog is the visible signal of a frozen fold —

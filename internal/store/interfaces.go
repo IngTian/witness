@@ -161,6 +161,12 @@ type ReviewStore interface {
 	// the max seq of the window just folded (#123), advanced per successful window.
 	ReviewRowid(lens string) int64
 	StampReviewLens(lens string, throughRowid int64) error
+	// PendingDeletedObservations and WriteFacetsPruned are how a review honours a
+	// delete_observation: the ids DeleteObservation recorded are stripped from the facets before
+	// any lens folds, and taken off the list in that write's transaction
+	// (Reviewer.pruneDeletedEvidence).
+	PendingDeletedObservations() ([]string, error)
+	WriteFacetsPruned(facets []Facet, events []ConfidenceEvent, pruned []string) error
 }
 
 // EmergentStore is the surface the S3 long-arc retrieval pass drives (issue #16): it

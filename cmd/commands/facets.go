@@ -31,7 +31,7 @@ func newFacetsCmd() *cobra.Command {
 		},
 	}
 	c.Flags().BoolVarP(&asJSON, "json", "j", false, "output as JSON")
-	c.Flags().BoolVar(&all, "all", false, "include facets archived by compaction (marked with where they went)")
+	c.Flags().BoolVar(&all, "all", false, "include archived facets (marked with where they went)")
 	c.Flags().StringVar(&expand, "expand", "", "unfold one facet (dimension/key) into everything merged into it")
 	return c
 }
@@ -47,8 +47,9 @@ func cmdFacets(args []string, asJSON, all bool) error {
 		lensName = strings.TrimSpace(args[0])
 	}
 	// Facets are tagged with the lens's MINED name (its lens.json `name`), which can differ from
-	// the name it was registered under: `witness facets corpus-example` must find the facets the
-	// worker wrote as "regime", not report an empty lens.
+	// the name it was registered under: a lens registered as corpus-example from a checkout whose
+	// lens.json still said "regime" must find the facets the worker wrote under that name, not
+	// report an empty lens.
 	dataName := lens.DataName(st, lensName)
 	// The live profile by default: an archived facet is history, and listing it beside the
 	// active ones would misrepresent what witness currently claims about the person.
@@ -180,7 +181,9 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 		if target.MergedInto != "" {
 			fmt.Println(hint("merged into", "witness facets "+lensName+" --expand "+target.MergedInto))
 		} else {
-			fmt.Println(dim("  retired by compaction — not merged into another facet"))
+			// Compaction and the review's deleted-evidence prune both retire outright; the why
+			// line above says which.
+			fmt.Println(dim("  retired — not merged into another facet"))
 		}
 	}
 

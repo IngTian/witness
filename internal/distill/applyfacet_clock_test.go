@@ -86,3 +86,32 @@ func TestApplyFacetClockStillRestartsOnARealSeq(t *testing.T) {
 		t.Errorf("a new facet with no clock information must start without a clock, got %d", got)
 	}
 }
+
+// A real seq LOWER than the facet's clock must not rewind it. An early window of a long fold, or a
+// non-fresh `lens backfill` refolding from seq 0, re-reads observations older than the facet's
+// last confirmation; stamping that seq made DecayedConfidence charge the facet for every
+// observation since, decaying it far below what the archive actually believed.
+func TestApplyFacetClockNeverMovesBackwards(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		facet  store.Facet
+		assert reviewedFacet
+	}{
+		{"reinforced (same value)", clockedFacet(false),
+			reviewedFacet{Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.8, BecauseOf: []string{"o2"}}},
+		{"contradicted (change arc)", clockedFacet(false),
+			reviewedFacet{Dimension: "d", Key: "k", Value: "prefers Rust now", Confidence: 0.7, Contradicts: true, BecauseOf: []string{"o2"}}},
+		{"reopened (every version closed)", clockedFacet(true),
+			reviewedFacet{Dimension: "d", Key: "k", Value: "prefers Go again", Confidence: 0.7, BecauseOf: []string{"o2"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			byKey := indexFacets([]store.Facet{tc.facet})
+			if !(&Reviewer{}).applyFacet(byKey, "L", tc.assert, applyNow, establishedClock-400) {
+				t.Fatal("the assertion was rejected, so nothing below is exercised")
+			}
+			if got := byKey["L|d|k"].Current().ConfidenceSeq; got != establishedClock {
+				t.Errorf("ConfidenceSeq = %d, want %d: an older window rewound the decay clock", got, establishedClock)
+			}
+		})
+	}
+}

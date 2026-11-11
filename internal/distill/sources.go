@@ -275,7 +275,7 @@ func (sm *Resolver) resolveOneNotebook(ctx context.Context, portrait string, ln 
 	model := ModelFor(sm.Config, ln, PhaseReview)
 	reply, err := sm.runFor(ln)(ctx, model, sm.LensPrompt, input)
 	if err != nil {
-		return fmt.Errorf("resolver call: %w", err)
+		return fmt.Errorf("resolver call: %w", withInputSize(err, input, ln))
 	}
 
 	src, err := parseLensLinks(reply, sentences, validKeys, portrait)
@@ -498,7 +498,7 @@ func (sm *Resolver) resolveUnified(ctx context.Context) error {
 	model := ModelFor(sm.Config, nil, PhaseReview)
 	reply, err := sm.Run(ctx, model, sm.UnifiedPrompt, input)
 	if err != nil {
-		return fmt.Errorf("resolver call: %w", err)
+		return fmt.Errorf("resolver call: %w", withInputSize(err, input, nil))
 	}
 
 	src, err := parseUnifiedLinks(reply, sentences, notebooks)

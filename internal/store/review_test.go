@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // TestReadObservationsSinceOrderedByRowid locks the windowed-fold read (#123): it
 // returns obs for the lens with rowid > since, in ROWID order, each carrying its
@@ -73,9 +76,6 @@ func TestReviewCursorSurvivesDeleteNewestReMine(t *testing.T) {
 	})
 
 	// The new obs MUST be visible to the fold, or it is silently skipped forever (#125).
-	// Note the delete ALSO resets this lens's watermark (so a pruned-but-already-folded
-	// obs's facet gets re-derived), so the surviving earlier obs are pending too — what
-	// this test pins is that 'd' is NEVER below the cursor.
 	pending, _ := s.ReadObservationsSinceOrdered(LensDefault, s.ReviewRowid(LensDefault))
 	var sawNew bool
 	for _, ob := range pending {
@@ -236,62 +236,100 @@ func TestReviewDue(t *testing.T) {
 	}
 }
 
-// TestDeleteObservationResetsThatLensReviewCursor locks the audit fix: both the CLI
-// (`witness observations delete`) and the MCP delete_observation tool promise "the
-// profile re-derives from what's left on the next review". The fold is INCREMENTAL
-// (seq > review_rowid, the #16 fix), so an obs that had already been folded sits below
-// the cursor: without clearing it the next review sees an EMPTY delta, never invokes the
-// model for that lens, and the facet grounded in the deleted obs keeps being served over
-// MCP citing a because_of id that no longer exists. Deleting must therefore reset that
-// lens's cursor — and ONLY that lens's.
-func TestDeleteObservationResetsThatLensReviewCursor(t *testing.T) {
+// Deleting an observation must NOT move any review cursor. It used to clear the lens's, so the
+// next review "re-derived from what's left" by re-folding the whole lens — ~650 model calls on a
+// 20k-observation lens, and the facet the deleted obs grounded still survived, since evidence only
+// grows. The facet is now cleaned up by the next review, which strips the ids the delete recorded
+// (distill's pruneDeletedEvidence), and nothing is re-read.
+func TestDeleteObservationKeepsTheReviewCursor(t *testing.T) {
 	s := tempStore(t)
 	s.AppendObservations([]Observation{
 		{ID: "keep", TS: "2026-01-01T00:00:00Z", Lens: LensDefault, Observation: "keep"},
 		{ID: "wrong", TS: "2026-01-02T00:00:00Z", Lens: LensDefault, Observation: "wrong"},
-		{ID: "other", TS: "2026-01-03T00:00:00Z", Lens: "codereview", Observation: "sibling"},
 	})
 	all, _ := s.ReadObservationsSinceOrdered(LensDefault, 0)
 	folded := all[len(all)-1].Rowid
 	if err := s.StampReviewLens(LensDefault, folded); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.StampReviewLens("codereview", 99); err != nil {
-		t.Fatal(err)
-	}
-	// Precondition: the wrong obs is already folded, so nothing is pending.
-	if got := s.UnreviewedDelta(LensDefault); got != 0 {
-		t.Fatalf("precondition: delta should be 0 (all folded), got %d", got)
-	}
 
 	deleted, err := s.DeleteObservation("wrong")
 	if err != nil || !deleted {
 		t.Fatalf("DeleteObservation: deleted=%v err=%v", deleted, err)
 	}
-
-	// The lens re-folds from scratch, so the promise is kept.
-	if got := s.ReviewRowid(LensDefault); got != 0 {
-		t.Fatalf("deleting an obs must reset that lens's review cursor, got %d", got)
+	if got := s.ReviewRowid(LensDefault); got != folded {
+		t.Fatalf("a delete must leave the review cursor at %d, got %d", folded, got)
 	}
-	if got := s.UnreviewedDelta(LensDefault); got != 1 {
-		t.Fatalf("the surviving obs must be re-offered to the fold, delta=%d want 1", got)
+	if got := s.UnreviewedDelta(LensDefault); got != 0 {
+		t.Fatalf("nothing may be re-offered to the fold after a delete, delta=%d", got)
 	}
-	// A SIBLING lens must be untouched — re-folding it would be pointless work.
-	if got := s.ReviewRowid("codereview"); got != 99 {
-		t.Fatalf("sibling lens cursor must not be reset, got %d", got)
-	}
-	// A no-op delete must not reset anything.
-	if err := s.StampReviewLens(LensDefault, 1); err != nil {
-		t.Fatal(err)
+	if left, _ := s.ReadObservationsSinceOrdered(LensDefault, 0); len(left) != 1 || left[0].ID != "keep" {
+		t.Fatalf("only the named obs is deleted, left %+v", left)
 	}
 	deleted, err = s.DeleteObservation("nonexistent")
-	if err != nil {
-		t.Fatalf("deleting a missing id must not error: %v", err)
+	if err != nil || deleted {
+		t.Fatalf("deleting a missing id: deleted=%v err=%v, want false, nil", deleted, err)
 	}
-	if deleted {
-		t.Fatal("deleting a missing id must report deleted=false")
+}
+
+// A delete records exactly the ids it removed, in its own transaction: a delete whose record
+// fails must not happen, or the next review never learns of it and the facets resting on the row
+// stand forever. WriteFacetsPruned takes off only the ids it was handed, in the facet write's
+// transaction, so a delete that lands after the review read the list survives the clear.
+func TestDeleteObservationRecordsWhatItDeleted(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{
+		{ID: "a", Lens: LensDefault, Observation: "a"},
+		{ID: "b", Lens: "math", Observation: "b"},
+		{ID: "c", Lens: LensDefault, Observation: "c"},
+	})
+	pending := func() []string {
+		t.Helper()
+		ids, err := s.PendingDeletedObservations()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ids
 	}
-	if got := s.ReviewRowid(LensDefault); got != 1 {
-		t.Fatalf("a no-op delete must not reset the cursor, got %d", got)
+	if got := pending(); len(got) != 0 {
+		t.Fatalf("nothing deleted yet, pending = %v", got)
+	}
+	for _, id := range []string{"a", "nope", "b"} {
+		if _, err := s.DeleteObservation(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := pending(); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("pending = %v, want the two ids actually deleted", got)
+	}
+
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_meta BEFORE UPDATE ON meta BEGIN SELECT RAISE(ABORT,'forced'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := s.DeleteObservation("c"); err == nil || deleted {
+		t.Fatalf("a delete whose record failed: deleted=%v err=%v, want an error", deleted, err)
+	}
+	if got, _ := s.ReadObservations(""); len(got) != 1 || got[0].ID != "c" {
+		t.Fatalf("a delete whose record failed must not delete the row, left %+v", got)
+	}
+	facets := []Facet{{Lens: LensDefault, Dimension: "d", Key: "k", Versions: []FacetVersion{{Value: "v", ValidFrom: "2026-01-01T00:00:00Z"}}}}
+	if err := s.WriteFacetsPruned(facets, nil, []string{"a"}); err == nil {
+		t.Fatal("a clear that failed must fail the write")
+	}
+	if got, _ := s.ReadFacets(); len(got) != 0 {
+		t.Fatalf("the facets must not land without the clear, got %+v", got)
+	}
+	if _, err := s.db.Exec(`DROP TRIGGER reject_meta`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.WriteFacetsPruned(facets, nil, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := pending(); !reflect.DeepEqual(got, []string{"b"}) {
+		t.Fatalf("pending = %v after pruning a, want only b", got)
+	}
+	if got, _ := s.ReadFacets(); len(got) != 1 {
+		t.Fatalf("the facets must land with the clear, got %+v", got)
 	}
 }

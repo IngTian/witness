@@ -480,6 +480,33 @@ func TestMergeIsIdempotentOnAReexport(t *testing.T) {
 	}
 }
 
+// The same with a session BOTH sides mined. Their paraphrase io1 is skipped while their facets
+// still cite it, so every re-merge meets io1 again; a re-merge that read it as new evidence would
+// report "1 updated" for a facet new here and for a same-key winner on every run, forever.
+func TestMergeIsIdempotentOnASessionBothMined(t *testing.T) {
+	base, inc := newArch(t), newArch(t)
+	base.raw("s1", "user:a")
+	base.obs("bo1", "s1", "default", "2026-02-01T00:00:00Z")
+	base.facets(mf("d", "k", "ours", 0.9, 1, "bo1"))
+	inc.raw("s1", "user:a")
+	inc.obs("io1", "s1", "default", "2026-08-01T00:00:00Z")
+	inc.facets(mf("d", "k", "theirs", 0.7, 1, "io1"), mf("d", "other", "only there", 0.5, 1, "io1"))
+
+	first := base.merge(inc.export(), true)
+	if first.Observations.SharedMined != 1 || first.Facets.New != 1 || len(first.Facets.SameKey) != 1 {
+		t.Fatalf("setup: want io1 skipped, 1 facet new, 1 same-key clash; got %+v %+v", first.Observations, first.Facets)
+	}
+	before := snapshotArchive(t, base.st)
+	for run := 2; run <= 3; run++ {
+		if rep := base.merge(inc.export(), true); !rep.Empty() {
+			t.Errorf("merge %d of the same archive must change nothing; facets: %+v", run, rep.Facets)
+		}
+	}
+	if after := snapshotArchive(t, base.st); !reflect.DeepEqual(before, after) {
+		t.Errorf("a re-merge changed the archive:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
 // snapshotArchive is everything the merge can touch, in a comparable form.
 func snapshotArchive(t *testing.T, st *Store) map[string]any {
 	t.Helper()

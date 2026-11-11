@@ -56,6 +56,11 @@ func buildTraits(in *store.ViewInput, loc *time.Location) ([]Notebook, []Trait, 
 
 	logs := map[facetID][]stamped{}
 	for _, e := range in.Log {
+		// A retirement confirms nothing; drawn, it would plot a point on a facet a later review
+		// brought back, on the day its evidence was deleted.
+		if e.Kind == store.EventRetire {
+			continue
+		}
 		if at, ok := parseTS(e.At); ok {
 			id := facetID{e.Lens, e.Dimension, e.Key}
 			logs[id] = append(logs[id], stamped{at, e.To})

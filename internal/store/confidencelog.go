@@ -10,12 +10,18 @@ const (
 	EventReinforce  = "reinforce"
 	EventDowngrade  = "downgrade"
 	EventCompaction = "compaction"
+	// EventRetire: a review retired the facet because every observation it cited was deleted
+	// (delete_observation). Its own kind, not "compaction" (no model judged anything) and not "downgrade"
+	// (confidence did not move: From is the decayed value it held, To the stored one, unchanged).
+	// Every other kind is a CONFIRMED value, which is how the view draws log rows, so the view
+	// skips this one (view/traits.go); page.js never sees kinds.
+	EventRetire = "retire"
 )
 
 // ConfidenceEvent records one confidence change for a facet. At holds the run's
 // timestamp (RFC3339 UTC); ClockSeq is the version's ConfidenceSeq AFTER the event;
 // From is what confidence was before this event; To is what was stored after; Kind
-// names the reason (new/reopen/rewrite/reinforce/downgrade/compaction).
+// names the reason (new/reopen/rewrite/reinforce/downgrade/compaction/retire).
 type ConfidenceEvent struct {
 	Lens, Dimension, Key string
 	At                   string  // RFC3339 UTC — the run's time

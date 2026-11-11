@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,6 +92,12 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// facets, watermark advanced through them), but refuse the global stamp and surface
 	// the failure so the review stays due and resumes from the watermark next pass.
 	var failed []string
+	// Before any lens folds, so no window folds against a facet still citing a deleted observation.
+	// A failure here strands no lens: the folds go on, the list stays, and the next review retries.
+	if err := r.pruneDeletedEvidence(nowStr); err != nil {
+		slog.Error("review: pruning deleted observations from facets failed (they stay pending)", "err", err)
+		failed = append(failed, "the deleted-observation prune")
+	}
 	for _, ln := range r.Lenses {
 		if err := r.foldLensWindowed(ctx, ln, nowStr); err != nil {
 			slog.Error("review: lens fold failed (committed windows kept; watermark left at last good window)",
@@ -126,7 +133,8 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 	if budget <= 0 {
 		budget = store.DefaultReviewMaxChars // defensive: never fold unbounded (the #123 stall)
 	}
-	obs, err := r.Store.ReadObservationsSinceOrdered(ln.Name, r.Store.ReviewRowid(ln.Name))
+	since := r.Store.ReviewRowid(ln.Name)
+	obs, err := r.Store.ReadObservationsSinceOrdered(ln.Name, since)
 	if err != nil {
 		return fmt.Errorf("read L1 delta: %w", err)
 	}
@@ -191,6 +199,58 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 		}
 		start = end
 	}
+	return nil
+}
+
+// retiredReason is the ArchiveReason a deleted-evidence retirement carries, where compaction
+// stores the model's one-line why.
+const retiredReason = "every observation it cited is gone from the archive"
+
+// pruneDeletedEvidence strips the ids DeleteObservation recorded from every version of every facet
+// (all lenses, archived included), retires each active facet whose current version cited at least
+// one id and now cites none, and takes those ids off the pending list in the same write. This is
+// how a delete reaches the profile: evidence otherwise only grows (mergeIDs) and the prompt never
+// retracts on absence, so a refold could not drop the facet — and refolding the lens to try was a
+// day of model calls. With nothing deleted it costs one meta read and reads no facet.
+//
+// Only recorded deletes, not every cited id that is not an observation: that broader rule also
+// retired facets resting on citations the model invented (48 on a real archive) and on ids
+// `witness merge` skips because this archive holds the same evidence under its own ids.
+//
+// A facet that never cited anything is left alone: no evidence was removed from under it. The
+// retirement is compaction's retired-outright archive (no MergedInto), so a later review that
+// re-asserts the key resurrects it (resolveArchived). Runs under the worker lock, the one place
+// that rewrites the facet table, which is why it lives here and not in the delete.
+func (r *Reviewer) pruneDeletedEvidence(nowStr string) error {
+	pending, err := r.Store.PendingDeletedObservations()
+	if err != nil || len(pending) == 0 {
+		return err
+	}
+	all, err := r.Store.ReadFacets()
+	if err != nil {
+		return fmt.Errorf("read L2: %w", err)
+	}
+	deleted := make(map[string]bool, len(pending))
+	for _, id := range pending {
+		deleted[id] = true
+	}
+	var events []store.ConfidenceEvent
+	for i := range all {
+		f := &all[i]
+		cur := f.Current()
+		had := cur != nil && len(cur.BecauseOf) > 0
+		for j := range f.Versions {
+			f.Versions[j].BecauseOf = slices.DeleteFunc(f.Versions[j].BecauseOf, func(id string) bool { return deleted[id] })
+		}
+		if had && f.Active() && len(cur.BecauseOf) == 0 {
+			f.ArchivedAt, f.MergedInto, f.ArchiveReason = nowStr, "", retiredReason
+			events = append(events, confidenceEvent(f, store.EventRetire, cur.DecayedConfidence(r.Store.ReviewRowid(f.Lens)), nowStr))
+		}
+	}
+	if err := r.Store.WriteFacetsPruned(all, events, pending); err != nil {
+		return fmt.Errorf("write L2: %w", err)
+	}
+	slog.Info("review: stripped deleted observations from facets", "deleted_ids", len(pending), "retired", len(events))
 	return nil
 }
 
@@ -329,11 +389,13 @@ func (r *Reviewer) logEvent(f *store.Facet, kind string, from float64, nowStr st
 // unconditionally, so an arc landing on an established facet overwrote its real clock with 0,
 // which DecayedConfidence reads as "never decays". A new facet asserted with seq 0 still starts
 // at 0, exactly as the emergent comment documents; only an existing clock is protected.
+//
+// A real seq never moves the clock BACKWARDS either: an early window, or a non-fresh `lens
+// backfill` refolding from seq 0, re-reads observations older than the facet's last
+// confirmation, and stamping that lower seq would make DecayedConfidence charge the facet for
+// observations it had already been confirmed past.
 func knownClock(seq, prior int64) int64 {
-	if seq > 0 {
-		return seq
-	}
-	return prior
+	return max(seq, prior)
 }
 
 // wellFormed rejects a facet assertion that cannot identify or state anything.

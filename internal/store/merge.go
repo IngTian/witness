@@ -22,8 +22,9 @@ import (
 // laptop, moving to a machine that already has its own archive), not a sync. Restoring by copying
 // a backup into the data dir replaces the destination; this keeps both.
 //
-// WHY IT IS NOT A SYNC. There are no tombstones (cleanup and delete_observation leave no record),
-// so a session or observation deleted on one side comes back from the other; and two machines
+// WHY IT IS NOT A SYNC. There are no tombstones that cross (cleanup leaves no record, and
+// delete_observation's lives in this archive's meta only until its next review), so a session or
+// observation deleted on one side comes back from the other; and two machines
 // that keep capturing between merges each grow a genuinely diverged chain for every facet both
 // touched, which this resolves by archiving one copy — one more archived copy per facet per round.
 // Re-merging the same source, and merging back, are handled (every rule below is idempotent on
@@ -31,7 +32,7 @@ import (
 // and a three-way facet merge, which this deliberately is not.
 //
 // THE SHAPE. The incoming database is never opened in place: Open writes into a data dir (config,
-// a lens migration, the default-lens seed), and a backup must stay a backup. It is copied to a
+// the default-lens seed), and a backup must stay a backup. It is copied to a
 // temp file, migrated THERE, and everything that has to change on the incoming side — renaming a
 // diverged session, dropping observations this archive already mined — is done to that copy. The
 // copy is then ATTACHed and the whole merge runs in ONE transaction on a pinned connection, so it
@@ -172,9 +173,9 @@ func (r *MergeReport) Empty() bool {
 }
 
 // mergeSide is one archive's state. The incoming side is read from the private temp copy; this
-// archive's side is read INSIDE the merge transaction, so a concurrent write (a delete_observation
-// resetting a review cursor) either lands before the read or waits for the commit, instead of being
-// silently overwritten by it.
+// archive's side is read INSIDE the merge transaction, so a concurrent write (a review advancing a
+// cursor) either lands before the read or waits for the commit, instead of being silently overwritten
+// by it.
 type mergeSide struct {
 	head    int64            // MAX(observations.seq): the decay clock's "now" on this side
 	cursors map[string]int64 // review_rowid:<lens>
@@ -549,6 +550,7 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 				continue
 			}
 			target, kind, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), kindNew, true
+			// TODO(#223): target == s for a copy an earlier merge minted; it is dropped as its own duplicate.
 			if held[target] { // same hash: the same transcript under a third id
 				if err := dropIncomingSession(ctx, tx, s); err != nil {
 					return nil, err
@@ -709,6 +711,8 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 //	                               a copied worker_pid is what `distill stop` would signal
 //	mine_drift_*, default_lens_migrated_v1a, profile_sig:*  local bookkeeping; profile_sig is stale
 //	                               anyway once the facets change, so the portrait regenerates
+//	deleted_obs_pending            the other side's unreviewed deletes: a merge is not a sync, so its
+//	                               facets arrive citing them, as they stood there
 func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *MergeReport) error {
 	// raw: new sessions whole, in their original order (seq is copied — LastDistilledRawTS
 	// compares it); a longer incoming transcript contributes only the tail we lack.

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
@@ -177,57 +178,54 @@ func (o *obsIO) AppendObservations(obs []Observation) error {
 // DeleteObservation removes one L1 observation by obs_id, reporting whether a row
 // was actually deleted (false = no such id, not an error). Facets are reviewer-
 // owned and read-only to humans; pruning a wrong/stale observation here is the
-// supported way to correct the profile — the next review re-derives from what's
-// left. Durable against re-mining: the per-session watermark won't re-mine an
-// already-distilled delta, and obs_id dedup would catch it even if it did.
-// It also RESETS that lens's incremental review watermark, so the promise the CLI and
-// the MCP tool both make — "the profile re-derives from what's left on the next review" —
-// is actually kept. The fold is incremental (it reads only obs with seq > review_rowid,
-// the #16 fix), so a pruned observation that had ALREADY been folded would otherwise sit
-// below the cursor forever: the next review would see an empty delta, never invoke the
-// model for that lens, and leave the facet it grounded asserting a claim whose only
-// evidence (because_of) no longer exists in the archive. Clearing the cursor makes the
-// next review re-fold that lens from scratch. That is bounded work, not a timeout risk —
-// the fold is windowed by ReviewMaxChars (#123).
+// supported way to correct the profile. Durable against re-mining: the per-session
+// watermark won't re-mine an already-distilled delta, and obs_id dedup would catch it
+// even if it did.
+//
+// It moves no review cursor, on purpose. It used to clear the lens's so the next review would
+// "re-derive from what's left" — which re-folded the whole lens (about 650 model calls on a
+// 20k-observation lens, a day holding the worker lock) and still could not drop the facet:
+// evidence only grows (mergeIDs) and absence never retracts. Instead it records the id on the
+// pending-delete list in the same transaction, and the next review, under the worker lock, strips
+// exactly those ids from every facet and retires a facet left citing nothing
+// (Reviewer.pruneDeletedEvidence). Doing that here would race the reviewer, which holds the whole
+// facet table in memory and writes it back as a replace. The list, not "every cited id that is not
+// an observation", is what makes a delete a delete: an id the model invented, or one `witness
+// merge` skipped because this archive holds the same evidence under its own id, is no delete.
 func (o *obsIO) DeleteObservation(obsID string) (bool, error) {
-	tx, err := beginImmediate(o.db)
+	tx, err := o.db.Begin()
 	if err != nil {
 		return false, err
 	}
-	// Capture the lens BEFORE the delete; afterwards the row is gone.
-	var lens string
-	switch err := tx.QueryRow(`SELECT lens FROM observations WHERE obs_id = ?`, obsID).Scan(&lens); {
-	case err == sql.ErrNoRows:
-		tx.Rollback()
-		return false, nil // no such id — not an error, just no hit
-	case err != nil:
-		tx.Rollback()
-		return false, err
-	}
+	defer tx.Rollback()
 	res, err := tx.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
 	if err != nil {
-		tx.Rollback()
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		tx.Rollback()
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return false, err
 	}
-	if n == 0 {
-		tx.Rollback()
-		return false, nil
-	}
-	// Same transaction as the delete: the archive must never be left with the row gone
-	// but the stale cursor still in place (that is the bug this closes).
-	if _, err := tx.Exec(`DELETE FROM meta WHERE key = ?`, reviewRowidKey(lens)); err != nil {
-		tx.Rollback()
+	// '$[#]' appends. Upsert, so the first delete creates the list.
+	if _, err := tx.Exec(`INSERT INTO meta(key, value) VALUES (?, json_array(?))
+		ON CONFLICT(key) DO UPDATE SET value = json_insert(value, '$[#]', ?)`, deletedObsPendingKey, obsID, obsID); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return true, tx.Commit()
+}
+
+// deletedObsPendingKey is the meta row holding, as a JSON array, the obs_ids DeleteObservation
+// removed that no review has pruned from the facets yet.
+const deletedObsPendingKey = "deleted_obs_pending"
+
+// PendingDeletedObservations is the pending-delete list (see DeleteObservation) less any id that
+// names an observation again: a merge can re-import a deleted row from a backup under the same
+// content-hash id, and pruning its citations then would retire facets resting on live evidence.
+// Such an id just stays listed, harmless, until it is deleted again. Empty in every review's
+// common case.
+func (o *obsIO) PendingDeletedObservations() ([]string, error) {
+	return queryStrings(context.Background(), o.db,
+		`SELECT DISTINCT value FROM json_each((SELECT value FROM meta WHERE key = ?))
+		 WHERE value NOT IN (SELECT obs_id FROM observations)`, deletedObsPendingKey)
 }
 
 // (ReadObservationsLite and ReadObservationsSince used to live here — 96 lines, both with zero

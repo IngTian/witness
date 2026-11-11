@@ -30,7 +30,7 @@ func readFixture(t *testing.T) *store.Store {
 }
 
 // registerRenamedLens registers a lens under `name` whose lens.json mines it as `mined` — the
-// shape of the shipped corpus-example lens (registered corpus-example, mines as "regime").
+// shape the shipped corpus-example lens had until F153 (registered corpus-example, mines as "regime").
 func registerRenamedLens(t *testing.T, st *store.Store, name, mined string) {
 	t.Helper()
 	dir := t.TempDir()

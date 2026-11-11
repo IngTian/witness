@@ -1,10 +1,13 @@
 package commands
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -174,11 +177,56 @@ func lensList(st *store.Store) error {
 // install no longer seeds content and a deliberately-removed default stays gone, this is the sole
 // "bring default back" path.
 func lensLoadDefault(st *store.Store) error {
+	old := lensSettings(st, store.LensDefault)
 	if err := seedDefaultLens(st); err != nil {
 		return fmt.Errorf("load default lens: %w", err)
 	}
 	fmt.Println(result(okGlyph(), "loaded the built-in default lens", "registered + enabled"))
+	warnDroppedSettings(st, store.LensDefault, old)
 	return nil
+}
+
+// warnDroppedSettings names each per-lens setting a re-register just erased (F048). `config set
+// --lens` writes the REGISTERED lens.json, and a register replaces that whole copy with the
+// source's, so a pinned model or runner vanished with only "[ok] registered" to show for it —
+// noticed, if ever, as worse facets or a different bill. old is lensSettings before the register.
+// A value the new source changes is named as replaced, and the restore is offered as a choice,
+// not an instruction: the old value may be a pin an unchanged source never had (the common case),
+// or the source may have been edited on purpose. Only the person knows which.
+func warnDroppedSettings(st *store.Store, name string, old lens.LensConfig) {
+	now := lensSettings(st, name)
+	for _, s := range []struct{ key, was, is string }{
+		{"runner", old.Runner, now.Runner},
+		{"mine_model", old.ExtractModel, now.ExtractModel},
+		{"review_model", old.ReviewModel, now.ReviewModel},
+	} {
+		label := "re-apply"
+		switch {
+		case s.was == "" || s.was == s.is:
+			continue
+		case s.is != "":
+			fmt.Println(result(warnGlyph(), "replaced "+s.key+" "+s.was+" → "+s.is, "lens "+name))
+			label = "keep yours"
+		default:
+			fmt.Println(result(warnGlyph(), "dropped "+s.key+" = "+s.was, "lens "+name))
+		}
+		fmt.Println(hint(label, "witness config set "+s.key+" "+shellArg(s.was)+" --lens "+name))
+	}
+}
+
+// lensSettings reads only the registered lens.json's settings, not the whole lens: a lens that
+// does not load (an emptied extract.md, a wrong-typed field) still loses its pinned values to a
+// re-register, and is how load-default's "re-seed it after editing broke it" is reached. Best
+// effort: unregistered or unreadable is the zero config (nothing to lose), and json.Unmarshal
+// still fills the well-typed fields when another one has the wrong type. Trimmed as the loader
+// trims them, so a value padded by a hand edit is not reported as changed or dropped.
+func lensSettings(st *store.Store, name string) (c lens.LensConfig) {
+	data, _ := os.ReadFile(filepath.Join(st.LensesDir(), name, lens.ConfigFile))
+	_ = json.Unmarshal(data, &c)
+	c.Runner = strings.TrimSpace(c.Runner)
+	c.ExtractModel = strings.TrimSpace(c.ExtractModel)
+	c.ReviewModel = strings.TrimSpace(c.ReviewModel)
+	return c
 }
 
 func lensRegister(st *store.Store, name, dir string) error {
@@ -192,6 +240,7 @@ func lensRegister(st *store.Store, name, dir string) error {
 	} else if !fi.IsDir() {
 		return fmt.Errorf("%s is a file, not a lens directory %s", dir, want)
 	}
+	old := lensSettings(st, name)
 	if err := st.RegisterLens(name, dir); err != nil {
 		return err
 	}
@@ -200,6 +249,7 @@ func lensRegister(st *store.Store, name, dir string) error {
 		note = fmt.Sprintf("mines as %q", l.Name)
 	}
 	fmt.Println(result(okGlyph(), "registered lens "+name, note))
+	warnDroppedSettings(st, name, old)
 	if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
 		fmt.Println(hint("turn it on", "witness lens enable "+name))
 	}
@@ -470,7 +520,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	// its re-mined observations and a --fresh backfill would be left with the empty facets
 	// it dropped. Reviewing unconditionally keeps L2 + L4 consistent with L1 either way.
 	fmt.Println(dim("re-mine complete; reviewing to refresh the lens's facets + profile…"))
-	// A fresh tap: the profile's cause must be the profile's, not an error the drain survived.
+	// A fresh tap: a failed review's cause must be the review's, not an error the drain survived.
 	rtap := &causeTap{}
 	ranReview, profErr, err := forceReviewTapped(st2, false, rtap)
 	if err != nil {
@@ -488,9 +538,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	if profErr != nil {
 		fmt.Println(result(warnGlyph(), "backfilled lens "+name,
 			"facets refreshed, but the profile was NOT regenerated (the previous one is kept)"))
-		rtap.note(profErr) // a model error during it, if one was seen; else its own (missing prompts …)
-		fmt.Println("  " + kvRow("cause", rtap.cause(), ""))
-		fmt.Println(hint("diagnose", "witness doctor"))
+		printProfileCause(profErr)
 	} else if drifted == 0 {
 		fmt.Println(result(okGlyph(), "backfilled lens "+name, "facets + profile refreshed"))
 	}
@@ -543,7 +591,8 @@ func lensShow(name string, full bool) error {
 	if full {
 		fmt.Print(renderLensPrompts(l))
 	} else {
-		fmt.Print(renderLensCard(name, l, enabled, effectiveConfig(st, l)))
+		// The card only: --prompts output stays a clean copy of the prompts.
+		fmt.Print(renderLensCard(name, l, enabled, effectiveConfig(st, l), name == store.LensDefault && defaultLensStale(st)))
 	}
 	return nil
 }
@@ -553,10 +602,10 @@ func lensShow(name string, full bool) error {
 // one flag away (`--prompts`), pointed to on the hint line.
 //
 // name is the REGISTERED name — the one every lens command takes. The card used to print the
-// lens.json name, so for corpus-example (which mines as "regime") its own footer suggested
+// lens.json name, so for a corpus-example that mines as "regime" its own footer suggested
 // `witness lens show regime --prompts`, which fails with "not registered". The settings rows are
 // config list --lens's rows, so the same data reads the same way, effective values included.
-func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting) string {
+func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting, stale bool) string {
 	var b strings.Builder
 	state := "disabled"
 	if enabled {
@@ -576,6 +625,9 @@ func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting)
 	}
 	fmt.Fprintln(&b, "  "+kvRow("extract.md", promptExcerpt(l.Extract), ""))
 	fmt.Fprintln(&b, "  "+kvRow("review.md", promptExcerpt(l.Review), ""))
+	if stale {
+		fmt.Fprintln(&b, "  "+warnGlyph()+" "+yellow(defaultLensStaleMsg))
+	}
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, hint("full prompts", "witness lens show "+name+" --prompts"))
 	return b.String()
@@ -608,16 +660,18 @@ func promptExcerpt(s string) string {
 // The footer used to count config entries, so "2 lenses · 3 enabled" sat under two rows, and the
 // lens the worker skips every pass was invisible.
 func renderLensList(st *store.Store, reg, enabled []string) {
+	// An old-format dir is not an orphan: its definition is there, and "disable" is the wrong fix.
+	old := st.OldFormatLenses()
 	var orphans []string
 	for _, name := range enabled {
-		if !slices.Contains(reg, name) {
+		if !slices.Contains(reg, name) && !slices.Contains(old, name) {
 			orphans = append(orphans, name)
 		}
 	}
 	// Since #44 slice 1a "default" has no special status — it is a registered lens like any
 	// other, so it appears in this loop naturally. An archive may have ZERO lenses (all
 	// disabled / none seeded), a legal "nothing to distill" state.
-	if len(reg) == 0 && len(orphans) == 0 {
+	if len(reg) == 0 && len(orphans) == 0 && len(old) == 0 {
 		fmt.Println(title("lens list", "", ""))
 		fmt.Println()
 		fmt.Printf("  %s no lenses registered — nothing is distilled\n", skipGlyph())
@@ -635,12 +689,15 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 	if len(orphans) > 0 {
 		summary += " · " + countOf(len(orphans), "orphan", "orphans")
 	}
+	if len(old) > 0 {
+		summary += fmt.Sprintf(" · %d old format", len(old))
+	}
 	fmt.Println(title("lens list", "", summary))
 	fmt.Println()
 	// kvRow's label column is 14 wide, so a longer name (corpus-example is 14) pushed its own
 	// value right of every other row's: pad every name to the longest first.
 	nameW := 0
-	for _, name := range append(slices.Clone(reg), orphans...) {
+	for _, name := range slices.Concat(reg, orphans, old) {
 		nameW = max(nameW, len([]rune(name)))
 	}
 	row := func(name, value, note string) string {
@@ -674,11 +731,56 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 	for _, name := range orphans {
 		fmt.Printf("  %s %s\n", flag, row(name, yellow("enabled, but not registered"), ""))
 	}
+	for _, name := range old {
+		fmt.Printf("  %s %s\n", flag, row(name, yellow(oldLensFormat), ""))
+	}
 	fmt.Println()
 	for _, name := range orphans {
 		fmt.Println(hint("clean up", "witness lens disable "+name))
 	}
+	for _, name := range old {
+		fmt.Println(hint("re-register", reRegisterOldLens(st, name)))
+	}
 	fmt.Println(hint("inspect one", "witness lens show <name>"))
+}
+
+// oldLensFormat is what `lens list` and `doctor` say about a registry dir holding only a
+// pre-v0.3.0 lens.md (store.OldFormatLenses).
+const oldLensFormat = `old lens format: split it into extract.md + review.md (its "# name:"/"# dimensions:" lines go in lens.json as "name"/"dimensions"), then re-register`
+
+const defaultLensStaleMsg = "default lens prompts differ from this binary's; refresh with `witness lens load-default` (resets per-lens overrides)"
+
+// defaultLensStale reports whether the archive's registered default lens prompts differ from the
+// ones this binary ships (F142). The default lens is seeded ONCE, then read only from the
+// archive's copy, so a prompt fix in a newer release (#209's confidence sentence, say) never
+// reached an existing archive and nothing said so. A byte compare can't tell an older seed
+// from a deliberate edit; it only makes the difference visible. A file the resolved bundle lacks
+// is not compared: there is nothing to claim it differs from. (With no bundle beside the binary
+// and no env override, bundle.Dir falls back to a cwd-relative prompts/, and that is what gets
+// compared.) A disabled default is never run, so its prompts are not news, and the offered fix
+// would re-enable it.
+func defaultLensStale(st *store.Store) bool {
+	if !slices.Contains(st.RegisteredLenses(), store.LensDefault) || !slices.Contains(st.LoadConfig().EnabledLenses, store.LensDefault) {
+		return false
+	}
+	for _, f := range []string{lens.ExtractFile, lens.ReviewFile, lens.EmergeFile} {
+		shipped, err := os.ReadFile(filepath.Join(lens.DefaultSeedDir(), f))
+		if err != nil {
+			continue
+		}
+		ours, err := os.ReadFile(filepath.Join(st.LensesDir(), store.LensDefault, f))
+		if err != nil || !bytes.Equal(ours, shipped) {
+			return true
+		}
+	}
+	return false
+}
+
+// reRegisterOldLens is the command that finishes the fix: split in place, then register the same
+// dir. A self-register keeps only the lens files (store.LensFiles), so it removes the old lens.md;
+// its header lines must be in lens.json first, which oldLensFormat says.
+func reRegisterOldLens(st *store.Store, name string) string {
+	return "witness lens register " + name + " " + shellArg(filepath.Join(st.LensesDir(), name))
 }
 
 // renderLensPrompts is the `--prompts` view: the two prompts verbatim, under plain

@@ -40,8 +40,7 @@ func ReservedLensName(name string) bool {
 
 // lensReg is the lens-registry concern: the on-disk lens definitions under
 // <root>/lenses/<name>/ (each a directory of lens.json + extract.md + review.md,
-// issue #75) plus their one-shot legacy-format migration (lensmigrate.go). A
-// filesystem leaf — it holds only the data root and never touches the DB. Its
+// issue #75). A filesystem leaf — it holds only the data root and never touches the DB. Its
 // registry-mutation lock rides the shared flockPath primitive, so it depends on no
 // other concern.
 type lensReg struct{ root string }
@@ -201,30 +200,35 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 	if ReservedLensName(resolvedName) {
 		return fmt.Errorf("lens name %q resolves to reserved %q (the cross-lens 'unified' summary); choose another name or remove the lens.json override", name, resolvedName)
 	}
-	// Check the resolved name against all OTHER registered lenses (both their resolved
-	// names and their registry dir names) — a collision in the resolved namespace means
-	// they'd share the same L1/L2/profile identity.
-	if resolvedName != name { // only check when dir name ≠ resolved name (else the dir-collision guard above caught it)
-		rnameLower := strings.ToLower(resolvedName)
-		for _, existing := range r.RegisteredLenses() {
-			if existing == name {
-				continue // skip self (exact-case re-register is allowed)
-			}
-			existingResolved, err := r.resolveNameFromRegistry(existing)
-			if err != nil {
-				// Corrupted registered lens; report the collision-check failure rather than
-				// silently ignoring it (letting this lens register might clobber the broken one).
-				return fmt.Errorf("can't check collision: existing lens %q is unreadable: %w", existing, err)
-			}
-			// Collision if candidate-resolved equals OTHER's resolved (both namespace),
-			// OR candidate-resolved shadows OTHER's DIR name (an addressing collision).
-			if strings.ToLower(existingResolved) == rnameLower || strings.ToLower(existing) == rnameLower {
-				// Clearer message when the lens.json name collides vs. when it shadows a dir name.
-				if strings.ToLower(existingResolved) == rnameLower {
-					return fmt.Errorf("lens name %q with lens.json name=%q collides with existing lens %q (which resolves to %q); they would share observations/watermark/profile", name, resolvedName, existing, existingResolved)
-				}
-				return fmt.Errorf("lens name %q with lens.json name=%q shadows the registry handle %q; pick a different lens.json name or dir name", name, resolvedName, existing)
-			}
+	// Check BOTH of the candidate's names against BOTH names of every OTHER registered lens
+	// (its resolved name and its registry dir name) — a collision in the resolved namespace
+	// means they'd share the same L1/L2/profile identity. This used to run only when the
+	// candidate's own names differed, so the refusal depended on registration order (F153):
+	// `regime` registered AFTER a corpus-example that mines as "regime" passed, and both then
+	// wrote one "regime" archive.
+	rnameLower := strings.ToLower(resolvedName)
+	for _, existing := range r.RegisteredLenses() {
+		if existing == name {
+			continue // skip self (exact-case re-register is allowed)
+		}
+		existingResolved, err := r.resolveNameFromRegistry(existing)
+		if err != nil {
+			// An unreadable neighbour can't mine (activeLenses skips it), so compare only the name
+			// that is always known, its registry handle. Refusing instead blocked EVERY registration,
+			// the first-open default seed included, on one broken lens.json elsewhere, now that this
+			// loop runs for every candidate.
+			existingResolved = existing
+		}
+		// The first case names the candidate's lens.json name, so it needs one that really
+		// overrides the handle; a candidate without one falls through to the last case, which
+		// blames the lens.json that does.
+		switch erLower := strings.ToLower(existingResolved); {
+		case erLower == rnameLower && rnameLower != lname:
+			return fmt.Errorf("lens name %q with lens.json name=%q collides with existing lens %q (which resolves to %q); they would share observations/watermark/profile", name, resolvedName, existing, existingResolved)
+		case strings.ToLower(existing) == rnameLower:
+			return fmt.Errorf("lens name %q with lens.json name=%q shadows the registry handle %q; pick a different lens.json name or dir name", name, resolvedName, existing)
+		case erLower == lname:
+			return fmt.Errorf("lens name %q is the lens.json name existing lens %q stores its data under, so they would share observations/watermark/profile; pick a different name", name, existing)
 		}
 	}
 
@@ -324,6 +328,32 @@ func (r *lensReg) RegisteredLenses() []string {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(r.LensesDir(), e.Name(), LensExtractFile)); err == nil {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// OldFormatLenses lists the registry dirs holding a pre-v0.3.0 single-file lens.md and no
+// extract.md (issue #75). RegisteredLenses can't see them, so on their own they read as absent,
+// or, if enabled, as an orphan whose hint said "disable". The converter that once rewrote them
+// at every Open is gone (F065: every archive that matters is past v0.3.0); this is only so
+// `lens list` and `doctor` can name the manual fix.
+func (r *lensReg) OldFormatLenses() []string {
+	entries, err := os.ReadDir(r.LensesDir())
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() || isLensStagingDir(e.Name()) {
+			continue
+		}
+		dir := filepath.Join(r.LensesDir(), e.Name())
+		if _, err := os.Stat(filepath.Join(dir, LensExtractFile)); !os.IsNotExist(err) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "lens.md")); err == nil {
 			names = append(names, e.Name())
 		}
 	}

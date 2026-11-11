@@ -26,7 +26,7 @@ they exist for recovery and debugging, and everything they do also happens autom
   behind each facet; keep it as private as the archive. `export --all` leaves it out, since it is
   rebuilt from what the backup holds.
 - `witness facets [lens]` — print the active structured facets (CLI equivalent of MCP `get_facets`).
-  `--all` also lists facets archived by compaction, saying where each one went; `--expand
+  `--all` also lists archived facets, saying where each one went; `--expand
   <dimension/key>` unfolds one facet into everything that was merged into it.
 - `witness compact [--lens <name>] [--yes]` — consolidate the profile: merge facets that describe
   one trait, retire ones that were never traits, and give each surviving facet a short `claim`
@@ -39,7 +39,8 @@ they exist for recovery and debugging, and everything they do also happens autom
   it. Re-runnable; each pass consolidates what it can see.
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
 - `witness observations record --session <id> --dimension <name> --observation <text>` — stage an active observation and kick the worker.
-- `witness observations delete <obs_id>` — prune a wrong observation.
+- `witness observations delete <obs_id>` — prune a wrong observation. It is removed now; facets that rested only on it
+  are retired at the next review, and nothing is re-read.
 - `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
   observations. (Hidden, like the rest of `worker`: review normally runs on its own schedule —
   `review_every` / `review_poignancy` — so reaching for this by hand is the exception. `--full`

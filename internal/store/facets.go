@@ -35,7 +35,7 @@ func (f *facetIO) readFacets(activeOnly bool) ([]Facet, error) {
 // rowQuerier is what reading needs from either a *sql.DB or a *sql.Tx. The merge reads this
 // archive's facets INSIDE its transaction, so a facet change that lands while it runs either
 // precedes the read or waits for the commit — read outside, a concurrent write (a
-// delete_observation resetting a review cursor) would be silently overwritten by the merge.
+// review's facet write) would be silently overwritten by the merge.
 type rowQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
@@ -115,7 +115,19 @@ func (f *facetIO) WriteFacets(facets []Facet) error {
 // rolls back on any error, so either both succeed or neither is persisted. Call
 // WriteFacets(fs) to write facets without events — it delegates to WriteFacetsLogged(fs, nil).
 func (f *facetIO) WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error {
-	tx, err := f.db.Begin()
+	return f.WriteFacetsPruned(facets, events, nil)
+}
+
+// WriteFacetsPruned is WriteFacetsLogged that also takes `pruned` off the pending-delete list
+// (DeleteObservation) in the same transaction, so a crash cannot leave the ids stripped from the
+// facets but still pending, or cleared but never stripped. It removes only those ids, not the
+// whole list: a delete that lands after the review read the list is the next review's to prune.
+func (f *facetIO) WriteFacetsPruned(facets []Facet, events []ConfidenceEvent, pruned []string) error {
+	// Write lock first: writeFacetsTx READS user_version before its REPLACE, and under WAL a
+	// deferred tx that read and then writes fails with SQLITE_BUSY_SNAPSHOT (517) the moment a
+	// capture hook in another process commits in between, which busy_timeout cannot retry. Every
+	// fold window writes through here, so that cost a model call per collision.
+	tx, err := beginImmediate(f.db)
 	if err != nil {
 		return err
 	}
@@ -145,6 +157,17 @@ func (f *facetIO) WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) er
 			if err != nil {
 				return err
 			}
+		}
+	}
+
+	if len(pruned) > 0 {
+		var b []byte
+		if b, err = json.Marshal(pruned); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`UPDATE meta SET value = (SELECT json_group_array(p.value) FROM json_each(meta.value) p
+			WHERE p.value NOT IN (SELECT value FROM json_each(?))) WHERE key = ?`, string(b), deletedObsPendingKey); err != nil {
+			return err
 		}
 	}
 

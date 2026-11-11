@@ -149,7 +149,8 @@ type Options struct {
 	Refresh RefreshProfiles
 	// DataName maps the lens name an agent passes — the registered name `witness lens list` shows
 	// and every command takes — to the name that lens's rows are tagged with (its lens.json
-	// `name`; the shipped corpus-example mines as "regime"). nil uses names as given.
+	// `name` when set, e.g. a lens registered as corpus-example that mines as "regime"). nil
+	// uses names as given.
 	DataName func(lens string) string
 	// Wire is the copyable "connect an editor" command, built from the install targets so it
 	// names every editor `witness wire` accepts.
@@ -376,12 +377,13 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 
 	// delete_observation: prune one L1 observation by id. Facets are reviewer-owned
 	// (read-only); the supported way to correct the profile is to fix its inputs —
-	// add a better observation, or remove a wrong/stale one here. The next review
-	// re-derives the profile from what's left.
+	// add a better observation, or remove a wrong/stale one here. Nothing is re-read:
+	// the next review strips the id from the facets citing it and retires any facet
+	// left citing nothing (Reviewer.pruneDeletedEvidence).
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "delete_observation",
 		Description: "Delete one observation from the archive by obs_id (get ids from search_observations). " +
-			"Use to prune a wrong or stale observation; the profile re-derives from the remaining ones on the next review. " +
+			"Use to prune a wrong or stale observation. It is removed now; facets that rested only on it are retired at the next review, and nothing is re-read. " +
 			"The profile (facets) itself is not directly editable — observations are the input layer.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in deleteInput) (*mcpsdk.CallToolResult, any, error) {
 		id := strings.TrimSpace(in.ObsID)
@@ -395,7 +397,7 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		if !deleted {
 			return textResult("no observation with id " + id), nil, nil
 		}
-		return textResult("deleted " + id), nil, nil
+		return textResult("deleted " + id + "; facets that rested only on it are retired at the next review"), nil, nil
 	})
 
 	return server
