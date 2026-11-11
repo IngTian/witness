@@ -351,8 +351,8 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 			lensName = store.ProfileUnified
 		}
 		// Regenerate on read if stale (#100). Measured ~13s for a real regeneration and ~0.02s
-		// when the signature already matches, so blocking the tool call is acceptable and an
-		// unread profile costs nothing. NON-FATAL: a refresh failure still serves what is on
+		// when the signature already matches, so blocking the tool call is acceptable; the worker also
+		// rebuilds stale portraits after each review, so a read usually finds one current. NON-FATAL: a refresh failure still serves what is on
 		// disk — a stale narrative is strictly better than none — and the note is appended to
 		// the reply so the agent knows what it is holding rather than being misled.
 		var stale string

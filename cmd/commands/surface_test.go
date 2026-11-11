@@ -78,7 +78,7 @@ func TestJSONOutputHasNoANSI(t *testing.T) {
 
 func TestInternalWorkerCommandResolution(t *testing.T) {
 	// Regression guard for C1: the internal worker token `worker-run` must resolve to
-	// the flag-bearing command (--auto/--since/--until), NOT to the hidden operator group
+	// the flag-bearing command (--auto/--since/--until), NOT to the operator group
 	// `worker` (which has run/stop/review subcommands but no flags). A name collision
 	// kills automatic distillation: hooks spawn `worker-run --auto`, and a misroute to
 	// the group errors ("unknown flag: --auto").

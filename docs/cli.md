@@ -43,6 +43,8 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
 - `witness observations delete <obs_id>` — prune a wrong observation. It is removed now; facets that rested only on it
   are retired at the next review, and nothing is re-read.
+- `witness worker candidates <lens>` — dry-run the long-arc clustering for one lens: prints the
+  candidate arcs it would verify, with no model call and nothing written.
 - `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
   observations. Review normally runs on its own schedule (`review_every` / `review_poignancy`),
   so reaching for this by hand is the exception. `--full` also runs the emergent long-arc pass,

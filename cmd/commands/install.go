@@ -542,7 +542,7 @@ func cmdProvision(path string) error {
 		fmt.Printf("%s archive created at %s %s\n", okGlyph(), tildePath(root), dim("(no lenses yet)"))
 	}
 	if personal {
-		fmt.Println(hint("connect an editor", wireCommand()))
+		fmt.Println(hint("connect", wireCommand()))
 		return nil
 	}
 	prefix := ""

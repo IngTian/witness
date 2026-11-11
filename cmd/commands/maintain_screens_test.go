@@ -565,8 +565,8 @@ func TestProvisionOptsOutOnlyForAChosenArchive(t *testing.T) {
 		home, path      bool
 		opt, want, hint string
 	}{
-		{name: "bare", want: "done", hint: hint("connect an editor", wireCommand())},
-		{name: "bare, opted out", opt: "1", want: "opted-out", hint: hint("connect an editor", wireCommand())},
+		{name: "bare", want: "done", hint: hint("connect", wireCommand())},
+		{name: "bare, opted out", opt: "1", want: "opted-out", hint: hint("connect", wireCommand())},
 		{name: "WITNESS_HOME", home: true, want: "opted-out", hint: "witness lens register <name> <dir>"},
 		{name: "--path", path: true, want: "opted-out", hint: "witness lens register <name> <dir>"},
 	} {

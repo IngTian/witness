@@ -84,7 +84,7 @@ else
       mkdir -p "$HOME/.local/bin"
       cat > "$HOME/.local/bin/witness" <<EOF
 #!/usr/bin/env bash
-# Launcher for the witness CLI — execs the plugin shim by its real path.
+# Launcher for the witness CLI — execs the hook shim by its real path.
 exec "$ROOT/hooks/witness.sh" "\$@"
 EOF
       chmod +x "$HOME/.local/bin/witness"

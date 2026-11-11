@@ -25,7 +25,7 @@ import (
 //  1. $envOverride, if set — an explicit, fully-resolved override.
 //  2. $CLAUDE_PLUGIN_ROOT/subdir — exported by the Unix hook shim
 //     (hooks/witness.sh) as its checkout root, for a working-copy install. The
-//     name is Claude Code's plugin variable; witness no longer ships a plugin, but
+//     name is Claude Code's plugin variable; witness no longer ships a Claude Code plugin, but
 //     the shim and these lookups still agree on it.
 //  3. exe-relative: the first of <exeDir>/subdir or <exeDir>/../subdir that
 //     exists. This covers both an installed layout (witness + assets/ siblings)

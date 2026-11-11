@@ -146,7 +146,7 @@ idempotency, foreign-hook preservation, the Windows `commandWindows` form and it
 quoting, and that the installer and importer resolve the same Codex home. Every one of
 those assertions was confirmed to fail when the behaviour it checks is removed.
 
-Not covered: the Windows *wiring* path (the import path there was verified separately),
+Not covered: the Windows *wiring* path (the import path there was verified in #169),
 and interactive `codex` rather than `codex exec`.
 
 `--hook` always returns exit 0 and `{}` on stdout, including on malformed input,

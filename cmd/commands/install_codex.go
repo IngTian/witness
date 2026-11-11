@@ -245,7 +245,7 @@ func cmdInstallCodex() (wireOutcome, error) {
 // wiring is when someone has that history in mind (#199 F046).
 func codexWiredOutcome() wireOutcome {
 	return wireOutcome{glyph: warnGlyph(), line: bold("REQUIRED") + " approve the witness hooks in Codex — until then nothing is captured",
-		hints: [][2]string{{"in Codex, run", "/hooks"}, {"import your history", "witness import --agent codex"}}}
+		hints: [][2]string{{"in Codex, run", "/hooks"}, {"past sessions", "witness import --agent codex"}}}
 }
 
 // unwireCodexHooks strips our entries from the hooks.json at path, reporting whether
