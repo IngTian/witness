@@ -233,18 +233,21 @@ func (c *Claimer) claimBatch(ctx context.Context, ln *lens.Lens, batch []*store.
 
 // claimPrompt lives in Go, not the lens registry, for the reason this pass exists at all: lens
 // prompt files are copied into an archive once at seed time and never updated, so text authored
-// there provably never reaches an existing install. Writing "what does this facet assert" is
-// also not domain-specific — it does not change between a coding lens and a trading lens.
-const claimPrompt = `You are given facets from a behavioural profile. Each one is a long record about one person:
-a claim about them, plus the evidence, contrasts with related facets, costs, provenance notes
-and the conditions that would change it.
+// there provably never reaches an existing install. One prompt serves every lens because the task
+// — "what does this facet assert" — does not change between a coding lens and a trading lens, so
+// the wording names the lens's SUBJECT rather than assuming a person (#199 G001): every review
+// reads these claims, and this pass now runs before every fold, for corpus lenses too.
+const claimPrompt = `You are given facets from one lens of a profile. A lens tracks one subject — usually a person,
+but it can be a market, a project or anything else — and each facet is a long record about that
+subject: a claim about it, plus the evidence, contrasts with related facets, costs, provenance
+notes and the conditions that would change it.
 
 For each facet, write its CLAIM: one or two sentences stating what the facet actually asserts
-about this person.
+about the subject.
 
 The claim is used to decide, in a later pass, whether new evidence bears on this facet and
-whether it contradicts it. So it must stand alone and be judgeable. Name the disposition and its
-mechanism — what the person does, and what makes it happen.
+whether it contradicts it. So it must stand alone and be judgeable. Name the disposition or pattern
+and its mechanism — what the subject does, and what makes it happen.
 
 LEAVE OUT, because they live in the full record and are not needed to judge new evidence:
 
@@ -252,11 +255,13 @@ LEAVE OUT, because they live in the full record and are not needed to judge new 
   - confidence numbers and changelog notes ("UPGRADE", "NEW this round", "0.7 to 0.75")
   - references to other facets
   - falsifiers, costs, and "what to test next"
-  - advice about how to work with the person
+  - advice about how to act on it
 
 Write the claim in plain, specific, behavioural language, in the third person. Do not hedge it
-into vagueness: "defaults to blaming his own state when confused, rather than suspecting the
-material" is a claim; "has some patterns around confusion" is not.
+into vagueness: "defaults to blaming their own state when confused, rather than suspecting the
+material" is a claim; "has some patterns around confusion" is not. For a market: "sells off on
+tariff headlines and recovers within days once the policy is softened" is a claim; "reacts to
+news" is not.
 
 Keep it UNDER 400 characters. A claim that runs long is the analysis again, which defeats the
 purpose.

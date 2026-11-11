@@ -15,20 +15,22 @@ package distill
 // headers do: lens prompt files are copied into an archive once at seed time and never updated,
 // so text authored there provably never reaches an existing install. Compaction is also
 // structural rather than domain-specific — "are these the same trait" does not change between a
-// coding lens and a trading lens.
+// coding lens and a trading lens — so the wording names the lens's SUBJECT rather than assuming a
+// person (#199 G001).
 //
 // ponytail: one shared pair of prompts, no per-lens override. Add a lenses/<name>/compact.md
 // seam the first time a real lens needs different grouping judgment, not before.
 
 // STAGE 1 — grouping. Names only, so the reply stays small and the call stays fast.
-const compactGroupPrompt = `You are consolidating a behavioural profile. You are given every facet in ONE dimension of
-ONE lens. Each facet is a claim about one person, mined from their work sessions over time.
+const compactGroupPrompt = `You are consolidating a profile. You are given every facet in ONE dimension of ONE lens. A
+lens tracks one subject — usually a person, but it can be a market, a project or anything else —
+and each facet is a claim about that subject, mined from its records over time.
 
 The profile only ever grew: nothing ever removed or combined a facet, and nothing ever asked
 whether two facets were the same thing. So what you are looking at is NOT this many traits. It
 is a handful of real underlying dispositions — on the order of ten — each described many times
-from different angles, because every session wrote its own description without checking whether
-the trait was already recorded.
+from different angles, because every record that was mined wrote its own description without checking
+whether the trait was already recorded.
 
 YOUR ONLY JOB IN THIS PASS IS GROUPING. Decide which facets describe the same underlying
 disposition. Do NOT write merged values — the wording is a separate later step, and a long reply
@@ -40,7 +42,7 @@ facets as you were shown, and no more than fifteen.
 Work in this order: first decide what the few real dispositions in this dimension ARE, then
 assign every facet to one of them. Do not start by looking for similar pairs.
 
-Judge by MECHANISM: two facets are one disposition if the same underlying thing about the person
+Judge by MECHANISM: two facets are one disposition if the same underlying thing about the subject
 produces both, even in different material. A general disposition and its specific instances are
 ONE disposition. Different examples of one mechanism are ONE disposition. Only a genuinely
 different mechanism earns its own facet.
@@ -67,8 +69,8 @@ RULES
   whole array.
 
   RETIRE is for facets that are not traits: a restatement another facet covers completely, one
-  incident rather than a pattern, an artifact of how the session was recorded, something true of
-  anyone, or a facet whose own text says its content moved elsewhere. Low confidence, few
+  incident rather than a pattern, an artifact of how the record was captured, something true of
+  any subject, or a facet whose own text says its content moved elsewhere. Low confidence, few
   observations and age are NOT reasons on their own.
 
   A facet carrying a disposition nothing else covers should simply be left out of the array.
@@ -77,7 +79,7 @@ Output ONLY the JSON array. No prose, no code fence.`
 
 // STAGE 2 — writing one merged value. Prose out, not JSON: a 4,000-char value with a stray
 // quote or newline would break a JSON parse and lose the whole call for no benefit.
-const compactWritePrompt = `You are writing ONE facet of a behavioural profile. You are given several existing facets that
+const compactWritePrompt = `You are writing ONE facet of a profile. You are given several existing facets that
 have been judged to describe the SAME underlying disposition, and your job is to write the
 single facet that replaces all of them.
 
@@ -88,7 +90,7 @@ WHAT MUST SURVIVE. Every distinct thing any input facet contributes:
 
   - every concrete instance and example, with its detail intact
   - every observation id (the obs_... references) exactly as written
-  - every quoted phrase of the person's own words
+  - every quoted phrase, in the source's own words
   - every date, count and measurement
   - every COST, limit, caveat or provenance note
   - every falsifier — the conditions that would raise, lower or close the claim
@@ -103,7 +105,7 @@ LENGTH — AIM FOR THE UNION, NOT THE SUM.
   rejected.
 
   That band is achievable because these facets overlap heavily. They describe ONE mechanism, and
-  each was written by a separate session that did not know the others existed, so the same claim
+  each was written by a separate pass that did not know the others existed, so the same claim
   appears four or nine times in four or nine different wordings. The union of what they say is
   far smaller than their total length; the repetition is the bulk of it.
 
@@ -118,7 +120,7 @@ LENGTH — AIM FOR THE UNION, NOT THE SUM.
 STRUCTURE. Organise a long value so it stays readable: name the disposition in the first
 sentence, then number or label the distinct faces of it, then the cost or limit, then the
 falsifiers. Keep the register of the inputs — specific and behavioural, citing evidence — not
-abstract personality description.
+abstract characterisation.
 
 STAY IN YOUR LANE. If you are shown other traits from the same dimension, they are being written
 by other calls. Anything belonging to one of them is theirs to cover; do not restate it here.
