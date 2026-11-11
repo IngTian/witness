@@ -83,9 +83,12 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
   archived beside it; duplicates under different keys are left for `witness compact`. A one-time
   consolidation, not a sync — merged back and forth, two machines grow an archived copy of every facet
   both changed, every round.
-- `witness install [--path <dir>]` — provision a new witness archive at the specified path (or the
-  default data root). Creates the directory structure and database schema. Typically called once per
-  machine; `install.sh` handles this for source-checkout users.
+- `witness install [--path <dir>]` — provision a witness archive at the specified path (or the
+  default data root) without wiring any editor. Creates the directory structure and database schema.
+  An archive chosen with `--path` or `WITNESS_HOME` starts with no lenses, for a library or data
+  source; the default data root gets the built-in `default` lens like any first open
+  (`WITNESS_NO_DEFAULT_LENS=1` keeps it blank). A personal machine does not need it: `install.sh`
+  runs `witness wire`, which opens the archive itself.
 - `witness wire <claude|opencode|codex>` — wire the editor integration (hooks + MCP for Claude Code;
   plugin + MCP for OpenCode; hooks for Codex). Source-checkout command; `install.sh` calls this for
   you. Re-running it is safe: it replaces its own entries and preserves any hooks you wrote yourself.
@@ -128,7 +131,7 @@ review_max_chars = 16000      # safety ceiling: max observation chars folded in 
 
 Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
 `claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
-`runner = "opencode"`. Leaving both empty is the safe default and what `witness install` writes;
+`runner = "opencode"`. Leaving both empty is the safe default and what `witness wire` writes;
 note that an empty `triage_model` under the claude runner inherits your *ambient interactive*
 model, which may be heavier than you want for per-session mining, so pinning a light one is
 usually worth it.

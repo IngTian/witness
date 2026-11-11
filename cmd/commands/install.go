@@ -100,8 +100,10 @@ provisions witness itself; it does NOT wire any editor. Run several with differe
 
   --path <dir>   archive location (default: the standard witness data dir)
 
-A bare archive starts with NO lenses: register your own with 'witness lens register',
-then feed it with 'witness ingest'. To connect an editor instead, use 'witness wire'.`),
+An archive chosen with --path or WITNESS_HOME starts with NO lenses: register your own
+with 'witness lens register', then feed it with 'witness ingest'. The standard data dir
+gets the built-in default lens like any first open; set WITNESS_NO_DEFAULT_LENS=1 to keep
+it blank. To connect an editor, use 'witness wire'.`),
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error { return cmdProvision(path) },
 	}
@@ -493,24 +495,29 @@ func repoShim() (string, error) {
 	return shim, nil
 }
 
-// cmdProvision opens (creating) an archive at path without wiring any editor. It opts
-// the archive OUT of the person-growth default-lens auto-seed — a provisioned archive is
-// a blank engine the caller fills with its own lens(es). (wire, by contrast, leaves the
-// env unset so an editor user DOES get the default lens.)
+// cmdProvision opens (creating) an archive at path without wiring any editor. An archive the
+// caller CHOSE (--path or WITNESS_HOME) opts OUT of the person-growth default-lens auto-seed: it
+// is a blank engine the caller fills with its own lens(es). The standard personal folder does
+// not: opting it out too left a new machine that ran `install` first with no lenses for good,
+// because the opt-out is durable and wire cannot undo it (#199 F018). There a bare install is
+// any first open; WITNESS_NO_DEFAULT_LENS=1 still keeps it blank on purpose.
 //
 // It says whether it CREATED the archive or adopted one already there, and its next steps carry
 // WITNESS_HOME when the archive is not the one every command would use anyway: printed bare, they
 // acted on the DEFAULT archive, because nothing but WITNESS_HOME selects another.
 func cmdProvision(path string) error {
 	prevHome := os.Getenv("WITNESS_HOME")
+	personal := strings.TrimSpace(path) == "" && prevHome == "" // "" is resolveRoot's "unset"
 	if strings.TrimSpace(path) != "" {
 		if err := os.Setenv("WITNESS_HOME", path); err != nil {
 			return err
 		}
 	}
-	// Suppress the person default on this fresh archive (read live by the first-open
-	// seed hook, see defaultseed.go). Set BEFORE Open.
-	_ = os.Setenv(noDefaultLensEnv, "1")
+	// Suppress the person default on a chosen archive (read live by the first-open seed
+	// hook, see defaultseed.go). Set BEFORE Open.
+	if !personal {
+		_ = os.Setenv(noDefaultLensEnv, "1")
+	}
 	existed := false
 	if strings.TrimSpace(path) != "" {
 		_, err := os.Stat(filepath.Join(path, "witness.db"))
@@ -533,6 +540,10 @@ func cmdProvision(path string) error {
 		fmt.Printf("%s archive adopted at %s %s\n", okGlyph(), tildePath(root), sessions)
 	default:
 		fmt.Printf("%s archive created at %s %s\n", okGlyph(), tildePath(root), dim("(no lenses yet)"))
+	}
+	if personal {
+		fmt.Println(hint("connect an editor", wireCommand()))
+		return nil
 	}
 	prefix := ""
 	if strings.TrimSpace(path) != "" && filepath.Clean(prevHome) != filepath.Clean(root) {

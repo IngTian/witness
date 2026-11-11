@@ -18,8 +18,8 @@ import (
 // arrives through exactly ONE automatic path plus one explicit one:
 //
 //   - AUTO-SEED (automatic, here): the FIRST time any process opens an archive that is
-//     either brand-new (a fresh personal install — install/import/doctor open the store
-//     before any capture) OR predates 1a (distilled under the old always-on default),
+//     either brand-new (a fresh personal archive — wire, import, doctor or a bare `install`
+//     on the standard folder opens the store before any capture) OR predates 1a (distilled under the old always-on default),
 //     register+enable default. This unifies the Claude-install and npm-OpenCode paths
 //     for free (both just open the store) with zero install-specific seed code.
 //   - LOAD/RESTORE (explicit): `witness lens load-default` re-seeds from any state,
@@ -45,8 +45,10 @@ const defaultMigratedKey = "default_lens_migrated_v1a"
 
 // noDefaultLensEnv opts an archive OUT of the first-open auto-seed (a "declined marker",
 // #102): when set to a non-empty value the hook records the opt-out in the one-shot gate
-// and seeds nothing, so a library/service archive (`witness install --path`) — or anyone who simply doesn't want the person-growth starter — begins with
-// no lenses. `witness lens load-default` remains the escape hatch to add it later.
+// and seeds nothing, so a library/service archive begins with no lenses. `witness install`
+// sets it only for an archive chosen by --path or WITNESS_HOME (#199 F018); anyone who wants
+// the standard personal folder blank sets it themselves. `witness lens load-default` remains
+// the escape hatch to add it later.
 const noDefaultLensEnv = "WITNESS_NO_DEFAULT_LENS"
 
 // seedDefaultLensOnOpen is the store.SeedDefaultLens hook: a TRUE one-shot, run once per

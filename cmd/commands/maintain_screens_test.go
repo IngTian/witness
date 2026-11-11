@@ -554,6 +554,49 @@ func TestProvisionSaysCreatedOrAdoptedAndSelectsTheArchive(t *testing.T) {
 	}
 }
 
+// A bare `witness install` on the standard personal folder is any first open: it seeds the
+// default lens and points at wire. Opting out on every install left a new machine's personal
+// archive lens-less for good (#199 F018); only an archive chosen by --path or WITNESS_HOME, or
+// an explicit WITNESS_NO_DEFAULT_LENS=1, starts blank.
+func TestProvisionOptsOutOnlyForAChosenArchive(t *testing.T) {
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	for _, c := range []struct {
+		name            string
+		home, path      bool
+		opt, want, hint string
+	}{
+		{name: "bare", want: "done", hint: hint("connect an editor", wireCommand())},
+		{name: "bare, opted out", opt: "1", want: "opted-out", hint: hint("connect an editor", wireCommand())},
+		{name: "WITNESS_HOME", home: true, want: "opted-out", hint: "witness lens register <name> <dir>"},
+		{name: "--path", path: true, want: "opted-out", hint: "witness lens register <name> <dir>"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", t.TempDir()) // the standard folder, never the owner's
+			t.Setenv("WITNESS_HOME", "")           // restored after: cmdProvision overwrites it
+			t.Setenv(noDefaultLensEnv, c.opt)
+			path := ""
+			if c.home {
+				t.Setenv("WITNESS_HOME", t.TempDir())
+			}
+			if c.path {
+				path = t.TempDir()
+			}
+			out, err := captureStdoutErr(t, func() error { return cmdProvision(path) })
+			if err != nil || !strings.Contains(out, c.hint) {
+				t.Fatalf("(%v) want hint %q:\n%s", err, c.hint, out)
+			}
+			st, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if got := st.MetaString(defaultMigratedKey); got != c.want {
+				t.Errorf("default-lens decision = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestStatusRowsAndTheNextStep(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	out := captureStdout(t, func() { _ = cmdDistillStatus(false) })
