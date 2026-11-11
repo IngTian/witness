@@ -197,7 +197,8 @@ func TestDeleteThenReviewRetiresWithoutRefolding(t *testing.T) {
 	}
 }
 
-// `witness merge` skips the other side's paraphrases of sessions both mined, and its orphans. A
+// `witness merge` skips the other side's paraphrases of sessions both mined, its orphans, and the
+// observations of a session it drops as a second copy of one transcript. A
 // facet it imports resting only on those must survive the next review: left citing ids this
 // archive never holds, the prune read them as deleted and retired the facets the merge had just
 // reported as new. A real delete must still reach the profile through a merge — one of ours (the
@@ -239,7 +240,11 @@ func TestMergedFacetsOnSkippedObservationsSurviveTheNextReview(t *testing.T) {
 	obs(inc, "io1", "s1")  // their wording of bo1: skipped as a paraphrase
 	obs(inc, "x", "s1")    // the backup still holds what we deleted: skipped too
 	obs(inc, "orph", "s2") // mined from a transcript they cleaned up: skipped as an orphan
-	writeFacets(t, inc, citing("paraphrase", "io1"), citing("orphan", "orph"), citing("deleted_there", "gone"))
+	// An older witness held s1 twice, each copy mined: the second is dropped as a duplicate session.
+	mined(inc, "s1@0123abcd")
+	obs(inc, "idup", "s1@0123abcd")
+	writeFacets(t, inc, citing("paraphrase", "io1"), citing("orphan", "orph"), citing("duplicate", "idup"),
+		citing("deleted_there", "gone"))
 	path := filepath.Join(t.TempDir(), "incoming.db")
 	if err := inc.Export(path, false); err != nil {
 		t.Fatal(err)
@@ -250,8 +255,9 @@ func TestMergedFacetsOnSkippedObservationsSurviveTheNextReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
-	if rep.Observations.SharedMined != 2 || rep.Observations.Orphaned != 1 || rep.Facets.New != 3 {
-		t.Fatalf("setup: want 2 paraphrases and 1 orphan skipped, 3 facets new; got %+v %+v", rep.Observations, rep.Facets)
+	if rep.Observations.SharedMined != 2 || rep.Observations.Orphaned != 1 || rep.Sessions.Duplicates != 1 || rep.Facets.New != 4 {
+		t.Fatalf("setup: want 2 paraphrases, 1 orphan and 1 duplicate session skipped, 4 facets new; got %+v %+v %+v",
+			rep.Observations, rep.Sessions, rep.Facets)
 	}
 	hw, err := base.ObservationHighWater()
 	if err != nil {
@@ -259,7 +265,7 @@ func TestMergedFacetsOnSkippedObservationsSurviveTheNextReview(t *testing.T) {
 	}
 	pruneOnly(t, base, base, hw, now)
 
-	for _, k := range []string{"paraphrase", "orphan"} {
+	for _, k := range []string{"paraphrase", "orphan", "duplicate"} {
 		if f := facetNamed(t, base, "default", k); !f.Active() {
 			t.Errorf("%s: the merge imported it as new, and the next review retired it (%q)", k, f.ArchiveReason)
 		}

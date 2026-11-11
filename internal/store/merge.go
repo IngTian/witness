@@ -330,13 +330,16 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc *mergeSide, re
 	if err != nil {
 		return fmt.Errorf("read this archive: %w", err)
 	}
-	kinds, err := classifySessions(ctx, tx, rep)
+	kinds, dupObs, err := classifySessions(ctx, tx, rep)
 	if err != nil {
 		return fmt.Errorf("classify sessions: %w", err)
 	}
 	dropped, err := dropSharedMined(ctx, tx, rep)
 	if err != nil {
 		return fmt.Errorf("skip already-mined sessions: %w", err)
+	}
+	for _, id := range dupObs {
+		dropped[id] = true
 	}
 	if err := mergeL0(ctx, tx, kinds, rep); err != nil {
 		return fmt.Errorf("merge transcripts: %w", err)
@@ -360,8 +363,18 @@ func (s *Store) mergeTx(ctx context.Context, copyPath string, inc *mergeSide, re
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM main.observations`).Scan(&m); err != nil {
 		return err
 	}
-	merged := mergeFacets(base, inc, m, arrivingForBase, arrivingForInc, now, &rep.Facets)
-	stripDroppedCitations(merged, dropped, base.facets)
+	// Ids our own facets cite are never stripped (see stripDroppedCitations). The exception is taken
+	// here, not inside the strip: mergeFacets counts an update on the facet as it will be written, so
+	// it needs the final set.
+	for _, f := range base.facets {
+		for _, v := range f.Versions {
+			for _, id := range v.BecauseOf {
+				delete(dropped, id)
+			}
+		}
+	}
+	merged := mergeFacets(base, inc, m, arrivingForBase, arrivingForInc, dropped, now, &rep.Facets)
+	stripDroppedCitations(merged, dropped)
 	if err := writeFacetsTx(tx, merged); err != nil {
 		return fmt.Errorf("write facets: %w", err)
 	}
@@ -480,15 +493,15 @@ func transcriptHash8(turns []rawTurn) string {
 // that member is the match and the incoming session is renamed to it in the copy. Only when nothing
 // matches and our exact id is taken by a different transcript is a fresh id minted. An incoming
 // session that turns out to be a second copy of one already claimed (a merge back can carry both)
-// is dropped from the copy.
-func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[string]string, error) {
+// is dropped from the copy; the obs_ids that removes are returned (see dropIncomingSession).
+func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[string]string, []string, error) {
 	incoming, err := queryStrings(ctx, tx, `SELECT DISTINCT session FROM inc.raw ORDER BY session`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ours, err := queryStrings(ctx, tx, `SELECT DISTINCT session FROM main.raw`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	family := map[string][]string{}
 	for _, o := range ours {
@@ -500,10 +513,11 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	}
 
 	kinds := map[string]string{}
+	var dupObs []string
 	for _, s := range incoming {
 		theirs, err := readTurns(ctx, tx, "inc", s)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// Our exact id first, then the family root, then its other copies, in a stable order.
 		cands := []string{s, sessionFamily(s)}
@@ -520,7 +534,7 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			seen[c] = true
 			mine, err := readTurns(ctx, tx, "main", c)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if c == s && len(mine) > 0 {
 				oursHasS = true
@@ -541,21 +555,26 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			// The copy already holds that id. If it is the same transcript, this is a duplicate.
 			other, err := readTurns(ctx, tx, "inc", target)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if reflect.DeepEqual(other, theirs) {
-				if err := dropIncomingSession(ctx, tx, s); err != nil {
-					return nil, err
+				ids, err := dropIncomingSession(ctx, tx, s)
+				if err != nil {
+					return nil, nil, err
 				}
+				dupObs = append(dupObs, ids...)
 				delete(held, s)
 				rep.Sessions.Duplicates++
 				continue
 			}
 			target, kind, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), kindNew, true
+			// TODO: target == s for a copy an earlier merge minted; it is dropped as its own duplicate.
 			if held[target] { // same hash: the same transcript under a third id
-				if err := dropIncomingSession(ctx, tx, s); err != nil {
-					return nil, err
+				ids, err := dropIncomingSession(ctx, tx, s)
+				if err != nil {
+					return nil, nil, err
 				}
+				dupObs = append(dupObs, ids...)
 				delete(held, s)
 				rep.Sessions.Duplicates++
 				continue
@@ -563,7 +582,7 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		}
 		if target != s {
 			if err := renameIncomingSession(ctx, tx, s, target); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			delete(held, s)
 			held[target] = true
@@ -586,14 +605,14 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE merge_kind(session TEXT PRIMARY KEY, kind TEXT NOT NULL)`); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for sess, k := range kinds {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO temp.merge_kind(session, kind) VALUES (?, ?)`, sess, k); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return kinds, nil
+	return kinds, dupObs, nil
 }
 
 var mergeSessionTables = []string{"raw", "session_meta", "progress", "observations", "staged"}
@@ -616,13 +635,22 @@ func renameIncomingSession(ctx context.Context, tx *sql.Tx, from, to string) err
 	return dropImporterKeys(ctx, tx, from)
 }
 
-func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess string) error {
+// dropIncomingSession removes a duplicate session from the copy and returns the ids of its
+// observations this archive does not hold, for stripDroppedCitations. The incoming facets may cite
+// them; left cited, they are ids no archive here holds, and the next review retired the facets
+// resting on them as if their evidence had been deleted.
+func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess string) ([]string, error) {
+	ids, err := queryStrings(ctx, tx, `SELECT o.obs_id FROM inc.observations o WHERE o.session = ?
+		AND NOT EXISTS (SELECT 1 FROM main.observations m WHERE m.obs_id = o.obs_id)`, sess)
+	if err != nil {
+		return nil, err
+	}
 	for _, table := range mergeSessionTables {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM inc.`+table+` WHERE session = ?`, sess); err != nil {
-			return fmt.Errorf("drop duplicate from %s: %w", table, err)
+			return nil, fmt.Errorf("drop duplicate from %s: %w", table, err)
 		}
 	}
-	return dropImporterKeys(ctx, tx, sess)
+	return ids, dropImporterKeys(ctx, tx, sess)
 }
 
 func dropImporterKeys(ctx context.Context, tx *sql.Tx, sess string) error {
@@ -702,25 +730,19 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[str
 }
 
 // stripDroppedCitations removes, from every version of the merged facets, the ids dropSharedMined
-// skipped. Left in, they are ids this archive never holds, and the next review's
-// pruneDeletedEvidence reads a missing id as a deleted one: it retired facets this merge imported
-// on purpose, under a reason saying their evidence was deleted. A facet left citing nothing arrives
-// never-cited, which the prune leaves alone; a duplicate of one of ours is compaction's to merge.
+// and dropIncomingSession skipped. Left in, they are ids this archive never holds, and the next
+// review's pruneDeletedEvidence reads a missing id as a deleted one: it retired facets this merge
+// imported on purpose, under a reason saying their evidence was deleted. A facet left citing
+// nothing arrives never-cited, which the prune leaves alone; a duplicate of one of ours is
+// compaction's to merge.
 //
 // It runs on the merged result, not on the incoming facets beforehand: evidenceTime reads these ids,
 // so stripping them first would change which copy wins a same-key clash and which chain extension
-// is adopted. Ids our own facets cite are kept: one of those we do not hold is an observation
-// deleted here (the incoming backup still has it), and the prune must still retire what rested on
-// it. Ids the incoming archive deleted itself were never in its observations, so they are not in
-// `dropped` and the prune still handles them.
-func stripDroppedCitations(merged []Facet, dropped map[string]bool, ours []Facet) {
-	for _, f := range ours {
-		for _, v := range f.Versions {
-			for _, id := range v.BecauseOf {
-				delete(dropped, id)
-			}
-		}
-	}
+// is adopted. Ids our own facets cite are kept (mergeTx takes them out of `dropped` first): one of
+// those we do not hold is an observation deleted here (the incoming backup still has it), and the
+// prune must still retire what rested on it. Ids the incoming archive deleted itself were never in
+// its observations, so they are not in `dropped` and the prune still handles them.
+func stripDroppedCitations(merged []Facet, dropped map[string]bool) {
 	if len(dropped) == 0 {
 		return
 	}
@@ -1138,7 +1160,7 @@ func keyAt(id string) string { return id[strings.LastIndex(id, "|")+1:] }
 // Lineage is a text reference ("dimension/key") resolved within a lens, so a rename rewrites a
 // reference with the rename map of the side it CAME from: a loser's own absorbed facets keep
 // pointing at it, and a reference adopted from the other side follows the other side's renames.
-func mergeFacets(base, inc *mergeSide, mergedHead int64, arrivingForBase, arrivingForInc []string, now time.Time, rep *MergeFacets) []Facet {
+func mergeFacets(base, inc *mergeSide, mergedHead int64, arrivingForBase, arrivingForInc []string, dropped map[string]bool, now time.Time, rep *MergeFacets) []Facet {
 	nowStr := now.UTC().Format(time.RFC3339)
 	baseFacets := cloneFacets(base.facets)
 	incFacets := cloneFacets(inc.facets)
@@ -1218,6 +1240,7 @@ nextIncoming:
 					continue
 				}
 			}
+			before := asWritten(*b, dropped)
 			changed := adoptShared(b, f, rel, allTS)
 			if changed && f.MergedInto != "" && b.MergedInto == f.MergedInto {
 				incomingRef[b] = true
@@ -1225,7 +1248,10 @@ nextIncoming:
 			switch {
 			case rel == chainBaseShorter:
 				rep.FastForwarded++
-			case changed:
+			case changed && !reflect.DeepEqual(before, asWritten(*b, dropped)):
+				// Counted as written. The union still takes in the dropped ids (evidenceTime reads them
+				// for the rest of this merge) and the strip removes them before the write; counted as a
+				// change, they made every re-merge of a session both sides mined report "1 updated".
 				rep.Updated++
 			default:
 				rep.Shared++
@@ -1365,6 +1391,15 @@ func adoptShared(b, f *Facet, rel int, ts map[string]string) bool {
 		b.LastSeen = f.LastSeen
 	}
 	return !reflect.DeepEqual(before, *b)
+}
+
+// asWritten is f as writeFacetsTx will store it: the dropped citations stripped. The second clone
+// turns a list the strip emptied into nil, as an uncited version already is here — DeepEqual tells
+// the two apart, though both are stored as "[]".
+func asWritten(f Facet, dropped map[string]bool) Facet {
+	g := cloneFacets([]Facet{f})
+	stripDroppedCitations(g, dropped)
+	return cloneFacets(g)[0]
 }
 
 func cloneFacets(in []Facet) []Facet {
