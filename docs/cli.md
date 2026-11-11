@@ -96,6 +96,9 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
   and distill them into the archive. Reads from stdin or a file. See the record contract in
   [`prompts/SCHEMA.md`](../prompts/SCHEMA.md#records-in-the-ingest-contract).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
+  In `doctor --json`'s `config` block, `triage_model` and `distill_model` are the raw config.toml
+  fields; `runner`, `mine_model` and `review_model` are what actually runs, each model with a
+  `_from` key saying where it came from.
 - `witness model fetch` — download the embedding model (multilingual-e5-small, ~470MB) once, pinned
   to one revision and checked by SHA-256. `install.sh` and `make fetch-model` run it; re-running
   checks the files instead of downloading them again. `WITNESS_ASSETS` picks the directory, and

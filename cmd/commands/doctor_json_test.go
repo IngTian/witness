@@ -104,12 +104,23 @@ func TestDoctorJSONSucceedsWithAWorkingEmbedder(t *testing.T) {
 	prev := newDoctorEmbedder
 	newDoctorEmbedder = func() (distill.Embedder, error) { return fixedEmbedder{vec: []float32{1, 0, 0}}, nil }
 	t.Cleanup(func() { newDoctorEmbedder = prev })
+	// Only mine_model set: review falls back to it, which the raw distill_model ("") hid (#199 G030).
+	t.Setenv("WITNESS_RUNNER", "")
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configApplySet(st, "mine_model", "claude-haiku-4-5", ""); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
 
 	out, err := captureStdoutErr(t, func() error { return cmdDoctor(true) })
 	if err != nil {
 		t.Fatalf("doctor --json failed with a working embedder: %v (out=%s)", err, out)
 	}
 	var report struct {
+		Config   map[string]any `json:"config"`
 		Embedder struct {
 			Status    string `json:"status"`
 			Dimension int    `json:"dimension"`
@@ -120,6 +131,15 @@ func TestDoctorJSONSucceedsWithAWorkingEmbedder(t *testing.T) {
 	}
 	if report.Embedder.Status != "OK" || report.Embedder.Dimension != 3 {
 		t.Errorf("embedder = %+v, want status OK and dimension 3", report.Embedder)
+	}
+	for key, want := range map[string]string{
+		"triage_model": "claude-haiku-4-5", "distill_model": "", // raw, as typed in config.toml
+		"mine_model": "claude-haiku-4-5", "mine_model_from": "config.toml", // effective
+		"review_model": "claude-haiku-4-5", "review_model_from": "falls back to mine_model",
+	} {
+		if got, ok := report.Config[key]; !ok || got != want {
+			t.Errorf("config.%s = %v (present=%v), want %q", key, got, ok, want)
+		}
 	}
 }
 

@@ -133,6 +133,8 @@ func cmdDoctor(asJSON bool) error {
 	if lastReview == "" {
 		lastReview = "never"
 	}
+	// The models the engine will actually run, with their origin: runner, mine_model, review_model.
+	eff := effectiveConfig(st, nil)
 
 	if asJSON {
 		out := doctorJSON{
@@ -141,6 +143,10 @@ func cmdDoctor(asJSON bool) error {
 				Runner:          cfg.Runner,
 				TriageModel:     cfg.TriageModel,
 				DistillModel:    cfg.DistillModel,
+				MineModel:       eff[1].value,
+				MineModelFrom:   eff[1].from,
+				ReviewModel:     eff[2].value,
+				ReviewModelFrom: eff[2].from,
 				ReviewEvery:     cfg.ReviewEvery,
 				ReviewPoignancy: cfg.ReviewPoignancy,
 				AutoDistill:     cfg.AutoDistill,
@@ -224,7 +230,6 @@ func cmdDoctor(asJSON bool) error {
 	// the EFFECTIVE ones (an empty review_model runs on mine_model), with their origin.
 	fmt.Println()
 	fmt.Println("  " + bold("Distillation"))
-	eff := effectiveConfig(st, nil)
 	row("runner", cyan(cfg.Runner), "via "+runnerCmd+" · "+eff[0].from)
 	for _, s := range eff[1:] {
 		row(s.key, settingValue(s), s.from)
@@ -436,10 +441,19 @@ type doctorJSON struct {
 	Embedder   doctorEmbedderJSON `json:"embedder"`
 }
 
+// doctorConfigJSON mixes raw and effective values, so the split is stated here and in docs/cli.md.
+// triage_model / distill_model are the raw config.toml fields, kept so existing readers keep
+// their meaning. mine_model / review_model (+ _from) are what the engine runs, as human doctor and
+// `config list` show (#199 G030): with only mine_model set, distill_model reads "" while review
+// really runs on mine_model. runner is already the effective value.
 type doctorConfigJSON struct {
 	Runner          string `json:"runner"`
 	TriageModel     string `json:"triage_model"`
 	DistillModel    string `json:"distill_model"`
+	MineModel       string `json:"mine_model"`
+	MineModelFrom   string `json:"mine_model_from"`
+	ReviewModel     string `json:"review_model"`
+	ReviewModelFrom string `json:"review_model_from"`
 	ReviewEvery     int    `json:"review_every"`
 	ReviewPoignancy int    `json:"review_poignancy"`
 	AutoDistill     bool   `json:"auto_distill"`
