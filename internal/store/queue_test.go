@@ -87,11 +87,12 @@ func TestConfidenceLogCount(t *testing.T) {
 // SQLITE_BUSY_SNAPSHOT (517) — a conflict busy_timeout CANNOT retry, because there is no
 // lock to wait for; the snapshot is simply stale. witness is multi-process (a capture hook
 // per user turn, a draining worker, an MCP server), so these must survive a concurrent
-// commit. The two read-then-write sites are StampReview and PruneSessionsBefore; the other
-// transactions in this package write first, which takes the lock immediately, so they are
-// already safe. (DeleteObservation was a third until it stopped reading the lens to reset its
-// review cursor; it writes first now, the DELETE and then the pending-delete upsert. So does
-// WriteFacetsPruned: the facet REPLACE comes before the list update.)
+// commit. The read-then-write sites are StampReview, PruneSessionsBefore and the facet write
+// (WriteFacetsPruned, under WriteFacets/WriteFacetsLogged: it reads user_version before its
+// REPLACE); the other transactions in this package write first, which takes the lock
+// immediately, so they are already safe. (DeleteObservation was one until it stopped reading the
+// lens to reset its review cursor; it writes first now, the DELETE and then the pending-delete
+// upsert.)
 func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -99,6 +100,10 @@ func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 	}{
 		{"StampReview", func(s *Store) error { return s.StampReview() }},
 		{"PruneSessionsBefore", func(s *Store) error { _, _, err := s.PruneSessionsBefore("2025-01-01T00:00:00Z"); return err }},
+		{"WriteFacetsPruned", func(s *Store) error {
+			return s.WriteFacetsPruned([]Facet{{Lens: LensDefault, Dimension: "d", Key: "k",
+				Versions: []FacetVersion{{Value: "v", BecauseOf: []string{"o1"}}}}}, nil, nil)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for attempt := 0; attempt < 5; attempt++ { // the race is timing-dependent

@@ -123,7 +123,11 @@ func (f *facetIO) WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) er
 // facets but still pending, or cleared but never stripped. It removes only those ids, not the
 // whole list: a delete that lands after the review read the list is the next review's to prune.
 func (f *facetIO) WriteFacetsPruned(facets []Facet, events []ConfidenceEvent, pruned []string) error {
-	tx, err := f.db.Begin()
+	// Write lock first: writeFacetsTx READS user_version before its REPLACE, and under WAL a
+	// deferred tx that read and then writes fails with SQLITE_BUSY_SNAPSHOT (517) the moment a
+	// capture hook in another process commits in between, which busy_timeout cannot retry. Every
+	// fold window writes through here, so that cost a model call per collision.
+	tx, err := beginImmediate(f.db)
 	if err != nil {
 		return err
 	}
