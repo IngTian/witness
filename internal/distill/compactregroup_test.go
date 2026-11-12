@@ -194,7 +194,7 @@ func TestARegroupPairKeepsAnExistingSurvivor(t *testing.T) {
 }
 
 // A union whose originals exceed the cap would be written in one call expected to hit the
-// runner's 10-minute wall, so it is not folded: its groups are written separately, as before.
+// runner's 20-minute wall, so it is not folded: its groups are written separately, as before.
 func TestAUnionOverTheCapStaysSplit(t *testing.T) {
 	n := compactUnionMaxChars/4 + 1 // four of these exceed the cap together
 	st := &fakeCompactStore{}
@@ -215,6 +215,25 @@ func TestAUnionOverTheCapStaysSplit(t *testing.T) {
 	}
 	if plan.Skipped["regroup_union_over_cap"] != 1 {
 		t.Errorf("the capped union should be tallied, got %v", plan.Skipped)
+	}
+}
+
+// The owner's largest duplicate cluster (trading: 41 facets, ~24.3k chars) stayed split under the
+// 20k cap the 10-minute wall set. The wall is 20 minutes now, so a union that size folds.
+func TestAUnionTheSizeOfTheTradingClusterFolds(t *testing.T) {
+	n := 24_300 / 4
+	st := &fakeCompactStore{}
+	for _, k := range []string{"a", "b", "c", "d"} {
+		st.facets = append(st.facets, cf("thinking", k, k+strings.Repeat(".", n-1), 0.7, 1))
+	}
+	_, f := twoBatchRounds()
+	f.regroup = replies(actionsJSON(mg("g", "one mechanism", 0, "g1", "g2")))
+	long := strings.Repeat("m", n)
+	f.write = func(string) (string, error) { return long, nil }
+
+	_, plan := planWith(t, st, f, 2*n)
+	if got := keysOf(plan.Actions); !slices.Equal(got, []string{"g"}) || len(f.writes) != 1 {
+		t.Errorf("a 24.3k-char union should fold into one write, got %v in %d writes (skipped %v)", got, len(f.writes), plan.Skipped)
 	}
 }
 

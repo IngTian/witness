@@ -151,7 +151,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// down in-flight `claude -p` children too — the ctx threads worker→Drain→
 	// MineSession→Run→exec.CommandContext, and cancelling it sends the child a kill.
 	// Without this, stopping the parent left up to `conc` orphaned children running with
-	// no bound at all — their 10-min timeout is a context THIS process enforces, so it
+	// no bound at all — their 20-min timeout is a context THIS process enforces, so it
 	// dies with it (issue #22 audit; on Windows the stop is a TerminateProcess this never
 	// sees, which is #216). runner.Close still runs (deferred)
 	// to sweep any OpenCode distill sessions. proc.NotifyStop is the port's

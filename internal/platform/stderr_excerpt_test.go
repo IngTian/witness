@@ -6,7 +6,7 @@ import (
 )
 
 // A failed child's stderr is interpolated into an error that becomes ONE line in witness.log,
-// and that stderr is unbounded across the 10-minute timeout — so a chatty or looping CLI
+// and that stderr is unbounded across the 20-minute timeout — so a chatty or looping CLI
 // could write a single multi-megabyte log line. This bounds it.
 func TestStderrExcerptBoundsAnEnormousStderr(t *testing.T) {
 	huge := strings.Repeat("noise ", 2_000_000) + "THE REAL ERROR"

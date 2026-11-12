@@ -179,3 +179,13 @@ func TestClaudeRunFailureKeepsStdout(t *testing.T) {
 		t.Errorf("the error drops the child's stdout, where `claude -p` prints its error: %v", err)
 	}
 }
+
+// The owner's call: one `claude -p` may run 20 minutes. The worker is async, so a stuck call
+// holding it that long is the accepted price, and compaction's union writes are sized against this
+// wall (distill's compactUnionMaxChars folds the 24k-char cluster the 10-minute wall would kill).
+// Lowering it silently re-breaks those writes.
+func TestAClaudeCallMayRunTwentyMinutes(t *testing.T) {
+	if claudeRunTimeout != 20*time.Minute {
+		t.Errorf("claudeRunTimeout = %s; compaction's union cap is sized for a 20-minute wall", claudeRunTimeout)
+	}
+}

@@ -52,7 +52,7 @@ import (
 // applyFacet — the model judges what is the same, code enforces what may be done about it.
 const (
 	// compactBatchChars bounds one compaction call's facet payload. Sized like
-	// ReviewMaxChars: well inside the runner's 10-minute wall, since the reply is long
+	// ReviewMaxChars: well inside the runner's 20-minute wall, since the reply is long
 	// (merged values are rewritten prose, not verdicts). ~50 average facets per batch.
 	compactBatchChars = 60_000
 
@@ -83,13 +83,16 @@ const (
 
 	// compactUnionMaxChars caps a regroup union by its original facets' total value size. A union
 	// is written by ONE stage-2 call and a merged value runs ~1.08x its inputs, so on the owner's
-	// archive the duplicate clusters would write 13-26k chars, where 3 of the 6 writes ever
-	// measured at 19k+ hit or nearly hit the wall and the largest success was 21k out of 24.7k in.
-	// Over the cap the union is not folded and its round-1 groups are written as before, rather
-	// than burning ten minutes on a call expected to fail before falling back.
-	// ponytail: a fixed size standing in for claudeRunTimeout's 10-minute wall (one var shared by
-	// every claude -p call); give compaction writes their own budget if big clusters must join.
-	compactUnionMaxChars = 20_000
+	// archive the duplicate clusters would write 13-26k chars. Against the old 10-minute wall, 3
+	// of the 6 writes ever measured at 19k+ hit or nearly hit it and the largest success was 21k
+	// out of 24.7k in; generation time tracks output, so the 20-minute wall roughly doubles that,
+	// and 40k lets the largest cluster (trading, ~24.3k) fold. Over the cap the union is not
+	// folded and its round-1 groups are written as before, rather than burning twenty minutes on
+	// a call expected to fail before falling back.
+	// ponytail: a fixed size standing in for claudeRunTimeout's 20-minute wall (one var shared by
+	// every claude -p call), extrapolated from 10-minute measurements; give compaction writes
+	// their own budget, or measure a 40k write, if a union this size starts timing out.
+	compactUnionMaxChars = 40_000
 )
 
 // compactAction is one proposed structural change. A single JSON array carries both kinds so

@@ -17,7 +17,7 @@ import (
 // the structure that came out of that, and the two ways stage 2 could quietly do damage.
 
 // Stage 1 must never be asked for values, and stage 2 must be one call per group. If these drift
-// back together the 10-minute wall returns and deep merges silently stop happening.
+// back together that wall returns and deep merges silently stop happening.
 func TestGroupingAndWritingAreSeparateCalls(t *testing.T) {
 	st := &fakeCompactStore{facets: []store.Facet{
 		cf("thinking", "a", "va", 0.7, 1),

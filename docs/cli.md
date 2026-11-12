@@ -143,7 +143,7 @@ usually worth it.
 session whole is the best-quality path — splitting it loses insight that spans the session, like a
 decision made early and confirmed late — so raise `chunk_max_chars` off 0 only if a giant session
 actually times out. `review_max_chars` exists so a large review backlog is folded in windows
-rather than one call that rides the 10-minute runner timeout and freezes the profile.
+rather than one call that rides the 20-minute runner timeout and freezes the profile.
 
 Set `auto_distill = false` for capture-only mode on battery-constrained machines, then run
 `witness worker run --detach` manually when plugged in. Automatic workers are short-lived: they load the
