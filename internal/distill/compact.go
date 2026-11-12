@@ -712,7 +712,13 @@ func splitClaim(reply string) (claim, value string) {
 			continue
 		}
 		head := strings.TrimSpace(strings.Join(lines[:i], "\n"))
-		head = strings.TrimSpace(strings.TrimPrefix(head, "CLAIM:"))
+		// The claim is what follows the CLAIM: marker, never what comes before it: a claude -p
+		// write once opened "Waiting on the three completeness checks." and that line rode into the
+		// stored claim, which every later review reads. No marker: the whole head, as before.
+		if j := strings.LastIndex(head, "CLAIM:"); j == 0 || (j > 0 && head[j-1] == '\n') {
+			head = head[j+len("CLAIM:"):]
+		}
+		head = strings.TrimSpace(head)
 		body := strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
 		if head == "" || body == "" {
 			break // a delimiter with nothing either side is not a split; treat it as prose

@@ -177,6 +177,10 @@ func TestSplitClaimParsesBothPartsAndDegradesSafely(t *testing.T) {
 		t.Errorf("a reply with no delimiter should be value-only, got claim=%q value=%q", claim, value)
 	}
 	// A delimiter with nothing on one side is not a split.
+	// A preamble before the marker (seen from a real write) never reaches the stored claim.
+	if c, v := splitClaim("Waiting on the three completeness checks.\n\nCLAIM: He learns by doing\n---\nbody"); c != "He learns by doing" || v != "body" {
+		t.Errorf("a preamble before CLAIM: leaked: claim %q, value %q", c, v)
+	}
 	if c, v := splitClaim("---\nonly a body"); c != "" || !strings.Contains(v, "only a body") {
 		t.Errorf("a headless split should be treated as prose, got claim=%q value=%q", c, v)
 	}

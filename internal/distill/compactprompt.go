@@ -133,7 +133,8 @@ WHAT MUST SURVIVE. Every distinct thing any input facet contributes:
   - every concrete instance and example, with its detail intact
   - every observation id (the obs_... references) exactly as written
   - every quoted phrase, in the source's own words
-  - every date, count and measurement
+  - every date, count and measurement, written exactly as the input writes it (2026-08-13 stays
+    2026-08-13: a date that loses its year is a different fact)
   - every COST, limit, caveat or provenance note
   - every falsifier — the conditions that would raise, lower or close the claim
 
@@ -160,7 +161,9 @@ sentence, then number or label the distinct faces of it, then any cost, limit or
 inputs state. Do not write a falsifier, cost or recommendation (how-to-act advice included)
 that no input makes: it would be an unsupported claim, so a section with nothing from the inputs
 to put in it is left out. Keep the register of the inputs — specific and behavioural, citing
-evidence — not abstract characterisation.
+evidence — not abstract characterisation. Write it as a standalone facet for a reader who never
+sees the facets you were given: the value and its headings never mention "the inputs", the
+source facets or this merge.
 
 STAY IN YOUR LANE. If you are shown other traits from the same dimension, they are being written
 by other calls. Do not describe, generalise about or expand into their mechanisms: overlapping
@@ -183,4 +186,4 @@ Everything after the dashes is the complete value: the instances, the evidence, 
 costs and falsifiers the inputs state, all of it, exactly as instructed above. Nothing is
 dropped because the claim exists; the claim is an additional short handle, not a replacement.
 
-No JSON, no code fence, no preamble, no commentary about what you did.`
+Start your reply with "CLAIM:". No JSON, no code fence, no preamble, no commentary about what you did.`

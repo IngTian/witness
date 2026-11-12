@@ -201,6 +201,7 @@ func TestTheWritePromptBoundsLengthByItsInputs(t *testing.T) {
 		"that no input makes",
 		"then any cost, limit or falsifier the inputs state",
 		"whatever costs and falsifiers the inputs state",
+		"written exactly as the input writes it", "never mention \"the inputs\"", "start your reply with \"claim:\"",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("the write prompt lost %q", want)
