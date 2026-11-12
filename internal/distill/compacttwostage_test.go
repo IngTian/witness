@@ -108,6 +108,43 @@ func TestStageTwoIsToldWhatItsSiblingsCover(t *testing.T) {
 	}
 }
 
+// Stage 2 is told every number in its input must survive, so any store bookkeeping it is shown
+// becomes "evidence": on an A/B of the owner's archive, 20-25 of ~48 merged values carried a
+// copied "confidence 0.42, 1 version, last seen ..." that was stale the moment it was written.
+// The writer has no use for it (confidence comes from stage 1), so it gets key and value only.
+func TestStageTwoSeesOnlyKeysAndValues(t *testing.T) {
+	st := &fakeCompactStore{facets: []store.Facet{
+		cf("thinking", "a", "value-a", 0.37, 3),
+		cf("thinking", "b", "value-b", 0.37, 1),
+	}}
+	var writeInput string
+	c := compactor(st, "")
+	c.Runner = func(_ context.Context, _, _, input string) (string, error) {
+		if strings.Contains(input, "THE TRAIT YOU ARE WRITING") {
+			writeInput = input
+			return mergedValue, nil
+		}
+		return `[{"action":"merge","dimension":"thinking","key":"t","absorb":["a","b"],"why":"w"}]`, nil
+	}
+	if _, err := c.Plan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if writeInput == "" {
+		t.Fatal("no write call was made, so nothing below is exercised")
+	}
+	for _, want := range []string{"--- a\n", "value-a", "--- b\n", "value-b"} {
+		if !strings.Contains(writeInput, want) {
+			t.Errorf("stage 2 must see each member's key and value, missing %q", want)
+		}
+	}
+	// cf stamps LastSeen 2026-10-01; "version" covers both "3 version(s)" and "versions: 3".
+	for _, leak := range []string{"0.37", "confidence", "version", "last_seen", "2026-10-01"} {
+		if strings.Contains(writeInput, leak) {
+			t.Errorf("stage 2 input carries store metadata %q, which the model copies into the value", leak)
+		}
+	}
+}
+
 // The central risk of the whole feature: a merge that READS well while dropping nine facets'
 // worth of specifics turns "90%% fewer facets" into data loss dressed as a win. A value shorter
 // than the longest thing it absorbs is the cheap, prose-blind tell.

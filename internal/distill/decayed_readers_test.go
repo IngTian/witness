@@ -61,8 +61,10 @@ func TestCompactionShowsTheModelDecayedConfidence(t *testing.T) {
 	if !strings.Contains(stage1, "confidence: 0.45") || strings.Contains(stage1, "confidence: 0.90") {
 		t.Errorf("stage 1 (grouping) must show the decayed 0.45, not the stored 0.90:\n%s", stage1)
 	}
-	if !strings.Contains(stage2, "(confidence 0.45") || strings.Contains(stage2, "(confidence 0.90") {
-		t.Errorf("stage 2 (writing) must show the decayed 0.45, not the stored 0.90:\n%s", stage2)
+	// Stage 2 is shown no confidence at all: it has no use for one and copied it into values
+	// (TestStageTwoSeesOnlyKeysAndValues). A stored 0.90 reaching it would be worse still.
+	if strings.Contains(stage2, "0.45") || strings.Contains(stage2, "0.90") {
+		t.Errorf("stage 2 (writing) must be shown no confidence, decayed or stored:\n%s", stage2)
 	}
 }
 

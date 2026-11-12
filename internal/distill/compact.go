@@ -141,8 +141,9 @@ type Compactor struct {
 	prog     compactProgress
 
 	// decaySeq is the observation high-water mark, read once by Plan, so every confidence the
-	// model is shown is the CURRENT (decayed) one. Both stages used to render the stored value:
-	// a facet stored at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh
+	// model is shown is the CURRENT (decayed) one. Only grouping is shown any (the writer gets
+	// key and value alone, see renderMergeInput), and it used to render the stored value: a
+	// facet stored at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh
 	// 0.59 duplicate looking like the stronger claim, the model returned ~0.90 for the survivor,
 	// and Apply gave that survivor the fresher member's clock — so a stale confidence came out
 	// fresh. The review already sends decayed values (slimFacets); compaction now agrees with it.
@@ -430,7 +431,7 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 func (c *Compactor) writeOne(ctx context.Context, ln *lens.Lens, dim string,
 	group compactAction, members []store.Facet, siblings []compactAction) (claim, value string, err error) {
 
-	input := renderMergeInput(ln.Name, dim, group, members, siblings, c.decaySeq)
+	input := renderMergeInput(ln.Name, dim, group, members, siblings)
 	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), compactWritePrompt, input)
 	if err != nil {
 		return "", "", err
@@ -804,7 +805,13 @@ func compactBatches(facets []store.Facet, budget int) [][]store.Facet {
 // their territory and the dimension ends up with coarse-grained overlap — the same redundancy
 // compaction removed, re-created one level up. Names and one-line reasons are enough to fence
 // each call; their full values are not needed and would blow the payload back up.
-func renderMergeInput(lensName, dim string, group compactAction, members []store.Facet, siblings []compactAction, decaySeq int64) string {
+//
+// Members carry key and value ONLY. The prompt says every number must survive, so the
+// confidence/versions/last_seen header this used to print was copied into 20-25 of ~48 merged
+// values on an A/B of the owner's archive, stale the moment it was written. The writer has no
+// use for it: the survivor's confidence comes from grouping (renderCompactBatch keeps the
+// signals, and its JSON reply has no value text for them to leak into).
+func renderMergeInput(lensName, dim string, group compactAction, members []store.Facet, siblings []compactAction) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "LENS: %s\nDIMENSION: %s\n\n", lensName, dim)
 	fmt.Fprintf(&b, "THE TRAIT YOU ARE WRITING: %s\nWHY THESE WERE GROUPED: %s\n\n", group.Key, group.Why)
@@ -815,8 +822,7 @@ func renderMergeInput(lensName, dim string, group compactAction, members []store
 		if cur == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "--- %s (confidence %.2f, %d version(s), last_seen %s)\n%s\n\n",
-			m.Key, cur.DecayedConfidence(decaySeq), len(m.Versions), m.LastSeen, cur.Value)
+		fmt.Fprintf(&b, "--- %s\n%s\n\n", m.Key, cur.Value)
 	}
 
 	var others []compactAction
