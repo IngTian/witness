@@ -177,6 +177,35 @@ func TestAMergedValueShorterThanItsLargestInputIsRefused(t *testing.T) {
 	}
 }
 
+// The write prompt once asked for "about as long as the LONGEST facet, never more than twice
+// it" while also demanding every instance survive. A group is distinct episodes of one
+// mechanism, so the two cannot both hold: on an A/B over the owner's archive 2-3 of ~48 merges
+// landed in the band, and meeting it would have dropped a median ~40% of the input text. The
+// model kept the evidence and broke the band, and its STRUCTURE made it invent falsifier and
+// cost sections no input had (15-17 groups per run). This pins the replacement: a ceiling at
+// the sum, the floor the code enforces, the preservation list, and no invented sections.
+func TestTheWritePromptBoundsLengthByItsInputs(t *testing.T) {
+	p := strings.ToLower(strings.Join(strings.Fields(compactWritePrompt), " "))
+	for _, gone := range []string{"twice", "band", "overlap heavily", "the bulk of it"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("the write prompt still carries the unreachable length band: %q", gone)
+		}
+	}
+	for _, want := range []string{
+		"never longer than the facets you were given put together",
+		"must not be shorter than the longest one", "it will be rejected",
+		"state each distinct thing once", "cut repeated description, never evidence",
+		"every concrete instance and example, with its detail intact",
+		"every observation id", "every quoted phrase", "every date, count and measurement",
+		"every cost, limit, caveat or provenance note", "every falsifier",
+		"that no input makes",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the write prompt lost %q", want)
+		}
+	}
+}
+
 // The empty check has to be tested in ISOLATION, which needs members whose own values are
 // empty so `longest` is 0 and the length guard CANNOT fire. Without that, writeOne trims a
 // whitespace-only reply to "" and the length guard catches it instead — so deleting the empty

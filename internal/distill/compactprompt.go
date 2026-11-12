@@ -100,27 +100,25 @@ mentioned by only one facet is the single way this task fails.
 
 LENGTH — AIM FOR THE UNION, NOT THE SUM.
 
-  Target: about as long as the LONGEST facet you were given, and never more than twice it. It
-  must not be SHORTER than the longest one — that would mean you dropped content, and it will be
-  rejected.
+  Ceiling: never longer than the facets you were given put together, and shorter wherever they
+  restate each other. Floor: it must not be SHORTER than the longest one — that would mean you
+  dropped content, and it will be rejected. There is no other target: do not pad, and do not
+  cut evidence to reach one.
 
-  That band is achievable because these facets overlap heavily. They describe ONE mechanism, and
-  each was written by a separate pass that did not know the others existed, so the same claim
-  appears four or nine times in four or nine different wordings. The union of what they say is
-  far smaller than their total length; the repetition is the bulk of it.
+  State each distinct thing ONCE. Do not restate one mechanism in four phrasings because four
+  facets did. Do not keep four separate "why this matters" passages that make the same point.
+  Do not re-explain the trait before each instance.
 
-  So: state each distinct thing ONCE. Do not restate one mechanism in four phrasings because
-  four facets did. Do not keep four separate "why this matters" passages that make the same
-  point. Do not re-explain the trait before each instance.
-
-  What you must NOT drop to hit the band: any concrete instance, any observation id, any quoted
-  phrase, any date or measurement, any cost or falsifier. Those are the irreducible content and
-  together they are a small fraction of the text. Cut repeated DESCRIPTION, never evidence.
+  What you must NOT drop to make it shorter: any concrete instance, any observation id, any
+  quoted phrase, any date or measurement, any cost or falsifier. Those are the irreducible
+  content. Cut repeated DESCRIPTION, never evidence.
 
 STRUCTURE. Organise a long value so it stays readable: name the disposition in the first
-sentence, then number or label the distinct faces of it, then the cost or limit, then the
-falsifiers. Keep the register of the inputs — specific and behavioural, citing evidence — not
-abstract characterisation.
+sentence, then number or label the distinct faces of it, then any cost, limit or falsifier the
+inputs state. Do not write a falsifier, cost or recommendation (how-to-act advice included)
+that no input makes: it would be an unsupported claim, so a section with nothing from the inputs
+to put in it is left out. Keep the register of the inputs — specific and behavioural, citing
+evidence — not abstract characterisation.
 
 STAY IN YOUR LANE. If you are shown other traits from the same dimension, they are being written
 by other calls. Anything belonging to one of them is theirs to cover; do not restate it here.
@@ -137,8 +135,8 @@ disposition and its mechanism in a way that someone could judge new evidence aga
 instances, no observation ids, no falsifiers, no cross-references — those live in the full value
 below. Think of it as the sentence you would use to tell someone what this trait is.
 
-Everything after the dashes is the complete value: the instances, the evidence, the costs, the
-falsifiers, all of it, exactly as instructed above. Nothing is dropped because the claim exists;
-the claim is an additional short handle, not a replacement.
+Everything after the dashes is the complete value: the instances, the evidence, and whatever
+costs and falsifiers the inputs state, all of it, exactly as instructed above. Nothing is
+dropped because the claim exists; the claim is an additional short handle, not a replacement.
 
 No JSON, no code fence, no preamble, no commentary about what you did.`
