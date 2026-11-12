@@ -28,7 +28,7 @@ func TestCompactProgressCountsEveryCall(t *testing.T) {
 		cf("thinking", "c", "value c", 0.7, 1), cf("thinking", "d", "value d", 0.7, 1),
 	}}
 	c := compactor(st, `[{"action":"merge","dimension":"thinking","key":"a","value":"merged","absorb":["b","c"],"confidence":0.8,"why":"same"}]`)
-	c.BatchChars = 21 // a, b, c (7 chars each) fill one batch; d is a second
+	c.BatchChars = 21 // a, b, c (7 chars each) fill one batch; d is a second, so a regroup joins them
 	inner := c.Runner
 	groups, writes := 0, 0
 	c.Runner = func(ctx context.Context, model, system, input string) (string, error) {
@@ -48,7 +48,7 @@ func TestCompactProgressCountsEveryCall(t *testing.T) {
 	if len(evs) == 0 {
 		t.Fatal("Plan reported no progress")
 	}
-	if g := stage(t, evs[0], "grouping"); g.Total != 2 || g.Done != 0 {
+	if g := stage(t, evs[0], "grouping"); g.Total != 3 || g.Done != 0 {
 		t.Errorf("the first event must carry the full grouping total before any call: %+v", g)
 	}
 	for i := 1; i < len(evs); i++ {

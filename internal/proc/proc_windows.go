@@ -33,7 +33,7 @@ func (sys) Detach(cmd *exec.Cmd) {
 // stop context (NotifyStop, which cancels the drain ctx and thus its `claude -p`
 // children on Unix) never runs here, and TerminateProcess does not cascade to
 // children — up to mine_concurrency `claude -p` can orphan on a Windows stop, with
-// nothing bounding them (the 10-min claudeRunTimeout is a context the worker itself
+// nothing bounding them (the 20-min claudeRunTimeout is a context the worker itself
 // enforces, and the worker is what just died), and so does the `opencode serve` child,
 // which only the pid-file reaper (opencode reapPriorServe) cleans up, at the next
 // drain. The fix is to put the worker itself into a KILL_ON_JOB_CLOSE Job Object at

@@ -137,7 +137,7 @@ func TestReviewerFailedLensDoesNotStamp(t *testing.T) {
 // TestReviewFoldsOnlyObsSinceWatermark is the #16 structural fix: after a lens is
 // reviewed, the NEXT review folds ONLY the observations recorded since that lens's
 // fold watermark — not the whole corpus. This is what bounds the reviewer input by
-// "what's new" instead of archive size (the 10-min / context cliff at scale).
+// "what's new" instead of archive size (the 20-min / context cliff at scale).
 func TestReviewFoldsOnlyObsSinceWatermark(t *testing.T) {
 	s := newStore(t)
 
@@ -208,7 +208,7 @@ func bigObs(t *testing.T, s *store.Store, n int) {
 
 // TestReviewChunksLargeDeltaByReviewMaxChars (issue #123): a delta whose serialized size
 // exceeds ReviewMaxChars must be folded in MORE THAN ONE reviewLens call, each bounded —
-// not one giant call that would ride the 10-min timeout.
+// not one giant call that would ride the 20-min timeout.
 func TestReviewChunksLargeDeltaByReviewMaxChars(t *testing.T) {
 	s := newStore(t)
 	bigObs(t, s, 10) // ~3KB+ of serialized obs

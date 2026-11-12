@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -51,7 +52,7 @@ import (
 // applyFacet — the model judges what is the same, code enforces what may be done about it.
 const (
 	// compactBatchChars bounds one compaction call's facet payload. Sized like
-	// ReviewMaxChars: well inside the runner's 10-minute wall, since the reply is long
+	// ReviewMaxChars: well inside the runner's 20-minute wall, since the reply is long
 	// (merged values are rewritten prose, not verdicts). ~50 average facets per batch.
 	compactBatchChars = 60_000
 
@@ -79,6 +80,20 @@ const (
 	// it moves a facet's identity without combining anything, which loses the old key with no
 	// consolidation gain. Renames are not what compaction is for, so they are refused.
 	compactMinAbsorb = 2
+
+	// compactUnionMaxChars caps a regroup union by its original facets' total value size. A union
+	// is written by ONE stage-2 call and a merged value runs ~1.08x its inputs, so on the owner's
+	// archive the duplicate clusters would write 13-26k chars. Against the old 10-minute wall, 3
+	// of the 6 writes ever measured at 19k+ hit or nearly hit it and the largest success was 21k
+	// out of 24.7k in. Measured on the owner's archive with the 20-minute wall (2026-11-12): a
+	// 24.3k-original union wrote in 6.1 min and a 28.6k one in 3.5 min, so 60k leaves room for the
+	// largest cluster there (self-worth, 41.3k, which a 40k cap refused). Over the cap the union is
+	// not folded and its round-1 groups are written as before, rather than burning twenty minutes
+	// on a call expected to fail before falling back.
+	// ponytail: a fixed size standing in for claudeRunTimeout's 20-minute wall (one var shared by
+	// every claude -p call); give compaction writes their own budget, or measure a 60k write, if a
+	// union this size starts timing out.
+	compactUnionMaxChars = 60_000
 )
 
 // compactAction is one proposed structural change. A single JSON array carries both kinds so
@@ -92,6 +107,10 @@ type compactAction struct {
 	Absorb     []string `json:"absorb"`     // merge only: keys folded into Key
 	Why        string   `json:"why"`        // recorded in the log, and shown in a dry run
 	Confidence float64  `json:"confidence"` // merge only: confidence in the survivor
+
+	// split is a regroup union's round-1 groups, written instead when the union's own write
+	// fails or is refused, so the regroup round can never leave a dimension worse than round 1.
+	split []compactAction
 }
 
 // CompactPlan is what one lens's pass proposes. Produced by Plan (which writes nothing) and
@@ -141,8 +160,9 @@ type Compactor struct {
 	prog     compactProgress
 
 	// decaySeq is the observation high-water mark, read once by Plan, so every confidence the
-	// model is shown is the CURRENT (decayed) one. Both stages used to render the stored value:
-	// a facet stored at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh
+	// model is shown is the CURRENT (decayed) one. Only grouping is shown any (the writer gets
+	// key and value alone, see renderMergeInput), and it used to render the stored value: a
+	// facet stored at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh
 	// 0.59 duplicate looking like the stronger claim, the model returned ~0.90 for the survivor,
 	// and Apply gave that survivor the fresher member's clock — so a stale confidence came out
 	// fresh. The review already sends decayed values (slimFacets); compaction now agrees with it.
@@ -196,12 +216,17 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 		return nil, fmt.Errorf("read observation high-water: %w", err)
 	}
 	// Every grouping batch is known before the first call (batching is local), so the total is
-	// exact from the start; only the merges are discovered as we go.
+	// exact from the start; only the merges are discovered as we go. A multi-batch dimension adds
+	// its regroup call.
 	c.prog = compactProgress{}
 	for _, ln := range c.Lenses {
 		active := activeForLens(all, ln.Name)
 		for _, dim := range dimensionsOf(active) {
-			c.prog.groups += len(compactBatches(facetsInDimension(active, dim), c.batchChars()))
+			n := len(compactBatches(facetsInDimension(active, dim), c.batchChars()))
+			c.prog.groups += n
+			if n > 1 {
+				c.prog.groups++
+			}
 		}
 	}
 	c.tick()
@@ -238,7 +263,8 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 		c.prog.lens, c.prog.dim = ln.Name, dim
 		c.tick()
 		var grouped []compactAction // stage-1 output for THIS dimension, awaiting values
-		for _, batch := range compactBatches(inDim, c.batchChars()) {
+		batches := compactBatches(inDim, c.batchChars())
+		for _, batch := range batches {
 			actions, err := c.groupBatch(ctx, ln, dim, batch)
 			c.prog.grouped++ // a failed call is still a call done
 			c.tick()
@@ -275,6 +301,11 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 				grouped = append(grouped, a)
 			}
 		}
+		if len(batches) > 1 {
+			grouped = c.regroup(ctx, ln, dim, inDim, grouped, byKey, claimed, &plan)
+			c.prog.grouped++
+			c.tick()
+		}
 
 		// STAGE 2 — write one merged value per group, each in its own bounded call.
 		//
@@ -295,27 +326,7 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 		// Collapse guard, per dimension and BEFORE the actions are accepted: count what this
 		// dimension would be left with. Archiving a lot is the goal; being left with almost
 		// nothing is the failure.
-		survivors := len(inDim)
-		for _, a := range written {
-			if a.Action == "merge" {
-				survivors -= len(a.Absorb)
-				if _, existed := byKey[store.FacetRef(dim, a.Key)]; !existed {
-					survivors++ // a new abstraction key adds a facet
-				}
-			} else {
-				survivors--
-			}
-		}
-		floor := compactMinSurvivors
-		if len(inDim) < compactCollapseGuardMin {
-			// No floor on a small dimension. It may legitimately turn out to BE one
-			// disposition, and a dimension holding a single junk facet should be emptiable —
-			// retiring it loses no distinction, which is the only thing this guard protects.
-			// Enforcing any floor here repeats the mistake the fraction cap made: blocking the
-			// work compaction exists to do. The dry run shows the entire plan at this size.
-			floor = 0
-		}
-		if survivors < floor {
+		if survivors, floor := survivorsAfter(inDim, dim, written, byKey); survivors < floor {
 			slog.Error("compact: refusing a plan that would collapse a dimension",
 				"lens", ln.Name, "dimension", dim, "facets", len(inDim),
 				"would_survive", survivors, "floor", floor)
@@ -356,6 +367,31 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 	return plan
 }
 
+// survivorsAfter projects how many facets a dimension keeps once actions apply, and the floor it
+// may not go below. Shared by the collapse guard and the regroup round, which must agree on both.
+func survivorsAfter(inDim []store.Facet, dim string, actions []compactAction, byKey map[string]store.Facet) (survivors, floor int) {
+	survivors = len(inDim)
+	for _, a := range actions {
+		if a.Action == "merge" {
+			survivors -= len(a.Absorb)
+			if _, existed := byKey[store.FacetRef(dim, a.Key)]; !existed {
+				survivors++ // a new abstraction key adds a facet
+			}
+		} else {
+			survivors--
+		}
+	}
+	if len(inDim) < compactCollapseGuardMin {
+		// No floor on a small dimension. It may legitimately turn out to BE one
+		// disposition, and a dimension holding a single junk facet should be emptiable —
+		// retiring it loses no distinction, which is the only thing this guard protects.
+		// Enforcing any floor here repeats the mistake the fraction cap made: blocking the
+		// work compaction exists to do. The dry run shows the entire plan at this size.
+		return survivors, 0
+	}
+	return survivors, compactMinSurvivors
+}
+
 // groupBatch is STAGE 1: one model call that decides which facets are the same disposition and
 // returns ONLY names. No values.
 //
@@ -381,6 +417,210 @@ func (c *Compactor) groupBatch(ctx context.Context, ln *lens.Lens, dim string, b
 	return actions, nil
 }
 
+// regroupExcerptRunes bounds a lone facet's line in the regroup input: its claim, or for a facet
+// with none the opening of its value, where a written facet names its disposition. Claims run
+// ~250 chars, so 400 runes keeps a claim whole while an unclaimed 3k value no longer rides along.
+const regroupExcerptRunes = 400
+
+// regroupUnit is one line of the regroup round: a round-1 group, or a facet round 1 left alone.
+type regroupUnit struct {
+	group  int      // index into round 1's actions; -1 for a lone facet
+	facets []string // the original facets it stands for, an existing survivor included
+}
+
+// regroup joins what round 1 formed separately when a dimension needed more than one batch, and
+// returns round 1's actions with each accepted union folded into ONE merge.
+//
+// Round 1 can only merge within a batch (validateGrouping), and each batch is told it sees the
+// whole dimension and should end near fifteen, so a split dimension ended near batches x 12 with
+// one trait formed once per batch. On an A/B over the owner's archive, state's 4 batches left 48
+// survivors holding 7 obvious duplicate clusters (23 facets that should be 7), and in no cluster
+// did two members share a batch. Re-running does not fix it: the survivors re-batch the same way,
+// and only 9-12 of the 29 duplicate pairs then share one.
+//
+// So one merges-only call sees the whole dimension at the grain round 1 left it: each group as
+// its key and why, each lone facet as its key and claim (or its value's opening, when it has no
+// claim) — ~12k chars for state's 275 facets, against 58-71k per round-1 batch. No numbers, so
+// nothing the writer could later copy. A union is folded into one action over the ORIGINAL
+// facets, so stage 2 writes each trait once from its sources rather than merging merged prose.
+// Every failure keeps round 1 as it was, and so does a set of unions that would collapse the
+// dimension.
+//
+// ponytail: one call over every unit, each at most its key plus regroupExcerptRunes, so the input
+// grows with the unit count, not the values: ~54k chars at most on the owner's archive, and ~130
+// unclaimed English units (a third of that in CJK) fill compactBatchChars. Batch it the way round
+// 1 is if units ever outgrow that.
+func (c *Compactor) regroup(ctx context.Context, ln *lens.Lens, dim string, inDim []store.Facet,
+	grouped []compactAction, byKey map[string]store.Facet, claimed map[string]bool, plan *CompactPlan) []compactAction {
+
+	units := map[string]regroupUnit{}
+	var b strings.Builder
+	for i, a := range grouped {
+		if a.Action != "merge" {
+			continue
+		}
+		u := regroupUnit{group: i, facets: slices.Clone(a.Absorb)}
+		if _, ok := byKey[store.FacetRef(dim, a.Key)]; ok {
+			u.facets = append(u.facets, a.Key)
+		}
+		units[a.Key] = u
+		fmt.Fprintf(&b, "key: %s\ngrouped because: %s\n\n", a.Key, a.Why)
+	}
+	for _, f := range inDim {
+		if !claimed[store.FacetRef(dim, f.Key)] { // a key round 1 neither merged nor retired
+			units[f.Key] = regroupUnit{group: -1, facets: []string{f.Key}}
+			fmt.Fprintf(&b, "key: %s\nclaim: %s\n\n", f.Key, clipRunes(f.Current().Gist(), regroupExcerptRunes))
+		}
+	}
+	if len(units) < 2 {
+		return grouped
+	}
+	input := fmt.Sprintf("LENS: %s\nDIMENSION: %s\nUNITS: %d\n\n", ln.Name, dim, len(units)) + b.String()
+	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), compactRegroupPrompt, input)
+	var merges []compactAction
+	if err == nil {
+		merges, err = ParseJSONArray[compactAction](reply)
+	}
+	if err != nil {
+		slog.Error("compact: regroup failed (round 1's groups stand)",
+			"lens", ln.Name, "dimension", dim, "units", len(units), "err", err)
+		plan.Failed++
+		return grouped
+	}
+
+	used := map[string]bool{}
+	folded := map[int]bool{}
+	var unions []compactAction
+	for _, m := range merges {
+		if reason := validateRegroup(m, dim, units, byKey, used); reason != "" {
+			plan.Skipped["regroup_"+reason]++
+			continue
+		}
+		used[m.Key] = true
+		for _, k := range m.Absorb {
+			used[k] = true
+		}
+		u := compactAction{Action: "merge", Dimension: dim, Key: m.Key, Why: m.Why}
+		var groups []int
+		chars := 0
+		for _, k := range append([]string{m.Key}, m.Absorb...) {
+			unit, ok := units[k]
+			if !ok {
+				continue // a new survivor key stands for no facet
+			}
+			for _, fk := range unit.facets {
+				f := byKey[store.FacetRef(dim, fk)]
+				chars += len(f.Current().Value)
+				if fk != m.Key {
+					u.Absorb = append(u.Absorb, fk)
+				}
+				// The regroup call sees no numbers, so the union's confidence is its strongest
+				// member's: round 1 judged each group's, and a lone facet's is its own.
+				if unit.group < 0 {
+					u.Confidence = max(u.Confidence, f.Current().DecayedConfidence(c.decaySeq))
+				}
+			}
+			if unit.group >= 0 {
+				groups = append(groups, unit.group)
+				u.Confidence = max(u.Confidence, grouped[unit.group].Confidence)
+			}
+		}
+		switch {
+		case len(u.Absorb) < compactMinAbsorb: // two lone facets, one the survivor: round 1 refuses it too
+			plan.Skipped["regroup_merge_too_small"]++
+		case chars > compactUnionMaxChars:
+			plan.Skipped["regroup_union_over_cap"]++
+		default:
+			for _, i := range groups {
+				folded[i] = true
+				u.split = append(u.split, grouped[i])
+			}
+			unions = append(unions, u)
+		}
+	}
+	slog.Info("compact: regrouped", "lens", ln.Name, "dimension", dim, "units", len(units),
+		"input_chars", len(input), "reply_chars", len(reply), "proposed", len(merges), "unions", len(unions))
+
+	out := make([]compactAction, 0, len(grouped))
+	for i, a := range grouped {
+		if !folded[i] {
+			out = append(out, a)
+		}
+	}
+	out = append(out, unions...)
+	// The collapse guard refuses the WHOLE dimension, so a runaway union would take round 1's
+	// valid merges down with it. Check the same floor here, before any write is spent. Unions
+	// that clear it now cannot trip it later: a failed or refused write, and the split
+	// fallback, only ever leave more facets standing.
+	if s, floor := survivorsAfter(inDim, dim, out, byKey); len(unions) > 0 && s < floor {
+		slog.Error("compact: dropping regroup unions that would collapse the dimension (round 1's groups stand)",
+			"lens", ln.Name, "dimension", dim, "unions", len(unions), "would_survive", s, "floor", floor)
+		plan.Skipped["regroup_would_collapse_the_dimension"] += len(unions)
+		return grouped
+	}
+	return out
+}
+
+// clipRunes cuts s to at most n runes, on a rune boundary, marking the cut.
+func clipRunes(s string, n int) string {
+	for i := range s {
+		if n == 0 {
+			return s[:i] + " …"
+		}
+		n--
+	}
+	return s
+}
+
+// validateRegroup checks one regroup merge: validateGrouping's rules restated over units. That one
+// cannot be reused, because it would refuse the commonest case here, a PAIR of groups whose
+// survivor is one of the two, as merge_too_small.
+func validateRegroup(a compactAction, dim string, units map[string]regroupUnit, byKey map[string]store.Facet, used map[string]bool) string {
+	if a.Action != "merge" {
+		return "not_a_merge" // every unit was already judged worth keeping; retiring is round 1's
+	}
+	if a.Dimension != "" && a.Dimension != dim {
+		return "wrong_dimension"
+	}
+	if strings.TrimSpace(a.Key) == "" {
+		return "empty_key"
+	}
+	// The survivor is a unit or a NEW key. An existing facet that is not a unit was absorbed or
+	// retired by round 1, and reviving it would rewrite a value this call never saw.
+	_, keyIsUnit := units[a.Key]
+	if _, exists := byKey[store.FacetRef(dim, a.Key)]; exists && !keyIsUnit {
+		return "survivor_unseen"
+	}
+	if used[a.Key] { // also refuses one new key minted by two merges
+		return "already_claimed"
+	}
+	n := 0
+	if keyIsUnit {
+		n++
+	}
+	seen := map[string]bool{}
+	for _, k := range a.Absorb {
+		if k == a.Key {
+			return "absorb_includes_survivor"
+		}
+		if _, ok := units[k]; !ok {
+			return "absorb_unseen_unit"
+		}
+		if seen[k] {
+			return "absorb_duplicate"
+		}
+		if used[k] {
+			return "already_claimed"
+		}
+		seen[k] = true
+		n++
+	}
+	if n < 2 {
+		return "merge_too_small"
+	}
+	return ""
+}
+
 // writeValues is STAGE 2: one call per merge group, filling in the merged value. Retirements
 // pass straight through — they have no value to write.
 //
@@ -392,11 +632,7 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 
 	var out []compactAction
 	failures := 0
-	for _, a := range grouped {
-		if a.Action != "merge" {
-			out = append(out, a)
-			continue
-		}
+	write := func(a compactAction, siblings []compactAction) bool {
 		members := make([]store.Facet, 0, len(a.Absorb)+1)
 		if surv, ok := byKey[store.FacetRef(dim, a.Key)]; ok {
 			members = append(members, surv) // an existing survivor's own value is input too
@@ -406,21 +642,40 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 				members = append(members, f)
 			}
 		}
-		claim, value, err := c.writeOne(ctx, ln, dim, a, members, grouped)
+		claim, value, err := c.writeOne(ctx, ln, dim, a, members, siblings)
 		c.prog.merged++
 		c.tick()
 		if err != nil {
 			slog.Error("compact: writing a merged value failed (group dropped, others kept)",
 				"lens", ln.Name, "dimension", dim, "survivor", a.Key, "absorbing", len(a.Absorb), "err", err)
 			failures++
-			continue
+			return false
 		}
 		a.Value, a.Claim = value, claim
 		if reason := validateMergedValue(a, members); reason != "" {
 			skipped[reason]++
-			continue
+			return false
 		}
 		out = append(out, a)
+		return true
+	}
+	for i, a := range grouped {
+		if a.Action != "merge" {
+			out = append(out, a)
+			continue
+		}
+		if write(a, grouped) || len(a.split) == 0 {
+			continue
+		}
+		// A regroup union that failed or was refused is written as the round-1 groups it folded,
+		// each fenced by the others rather than by the union, which covers its own ground.
+		slog.Info("compact: writing a union's round-1 groups separately instead",
+			"lens", ln.Name, "dimension", dim, "union", a.Key, "groups", len(a.split))
+		c.prog.merges += len(a.split)
+		siblings := append(append(slices.Clone(grouped[:i]), grouped[i+1:]...), a.split...)
+		for _, g := range a.split {
+			write(g, siblings)
+		}
 	}
 	return out, failures
 }
@@ -430,7 +685,7 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 func (c *Compactor) writeOne(ctx context.Context, ln *lens.Lens, dim string,
 	group compactAction, members []store.Facet, siblings []compactAction) (claim, value string, err error) {
 
-	input := renderMergeInput(ln.Name, dim, group, members, siblings, c.decaySeq)
+	input := renderMergeInput(ln.Name, dim, group, members, siblings)
 	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), compactWritePrompt, input)
 	if err != nil {
 		return "", "", err
@@ -458,7 +713,13 @@ func splitClaim(reply string) (claim, value string) {
 			continue
 		}
 		head := strings.TrimSpace(strings.Join(lines[:i], "\n"))
-		head = strings.TrimSpace(strings.TrimPrefix(head, "CLAIM:"))
+		// The claim is what follows the CLAIM: marker, never what comes before it: a claude -p
+		// write once opened "Waiting on the three completeness checks." and that line rode into the
+		// stored claim, which every later review reads. No marker: the whole head, as before.
+		if j := strings.LastIndex(head, "CLAIM:"); j == 0 || (j > 0 && head[j-1] == '\n') {
+			head = head[j+len("CLAIM:"):]
+		}
+		head = strings.TrimSpace(head)
 		body := strings.TrimSpace(strings.Join(lines[i+1:], "\n"))
 		if head == "" || body == "" {
 			break // a delimiter with nothing either side is not a split; treat it as prose
@@ -769,8 +1030,10 @@ func facetsInDimension(facets []store.Facet, dim string) []store.Facet {
 	// Sort by key so related facets land in the SAME batch: keys are descriptive snake_case
 	// slugs the model minted, so lexical adjacency correlates with topical adjacency
 	// (grounds_state_in_verification next to grounds_state_in_measurement). A free heuristic
-	// that raises the chance a duplicate pair is visible in one call — and compaction is
-	// re-runnable, so a pair split across batches is merged on a later pass rather than lost.
+	// that raises the chance a duplicate pair is visible in one call, and a weak one: the owner's
+	// PhD-prep facets were keyed self_directed_quant_prep, phd_prep, pre_phd_math, phd_math_prep.
+	// A pair split across batches is NOT merged by a later pass (the survivors re-batch the same
+	// way; only 9-12 of 29 such pairs then share a batch), so the regroup round joins it.
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
@@ -803,8 +1066,17 @@ func compactBatches(facets []store.Facet, budget int) [][]store.Facet {
 // its own members writes a facet blind to what the other survivors cover, so it drifts into
 // their territory and the dimension ends up with coarse-grained overlap — the same redundancy
 // compaction removed, re-created one level up. Names and one-line reasons are enough to fence
-// each call; their full values are not needed and would blow the payload back up.
-func renderMergeInput(lensName, dim string, group compactAction, members []store.Facet, siblings []compactAction, decaySeq int64) string {
+// each call; their full values are not needed and would blow the payload back up. The fence is
+// against drifting into a sibling's mechanism, never against keeping this call's own evidence:
+// it once said "leave it to them", but no sibling sees these members, which are archived once
+// this value is written, so an instance left to a sibling would leave the active profile.
+//
+// Members carry key and value ONLY. The prompt says every number must survive, so the
+// confidence/versions/last_seen header this used to print was copied into 20-25 of ~48 merged
+// values on an A/B of the owner's archive, stale the moment it was written. The writer has no
+// use for it: the survivor's confidence comes from grouping (renderCompactBatch keeps the
+// signals, and its JSON reply has no value text for them to leak into).
+func renderMergeInput(lensName, dim string, group compactAction, members []store.Facet, siblings []compactAction) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "LENS: %s\nDIMENSION: %s\n\n", lensName, dim)
 	fmt.Fprintf(&b, "THE TRAIT YOU ARE WRITING: %s\nWHY THESE WERE GROUPED: %s\n\n", group.Key, group.Why)
@@ -815,8 +1087,7 @@ func renderMergeInput(lensName, dim string, group compactAction, members []store
 		if cur == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "--- %s (confidence %.2f, %d version(s), last_seen %s)\n%s\n\n",
-			m.Key, cur.DecayedConfidence(decaySeq), len(m.Versions), m.LastSeen, cur.Value)
+		fmt.Fprintf(&b, "--- %s\n%s\n\n", m.Key, cur.Value)
 	}
 
 	var others []compactAction
@@ -827,7 +1098,8 @@ func renderMergeInput(lensName, dim string, group compactAction, members []store
 	}
 	if len(others) > 0 {
 		fmt.Fprintf(&b, "OTHER TRAITS IN THIS DIMENSION (%d), each being written by a separate call.\n"+
-			"Do NOT cover their ground — if something belongs to one of these, leave it to them:\n\n", len(others))
+			"Do NOT expand into their ground — but nothing from your own facets above is dropped for\n"+
+			"their sake: no other call sees them.\n\n", len(others))
 		for _, s := range others {
 			fmt.Fprintf(&b, "  %s — %s\n", s.Key, s.Why)
 		}

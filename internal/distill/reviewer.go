@@ -127,7 +127,7 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 // THROUGH that window's max seq. So each window is a durable mini-review: partial progress
 // sticks, a failed or crashed window strands only itself, and the next Run resumes from the
 // watermark. The window size is store.Config.ReviewMaxChars serialized-slimObs characters —
-// a latency ceiling that keeps any one review call well under the runner's 10-min wall.
+// a latency ceiling that keeps any one review call well under the runner's 20-min wall.
 func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr string) error {
 	budget := r.Config.ReviewMaxChars
 	if budget <= 0 {

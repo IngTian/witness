@@ -19,7 +19,7 @@ func ExternalRunnersDisabled() bool { return os.Getenv(DisableExternalRunnersEnv
 // maxStderrExcerpt bounds how much of a failed child's stderr is interpolated into the error.
 //
 // That error string becomes ONE line in witness.log (the worker logs it on a mine failure), and
-// a child's stderr is unbounded (across claude's 10-minute timeout, say) — so a chatty or
+// a child's stderr is unbounded (across claude's 20-minute timeout, say) — so a chatty or
 // looping CLI could write a single multi-megabyte log line. The measured real case is only
 // ~0.5KB (repeated ANSI-wrapped "AWS auth refresh timed out"), so this is a ceiling on a
 // known-possible shape rather than a fix for observed damage.

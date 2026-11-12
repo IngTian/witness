@@ -63,7 +63,7 @@ func ModelFor(cfg store.Config, ln *lens.Lens, phase Phase) string {
 		// empty DistillModel means the review call omits --model and inherits the runner's
 		// ambient default, which for `claude -p` is the operator's interactive `claude`
 		// model (commonly a heavy frontier/Bedrock model): the batched review then runs
-		// far slower/pricier than the mine — and can ride the 10-min timeout — even though
+		// far slower/pricier than the mine — and can ride the 20-min timeout — even though
 		// the user only ever set a light triage_model. Distillation latency/cost must not
 		// be silently hostage to the ambient interactive default; an explicit distill_model
 		// still overrides. (Both empty → "" → the runner's own default, as before.)

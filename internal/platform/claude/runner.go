@@ -78,7 +78,12 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 
 // claudeRunTimeout bounds one `claude -p`. It is a var only so the deadline-attribution test can
 // shrink it; nothing in production reassigns it.
-var claudeRunTimeout = 10 * time.Minute
+//
+// 20 minutes, raised from 10 by the owner's call: compaction's union writes need it (generation
+// time tracks output, and the owner's largest duplicate cluster writes ~26k chars where ~21k was
+// the 10-minute ceiling), and the worker is async, so a wedged call holding it for up to 20
+// minutes is the accepted price.
+var claudeRunTimeout = 20 * time.Minute
 
 // childOutput is a failed child's stderr excerpt plus, when there is any, a bounded tail of its
 // stdout — which is where `claude -p` prints its own errors. Reporting stderr alone logged the

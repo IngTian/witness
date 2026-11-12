@@ -55,7 +55,7 @@ type Config struct {
 	// a POSITIVE safety CEILING, because 0-means-unbounded here re-ships the permanent-
 	// stall bug: a cold start (ReviewRowid==0 → whole corpus is the delta) or a batch
 	// producer sends the entire delta in one runnerFor call, which rides the hardcoded
-	// 10-min claude -p wall, the error is dropped, the watermark freezes, and every later
+	// 20-min claude -p wall, the error is dropped, the watermark freezes, and every later
 	// obs piles up unreviewed forever. The windowed fold splits the delta into seq-
 	// contiguous windows of this size, committing + advancing the watermark per window.
 	// Splitting is loss-free (obs are atomic facts; each window WriteFacets then the next
@@ -79,7 +79,7 @@ const DefaultMineConcurrency = 4
 // 138-obs delta (~24-32 KB) rode the 10-min timeout. 16 KB sits ~2× below the measured
 // failure and ~4× the known-good window (~32-70 obs), leaving headroom for the fixed
 // per-call overhead the budget doesn't count (the prior facets + prompt + corpus fence).
-// A safety ceiling like the 10-min timeout, not a quality dial; err small (too small =
+// A safety ceiling like the 20-min timeout, not a quality dial; err small (too small =
 // slower but correct; too large = reopens the stall).
 const DefaultReviewMaxChars = 16000
 
@@ -527,7 +527,7 @@ func (c *configFile) EnsureConfigFile() error {
 # chunk_max_chars = ` + strconv.Itoa(d.ChunkMaxChars) + `
 
 # Max observation characters folded into the profile in ONE review call. A SAFETY
-# CEILING (like the internal 10-min runner timeout), not a quality dial: a large review
+# CEILING (like the internal 20-min runner timeout), not a quality dial: a large review
 # backlog is folded in windows of this size so no single call rides the timeout and
 # freezes the profile forever. Larger = fewer, slower calls (and, well past this, timeout
 # risk); smaller = more, faster calls. <=0 restores the default. Splitting the fold does

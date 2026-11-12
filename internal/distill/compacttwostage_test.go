@@ -17,7 +17,7 @@ import (
 // the structure that came out of that, and the two ways stage 2 could quietly do damage.
 
 // Stage 1 must never be asked for values, and stage 2 must be one call per group. If these drift
-// back together the 10-minute wall returns and deep merges silently stop happening.
+// back together that wall returns and deep merges silently stop happening.
 func TestGroupingAndWritingAreSeparateCalls(t *testing.T) {
 	st := &fakeCompactStore{facets: []store.Facet{
 		cf("thinking", "a", "va", 0.7, 1),
@@ -108,6 +108,43 @@ func TestStageTwoIsToldWhatItsSiblingsCover(t *testing.T) {
 	}
 }
 
+// Stage 2 is told every number in its input must survive, so any store bookkeeping it is shown
+// becomes "evidence": on an A/B of the owner's archive, 20-25 of ~48 merged values carried a
+// copied "confidence 0.42, 1 version, last seen ..." that was stale the moment it was written.
+// The writer has no use for it (confidence comes from stage 1), so it gets key and value only.
+func TestStageTwoSeesOnlyKeysAndValues(t *testing.T) {
+	st := &fakeCompactStore{facets: []store.Facet{
+		cf("thinking", "a", "value-a", 0.37, 3),
+		cf("thinking", "b", "value-b", 0.37, 1),
+	}}
+	var writeInput string
+	c := compactor(st, "")
+	c.Runner = func(_ context.Context, _, _, input string) (string, error) {
+		if strings.Contains(input, "THE TRAIT YOU ARE WRITING") {
+			writeInput = input
+			return mergedValue, nil
+		}
+		return `[{"action":"merge","dimension":"thinking","key":"t","absorb":["a","b"],"why":"w"}]`, nil
+	}
+	if _, err := c.Plan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if writeInput == "" {
+		t.Fatal("no write call was made, so nothing below is exercised")
+	}
+	for _, want := range []string{"--- a\n", "value-a", "--- b\n", "value-b"} {
+		if !strings.Contains(writeInput, want) {
+			t.Errorf("stage 2 must see each member's key and value, missing %q", want)
+		}
+	}
+	// cf stamps LastSeen 2026-10-01; "version" covers both "3 version(s)" and "versions: 3".
+	for _, leak := range []string{"0.37", "confidence", "version", "last_seen", "2026-10-01"} {
+		if strings.Contains(writeInput, leak) {
+			t.Errorf("stage 2 input carries store metadata %q, which the model copies into the value", leak)
+		}
+	}
+}
+
 // The central risk of the whole feature: a merge that READS well while dropping nine facets'
 // worth of specifics turns "90%% fewer facets" into data loss dressed as a win. A value shorter
 // than the longest thing it absorbs is the cheap, prose-blind tell.
@@ -137,6 +174,61 @@ func TestAMergedValueShorterThanItsLargestInputIsRefused(t *testing.T) {
 	}
 	if plans[0].Skipped["merged_value_shorter_than_its_largest_input"] != 1 {
 		t.Errorf("the refusal should be tallied, got %v", plans[0].Skipped)
+	}
+}
+
+// The write prompt once asked for "about as long as the LONGEST facet, never more than twice
+// it" while also demanding every instance survive. A group is distinct episodes of one
+// mechanism, so the two cannot both hold: on an A/B over the owner's archive 2-3 of ~48 merges
+// landed in the band, and meeting it would have dropped a median ~40% of the input text. The
+// model kept the evidence and broke the band, and its STRUCTURE made it invent falsifier and
+// cost sections no input had (15-17 groups per run). This pins the replacement: a ceiling at
+// the sum, the floor the code enforces, the preservation list, and no invented sections.
+func TestTheWritePromptBoundsLengthByItsInputs(t *testing.T) {
+	p := strings.ToLower(strings.Join(strings.Fields(compactWritePrompt), " "))
+	for _, gone := range []string{"twice", "band", "overlap heavily", "the bulk of it"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("the write prompt still carries the unreachable length band: %q", gone)
+		}
+	}
+	for _, want := range []string{
+		"never longer than the facets you were given put together",
+		"must not be shorter than the longest one", "it will be rejected",
+		"state each distinct thing once", "cut repeated description, never evidence",
+		"every concrete instance and example, with its detail intact",
+		"every observation id", "every quoted phrase", "every date, count and measurement",
+		"every cost, limit, caveat or provenance note", "every falsifier",
+		"that no input makes",
+		"then any cost, limit or falsifier the inputs state",
+		"whatever costs and falsifiers the inputs state",
+		"written exactly as the input writes it", "never mention \"the inputs\"", "start your reply with \"claim:\"",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the write prompt lost %q", want)
+		}
+	}
+}
+
+// The sibling fence once said anything belonging to a sibling "is theirs to cover; do not restate
+// it here", in the prompt and again in the input. That is false for evidence in this group's OWN
+// members: each write sees only its own facets, which are archived when it finishes, so an
+// instance left to a sibling leaves the active profile, and the length floor cannot tell one
+// instance in many is missing. The fence is against drifting into siblings' mechanisms only.
+func TestTheSiblingFenceNeverAsksTheWriterToDropItsOwnEvidence(t *testing.T) {
+	flat := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+	input := renderMergeInput("default", "thinking", mg("x", "w", 0), nil, []compactAction{mg("y", "w2", 0)})
+	for name, text := range map[string]string{"prompt": flat(compactWritePrompt), "input": flat(input)} {
+		for _, gone := range []string{"theirs to cover", "do not restate it here", "leave it to them"} {
+			if strings.Contains(text, gone) {
+				t.Errorf("the %s still hands the writer's own evidence to a sibling: %q", name, gone)
+			}
+		}
+		if !strings.Contains(text, "no other call sees them") {
+			t.Errorf("the %s must say the writer's own facets stay with it", name)
+		}
+	}
+	if !strings.Contains(flat(compactWritePrompt), "everything in the facets you were given stays in your value") {
+		t.Error("the write prompt must keep everything in the writer's own facets")
 	}
 }
 
