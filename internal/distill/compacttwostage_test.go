@@ -199,10 +199,35 @@ func TestTheWritePromptBoundsLengthByItsInputs(t *testing.T) {
 		"every observation id", "every quoted phrase", "every date, count and measurement",
 		"every cost, limit, caveat or provenance note", "every falsifier",
 		"that no input makes",
+		"then any cost, limit or falsifier the inputs state",
+		"whatever costs and falsifiers the inputs state",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("the write prompt lost %q", want)
 		}
+	}
+}
+
+// The sibling fence once said anything belonging to a sibling "is theirs to cover; do not restate
+// it here", in the prompt and again in the input. That is false for evidence in this group's OWN
+// members: each write sees only its own facets, which are archived when it finishes, so an
+// instance left to a sibling leaves the active profile, and the length floor cannot tell one
+// instance in many is missing. The fence is against drifting into siblings' mechanisms only.
+func TestTheSiblingFenceNeverAsksTheWriterToDropItsOwnEvidence(t *testing.T) {
+	flat := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+	input := renderMergeInput("default", "thinking", mg("x", "w", 0), nil, []compactAction{mg("y", "w2", 0)})
+	for name, text := range map[string]string{"prompt": flat(compactWritePrompt), "input": flat(input)} {
+		for _, gone := range []string{"theirs to cover", "do not restate it here", "leave it to them"} {
+			if strings.Contains(text, gone) {
+				t.Errorf("the %s still hands the writer's own evidence to a sibling: %q", name, gone)
+			}
+		}
+		if !strings.Contains(text, "no other call sees them") {
+			t.Errorf("the %s must say the writer's own facets stay with it", name)
+		}
+	}
+	if !strings.Contains(flat(compactWritePrompt), "everything in the facets you were given stays in your value") {
+		t.Error("the write prompt must keep everything in the writer's own facets")
 	}
 }
 

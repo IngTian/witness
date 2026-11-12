@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/IngTian/witness/internal/store"
 )
@@ -346,6 +347,52 @@ func TestAFailedRegroupLeavesRoundOneUnchanged(t *testing.T) {
 				t.Errorf("want Failed=%d, got %d", wantFailed, plan.Failed)
 			}
 		})
+	}
+}
+
+// The collapse guard refuses a whole dimension, so a runaway union that pushed it under the floor
+// once cost round 1's valid merges with it: 10 facets, round 1 left 4 (floor 3), and one union
+// over g1, g2 and i would leave 2, so nothing at all was applied. The regroup checks the floor
+// itself and drops its unions instead — the round can add merges, never cost round 1's.
+func TestARegroupThatWouldCollapseTheDimensionKeepsRoundOne(t *testing.T) {
+	st := &fakeCompactStore{}
+	for _, k := range strings.Split("abcdefghij", "") {
+		st.facets = append(st.facets, cf("thinking", k, "value "+k, 0.7, 1))
+	}
+	f := &fakeRounds{
+		round1: map[string]string{ // BatchChars 35: [a..e] [f..j]
+			"a": actionsJSON(mg("g1", "w1", 0.6, "a", "b", "c", "d", "e")),
+			"f": actionsJSON(mg("g2", "w2", 0.6, "f", "g", "h")),
+		},
+		regroup: replies(actionsJSON(mg("u", "everything", 0, "g1", "g2", "i"))), // leaves u and j
+	}
+	_, plan := planWith(t, st, f, 35)
+	if got := keysOf(plan.Actions); !slices.Equal(got, []string{"g1", "g2"}) {
+		t.Fatalf("round 1's merges must stand, got %v (skipped %v)", got, plan.Skipped)
+	}
+	if plan.Archived != 8 || len(f.writes) != 2 {
+		t.Errorf("want round 1's 8 archived in 2 writes, got %d in %d", plan.Archived, len(f.writes))
+	}
+	if plan.Skipped["regroup_would_collapse_the_dimension"] != 1 || plan.Skipped["would_collapse_the_dimension"] != 0 {
+		t.Errorf("the union, not the dimension, should be refused: %v", plan.Skipped)
+	}
+}
+
+// The regroup is one call over every unit, so a lone facet with no claim (the claim pass is capped
+// per run, and `witness compact` claims only after Apply) must not send its whole value: it is
+// shown by a rune-safe excerpt, which keeps a unit's size independent of the value's.
+func TestARegroupShowsAnUnclaimedFacetByAnExcerpt(t *testing.T) {
+	st, f := twoBatchRounds()
+	long := strings.Repeat("长", 3*regroupExcerptRunes) // multi-byte, so a byte cut would split a rune
+	st.facets = append(st.facets, cf("thinking", "e", long, 0.7, 1))
+	f.regroup = replies("[]")
+	planWith(t, st, f, 14)
+	if !utf8.ValidString(f.regroupInput) {
+		t.Error("the excerpt split a rune")
+	}
+	if !strings.Contains(f.regroupInput, "key: e\nclaim: "+strings.Repeat("长", regroupExcerptRunes)) ||
+		strings.Contains(f.regroupInput, strings.Repeat("长", regroupExcerptRunes+1)) {
+		t.Errorf("want e shown by its first %d runes, got %d bytes of input", regroupExcerptRunes, len(f.regroupInput))
 	}
 }
 

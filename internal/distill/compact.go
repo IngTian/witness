@@ -322,27 +322,7 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 		// Collapse guard, per dimension and BEFORE the actions are accepted: count what this
 		// dimension would be left with. Archiving a lot is the goal; being left with almost
 		// nothing is the failure.
-		survivors := len(inDim)
-		for _, a := range written {
-			if a.Action == "merge" {
-				survivors -= len(a.Absorb)
-				if _, existed := byKey[store.FacetRef(dim, a.Key)]; !existed {
-					survivors++ // a new abstraction key adds a facet
-				}
-			} else {
-				survivors--
-			}
-		}
-		floor := compactMinSurvivors
-		if len(inDim) < compactCollapseGuardMin {
-			// No floor on a small dimension. It may legitimately turn out to BE one
-			// disposition, and a dimension holding a single junk facet should be emptiable —
-			// retiring it loses no distinction, which is the only thing this guard protects.
-			// Enforcing any floor here repeats the mistake the fraction cap made: blocking the
-			// work compaction exists to do. The dry run shows the entire plan at this size.
-			floor = 0
-		}
-		if survivors < floor {
+		if survivors, floor := survivorsAfter(inDim, dim, written, byKey); survivors < floor {
 			slog.Error("compact: refusing a plan that would collapse a dimension",
 				"lens", ln.Name, "dimension", dim, "facets", len(inDim),
 				"would_survive", survivors, "floor", floor)
@@ -383,6 +363,31 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 	return plan
 }
 
+// survivorsAfter projects how many facets a dimension keeps once actions apply, and the floor it
+// may not go below. Shared by the collapse guard and the regroup round, which must agree on both.
+func survivorsAfter(inDim []store.Facet, dim string, actions []compactAction, byKey map[string]store.Facet) (survivors, floor int) {
+	survivors = len(inDim)
+	for _, a := range actions {
+		if a.Action == "merge" {
+			survivors -= len(a.Absorb)
+			if _, existed := byKey[store.FacetRef(dim, a.Key)]; !existed {
+				survivors++ // a new abstraction key adds a facet
+			}
+		} else {
+			survivors--
+		}
+	}
+	if len(inDim) < compactCollapseGuardMin {
+		// No floor on a small dimension. It may legitimately turn out to BE one
+		// disposition, and a dimension holding a single junk facet should be emptiable —
+		// retiring it loses no distinction, which is the only thing this guard protects.
+		// Enforcing any floor here repeats the mistake the fraction cap made: blocking the
+		// work compaction exists to do. The dry run shows the entire plan at this size.
+		return survivors, 0
+	}
+	return survivors, compactMinSurvivors
+}
+
 // groupBatch is STAGE 1: one model call that decides which facets are the same disposition and
 // returns ONLY names. No values.
 //
@@ -408,6 +413,11 @@ func (c *Compactor) groupBatch(ctx context.Context, ln *lens.Lens, dim string, b
 	return actions, nil
 }
 
+// regroupExcerptRunes bounds a lone facet's line in the regroup input: its claim, or for a facet
+// with none the opening of its value, where a written facet names its disposition. Claims run
+// ~250 chars, so 400 runes keeps a claim whole while an unclaimed 3k value no longer rides along.
+const regroupExcerptRunes = 400
+
 // regroupUnit is one line of the regroup round: a round-1 group, or a facet round 1 left alone.
 type regroupUnit struct {
 	group  int      // index into round 1's actions; -1 for a lone facet
@@ -425,13 +435,17 @@ type regroupUnit struct {
 // and only 9-12 of the 29 duplicate pairs then share one.
 //
 // So one merges-only call sees the whole dimension at the grain round 1 left it: each group as
-// its key and why, each lone facet as its key and claim — ~12k chars for state's 275 facets,
-// against 58-71k per round-1 batch. No numbers, so nothing the writer could later copy. A union
-// is folded into one action over the ORIGINAL facets, so stage 2 writes each trait once from its
-// sources rather than merging merged prose. Every failure keeps round 1 as it was.
+// its key and why, each lone facet as its key and claim (or its value's opening, when it has no
+// claim) — ~12k chars for state's 275 facets, against 58-71k per round-1 batch. No numbers, so
+// nothing the writer could later copy. A union is folded into one action over the ORIGINAL
+// facets, so stage 2 writes each trait once from its sources rather than merging merged prose.
+// Every failure keeps round 1 as it was, and so does a set of unions that would collapse the
+// dimension.
 //
-// ponytail: one call over every unit, ~54k chars at most on the owner's archive; batch it the
-// way round 1 is if units ever outgrow compactBatchChars.
+// ponytail: one call over every unit, each at most its key plus regroupExcerptRunes, so the input
+// grows with the unit count, not the values: ~54k chars at most on the owner's archive, and ~130
+// unclaimed English units (a third of that in CJK) fill compactBatchChars. Batch it the way round
+// 1 is if units ever outgrow that.
 func (c *Compactor) regroup(ctx context.Context, ln *lens.Lens, dim string, inDim []store.Facet,
 	grouped []compactAction, byKey map[string]store.Facet, claimed map[string]bool, plan *CompactPlan) []compactAction {
 
@@ -451,7 +465,7 @@ func (c *Compactor) regroup(ctx context.Context, ln *lens.Lens, dim string, inDi
 	for _, f := range inDim {
 		if !claimed[store.FacetRef(dim, f.Key)] { // a key round 1 neither merged nor retired
 			units[f.Key] = regroupUnit{group: -1, facets: []string{f.Key}}
-			fmt.Fprintf(&b, "key: %s\nclaim: %s\n\n", f.Key, f.Current().Gist())
+			fmt.Fprintf(&b, "key: %s\nclaim: %s\n\n", f.Key, clipRunes(f.Current().Gist(), regroupExcerptRunes))
 		}
 	}
 	if len(units) < 2 {
@@ -529,7 +543,29 @@ func (c *Compactor) regroup(ctx context.Context, ln *lens.Lens, dim string, inDi
 			out = append(out, a)
 		}
 	}
-	return append(out, unions...)
+	out = append(out, unions...)
+	// The collapse guard refuses the WHOLE dimension, so a runaway union would take round 1's
+	// valid merges down with it. Check the same floor here, before any write is spent. Unions
+	// that clear it now cannot trip it later: a failed or refused write, and the split
+	// fallback, only ever leave more facets standing.
+	if s, floor := survivorsAfter(inDim, dim, out, byKey); len(unions) > 0 && s < floor {
+		slog.Error("compact: dropping regroup unions that would collapse the dimension (round 1's groups stand)",
+			"lens", ln.Name, "dimension", dim, "unions", len(unions), "would_survive", s, "floor", floor)
+		plan.Skipped["regroup_would_collapse_the_dimension"] += len(unions)
+		return grouped
+	}
+	return out
+}
+
+// clipRunes cuts s to at most n runes, on a rune boundary, marking the cut.
+func clipRunes(s string, n int) string {
+	for i := range s {
+		if n == 0 {
+			return s[:i] + " …"
+		}
+		n--
+	}
+	return s
 }
 
 // validateRegroup checks one regroup merge: validateGrouping's rules restated over units. That one
@@ -1020,7 +1056,10 @@ func compactBatches(facets []store.Facet, budget int) [][]store.Facet {
 // its own members writes a facet blind to what the other survivors cover, so it drifts into
 // their territory and the dimension ends up with coarse-grained overlap — the same redundancy
 // compaction removed, re-created one level up. Names and one-line reasons are enough to fence
-// each call; their full values are not needed and would blow the payload back up.
+// each call; their full values are not needed and would blow the payload back up. The fence is
+// against drifting into a sibling's mechanism, never against keeping this call's own evidence:
+// it once said "leave it to them", but no sibling sees these members, which are archived once
+// this value is written, so an instance left to a sibling would leave the active profile.
 //
 // Members carry key and value ONLY. The prompt says every number must survive, so the
 // confidence/versions/last_seen header this used to print was copied into 20-25 of ~48 merged
@@ -1049,7 +1088,8 @@ func renderMergeInput(lensName, dim string, group compactAction, members []store
 	}
 	if len(others) > 0 {
 		fmt.Fprintf(&b, "OTHER TRAITS IN THIS DIMENSION (%d), each being written by a separate call.\n"+
-			"Do NOT cover their ground — if something belongs to one of these, leave it to them:\n\n", len(others))
+			"Do NOT expand into their ground — but nothing from your own facets above is dropped for\n"+
+			"their sake: no other call sees them.\n\n", len(others))
 		for _, s := range others {
 			fmt.Fprintf(&b, "  %s — %s\n", s.Key, s.Why)
 		}

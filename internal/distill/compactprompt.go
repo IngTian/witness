@@ -163,8 +163,10 @@ to put in it is left out. Keep the register of the inputs — specific and behav
 evidence — not abstract characterisation.
 
 STAY IN YOUR LANE. If you are shown other traits from the same dimension, they are being written
-by other calls. Anything belonging to one of them is theirs to cover; do not restate it here.
-Overlapping with a sibling re-creates the redundancy this process exists to remove.
+by other calls. Do not describe, generalise about or expand into their mechanisms: overlapping
+with a sibling re-creates the redundancy this process exists to remove. But everything in the
+facets YOU were given stays in your value, even where it also fits a sibling: those facets are
+archived when you finish and no other call sees them.
 
 OUTPUT FORMAT — two parts, separated by a line containing only three dashes:
 
