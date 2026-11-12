@@ -448,3 +448,11 @@ func TestValidateRegroup(t *testing.T) {
 		}
 	}
 }
+
+// The owner raised the cap after a measured run (2026-11-12): the largest duplicate cluster on his
+// archive, self-worth at 41,272 chars of originals, must fold rather than stay as five survivors.
+func TestTheLargestMeasuredClusterFitsUnderTheUnionCap(t *testing.T) {
+	if compactUnionMaxChars < 41_272 {
+		t.Fatalf("compactUnionMaxChars = %d; the measured 41,272-char self-worth cluster would stay split", compactUnionMaxChars)
+	}
+}

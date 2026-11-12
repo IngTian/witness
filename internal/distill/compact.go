@@ -85,14 +85,15 @@ const (
 	// is written by ONE stage-2 call and a merged value runs ~1.08x its inputs, so on the owner's
 	// archive the duplicate clusters would write 13-26k chars. Against the old 10-minute wall, 3
 	// of the 6 writes ever measured at 19k+ hit or nearly hit it and the largest success was 21k
-	// out of 24.7k in; generation time tracks output, so the 20-minute wall roughly doubles that,
-	// and 40k lets the largest cluster (trading, ~24.3k) fold. Over the cap the union is not
-	// folded and its round-1 groups are written as before, rather than burning twenty minutes on
-	// a call expected to fail before falling back.
+	// out of 24.7k in. Measured on the owner's archive with the 20-minute wall (2026-11-12): a
+	// 24.3k-original union wrote in 6.1 min and a 28.6k one in 3.5 min, so 60k leaves room for the
+	// largest cluster there (self-worth, 41.3k, which a 40k cap refused). Over the cap the union is
+	// not folded and its round-1 groups are written as before, rather than burning twenty minutes
+	// on a call expected to fail before falling back.
 	// ponytail: a fixed size standing in for claudeRunTimeout's 20-minute wall (one var shared by
-	// every claude -p call), extrapolated from 10-minute measurements; give compaction writes
-	// their own budget, or measure a 40k write, if a union this size starts timing out.
-	compactUnionMaxChars = 40_000
+	// every claude -p call); give compaction writes their own budget, or measure a 60k write, if a
+	// union this size starts timing out.
+	compactUnionMaxChars = 60_000
 )
 
 // compactAction is one proposed structural change. A single JSON array carries both kinds so
