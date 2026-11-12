@@ -1,6 +1,6 @@
 package distill
 
-// The two compaction prompts, one per stage.
+// The compaction prompts: one per stage, plus the regroup round between them.
 //
 // WHY TWO. Measured on a real 105-facet dimension: one call asked to decide the grouping AND
 // write every merged value emitted ~40,000 chars and was KILLED at the runner's 10-minute wall,
@@ -11,14 +11,14 @@ package distill
 // 87.6% reduction, and the groups matched an independent by-hand clustering of the same
 // dimension. Large input is cheap; large output is what costs.
 //
-// Both live in Go, not in the lens registry, for the same reason the review prompt's block
+// All three live in Go, not in the lens registry, for the same reason the review prompt's block
 // headers do: lens prompt files are copied into an archive once at seed time and never updated,
 // so text authored there provably never reaches an existing install. Compaction is also
 // structural rather than domain-specific — "are these the same trait" does not change between a
 // coding lens and a trading lens — so the wording names the lens's SUBJECT rather than assuming a
 // person (#199 G001).
 //
-// ponytail: one shared pair of prompts, no per-lens override. Add a lenses/<name>/compact.md
+// ponytail: one shared set of prompts, no per-lens override. Add a lenses/<name>/compact.md
 // seam the first time a real lens needs different grouping judgment, not before.
 
 // STAGE 1 — grouping. Names only, so the reply stays small and the call stays fast.
@@ -74,6 +74,48 @@ RULES
   observations and age are NOT reasons on their own.
 
   A facet carrying a disposition nothing else covers should simply be left out of the array.
+
+Output ONLY the JSON array. No prose, no code fence.`
+
+// REGROUP — joins what round 1's batches formed separately (Compactor.regroup). Merges only, and
+// none of stage 1's "one tenth" or "groups of eight" targets: the units are already consolidated,
+// so a quota here would push distinct traits together.
+const compactRegroupPrompt = `You are finishing the consolidation of ONE dimension of ONE lens. A lens tracks one subject —
+usually a person, but it can be a market, a project or anything else — and each facet is a claim
+about that subject.
+
+The dimension was too large for one call, so its facets were grouped in separate batches that
+could not see each other. You are given every UNIT that grouping left: a trait one batch formed (its
+key and why it was formed), or a facet no batch combined with anything (its key and its claim).
+So the same disposition may appear more than once — formed independently in two batches, or as a
+lone facet that belongs to a trait another batch formed.
+
+YOUR ONLY JOB IS TO JOIN THOSE. Merge units only when the same underlying mechanism produces them.
+Units that are merely related, or different mechanisms in the same area, stay apart. Whatever you
+leave out is kept exactly as it is, so when unsure, leave it out. Do not write values; that is a
+later step.
+
+Return a JSON array of merges:
+
+{"action": "merge", "dimension": "<the dimension>", "key": "<survivor key>",
+ "absorb": ["<unit key>", ...], "why": "<one line>"}
+
+RULES
+
+  "key" is the survivor: one of the units being merged, or a NEW snake_case key naming the
+  disposition, never any other existing key. "absorb" never contains "key".
+
+  A merge joins at least TWO units: everything in "absorb", plus "key" when "key" is a unit.
+
+  Every key in "absorb" must be one of the units you were given, and each may be named at most ONCE
+  across the whole array.
+
+  Merge only. Nothing is retired in this pass.
+
+  Your "why" is RECORDED PERMANENTLY against every facet the merge touches. Name the shared
+  mechanism, not the similarity.
+
+If no units are the same disposition, return [].
 
 Output ONLY the JSON array. No prose, no code fence.`
 

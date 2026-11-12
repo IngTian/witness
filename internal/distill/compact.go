@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -79,6 +80,16 @@ const (
 	// it moves a facet's identity without combining anything, which loses the old key with no
 	// consolidation gain. Renames are not what compaction is for, so they are refused.
 	compactMinAbsorb = 2
+
+	// compactUnionMaxChars caps a regroup union by its original facets' total value size. A union
+	// is written by ONE stage-2 call and a merged value runs ~1.08x its inputs, so on the owner's
+	// archive the duplicate clusters would write 13-26k chars, where 3 of the 6 writes ever
+	// measured at 19k+ hit or nearly hit the wall and the largest success was 21k out of 24.7k in.
+	// Over the cap the union is not folded and its round-1 groups are written as before, rather
+	// than burning ten minutes on a call expected to fail before falling back.
+	// ponytail: a fixed size standing in for claudeRunTimeout's 10-minute wall (one var shared by
+	// every claude -p call); give compaction writes their own budget if big clusters must join.
+	compactUnionMaxChars = 20_000
 )
 
 // compactAction is one proposed structural change. A single JSON array carries both kinds so
@@ -92,6 +103,10 @@ type compactAction struct {
 	Absorb     []string `json:"absorb"`     // merge only: keys folded into Key
 	Why        string   `json:"why"`        // recorded in the log, and shown in a dry run
 	Confidence float64  `json:"confidence"` // merge only: confidence in the survivor
+
+	// split is a regroup union's round-1 groups, written instead when the union's own write
+	// fails or is refused, so the regroup round can never leave a dimension worse than round 1.
+	split []compactAction
 }
 
 // CompactPlan is what one lens's pass proposes. Produced by Plan (which writes nothing) and
@@ -197,12 +212,17 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 		return nil, fmt.Errorf("read observation high-water: %w", err)
 	}
 	// Every grouping batch is known before the first call (batching is local), so the total is
-	// exact from the start; only the merges are discovered as we go.
+	// exact from the start; only the merges are discovered as we go. A multi-batch dimension adds
+	// its regroup call.
 	c.prog = compactProgress{}
 	for _, ln := range c.Lenses {
 		active := activeForLens(all, ln.Name)
 		for _, dim := range dimensionsOf(active) {
-			c.prog.groups += len(compactBatches(facetsInDimension(active, dim), c.batchChars()))
+			n := len(compactBatches(facetsInDimension(active, dim), c.batchChars()))
+			c.prog.groups += n
+			if n > 1 {
+				c.prog.groups++
+			}
 		}
 	}
 	c.tick()
@@ -239,7 +259,8 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 		c.prog.lens, c.prog.dim = ln.Name, dim
 		c.tick()
 		var grouped []compactAction // stage-1 output for THIS dimension, awaiting values
-		for _, batch := range compactBatches(inDim, c.batchChars()) {
+		batches := compactBatches(inDim, c.batchChars())
+		for _, batch := range batches {
 			actions, err := c.groupBatch(ctx, ln, dim, batch)
 			c.prog.grouped++ // a failed call is still a call done
 			c.tick()
@@ -275,6 +296,11 @@ func (c *Compactor) planLens(ctx context.Context, ln *lens.Lens, all []store.Fac
 				a.Dimension = dim // normalize: validate accepted it, store it canonically
 				grouped = append(grouped, a)
 			}
+		}
+		if len(batches) > 1 {
+			grouped = c.regroup(ctx, ln, dim, inDim, grouped, byKey, claimed, &plan)
+			c.prog.grouped++
+			c.tick()
 		}
 
 		// STAGE 2 — write one merged value per group, each in its own bounded call.
@@ -382,6 +408,179 @@ func (c *Compactor) groupBatch(ctx context.Context, ln *lens.Lens, dim string, b
 	return actions, nil
 }
 
+// regroupUnit is one line of the regroup round: a round-1 group, or a facet round 1 left alone.
+type regroupUnit struct {
+	group  int      // index into round 1's actions; -1 for a lone facet
+	facets []string // the original facets it stands for, an existing survivor included
+}
+
+// regroup joins what round 1 formed separately when a dimension needed more than one batch, and
+// returns round 1's actions with each accepted union folded into ONE merge.
+//
+// Round 1 can only merge within a batch (validateGrouping), and each batch is told it sees the
+// whole dimension and should end near fifteen, so a split dimension ended near batches x 12 with
+// one trait formed once per batch. On an A/B over the owner's archive, state's 4 batches left 48
+// survivors holding 7 obvious duplicate clusters (23 facets that should be 7), and in no cluster
+// did two members share a batch. Re-running does not fix it: the survivors re-batch the same way,
+// and only 9-12 of the 29 duplicate pairs then share one.
+//
+// So one merges-only call sees the whole dimension at the grain round 1 left it: each group as
+// its key and why, each lone facet as its key and claim — ~12k chars for state's 275 facets,
+// against 58-71k per round-1 batch. No numbers, so nothing the writer could later copy. A union
+// is folded into one action over the ORIGINAL facets, so stage 2 writes each trait once from its
+// sources rather than merging merged prose. Every failure keeps round 1 as it was.
+//
+// ponytail: one call over every unit, ~54k chars at most on the owner's archive; batch it the
+// way round 1 is if units ever outgrow compactBatchChars.
+func (c *Compactor) regroup(ctx context.Context, ln *lens.Lens, dim string, inDim []store.Facet,
+	grouped []compactAction, byKey map[string]store.Facet, claimed map[string]bool, plan *CompactPlan) []compactAction {
+
+	units := map[string]regroupUnit{}
+	var b strings.Builder
+	for i, a := range grouped {
+		if a.Action != "merge" {
+			continue
+		}
+		u := regroupUnit{group: i, facets: slices.Clone(a.Absorb)}
+		if _, ok := byKey[store.FacetRef(dim, a.Key)]; ok {
+			u.facets = append(u.facets, a.Key)
+		}
+		units[a.Key] = u
+		fmt.Fprintf(&b, "key: %s\ngrouped because: %s\n\n", a.Key, a.Why)
+	}
+	for _, f := range inDim {
+		if !claimed[store.FacetRef(dim, f.Key)] { // a key round 1 neither merged nor retired
+			units[f.Key] = regroupUnit{group: -1, facets: []string{f.Key}}
+			fmt.Fprintf(&b, "key: %s\nclaim: %s\n\n", f.Key, f.Current().Gist())
+		}
+	}
+	if len(units) < 2 {
+		return grouped
+	}
+	input := fmt.Sprintf("LENS: %s\nDIMENSION: %s\nUNITS: %d\n\n", ln.Name, dim, len(units)) + b.String()
+	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), compactRegroupPrompt, input)
+	var merges []compactAction
+	if err == nil {
+		merges, err = ParseJSONArray[compactAction](reply)
+	}
+	if err != nil {
+		slog.Error("compact: regroup failed (round 1's groups stand)",
+			"lens", ln.Name, "dimension", dim, "units", len(units), "err", err)
+		plan.Failed++
+		return grouped
+	}
+
+	used := map[string]bool{}
+	folded := map[int]bool{}
+	var unions []compactAction
+	for _, m := range merges {
+		if reason := validateRegroup(m, dim, units, byKey, used); reason != "" {
+			plan.Skipped["regroup_"+reason]++
+			continue
+		}
+		used[m.Key] = true
+		for _, k := range m.Absorb {
+			used[k] = true
+		}
+		u := compactAction{Action: "merge", Dimension: dim, Key: m.Key, Why: m.Why}
+		var groups []int
+		chars := 0
+		for _, k := range append([]string{m.Key}, m.Absorb...) {
+			unit, ok := units[k]
+			if !ok {
+				continue // a new survivor key stands for no facet
+			}
+			for _, fk := range unit.facets {
+				f := byKey[store.FacetRef(dim, fk)]
+				chars += len(f.Current().Value)
+				if fk != m.Key {
+					u.Absorb = append(u.Absorb, fk)
+				}
+				// The regroup call sees no numbers, so the union's confidence is its strongest
+				// member's: round 1 judged each group's, and a lone facet's is its own.
+				if unit.group < 0 {
+					u.Confidence = max(u.Confidence, f.Current().DecayedConfidence(c.decaySeq))
+				}
+			}
+			if unit.group >= 0 {
+				groups = append(groups, unit.group)
+				u.Confidence = max(u.Confidence, grouped[unit.group].Confidence)
+			}
+		}
+		switch {
+		case len(u.Absorb) < compactMinAbsorb: // two lone facets, one the survivor: round 1 refuses it too
+			plan.Skipped["regroup_merge_too_small"]++
+		case chars > compactUnionMaxChars:
+			plan.Skipped["regroup_union_over_cap"]++
+		default:
+			for _, i := range groups {
+				folded[i] = true
+				u.split = append(u.split, grouped[i])
+			}
+			unions = append(unions, u)
+		}
+	}
+	slog.Info("compact: regrouped", "lens", ln.Name, "dimension", dim, "units", len(units),
+		"input_chars", len(input), "reply_chars", len(reply), "proposed", len(merges), "unions", len(unions))
+
+	out := make([]compactAction, 0, len(grouped))
+	for i, a := range grouped {
+		if !folded[i] {
+			out = append(out, a)
+		}
+	}
+	return append(out, unions...)
+}
+
+// validateRegroup checks one regroup merge: validateGrouping's rules restated over units. That one
+// cannot be reused, because it would refuse the commonest case here, a PAIR of groups whose
+// survivor is one of the two, as merge_too_small.
+func validateRegroup(a compactAction, dim string, units map[string]regroupUnit, byKey map[string]store.Facet, used map[string]bool) string {
+	if a.Action != "merge" {
+		return "not_a_merge" // every unit was already judged worth keeping; retiring is round 1's
+	}
+	if a.Dimension != "" && a.Dimension != dim {
+		return "wrong_dimension"
+	}
+	if strings.TrimSpace(a.Key) == "" {
+		return "empty_key"
+	}
+	// The survivor is a unit or a NEW key. An existing facet that is not a unit was absorbed or
+	// retired by round 1, and reviving it would rewrite a value this call never saw.
+	_, keyIsUnit := units[a.Key]
+	if _, exists := byKey[store.FacetRef(dim, a.Key)]; exists && !keyIsUnit {
+		return "survivor_unseen"
+	}
+	if used[a.Key] { // also refuses one new key minted by two merges
+		return "already_claimed"
+	}
+	n := 0
+	if keyIsUnit {
+		n++
+	}
+	seen := map[string]bool{}
+	for _, k := range a.Absorb {
+		if k == a.Key {
+			return "absorb_includes_survivor"
+		}
+		if _, ok := units[k]; !ok {
+			return "absorb_unseen_unit"
+		}
+		if seen[k] {
+			return "absorb_duplicate"
+		}
+		if used[k] {
+			return "already_claimed"
+		}
+		seen[k] = true
+		n++
+	}
+	if n < 2 {
+		return "merge_too_small"
+	}
+	return ""
+}
+
 // writeValues is STAGE 2: one call per merge group, filling in the merged value. Retirements
 // pass straight through — they have no value to write.
 //
@@ -393,11 +592,7 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 
 	var out []compactAction
 	failures := 0
-	for _, a := range grouped {
-		if a.Action != "merge" {
-			out = append(out, a)
-			continue
-		}
+	write := func(a compactAction, siblings []compactAction) bool {
 		members := make([]store.Facet, 0, len(a.Absorb)+1)
 		if surv, ok := byKey[store.FacetRef(dim, a.Key)]; ok {
 			members = append(members, surv) // an existing survivor's own value is input too
@@ -407,21 +602,40 @@ func (c *Compactor) writeValues(ctx context.Context, ln *lens.Lens, dim string,
 				members = append(members, f)
 			}
 		}
-		claim, value, err := c.writeOne(ctx, ln, dim, a, members, grouped)
+		claim, value, err := c.writeOne(ctx, ln, dim, a, members, siblings)
 		c.prog.merged++
 		c.tick()
 		if err != nil {
 			slog.Error("compact: writing a merged value failed (group dropped, others kept)",
 				"lens", ln.Name, "dimension", dim, "survivor", a.Key, "absorbing", len(a.Absorb), "err", err)
 			failures++
-			continue
+			return false
 		}
 		a.Value, a.Claim = value, claim
 		if reason := validateMergedValue(a, members); reason != "" {
 			skipped[reason]++
-			continue
+			return false
 		}
 		out = append(out, a)
+		return true
+	}
+	for i, a := range grouped {
+		if a.Action != "merge" {
+			out = append(out, a)
+			continue
+		}
+		if write(a, grouped) || len(a.split) == 0 {
+			continue
+		}
+		// A regroup union that failed or was refused is written as the round-1 groups it folded,
+		// each fenced by the others rather than by the union, which covers its own ground.
+		slog.Info("compact: writing a union's round-1 groups separately instead",
+			"lens", ln.Name, "dimension", dim, "union", a.Key, "groups", len(a.split))
+		c.prog.merges += len(a.split)
+		siblings := append(append(slices.Clone(grouped[:i]), grouped[i+1:]...), a.split...)
+		for _, g := range a.split {
+			write(g, siblings)
+		}
 	}
 	return out, failures
 }
@@ -770,8 +984,10 @@ func facetsInDimension(facets []store.Facet, dim string) []store.Facet {
 	// Sort by key so related facets land in the SAME batch: keys are descriptive snake_case
 	// slugs the model minted, so lexical adjacency correlates with topical adjacency
 	// (grounds_state_in_verification next to grounds_state_in_measurement). A free heuristic
-	// that raises the chance a duplicate pair is visible in one call — and compaction is
-	// re-runnable, so a pair split across batches is merged on a later pass rather than lost.
+	// that raises the chance a duplicate pair is visible in one call, and a weak one: the owner's
+	// PhD-prep facets were keyed self_directed_quant_prep, phd_prep, pre_phd_math, phd_math_prep.
+	// A pair split across batches is NOT merged by a later pass (the survivors re-batch the same
+	// way; only 9-12 of 29 such pairs then share a batch), so the regroup round joins it.
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
