@@ -716,8 +716,9 @@ func chooseRunner(st *store.Store, target string, in io.Reader) error {
 
 // askForModels prompts for mine_model and review_model when the runner requires a model
 // (platform.ModelRequirer.RequiresModel() == true) and the effective mine model is empty.
-// At a terminal it prompts (a value without "/" is refused and re-printed as a hint); when
-// in == nil it prints the hint only. No model is suggested (owner, 2026-11-13: no judgement).
+// At a terminal it prompts (an answer without "/", mine or review, refuses both and re-prints the
+// hint); when in == nil it prints the hint only. No model is suggested (owner, 2026-11-13: no
+// judgement).
 func askForModels(st *store.Store, runner string, in io.Reader) error {
 	p, ok := platform.ByName(runner)
 	if !ok {
@@ -727,29 +728,37 @@ func askForModels(st *store.Store, runner string, in io.Reader) error {
 	if !ok || !mr.RequiresModel() {
 		return nil
 	}
-	cfg := effectiveConfig(st, nil)
-	if cfg[1].value != "" { // mine_model is at index 1
-		return nil
+	for _, s := range effectiveConfig(st, nil) { // by key: a reordered list must not read another setting
+		if s.key == "mine_model" && s.value != "" {
+			return nil
+		}
 	}
 	modelHint := "witness config set mine_model <provider/model>"
-	if in == nil {
+	refuse := func(why string) error {
+		if why != "" {
+			fmt.Println(resultRow(warnGlyph(), "model", "not set", why))
+		}
 		fmt.Println(hint("set a model", modelHint))
 		fmt.Println(dim("  `opencode models` lists what is available"))
 		return nil
 	}
-	// Prompt for mine model.
+	if in == nil {
+		return refuse("")
+	}
+	// Both answers are checked before either is written, so a bad review model leaves nothing
+	// half-set and the one hint still names the whole fix.
 	mineVal := promptLine(in, "mine model (provider/model; `opencode models` lists them): ")
 	if !strings.Contains(mineVal, "/") {
-		fmt.Println(resultRow(warnGlyph(), "model", "not set", "invalid format"))
-		fmt.Println(hint("set a model", modelHint))
-		fmt.Println(dim("  `opencode models` lists what is available"))
-		return nil
+		return refuse("invalid format")
+	}
+	// Prompt for review model (optional: blank means same as mine).
+	reviewVal := promptLine(in, "review model (Enter: same as mine model): ")
+	if reviewVal != "" && !strings.Contains(reviewVal, "/") {
+		return refuse("invalid review model format")
 	}
 	if err := st.SetConfigString("triage_model", mineVal); err != nil {
 		return fmt.Errorf("write mine_model: %w", err)
 	}
-	// Prompt for review model (optional: blank means same as mine).
-	reviewVal := promptLine(in, "review model (Enter: same as mine model): ")
 	if reviewVal != "" {
 		if err := st.SetConfigString("distill_model", reviewVal); err != nil {
 			return fmt.Errorf("write review_model: %w", err)

@@ -34,6 +34,32 @@ func (fakeModelRunner) Run(context.Context, string, string, string) (string, err
 func (fakeModelRunner) ValidateModels(context.Context, ...string) error             { return nil }
 func (fakeModelRunner) InvocationHint() string                                      { return "fakemodel" }
 
+// wireOutput runs `witness wire target` and returns what it printed, failing the test on an error.
+func wireOutput(t *testing.T, target string) string {
+	t.Helper()
+	var err error
+	out := captureStdout(t, func() { err = cmdInstall([]string{target}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// hasLine reports whether one line of out contains every part, so a row is matched whole and not
+// by words scattered over the screen.
+func hasLine(out string, parts ...string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		all := true
+		for _, p := range parts {
+			all = all && strings.Contains(line, p)
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
 // TestWireBindsTheRunnerWhenNoneIsChosenYet verifies that on a fresh archive (no runner
 // bound), wire binds the wired target as the default and reports "the default".
 func TestWireBindsTheRunnerWhenNoneIsChosenYet(t *testing.T) {
@@ -44,11 +70,12 @@ func TestWireBindsTheRunnerWhenNoneIsChosenYet(t *testing.T) {
 	var called bool
 	registerFakeCaptureOnlyEditor(t, "fakeleak", &called)
 
-	if err := cmdInstall([]string{"fakeleak"}); err != nil {
-		t.Fatal(err)
-	}
+	out := wireOutput(t, "fakeleak")
 	if !called {
 		t.Fatal("installer was not called")
+	}
+	if !hasLine(out, "runner", "fakeleak", "the default") {
+		t.Errorf("wire output has no `runner fakeleak (the default)` row:\n%s", out)
 	}
 
 	st, err := store.Open()
@@ -85,8 +112,13 @@ func TestWireNeverSwitchesABoundRunnerWithoutATerminal(t *testing.T) {
 	var called bool
 	registerFakeCaptureOnlyEditor(t, "fakeleak", &called)
 
-	if err := cmdInstall([]string{"fakeleak"}); err != nil {
-		t.Fatal(err)
+	out := wireOutput(t, "fakeleak")
+	// Piped, this hint is the only guidance there is (Global Constraints)
+	if !hasLine(out, "runner", "unchanged (claude)") || !hasLine(out, "witness config set runner fakeleak") {
+		t.Errorf("wire output without a terminal lacks the unchanged row or the `witness config set runner fakeleak` hint:\n%s", out)
+	}
+	if strings.Contains(out, "[y/N]") {
+		t.Errorf("wire asked without a terminal:\n%s", out)
 	}
 
 	st, err = store.Open()
@@ -136,8 +168,16 @@ func TestWireAsksBeforeSwitchingABoundRunner(t *testing.T) {
 			wireAnswers = func() io.Reader { return bytes.NewBufferString(tc.answer) }
 			t.Cleanup(func() { wireAnswers = orig })
 
-			if err := cmdInstall([]string{"fakeleak"}); err != nil {
-				t.Fatal(err)
+			out := wireOutput(t, "fakeleak")
+			if !strings.Contains(out, "Make fakeleak the default runner instead of claude? [y/N]") {
+				t.Errorf("wire did not ask with a [y/N] prompt:\n%s", out)
+			}
+			if tc.wantNext == "fakeleak" {
+				if !hasLine(out, "runner", "fakeleak", "the default") {
+					t.Errorf("a yes did not report `runner fakeleak (the default)`:\n%s", out)
+				}
+			} else if !hasLine(out, "witness config set runner fakeleak") {
+				t.Errorf("a no did not print the `witness config set runner fakeleak` hint:\n%s", out)
 			}
 
 			st, err = store.Open()
@@ -169,6 +209,8 @@ func TestWireAsksForModelsWhenTheNewDefaultNeedsOne(t *testing.T) {
 		{"mine_only", "prov/m1\n\n", "prov/m1", "", false},
 		{"both", "prov/m1\nprov/m2\n", "prov/m1", "prov/m2", false},
 		{"invalid", "nonsense\n", "", "", true},
+		// A bad review model refuses both: a half-set pair would hide the refusal behind a working mine
+		{"invalid_review", "prov/m1\nnonsense\n", "", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("WITNESS_HOME", t.TempDir())
@@ -182,8 +224,9 @@ func TestWireAsksForModelsWhenTheNewDefaultNeedsOne(t *testing.T) {
 			wireAnswers = func() io.Reader { return bytes.NewBufferString(tc.input) }
 			t.Cleanup(func() { wireAnswers = orig })
 
-			if err := cmdInstall([]string{"fakemodel"}); err != nil {
-				t.Fatal(err)
+			out := wireOutput(t, "fakemodel")
+			if got := hasLine(out, "witness config set mine_model <provider/model>"); got != tc.wantNoWrite {
+				t.Errorf("mine_model hint printed = %v, want %v:\n%s", got, tc.wantNoWrite, out)
 			}
 
 			st, err := store.Open()
@@ -193,8 +236,8 @@ func TestWireAsksForModelsWhenTheNewDefaultNeedsOne(t *testing.T) {
 			defer st.Close()
 			cfg := st.ResolvedConfig()
 			if tc.wantNoWrite {
-				if cfg.TriageModel != "" {
-					t.Errorf("TriageModel = %q, want empty (invalid input, nothing written)", cfg.TriageModel)
+				if cfg.TriageModel != "" || cfg.DistillModel != "" {
+					t.Errorf("TriageModel = %q, DistillModel = %q, want both empty (invalid input, nothing written)", cfg.TriageModel, cfg.DistillModel)
 				}
 			} else {
 				if cfg.TriageModel != tc.wantMine {
@@ -215,8 +258,12 @@ func TestWireAsksForModelsWhenTheNewDefaultNeedsOne(t *testing.T) {
 		var called bool
 		registerFakeCaptureOnlyEditor(t, "fakemodel", &called)
 
-		if err := cmdInstall([]string{"fakemodel"}); err != nil {
-			t.Fatal(err)
+		out := wireOutput(t, "fakemodel")
+		if !hasLine(out, "witness config set mine_model <provider/model>") {
+			t.Errorf("wire without a terminal did not print the mine_model hint:\n%s", out)
+		}
+		if strings.Contains(out, "mine model (") {
+			t.Errorf("wire asked for a model without a terminal:\n%s", out)
 		}
 
 		st, err := store.Open()
