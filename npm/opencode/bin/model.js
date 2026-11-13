@@ -9,6 +9,7 @@ import { pipeline } from "node:stream/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { dataRoot, modelDir, promptsDir } from "./platform.js"
 
 // Pin the exact HuggingFace revision (not a floating `main`): the SHA-256s below
 // are that revision's git-LFS oids, verified against the pointers. A floating ref
@@ -24,40 +25,13 @@ const MODEL_SHA256 = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6
 const TOKENIZER_SHA256 = "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
 const DEFAULT_BASE_URL = "https://huggingface.co/intfloat/multilingual-e5-small/resolve/" + MODEL_REVISION
 const LOCK_STALE_MS = 12 * 60 * 60 * 1000
-const DATA_DIR_NAMES = ["witness", "claude-witness"]
 const VERIFIED_MARKER = ".verified.json"
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 30_000
 
 const scriptPath = fileURLToPath(import.meta.url).replace(/model\.js$/, "download-model.js")
 
-function dataRoot() {
-  if (process.env.WITNESS_HOME) return process.env.WITNESS_HOME
-  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share")
-  for (const name of DATA_DIR_NAMES) {
-    const candidate = path.join(base, name)
-    if (existsSync(candidate)) return candidate
-  }
-  return path.join(base, DATA_DIR_NAMES[0])
-}
-
-export function modelDir() {
-  // Keep the large model in witness's user data dir, not inside the global npm
-  // package. Package directories may be read-only, removed on upgrade, or shared
-  // across package-manager installs; the data dir is stable and matches Go's
-  // store root resolution, including the legacy claude-witness adoption rule.
-  return process.env.WITNESS_ASSETS || path.join(dataRoot(), "assets", "e5-small")
-}
-
-// promptsDir returns the bundled prompt/lens templates shipped in THIS (main)
-// package. Critical since the optionalDependencies split: the witness binary now
-// lives in a SEPARATE per-platform package (@witness-ai/opencode-<plat>/bin), so
-// the binary's exe-relative probe for prompts/ looks beside itself and misses the
-// main package's prompts/ entirely — LoadDefault then fails and ALL distillation
-// silently breaks. We pass this to the binary as WITNESS_PROMPTS (mirroring how
-// WITNESS_ASSETS points at the model dir), which bundle.Dir honors first.
-export function promptsDir(packageRoot) {
-  return path.join(packageRoot, "prompts")
-}
+// Re-export the platform helpers so existing callers keep loading until task 1.5
+export { modelDir, promptsDir }
 
 function envInt(name, fallback) {
   const raw = process.env[name]

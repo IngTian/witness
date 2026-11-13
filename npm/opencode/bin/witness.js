@@ -3,8 +3,7 @@ import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { modelDir, promptsDir } from "./model.js"
-import { platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"
+import { modelDir, promptsDir, platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"
 
 // This wrapper lives in <package>/bin/, so the package root (holding prompts/) is
 // one level up.

@@ -9,8 +9,7 @@ const sourcePath = new URL("./witness.js", import.meta.url)
 const source = (await readFile(sourcePath, "utf8"))
   .replace('import { spawnSync } from "node:child_process"', 'const { spawnSync } = globalThis.__witnessCliHarness.childProcess')
   .replace('import { existsSync } from "node:fs"', 'const { existsSync } = globalThis.__witnessCliHarness.fs')
-  .replace('import { modelDir, promptsDir } from "./model.js"', 'const { modelDir, promptsDir } = globalThis.__witnessCliHarness.model')
-  .replace('import { platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"', 'const { platformPackage, platformWitnessBin, supportedPlatforms } = globalThis.__witnessCliHarness.platform')
+  .replace('import { modelDir, promptsDir, platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"', 'const { modelDir, promptsDir, platformPackage, platformWitnessBin, supportedPlatforms } = globalThis.__witnessCliHarness.platform')
 
 async function runCLI(argv, harness) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "witness-opencode-cli-"))
@@ -69,15 +68,13 @@ test("npm CLI gives a clear wire/unwire error before looking for bundled binarie
         throw new Error("should not probe dist for wire/unwire")
       },
     },
-    model: {
+    platform: {
       modelDir() {
         return "/assets/e5-small"
       },
       promptsDir() {
         return "/pkg/prompts"
       },
-    },
-    platform: {
       platformPackage() {
         throw new Error("should not resolve platform for wire/unwire")
       },
@@ -111,15 +108,13 @@ test("npm CLI still forwards non-install commands to the bundled binary with wit
         return true
       },
     },
-    model: {
+    platform: {
       modelDir() {
         return "/assets/e5-small"
       },
       promptsDir() {
         return "/pkg/prompts"
       },
-    },
-    platform: {
       platformPackage() {
         return "@witness-ai/opencode-darwin-arm64"
       },
@@ -158,8 +153,9 @@ test("npm CLI honors an explicit WITNESS_BIN override even when no platform pack
         throw new Error("an explicit WITNESS_BIN must be used verbatim, not existsSync-gated")
       },
     },
-    model: { modelDir: () => "/assets/e5-small", promptsDir: () => "/pkg/prompts" },
     platform: {
+      modelDir: () => "/assets/e5-small",
+      promptsDir: () => "/pkg/prompts",
       platformPackage: () => "", // unsupported platform: no bundled binary
       platformWitnessBin: () => "",
       supportedPlatforms: () => "supported",
@@ -180,8 +176,8 @@ test("npm CLI honors an explicit WITNESS_BIN override even when no platform pack
 test("npm CLI reports the supported matrix when no platform package is available", async () => {
   const harness = {
     fs: { existsSync: () => false },
-    model: { modelDir: () => "/assets/e5-small" },
     platform: {
+      modelDir: () => "/assets/e5-small",
       platformPackage: () => "",
       platformWitnessBin: () => "",
       supportedPlatforms: () => "macOS Apple Silicon and Linux x86-64",
