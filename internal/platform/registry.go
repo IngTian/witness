@@ -259,6 +259,14 @@ func RenderChunks(raw []store.RawRecord, policy ChunkPolicy) []string {
 	return chunks
 }
 
+// ModelRequirer is the optional capability for a runner that refuses to run without
+// a stage model set (OpenCode's runner errors on an empty mine_model because the
+// platform default may train on inputs). Wire asks for models when binding a runner
+// that implements this and the effective mine_model is empty.
+type ModelRequirer interface {
+	RequiresModel() bool
+}
+
 // registry holds the registered platforms, keyed by Name(). It is populated by
 // each platform subpackage's init(), so importing a subpackage (even blank) makes
 // its platform available. Registration happens at process start before any

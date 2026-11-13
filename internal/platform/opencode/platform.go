@@ -24,9 +24,15 @@ var (
 	_ platform.AutoImporter        = Platform{}
 	_ platform.RunnerProvider      = Platform{}
 	_ platform.NativeSessionSource = Platform{}
+	_ platform.ModelRequirer       = Platform{}
 )
 
 func (Platform) Name() string { return "opencode" }
+
+// RequiresModel returns true: an empty stage model is an error on the OpenCode runner
+// (the platform's default model may train on inputs, so witness refuses to fall back).
+// Wire checks this to ask for models when binding OpenCode as the default runner.
+func (Platform) RequiresModel() bool { return true }
 
 func (Platform) SessionPrefix() string { return SessionPrefix }
 

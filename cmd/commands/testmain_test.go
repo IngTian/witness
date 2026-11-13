@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,6 +54,8 @@ func TestMain(m *testing.M) {
 	openCodeVersion = func(context.Context) (opencode.Version, error) { return opencode.MinVersion, nil }
 	// On Windows the real openCodeInstallTarget copies the test binary.
 	openCodeInstallTarget = func() (string, error) { return "", errors.New("no install target under go test") }
+	// No test reads the real stdin for wire prompts.
+	wireAnswers = func() io.Reader { return nil }
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)

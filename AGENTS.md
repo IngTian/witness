@@ -77,11 +77,12 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   `codex:`, `file:`; Claude is unprefixed). Import state is source-namespaced.
   A capture source need not provide a distillation runner.
 - **Runners are resolved from the enabled-lens set (process-wide, never
-  repo-scoped).** A **default** `runner` (in `config.toml`, bound by `witness wire
-  <target>`) distills every session unless overridden, but a lens may declare its own
-  `runner` in its `lens.json` (#75 slice 2) — so one drain can span both Claude
-  and OpenCode, each lens routed to its runtime. The set of runtimes to open is
-  derived from the active lenses (`cmd/commands/runnerset.go`), never from a repo.
+  repo-scoped).** A **default** `runner` (in `config.toml`; the first `witness wire <target>`
+  binds it, a later wire of another agent asks at a terminal and never switches it otherwise)
+  distills every session unless overridden, but a lens may declare its own `runner` in its
+  `lens.json` (#75 slice 2) — so one drain can span both Claude and OpenCode, each lens routed
+  to its runtime. The set of runtimes to open is derived from the active lenses
+  (`cmd/commands/runnerset.go`), never from a repo.
 - **Capture must never break a session.** `capture`/`session-start`/`session-end`
   are best-effort: they log failures but always exit 0. Do not make them return
   errors on a bad hook payload.
