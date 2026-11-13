@@ -187,18 +187,13 @@ func TestSelfSpawnedTokenDiscoveryFindsTheKnownSpawns(t *testing.T) {
 	}
 	// The three tokens the OLD hardcoded list did not cover. Each is a real distillation
 	// trigger: worker-run (capture's post-turn kick, ingest, observations), worker-wakeup (the
-	// backoff retry), worker-kick (the OpenCode plugin's quiet-period start).
-	for _, want := range []string{"worker-run", "worker-wakeup", "worker-kick"} {
+	// backoff retry), worker-kick (the OpenCode plugin's quiet-period start). The plugin also
+	// spawns import (startup sync and every turn end) and, from npm, model fetch.
+	for _, want := range []string{"worker-run", "worker-wakeup", "worker-kick", "import", "model"} {
 		if !got[want] {
 			t.Errorf("the scan no longer finds %q; if that spawn site was renamed, update this "+
 				"list — otherwise the hook-contract guard has gone blind (found: %v)", want, got)
 		}
-	}
-	// `worker` IS legitimately discovered — the plugin runs `worker stop --auto-only` on dispose
-	// — so it stays covered as a group whose subcommand path must resolve. What was wrong before
-	// was guarding ONLY that, since it told us nothing about the three tokens above.
-	if !got["worker"] {
-		t.Error(`"worker" should still be discovered: the plugin invokes "worker stop --auto-only"`)
 	}
 }
 

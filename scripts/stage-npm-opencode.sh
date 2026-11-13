@@ -61,7 +61,6 @@ cp "$ROOT/bin/witness-windows-arm64.exe" "$WIN_ARM64_PKG/bin/witness.exe"
 cp -R "$ROOT/prompts" "$PKG/prompts"
 
 chmod +x "$PKG/bin/witness.js"
-chmod +x "$PKG/bin/download-model.js"
 chmod +x "$DARWIN_PKG/bin/witness" "$LINUX_PKG/bin/witness"
 # The Windows binaries get the exec bit too: npm preserves mode, and a checkout that
 # later runs these under WSL or a POSIX shell would otherwise hit EACCES.

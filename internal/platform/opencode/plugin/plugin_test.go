@@ -1,43 +1,84 @@
 package plugin
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestBodyExportsDefaultPlugin(t *testing.T) {
+// The v2 contract the body must keep, each piece observed on OpenCode 2.2.7 and 2.3.0 (the
+// evidence is docs/superpowers/specs/2026-11-13-opencode-v2-evidence/plugin.md); behaviour is
+// tested in npm/opencode/witness.test.js, which runs this body and the npm copy.
+func TestBodyIsAV2Plugin(t *testing.T) {
 	body := Source("")
-	if !strings.Contains(body, "export default plugin") {
-		t.Fatal("OpenCode package loading expects a default plugin export")
+	for _, want := range []string{
+		"export default {", `id: "witness"`, // v2 decodes only default: {id, setup}
+		"ctx.event.subscribe(",
+		`"session.execution.started"`, `"session.execution.succeeded"`,
+		`"session.execution.failed"`, `"session.execution.interrupted"`,
+		"globalThis.__witnessCaptureV2",          // one state for every Location instance
+		"WITNESS_OPENCODE_BIN: process.execPath", // the Windows desktop's CLI is never on PATH
+		`process.env.WITNESS_WORKER === "1"`,     // the recursion guard
+		`spawnWitness(["worker-kick"])`,          // the quiet-period start goes through the kick gate
+		"Bun.spawn([WITNESS_BIN, ...args]",       // an argv array, never a shell string
+		`process.env.WITNESS_BIN || "witness"`,   // the unwired fallback
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the plugin body lacks %q", want)
+		}
 	}
-	if !strings.Contains(body, "export const Witness = plugin") || !strings.Contains(body, "export const ClaudeWitness = plugin") {
-		t.Fatal("named plugin exports should remain available for local/plugin-name loading")
+	for _, bad := range []string{
+		".properties",      // v1 payloads; v2 carries data.sessionID
+		`"session.idle"`,   // accepted by v2's subscribe, never delivered
+		`"session.status"`, // likewise
+		`"worker", "stop"`, // cleanup has ~5 s before SIGKILL and runs on every reload
+		"export const",     // v1's named exports; v2 rejects the module shape
+		"IMPORT_GRACE_MS",  // the v1 dispose grace that cannot fit that budget
+	} {
+		if strings.Contains(body, bad) {
+			t.Errorf("the plugin body still contains %q", bad)
+		}
 	}
-	if !strings.Contains(body, `type.startsWith("message.")`) || !strings.Contains(body, "clearQuietTimer()") {
-		t.Fatal("embedded plugin should treat message updates as activity without importing them")
+}
+
+// npm/opencode/witness.js is generated, so the two copies cannot drift (F113).
+func TestNPMPluginIsGeneratedFromTheBody(t *testing.T) {
+	prelude, err := os.ReadFile("npm_prelude.js")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, `const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]`) || strings.Contains(body, `"import", "--agent", "opencode", "--quiet", "--auto"`) {
-		t.Fatal("embedded plugin should reconcile OpenCode sessions through L0-only import")
+	want := string(prelude) + body
+	npm := filepath.Join("..", "..", "..", "..", "npm", "opencode", "witness.js")
+	if os.Getenv("WITNESS_WRITE_NPM_PLUGIN") == "1" {
+		if err := os.WriteFile(npm, []byte(want), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
 	}
-	if !strings.Contains(body, "sync()") || !strings.Contains(body, `type === "session.idle"`) || !strings.Contains(body, `type === "session.status"`) || !strings.Contains(body, `status?.type === "idle"`) {
-		t.Fatal("embedded plugin should reconcile on init and both idle event forms")
+	got, err := os.ReadFile(npm)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, "const pendingSessions = new Set()") || !strings.Contains(body, "const sessionWaiters = new Map()") || !strings.Contains(body, "const batchWaiters = claimWaiters(coveredSessions)") || !strings.Contains(body, "const idleCycles = new Map()") || !strings.Contains(body, "let activeImport = null") || !strings.Contains(body, "drain()") {
-		t.Fatal("embedded plugin should serialize, wait for, and deduplicate idle imports")
+	if string(got) != want {
+		t.Fatalf("%s is not npm_prelude.js + witness.js; regenerate it:\n"+
+			"  WITNESS_WRITE_NPM_PLUGIN=1 go test ./internal/platform/opencode/plugin/ -run TestNPMPluginIsGeneratedFromTheBody", npm)
 	}
-	if !strings.Contains(body, "const IMPORT_GRACE_MS = 5000") || !strings.Contains(body, "let disposing = false") || !strings.Contains(body, "waitForIdle()") {
-		t.Fatal("embedded plugin should drain imports gracefully before disposal")
+}
+
+func TestInstalledShimRecognisesOnlyTheCurrentBody(t *testing.T) {
+	for _, shim := range []string{"/r/hooks/witness.sh", `C:\Users\Zeying Tian\AppData\Local\witness\witness.exe`} {
+		if got, current := InstalledShim(Source(shim)); got != shim || !current {
+			t.Errorf("InstalledShim(Source(%q)) = (%q, %v), want (%q, true)", shim, got, current, shim)
+		}
 	}
-	if !strings.Contains(body, "const QUIET_PERIOD_MS = 5 * 60 * 1000") || !strings.Contains(body, "scheduleQuietWorker()") || !strings.Contains(body, `spawnWitness(["worker-kick"])`) || !strings.Contains(body, "clearQuietTimer()") {
-		t.Fatal("embedded plugin should start one auto worker after a resettable quiet period")
-	}
-	// Must go through worker-kick, NOT `worker-run --auto`: dispose latches a durable
-	// worker_stop_requested flag that only the kick gate clears, so spawning worker-run
-	// directly freezes automatic distillation permanently after the first OpenCode close.
-	if strings.Contains(body, `spawnWitness(["worker-run", "--auto"])`) {
-		t.Fatal("embedded plugin must not spawn worker-run directly; it bypasses the stop-flag clear and freezes auto-distill")
-	}
-	if !strings.Contains(body, `spawnWitness(["worker", "stop", "--auto-only"])`) {
-		t.Fatal("embedded plugin should stop only auto workers on disposal")
+	for name, src := range map[string]string{
+		"an edited body":     Source("/r/hooks/witness.sh") + "\n// edit",
+		"a v1-shaped plugin": "globalThis.WITNESS_SHIM = \"/r\"\n\nconst plugin = async () => ({})",
+		"an empty file":      "",
+	} {
+		if _, current := InstalledShim(src); current {
+			t.Errorf("%s is reported current", name)
+		}
 	}
 }

@@ -1,6 +1,6 @@
 # @witness-ai/opencode
 
-OpenCode plugin for witness. It reconciles OpenCode's local session database on startup and when a session goes idle, and starts witness distillation only through the CLI's laptop-friendly auto-start gate.
+OpenCode plugin for witness. It reconciles OpenCode's local session database on startup and at the end of every turn, and starts witness distillation only through the CLI's laptop-friendly auto-start gate.
 
 ## Supported platforms
 
@@ -13,7 +13,7 @@ OpenCode plugin for witness. It reconciles OpenCode's local session database on 
 
 These are the only platforms supported by the npm distribution. macOS Intel and Linux ARM are not supported; the CLI exits with a clear supported-platform message on those systems.
 
-Requires **OpenCode v1, 1.18.0 or newer and below 2.0**. OpenCode v2 (`@opencode/cli`) is not supported yet ([#218](https://github.com/IngTian/witness/issues/218)): witness refuses it by name rather than silently capturing nothing. Install v1 with `npm i -g opencode-ai@1.19.5`. On Windows, if you prefer a self-contained install with the embedding model already included — no first-run download — use the zip from the [latest release](https://github.com/IngTian/witness/releases/latest) instead.
+Requires OpenCode **2.2.7 or newer** (v1 is not supported; witness v0.13.0 was the last release for v1). On Windows, if you prefer a self-contained install with the embedding model already included — no first-run download — use the zip from the [latest release](https://github.com/IngTian/witness/releases/latest) instead.
 
 ## Install
 
@@ -22,12 +22,12 @@ Add the npm plugin to your OpenCode config. OpenCode installs the package automa
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@witness-ai/opencode"]
+  "plugins": ["@witness-ai/opencode"]
 }
 ```
 
 To test a prerelease, pin an explicit version instead of the unversioned package name — e.g.
-`"plugin": ["@witness-ai/opencode@0.9.1-beta.1"]`. Use a real published version; the `beta` dist-tag
+`"plugins": ["@witness-ai/opencode@0.9.1-beta.1"]`. Use a real published version; the `beta` dist-tag
 is not kept current, so pinning it can silently install something several releases old.
 
 Optional: install it globally if you also want a `witness` CLI on your shell `PATH`:
@@ -42,7 +42,7 @@ Optional: run the CLI ad hoc without a global install:
 npm exec --yes --package=@witness-ai/opencode -- witness doctor
 ```
 
-The main package includes the plugin, CLI wrapper, and prompts. npm installs one optional platform package containing the matching `witness` binary; it does not download binaries for other operating systems or architectures. The first embedding-model download is about 470MB into the witness data directory (`assets/e5-small`). `npm install` only installs the packages; the OpenCode plugin starts the model download when OpenCode next starts. Keep OpenCode running until the first download finishes. If OpenCode stops early, the plugin stops its downloader and retries later with bounded backoff. Run as an MCP server alone (`npx @witness-ai/opencode mcp`, as the MCP Registry entry does), witness downloads the model itself in the background: search answers once it lands, and the other tools work at once. `npx @witness-ai/opencode model fetch` downloads it in the foreground instead. Set `WITNESS_BIN` to override the platform package binary.
+The main package includes the plugin, CLI wrapper, and prompts. npm installs one optional platform package containing the matching `witness` binary; it does not download binaries for other operating systems or architectures. The embedding model is not in the package: the plugin runs `witness model fetch` once each time OpenCode starts (~470 MB the first time, into the witness data directory's `assets/e5-small`; later starts only check it); `witness mcp` answers search once it lands, and the other tools work at once. Run as an MCP server alone (`npx @witness-ai/opencode mcp`, as the MCP Registry entry does), witness downloads the model itself in the background. `npx @witness-ai/opencode model fetch` downloads it in the foreground instead. Set `WITNESS_BIN` to override the platform package binary.
 
 After the download completes, verify the model, OpenCode runner, archive, and queue:
 
@@ -57,7 +57,7 @@ npm exec --yes --package=@witness-ai/opencode -- witness status
 
 By default the model is downloaded from Hugging Face. A custom `WITNESS_MODEL_BASE_URL` must serve the same paths (`onnx/model.onnx` and `tokenizer.json`) and also set `WITNESS_MODEL_SHA256` plus `WITNESS_TOKENIZER_SHA256`.
 
-Automatic distillation is batched by default: sessions are reconciled on startup and idle, while model work starts after a 5-minute quiet period (each new idle session resets it), drains the current queue, then exits so the embed model is not resident. Edit witness `config.toml` if you want manual-only behavior:
+Automatic distillation is batched by default: sessions are reconciled on startup and at every turn end, while model work starts after a 5-minute quiet period once no session is running (each new turn resets it), drains the current queue, then exits so the embed model is not resident. Edit witness `config.toml` if you want manual-only behavior:
 
 ```toml
 auto_distill = false

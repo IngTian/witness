@@ -69,10 +69,11 @@ func cmdModelFetch() error {
 	return nil
 }
 
-// lazyModel reports whether `witness mcp` must start without the model. Under
-// `npx @witness-ai/opencode mcp` (WITNESS_NPM_PACKAGE=1, set only by the npm launcher, never by
-// the plugin's MCP entry) nothing else downloads it, so a missing model used to stop the server
-// outright. Everywhere else, and whenever the model is present, the server is unchanged.
+// lazyModel reports whether `witness mcp` must start without the model. WITNESS_NPM_PACKAGE=1 is
+// set by the npm launcher (`npx @witness-ai/opencode mcp`) and by the npm plugin's `mcp.witness`
+// entry: the package ships without the model, so a missing one used to stop the server outright.
+// The plugin's own `witness model fetch` may hold the lock; the lazy fetch waits that out
+// (ErrBusy). Everywhere else, and whenever the model is present, the server is unchanged.
 func lazyModel() bool {
 	return os.Getenv("WITNESS_NPM_PACKAGE") == "1" && !embed.ModelReady()
 }

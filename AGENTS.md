@@ -58,7 +58,8 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   nothing); `cmd/commands/root.go` imports the adapters. Installers register
   separately: a cmd-local wire-target map (`cmd/commands/installers.go`) with cmd-side
   implementations.
-  `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
+  `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS — the one source of
+  `npm/opencode/witness.js` (regenerate with `WITNESS_WRITE_NPM_PLUGIN=1 go test ./internal/platform/opencode/plugin/`).
 - `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding
   model) relative to the binary via `os.Executable()` when no env var points at
   them, so a copied/installed binary self-locates its assets.

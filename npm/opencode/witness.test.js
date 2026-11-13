@@ -1,614 +1,449 @@
 import assert from "node:assert/strict"
-import { EventEmitter } from "node:events"
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { pathToFileURL } from "node:url"
 
-// The two plugin files share their import queue, idle dedupe, quiet-period worker and dispose
-// logic: npm's witness.js, and the one `witness wire opencode` embeds into the Go binary. The
-// behaviour tests below that cover that shared logic run against BOTH, so a change to one copy
-// cannot pass here while the other drifts. Only the npm copy has the model downloader, the MCP
-// config hook and the inert-platform warning, so those tests stay npm-only.
+// One body, two copies: npm's witness.js (npm_prelude.js + the body, generated) and the body
+// `witness wire opencode` writes with its shim line prepended. Every behaviour test runs against
+// BOTH, so a change that only works in one copy fails here. The fakes follow the v2 contract
+// observed on OpenCode 2.2.7 and 2.3.0 (docs/superpowers/specs/2026-11-13-opencode-v2-evidence/
+// plugin.md): setup runs once per Location and again on every hot reload, every instance sees
+// every event on one bus, and an event's id is the same in every instance.
+const BODY = await readFile(new URL("../../internal/platform/opencode/plugin/witness.js", import.meta.url), "utf8")
 const PLUGINS = [
-  { name: "npm", downloads: true, source: await readFile(new URL("./witness.js", import.meta.url), "utf8") },
-  {
-    name: "embedded",
-    downloads: false,
-    source: await readFile(new URL("../../internal/platform/opencode/plugin/witness.js", import.meta.url), "utf8"),
-  },
+  { name: "npm", npm: true, source: await readFile(new URL("./witness.js", import.meta.url), "utf8") },
+  { name: "embedded", npm: false, source: 'globalThis.WITNESS_SHIM = "/shim/witness"\n\n' + BODY },
 ]
+const [NPM, EMBEDDED] = PLUGINS
 
-function deferred() {
-  let resolve
-  let reject
-  const promise = new Promise((res, rej) => {
-    resolve = res
-    reject = rej
-  })
-  return { promise, resolve, reject }
+const ENV_KEYS = ["WITNESS_BIN", "WITNESS_WORKER", "WITNESS_SKIP_MODEL_DOWNLOAD", "WITNESS_ASSETS", "WITNESS_PROMPTS", "WITNESS_RUNNER", "WITNESS_OPENCODE_BIN"]
+const QUIET_MS = 5 * 60 * 1000
+const STATE = "__witnessCaptureV2"
+
+const settle = () => new Promise((resolve) => setImmediate(resolve))
+
+// A spawned witness that has already exited, unless the test wants to hold it.
+function exitedProc() {
+  return { exited: Promise.resolve(0), unref() {} }
 }
 
-function makeProc(label, events, options = {}) {
-  const done = deferred()
-  const proc = new EventEmitter()
-  proc.label = label
-  proc.killed = false
-  proc.exitCode = null
-  proc.exited = done.promise
-  proc.kill = () => {
-    events.push(`kill:${label}`)
-    proc.killed = true
-    proc.exitCode = options.killCode ?? 0
-    done.resolve(proc.exitCode)
-    proc.emit("exit", proc.exitCode)
+// A fake v2 event bus. ctx().event.subscribe is an async iterable that receives every matching
+// publish in every instance and ends when its signal aborts; ctx().mcp.transform runs the editor
+// callback on a Map, the way v2's MCP config transform does.
+function makeBus({ mcp = new Map() } = {}) {
+  const subs = new Set()
+  const bus = {
+    mcp,
+    subscribed: [],
+    transforms: 0,
+    live: () => subs.size,
+    ctx() {
+      return {
+        event: {
+          subscribe({ types, signal }) {
+            bus.subscribed.push(types)
+            const sub = { types, queue: [], wake: null }
+            subs.add(sub)
+            signal?.addEventListener("abort", () => sub.wake?.(), { once: true })
+            return (async function* () {
+              try {
+                while (!signal?.aborted) {
+                  if (sub.queue.length) {
+                    yield sub.queue.shift()
+                    continue
+                  }
+                  await new Promise((resolve) => (sub.wake = resolve))
+                  sub.wake = null
+                }
+              } finally {
+                subs.delete(sub)
+              }
+            })()
+          },
+        },
+        mcp: {
+          async transform(fn) {
+            bus.transforms += 1
+            fn({ get: (k) => mcp.get(k), set: (k, v) => mcp.set(k, v) })
+          },
+        },
+      }
+    },
+    async publish(event) {
+      for (const sub of subs) if (!sub.types || sub.types.includes(event.type)) sub.queue.push(event), sub.wake?.()
+      await settle()
+    },
   }
-  proc.finish = (code = 0) => {
-    proc.exitCode = code
-    done.resolve(code)
-    proc.emit("exit", code)
-  }
-  if (options.autoExit !== undefined) queueMicrotask(() => proc.finish(options.autoExit))
-  return proc
+  return bus
 }
 
-async function loadPlugin(harness, source = PLUGINS[0].source) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "witness-opencode-plugin-"))
+// Fake timers for the quiet period: setTimeout records, nothing fires until the test says so.
+function fakeTimers() {
+  const real = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout }
+  const timers = []
+  globalThis.setTimeout = (fn, delay) => {
+    const t = { fn, delay, active: true, unref() {} }
+    timers.push(t)
+    return t
+  }
+  globalThis.clearTimeout = (t) => {
+    if (t) t.active = false
+  }
+  return {
+    active: () => timers.filter((t) => t.active),
+    fire(t) {
+      t.active = false
+      t.fn()
+    },
+    restore() {
+      Object.assign(globalThis, real)
+    },
+  }
+}
+
+// loadPlugin writes source as <pkg>/witness.js beside a fake bin/platform.js (the npm prelude
+// imports it), installs a fake Bun.spawn that records every spawn, and imports the module.
+// load() imports another copy into the same process, reload() re-evaluates the first file the
+// way a hot reload does; globalThis state survives both, as it does in OpenCode.
+async function loadPlugin(harness = {}, source = NPM.source) {
+  // realpath: the module URL resolves macOS /var to /private/var, and promptsDir derives from it.
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "witness-opencode-plugin-")))
   await mkdir(path.join(dir, "bin"), { recursive: true })
-  await writeFile(path.join(dir, "witness.js"), source)
-  await writeFile(
-    path.join(dir, "bin", "model.js"),
-    `
-      const harness = globalThis.__witnessTestHarness
-      export function modelDir() { return harness.modelDir() }
-      export function modelReady() { return harness.modelReady() }
-      export function promptsDir(packageRoot) { return (harness.promptsDir || ((r) => r + "/prompts"))(packageRoot) }
-      export function startModelDownload(packageRoot, options = {}) { return harness.startModelDownload(packageRoot, options) }
-    `,
-  )
+  const platformBin = path.join(dir, "bin", "witness")
+  await writeFile(platformBin, "")
   await writeFile(
     path.join(dir, "bin", "platform.js"),
     `
-      export function platformWitnessBin() { return globalThis.__witnessTestHarness.platformBin?.() || "" }
-      export function platformPackage() { return globalThis.__witnessTestHarness.platformPackage?.() ?? "" }
-      export function supportedPlatforms() { return "macOS Apple Silicon (darwin/arm64) and Linux x86-64 (linux/x64)" }
+      import path from "node:path"
+      const h = () => globalThis.__witnessTestHarness
+      export function platformWitnessBin() { return h().platformBin ?? "" }
+      export function platformPackage() { return "" }
+      export function supportedPlatforms() { return "test platforms" }
+      export function modelDir() { return "/assets/e5-small" }
+      export function promptsDir(packageRoot) { return path.join(packageRoot, "prompts") }
     `,
   )
-
-  const previous = {
-    Bun: globalThis.Bun,
-    WITNESS_SHIM: globalThis.WITNESS_SHIM,
-    WITNESS_BIN: process.env.WITNESS_BIN,
-    harness: globalThis.__witnessTestHarness,
-  }
-  globalThis.__witnessTestHarness = harness
-  globalThis.WITNESS_SHIM = Object.hasOwn(harness, "shim") ? harness.shim : "/shim/witness"
-  if (Object.hasOwn(harness, "witnessBin")) process.env.WITNESS_BIN = harness.witnessBin
+  const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
+  for (const k of ENV_KEYS) delete process.env[k]
+  Object.assign(process.env, harness.env || {})
+  const spawns = []
+  globalThis.__witnessTestHarness = { platformBin: harness.platformBin === false ? "" : platformBin }
   globalThis.Bun = {
-    spawn(args, options) {
-      return harness.spawn(args, options)
+    spawn(argv, options) {
+      if (harness.spawn) return harness.spawn(argv, options, spawns)
+      spawns.push({ bin: argv[0], args: argv.slice(1), env: options?.env })
+      return exitedProc()
     },
   }
-
-  const mod = await import(`${pathToFileURL(path.join(dir, "witness.js")).href}?t=${Date.now()}-${Math.random()}`)
+  let n = 0
+  const importFile = (file) => import(`${pathToFileURL(file).href}?t=${Date.now()}-${n++}`)
+  const main = path.join(dir, "witness.js")
+  await writeFile(main, source)
   return {
     dir,
-    mod,
+    spawns,
+    bin: source === NPM.source ? platformBin : "/shim/witness",
+    prompts: path.join(dir, "prompts"),
+    mod: await importFile(main),
+    reload: () => importFile(main),
+    async load(other) {
+      const file = path.join(dir, `plugin-${n}.js`)
+      await writeFile(file, other)
+      return importFile(file)
+    },
     async restore() {
-      globalThis.Bun = previous.Bun
-      globalThis.WITNESS_SHIM = previous.WITNESS_SHIM
-      if (previous.WITNESS_BIN === undefined) delete process.env.WITNESS_BIN
-      else process.env.WITNESS_BIN = previous.WITNESS_BIN
-      globalThis.__witnessTestHarness = previous.harness
+      const S = globalThis[STATE]
+      if (S?.quiet) clearTimeout(S.quiet)
+      delete globalThis[STATE]
+      delete globalThis.WITNESS_SHIM
+      delete globalThis.Bun
+      delete globalThis.__witnessTestHarness
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
       await rm(dir, { recursive: true, force: true })
     },
   }
 }
 
-test("npm plugin stays inactive when no supported platform binary is available", async () => {
-  const harness = {
-    shim: "",
-    witnessBin: "",
-    platformBin: () => "",
-    platformPackage: () => "", // unsupported platform: no matching optional package
-    modelDir: () => "/assets/e5-small",
-    modelReady() {
-      throw new Error("unsupported platforms should not inspect the model")
-    },
-    startModelDownload() {
-      throw new Error("unsupported platforms should not download the model")
-    },
-    spawn() {
-      throw new Error("unsupported platforms should not spawn witness")
-    },
-  }
-  const warnings = []
-  const realWarn = console.warn
-  console.warn = (msg) => warnings.push(String(msg))
-  const { mod, restore } = await loadPlugin(harness)
-  try {
-    const hooks = await mod.default()
-    const input = {}
-    await hooks.config(input)
-    await hooks.event({ event: { type: "session.idle" } })
-    await hooks.dispose()
-    assert.deepEqual(input, {})
-    // #54 I4: the inert plugin must warn once (not silently do nothing), so the
-    // user does not falsely believe witness is capturing.
-    assert.equal(warnings.length, 1, "inert plugin should warn exactly once at init")
-    assert.match(warnings[0], /plugin inactive/)
-    assert.match(warnings[0], /unsupported platform/)
-    assert.match(warnings[0], /nothing is being captured/)
-  } finally {
-    console.warn = realWarn
-    await restore()
-  }
-})
+const imports = (spawns) => spawns.filter((s) => s.args[0] === "import")
+const startupImports = (spawns) => imports(spawns).filter((s) => !s.args.includes("--session"))
+const sessionImports = (spawns) => imports(spawns).filter((s) => s.args.includes("--session")).map((s) => s.args.slice(s.args.indexOf("--session") + 1).filter((a) => a !== "--session"))
+const kicks = (spawns) => spawns.filter((s) => s.args[0] === "worker-kick")
+const turn = (id, type, sessionID) => ({ id, type: `session.execution.${type}`, data: sessionID ? { sessionID } : {} })
 
-test("npm plugin does not warn when a binary is available", async () => {
-  const events = []
-  const harness = {
-    modelDir: () => "/assets/e5-small",
-    modelReady: () => true,
-    startModelDownload() {
-      throw new Error("download should not start when model is ready")
-    },
-    spawn(args) {
-      events.push(`spawn:${args.join(" ")}`)
-      return makeProc(`proc-${events.length}`, events, { autoExit: 0 })
-    },
-  }
-  const warnings = []
-  const realWarn = console.warn
-  console.warn = (msg) => warnings.push(String(msg))
-  const { mod, restore } = await loadPlugin(harness)
-  try {
-    const hooks = await mod.default()
-    await hooks.dispose()
-    assert.equal(warnings.length, 0, "an active plugin (WITNESS_BIN present) must stay silent")
-  } finally {
-    console.warn = realWarn
-    await restore()
-  }
-})
-
-test("npm plugin reconciles on init/idle, does not import activity events, and auto-registers MCP only when absent", async () => {
-  const events = []
-  const importEnvs = []
-  const harness = {
-    modelDir: () => "/assets/e5-small",
-    modelReady: () => true,
-    promptsDir: () => "/pkg/prompts",
-    startModelDownload() {
-      throw new Error("download should not start when model is ready")
-    },
-    spawn(args, options) {
-      events.push(`spawn:${args.join(" ")}`)
-      if (args[1] === "import") {
-        importEnvs.push(options?.env)
-        return makeProc(`import-${events.length}`, events, { autoExit: 0 })
+for (const variant of PLUGINS) {
+  const it = (name, fn, harness) =>
+    test(`${variant.name}: ${name}`, async () => {
+      const p = await loadPlugin(harness, variant.source)
+      try {
+        await fn(p)
+      } finally {
+        await p.restore()
       }
-      return makeProc(`proc-${events.length}`, events, { autoExit: 0 })
-    },
-  }
-  const { mod, restore } = await loadPlugin(harness)
-  try {
-    assert.equal(mod.default, mod.Witness)
-    assert.equal(mod.default, mod.ClaudeWitness)
-
-    const hooks = await mod.default()
-    await Promise.resolve()
-    assert.equal(events.filter((event) => event.includes(" import ")).length, 1)
-    // The spawned distill/import subprocess must carry the prompts override, or
-    // the binary's exe-relative probe misses the main package's prompts/.
-    assert.equal(importEnvs[0]?.WITNESS_PROMPTS, "/pkg/prompts")
-    assert.equal(importEnvs[0]?.WITNESS_ASSETS, "/assets/e5-small")
-    assert.equal(importEnvs[0]?.WITNESS_RUNNER, "opencode")
-
-    await hooks.event({ event: { type: "message.updated" } })
-    assert.equal(events.filter((event) => event.includes(" import ")).length, 1)
-
-    await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_current", status: { type: "idle" } } } })
-    await Promise.resolve()
-    assert.equal(events.filter((event) => event.includes(" import ")).length, 2)
-    assert.ok(events.some((event) => event.includes("--session ses_current")))
-
-    const input = {}
-    await hooks.config(input)
-    assert.equal(input.mcp.witness.type, "local")
-    assert.deepEqual(input.mcp.witness.command, ["/shim/witness", "mcp"])
-    assert.deepEqual(input.mcp.witness.environment, {
-      WITNESS_ASSETS: "/assets/e5-small",
-      WITNESS_PROMPTS: "/pkg/prompts",
-      WITNESS_RUNNER: "opencode",
     })
-    assert.equal(input.mcp.witness.enabled, true)
 
-    const existing = { mcp: { witness: { type: "local", command: ["custom"] } } }
-    await hooks.config(existing)
-    assert.deepEqual(existing.mcp.witness, { type: "local", command: ["custom"] })
+  it("default export is { id: \"witness\", setup } and setup resolves to a function", async (p) => {
+    assert.deepEqual(Object.keys(p.mod), ["default"], "v2 decodes only the default export; v1's named exports are gone")
+    assert.deepEqual(Object.keys(p.mod.default).sort(), ["id", "setup"])
+    assert.equal(p.mod.default.id, "witness")
+    // 2.2.7 calls any truthy setup result at unload, so it must be a function or nothing.
+    assert.equal(typeof (await p.mod.default.setup(makeBus().ctx())), "function")
+  })
 
-    await hooks.dispose()
-  } finally {
-    await restore()
-  }
-})
+  it("one startup import per process across two Locations and a hot reload", async (p) => {
+    const bus = makeBus()
+    await p.mod.default.setup(bus.ctx())
+    await p.mod.default.setup(bus.ctx())
+    const reloaded = await p.reload()
+    await reloaded.default.setup(bus.ctx())
+    await settle()
+    assert.deepEqual(startupImports(p.spawns).map((s) => [s.bin, ...s.args]), [[p.bin, "import", "--agent", "opencode", "--quiet", "--no-kick"]])
+  })
 
-for (const variant of PLUGINS) {
-  test(`${variant.name} plugin imports idle sessions immediately and starts one auto worker after a resettable five-minute quiet period`, async () => {
-    const spawns = []
-    const timers = []
-    const realSetTimeout = globalThis.setTimeout
-    const realClearTimeout = globalThis.clearTimeout
-    let now = 0
-    const harness = {
-      modelDir: () => "/assets/e5-small",
-      modelReady: () => true,
-      startModelDownload() {
-        throw new Error("download should not start when model is ready")
-      },
-      spawn(args) {
-        spawns.push(args)
-        return makeProc(`${args[1]}-${spawns.length}`, [], { autoExit: 0 })
-      },
+  it("a turn end imports that session once although every instance sees it", async (p) => {
+    const bus = makeBus()
+    await p.mod.default.setup(bus.ctx())
+    await p.mod.default.setup(bus.ctx())
+    await bus.publish(turn("evt_1", "succeeded", "ses_a"))
+    assert.deepEqual(imports(p.spawns).at(-1).args, ["import", "--agent", "opencode", "--quiet", "--no-kick", "--session", "ses_a"])
+    assert.deepEqual(sessionImports(p.spawns), [["ses_a"]])
+    await bus.publish(turn("evt_2", "succeeded"))
+    assert.deepEqual(sessionImports(p.spawns), [["ses_a"]], "an event without data.sessionID spawns nothing")
+  })
+
+  it("a parent's partial and final turn ends both import (2.3.0 background subagents)", async (p) => {
+    const bus = makeBus()
+    await p.mod.default.setup(bus.ctx())
+    await p.mod.default.setup(bus.ctx())
+    await bus.publish(turn("evt_s1", "started", "ses_P"))
+    await bus.publish(turn("evt_s2", "started", "ses_C"))
+    await bus.publish(turn("evt_1", "succeeded", "ses_P"))
+    await bus.publish(turn("evt_2", "succeeded", "ses_C"))
+    await bus.publish(turn("evt_s3", "started", "ses_P"))
+    await bus.publish(turn("evt_3", "succeeded", "ses_P"))
+    assert.deepEqual(sessionImports(p.spawns), [["ses_P"], ["ses_C"], ["ses_P"]])
+  })
+
+  it("failed and interrupted turns import too", async (p) => {
+    const bus = makeBus()
+    await p.mod.default.setup(bus.ctx())
+    await bus.publish({ ...turn("evt_f", "failed", "ses_f"), data: { sessionID: "ses_f", error: { type: "provider.invalid-request" } } })
+    await bus.publish({ ...turn("evt_i", "interrupted", "ses_i"), data: { sessionID: "ses_i", reason: "user" } })
+    assert.deepEqual(sessionImports(p.spawns), [["ses_f"], ["ses_i"]])
+  })
+
+  it("the quiet-period worker-kick waits for the last running session", async (p) => {
+    const timers = fakeTimers()
+    try {
+      const bus = makeBus()
+      await p.mod.default.setup(bus.ctx())
+      await p.mod.default.setup(bus.ctx())
+      await bus.publish(turn("evt_s1", "started", "ses_P"))
+      await bus.publish(turn("evt_s2", "started", "ses_C"))
+      await bus.publish(turn("evt_1", "succeeded", "ses_P"))
+      assert.deepEqual(timers.active(), [], "no kick may be armed while the child still runs")
+      await bus.publish(turn("evt_2", "succeeded", "ses_C"))
+      const armed = timers.active()
+      assert.deepEqual(armed.map((t) => t.delay), [QUIET_MS])
+      timers.fire(armed[0])
+      assert.deepEqual(kicks(p.spawns).map((s) => [s.bin, ...s.args]), [[p.bin, "worker-kick"]])
+
+      await bus.publish(turn("evt_3", "succeeded", "ses_D"))
+      const again = timers.active()
+      assert.equal(again.length, 1)
+      await bus.publish(turn("evt_s4", "started", "ses_E"))
+      assert.equal(again[0].active, false, "a new started clears the quiet period")
+      assert.deepEqual(timers.active(), [])
+      assert.equal(kicks(p.spawns).length, 1)
+    } finally {
+      timers.restore()
     }
-    globalThis.setTimeout = (fn, delay) => {
-      const timer = { fn, due: now + delay, delay, active: true }
-      timers.push(timer)
-      return timer
-    }
-    globalThis.clearTimeout = (timer) => {
-      timer.active = false
-    }
-    const advance = async (ms) => {
-      now += ms
-      for (const timer of timers) {
-        if (!timer.active || timer.due > now) continue
-        timer.active = false
-        timer.fn()
+  })
+
+  it("subscribes to exactly the four session.execution types", async (p) => {
+    const bus = makeBus()
+    await p.mod.default.setup(bus.ctx())
+    assert.equal(bus.subscribed.length, 1)
+    assert.deepEqual([...bus.subscribed[0]].sort(), [
+      "session.execution.failed",
+      "session.execution.interrupted",
+      "session.execution.started",
+      "session.execution.succeeded",
+    ])
+  })
+
+  it(
+    "WITNESS_WORKER=1 makes setup a no-op",
+    async (p) => {
+      const bus = makeBus()
+      assert.equal(await p.mod.default.setup(bus.ctx()), undefined)
+      await bus.publish(turn("evt_1", "succeeded", "ses_a"))
+      assert.deepEqual(p.spawns, [])
+      assert.equal(bus.subscribed.length, 0)
+      assert.equal(bus.transforms, 0)
+    },
+    { env: { WITNESS_WORKER: "1" } },
+  )
+
+  it("cleanup ends the subscription, spawns nothing and never throws", async (p) => {
+    const bus = makeBus()
+    const cleanup = await p.mod.default.setup(bus.ctx())
+    await settle()
+    assert.equal(bus.live(), 1)
+    const before = p.spawns.length
+    assert.doesNotThrow(() => cleanup())
+    assert.doesNotThrow(() => cleanup())
+    await settle()
+    assert.equal(bus.live(), 0)
+    await bus.publish(turn("evt_1", "succeeded", "ses_a"))
+    assert.equal(p.spawns.length, before, "no worker stop, no import after cleanup")
+  })
+
+  // An inherited value is stale by definition: the OpenCode running the plugin is process.execPath.
+  it(
+    "every spawn passes WITNESS_OPENCODE_BIN = process.execPath",
+    async (p) => {
+      const timers = fakeTimers()
+      try {
+        const bus = makeBus()
+        await p.mod.default.setup(bus.ctx())
+        await bus.publish(turn("evt_1", "succeeded", "ses_a"))
+        timers.fire(timers.active()[0])
+        assert.ok(p.spawns.length >= 3, `startup import, turn-end import and kick, got ${p.spawns.length}`)
+        for (const s of p.spawns) assert.equal(s.env?.WITNESS_OPENCODE_BIN, process.execPath, s.args.join(" "))
+      } finally {
+        timers.restore()
       }
-      await Promise.resolve()
-      await Promise.resolve()
-    }
+    },
+    { env: { WITNESS_OPENCODE_BIN: "/stale/opencode" } },
+  )
 
-    const { mod, restore } = await loadPlugin(harness, variant.source)
-    try {
-      const hooks = await mod.default()
-      await Promise.resolve()
-      const imports = () => spawns.filter((args) => args[1] === "import")
-      // worker-kick, not worker-run: dispose runs `worker stop --auto-only`, which latches a
-      // durable stop flag that an auto worker refuses to run under, and only the shared kick
-      // gate clears it. Spawning worker-run directly would freeze auto-distillation
-      // permanently after the first OpenCode close.
-      const workers = () => spawns.filter((args) => args[1] === "worker-kick")
-      assert.deepEqual(imports()[0], ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick"])
-
-      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
-      assert.deepEqual(imports().at(-1), ["/shim/witness", "import", "--agent", "opencode", "--quiet", "--no-kick", "--session", "ses_a"])
-      assert.equal(workers().length, 0, "idle imports must not start a worker")
-      const firstQuietTimer = timers.at(-1)
-      assert.equal(firstQuietTimer.delay, 300000)
-
-      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
-      assert.equal(timers.length, 1, "modern and legacy idle events are one occurrence")
-
-      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_b" } } })
-      assert.equal(firstQuietTimer.active, false, "a qualifying idle resets the quiet period")
-      const resetQuietTimer = timers.at(-1)
-      assert.equal(resetQuietTimer.delay, 300000)
-
-      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_b", status: { type: "busy" } } } })
-      assert.equal(resetQuietTimer.active, false, "a non-idle status cancels qualification")
-      await advance(300000)
-      assert.equal(workers().length, 0, "another idle is required after a non-idle status")
-
-      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_activity" } } })
-      const activityQuietTimer = timers.at(-1)
-      await hooks.event({ event: { type: "message.updated", properties: { sessionID: "ses_activity" } } })
-      assert.equal(activityQuietTimer.active, false, "message activity cancels quiet qualification")
-      await advance(300000)
-      assert.equal(workers().length, 0, "activity requires a new idle before auto mining")
-
-      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_c" } } })
-      await advance(299999)
-      assert.equal(workers().length, 0)
-      await advance(1)
-      assert.deepEqual(workers(), [["/shim/witness", "worker-kick"]])
-      assert.ok(
-        spawns.every((args) => args[1] !== "worker-run"),
-        "plugin must never spawn worker-run directly; it bypasses the stop-flag clear",
-      )
-
-      await hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_d" } } })
-      const disposeQuietTimer = timers.at(-1)
-      await hooks.dispose()
-      assert.equal(disposeQuietTimer.active, false, "dispose must clear the quiet timer")
-      await advance(300000)
-      assert.equal(workers().length, 1, "dispose must not allow a pending worker launch")
-      // Dispose stops only AUTO workers: a manual `witness worker run --detach` survives OpenCode closing.
-      assert.deepEqual(
-        spawns.filter((args) => args[1] === "worker"),
-        [["/shim/witness", "worker", "stop", "--auto-only"]],
-        "dispose must run exactly `worker stop --auto-only`",
-      )
-      assert.ok(spawns.every((args) => args[1] !== "export"), "plugin must not invoke export commands")
-      assert.ok(imports().every((args) => args.slice(1, 6).join(" ") === "import --agent opencode --quiet --no-kick" && !args.includes("--auto")))
-    } finally {
-      await restore()
-      globalThis.setTimeout = realSetTimeout
-      globalThis.clearTimeout = realClearTimeout
-    }
-  })
-
-  test(`${variant.name} plugin waits for idle batches, deduplicates modern/legacy pairs, and drains later arrivals`, async () => {
-    const events = []
-    const imports = []
-    const harness = {
-      modelDir: () => "/assets/e5-small",
-      modelReady: () => true,
-      startModelDownload() {
-        throw new Error("download should not start when model is ready")
+  let throwing = true
+  it(
+    "a throwing Bun.spawn never breaks setup or the event loop",
+    async (p) => {
+      const bus = makeBus()
+      assert.equal(typeof (await p.mod.default.setup(bus.ctx())), "function")
+      await bus.publish(turn("evt_1", "succeeded", "ses_a"))
+      throwing = false
+      await bus.publish(turn("evt_2", "succeeded", "ses_b"))
+      assert.deepEqual(sessionImports(p.spawns), [["ses_b"]], "the event loop survives a throwing spawn")
+    },
+    {
+      spawn(argv, options, spawns) {
+        if (throwing) throw new Error("spawn ENOENT")
+        spawns.push({ bin: argv[0], args: argv.slice(1), env: options?.env })
+        return exitedProc()
       },
-      spawn(args) {
-        if (args[1] === "import") {
-          events.push(`spawn:${args.join(" ")}`)
-          const proc = makeProc(`import-${imports.length + 1}`, events)
-          imports.push(proc)
-          return proc
-        }
-        return makeProc("distill", events, { autoExit: 0 })
-      },
-    }
-    const { mod, restore } = await loadPlugin(harness, variant.source)
-    try {
-      const hooks = await mod.default()
-      assert.equal(imports.length, 1, "initial full reconcile should start immediately")
-      assert.doesNotMatch(events[0], /--session/, "initial reconcile must be global")
-
-      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_busy", status: { type: "busy" } } } })
-      await hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_retry", status: { type: "retry" } } } })
-      assert.equal(imports.length, 1, "non-idle statuses must not import")
-
-      let modernResolved = false
-      let legacyResolved = false
-      const modern = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_a", status: { type: "idle" } } } })
-      const legacy = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
-      const legacyFirst = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_d" } } })
-      const modernSecond = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_d", status: { type: "idle" } } } })
-      const other = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_b" } } })
-      modern.then(() => { modernResolved = true })
-      legacy.then(() => { legacyResolved = true })
-      assert.equal(imports.length, 1, "idle events must queue behind the active import")
-      await Promise.resolve()
-      assert.equal(modernResolved, false, "queued idle must wait for its import")
-      assert.equal(legacyResolved, false, "deduplicated legacy idle must wait for the same import")
-
-      imports[0].finish()
-      await new Promise((resolve) => setImmediate(resolve))
-      assert.equal(imports.length, 2)
-      assert.match(events.at(-1), /--session ses_a/)
-      assert.match(events.at(-1), /--session ses_b/)
-      assert.equal((events.at(-1).match(/--session ses_d/g) || []).length, 1, "legacy then modern idle is one logical import")
-      assert.equal((events.at(-1).match(/--session ses_a/g) || []).length, 1, "modern and legacy idle are one logical import")
-      assert.equal(modernResolved, false, "active idle import must keep its promise pending")
-
-      const later = hooks.event({ event: { type: "session.status", properties: { sessionID: "ses_c", status: { type: "idle" } } } })
-      const sameSession = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_a" } } })
-      assert.equal(imports.length, 2, "new work must not start concurrently")
-      imports[1].finish()
-      await new Promise((resolve) => setImmediate(resolve))
-      await Promise.all([modern, legacy, other])
-      assert.equal(modernResolved, true)
-      assert.equal(legacyResolved, true)
-      await Promise.all([legacyFirst, modernSecond])
-      assert.equal(imports.length, 3, "new session idle arriving during import must run afterward")
-      assert.match(events.at(-1), /--session ses_c/)
-      assert.doesNotMatch(events.at(-1), /--session ses_a/, "duplicate same-session idle must stay deduplicated")
-
-      imports[2].finish()
-      await Promise.all([later, sameSession])
-      await hooks.dispose()
-    } finally {
-      await restore()
-    }
-  })
+    },
+  )
 }
 
-test("npm plugin retries model download with bounded exponential backoff on lock contention and failure", async () => {
-  const events = []
-  const timers = []
-  const cleared = []
-  const realSetTimeout = globalThis.setTimeout
-  const realClearTimeout = globalThis.clearTimeout
-  let attempts = 0
-  const harness = {
-    modelDir: () => "/assets/e5-small",
-    modelReady: () => false,
-    startModelDownload(_packageRoot, options) {
-      attempts += 1
-      events.push(`download:${attempts}`)
-      if (attempts === 1) return null
-      if (attempts === 2) {
-        const child = makeProc("download-child", events)
-        queueMicrotask(() => {
-          child.finish(1)
-          options.onExit?.(1)
-        })
-        return {
-          child,
-          stop() {
-            child.kill()
-          },
-        }
-      }
-      return null
-    },
-    spawn(args) {
-      if (args[1] === "import" || args[1] === "distill") return makeProc(args[1], events, { autoExit: 0 })
-      return makeProc("other", events, { autoExit: 0 })
-    },
-  }
-  globalThis.setTimeout = (fn, delay) => {
-    const timer = { fn, delay }
-    timers.push(timer)
-    return timer
-  }
-  globalThis.clearTimeout = (timer) => {
-    cleared.push(timer)
-  }
-
-  const { mod, restore } = await loadPlugin(harness)
+// A user who tried npm and later ran `witness wire opencode`: OpenCode loads both copies.
+test("the npm and the wired plugin share one state", async () => {
+  const timers = fakeTimers()
+  const p = await loadPlugin({}, NPM.source)
   try {
-    const hooks = await mod.default()
-    assert.equal(timers[0]?.delay, 1000)
-
-    timers[0].fn()
-    await Promise.resolve()
-    await Promise.resolve()
-    assert.equal(timers[1]?.delay, 2000)
-
-    await hooks.dispose()
-    assert.deepEqual(cleared.map((timer) => timer.delay), [2000, 5000])
+    const wired = await p.load(EMBEDDED.source)
+    const bus = makeBus()
+    await p.mod.default.setup(bus.ctx())
+    await wired.default.setup(bus.ctx())
+    await settle()
+    assert.equal(startupImports(p.spawns).length, 1)
+    await bus.publish(turn("evt_9", "succeeded", "ses_b"))
+    assert.deepEqual(sessionImports(p.spawns), [["ses_b"]])
+    const armed = timers.active()
+    assert.equal(armed.length, 1)
+    timers.fire(armed[0])
+    assert.equal(kicks(p.spawns).length, 1)
   } finally {
-    await restore()
-    globalThis.setTimeout = realSetTimeout
-    globalThis.clearTimeout = realClearTimeout
+    timers.restore()
+    await p.restore()
   }
 })
 
-for (const variant of PLUGINS) {
-  test(`${variant.name} plugin dispose drains startup and idle imports before stopping downloader and auto workers`, async () => {
-    const events = []
-    const timers = []
-    const realSetTimeout = globalThis.setTimeout
-    const realClearTimeout = globalThis.clearTimeout
-    let importCount = 0
-    const importArgs = []
-    const imports = []
-    let workerStopArgs
-    const harness = {
-      modelDir: () => "/assets/e5-small",
-      modelReady: () => false,
-      startModelDownload() {
-        const child = makeProc("download-child", events)
-        return {
-          child,
-          stop() {
-            events.push("download-stop")
-            child.kill()
-          },
-        }
-      },
-      spawn(args) {
-        if (args[1] === "import") {
-          importCount += 1
-          importArgs.push(args)
-          events.push(`spawn:import-${importCount}`)
-          const proc = makeProc(`import-${importCount}`, events)
-          imports.push(proc)
-          return proc
-        }
-        if (args[1] === "worker") {
-          workerStopArgs = args
-          events.push("spawn:worker-stop")
-          return makeProc("worker-stop", events, { autoExit: 0 })
-        }
-        return makeProc("other", events, { autoExit: 0 })
-      },
+// load(harness) gives a fresh process: it restores the previous load first, so a second
+// harness in one test does not inherit the first one's state.
+const npmTest = (name, fn) =>
+  test(`npm: ${name}`, async () => {
+    let p
+    const load = async (harness) => {
+      await p?.restore()
+      return (p = await loadPlugin(harness, NPM.source))
     }
-    globalThis.setTimeout = (fn, delay) => {
-      const timer = { fn, delay }
-      timers.push(timer)
-      return timer
-    }
-    globalThis.clearTimeout = (timer) => {
-      events.push(`clear:${timer.delay}`)
-    }
-
-    const { mod, restore } = await loadPlugin(harness, variant.source)
     try {
-      const hooks = await mod.default()
-      const pending = hooks.event({ event: { type: "session.idle", properties: { sessionID: "ses_pending" } } })
-      timers.push({ delay: 1000 })
-      let disposed = false
-      const dispose = hooks.dispose().then(() => { disposed = true })
-      await Promise.resolve()
-      assert.equal(disposed, false)
-      assert.equal(events.includes("kill:import-1"), false, "graceful disposal must not kill the active startup import")
-
-      // Finish the global startup import: the pending idle session must still drain
-      // before disposal is allowed to stop the downloader or auto worker.
-      imports[0].finish()
-      await new Promise((resolve) => setImmediate(resolve))
-      assert.equal(imports.length, 2)
-      assert.ok(importArgs[1].includes("ses_pending"))
-      assert.equal(disposed, false)
-      assert.equal(events.includes("kill:import-2"), false, "graceful disposal must not kill the active idle import")
-
-      imports[1].finish()
-      await pending
-      await dispose
-
-      const distillStop = events.indexOf("spawn:worker-stop")
-      assert.notEqual(distillStop, -1)
-      if (variant.downloads) {
-        const downloadStop = events.indexOf("download-stop")
-        assert.notEqual(downloadStop, -1)
-        assert.ok(downloadStop < distillStop)
-      }
-      assert.deepEqual(workerStopArgs, ["/shim/witness", "worker", "stop", "--auto-only"])
+      await fn(load)
     } finally {
-      await restore()
-      globalThis.setTimeout = realSetTimeout
-      globalThis.clearTimeout = realClearTimeout
+      await p?.restore()
     }
   })
 
-  test(`${variant.name} plugin kills a hung import after the dispose grace period`, async () => {
-    const events = []
-    const timers = []
-    const realSetTimeout = globalThis.setTimeout
-    const realClearTimeout = globalThis.clearTimeout
-    let startupImport
-    const harness = {
-      modelDir: () => "/assets/e5-small",
-      modelReady: () => true,
-      startModelDownload() {
-        throw new Error("download should not start when model is ready")
-      },
-      spawn(args) {
-        if (args[1] === "import") {
-          startupImport = makeProc("hung-import", events)
-          return startupImport
-        }
-        return makeProc("distill-stop", events, { autoExit: 0 })
-      },
-    }
-    globalThis.setTimeout = (fn, delay) => {
-      const timer = { fn, delay }
-      timers.push(timer)
-      return timer
-    }
-    globalThis.clearTimeout = () => {}
-
-    const { mod, restore } = await loadPlugin(harness, variant.source)
-    try {
-      const hooks = await mod.default()
-      let disposed = false
-      const dispose = hooks.dispose().then(() => { disposed = true })
-      await Promise.resolve()
-      assert.equal(disposed, false)
-      assert.equal(timers[0]?.delay, 5000)
-
-      timers[0].fn()
-      await dispose
-      assert.equal(startupImport.killed, true)
-      assert.ok(events.includes("kill:hung-import"))
-    } finally {
-      await restore()
-      globalThis.setTimeout = realSetTimeout
-      globalThis.clearTimeout = realClearTimeout
-    }
+npmTest("registers mcp.witness through ctx.mcp.transform and leaves an existing entry alone", async (load) => {
+  const p = await load()
+  const bus = makeBus()
+  await p.mod.default.setup(bus.ctx())
+  // No `enabled` key: v2's MCP config has none. WITNESS_NPM_PACKAGE=1 lets `witness mcp` start
+  // before the model lands.
+  assert.deepEqual(bus.mcp.get("witness"), {
+    type: "local",
+    command: [p.bin, "mcp"],
+    environment: {
+      WITNESS_ASSETS: "/assets/e5-small",
+      WITNESS_PROMPTS: p.prompts,
+      WITNESS_RUNNER: "opencode",
+      WITNESS_NPM_PACKAGE: "1",
+      WITNESS_OPENCODE_BIN: process.execPath,
+    },
   })
-}
+  const mine = { type: "local", command: ["custom"] }
+  const other = makeBus({ mcp: new Map([["witness", mine]]) })
+  await p.mod.default.setup(other.ctx())
+  assert.equal(other.transforms, 1)
+  assert.equal(other.mcp.get("witness"), mine)
+  assert.deepEqual(mine, { type: "local", command: ["custom"] })
+})
+
+const fetches = (spawns) => spawns.filter((s) => s.args.join(" ") === "model fetch")
+
+npmTest("runs witness model fetch once per process, not under WITNESS_SKIP_MODEL_DOWNLOAD=1", async (load) => {
+  const p = await load()
+  const bus = makeBus()
+  await p.mod.default.setup(bus.ctx())
+  await p.mod.default.setup(bus.ctx())
+  await (await p.reload()).default.setup(bus.ctx())
+  assert.deepEqual(fetches(p.spawns).map((s) => s.bin), [p.bin])
+
+  const off = await load({ env: { WITNESS_SKIP_MODEL_DOWNLOAD: "1" } })
+  await off.mod.default.setup(makeBus().ctx())
+  assert.deepEqual(fetches(off.spawns), [])
+  assert.equal(startupImports(off.spawns).length, 1, "capture still runs")
+})
+
+npmTest("is inert without a platform binary", async (load) => {
+  const p = await load({ platformBin: false })
+  const bus = makeBus()
+  assert.equal(await p.mod.default.setup(bus.ctx()), undefined)
+  await bus.publish(turn("evt_1", "succeeded", "ses_a"))
+  assert.deepEqual(p.spawns, [])
+  assert.equal(bus.subscribed.length, 0)
+  assert.equal(bus.transforms, 0)
+})
+
+// ||= semantics: the package's defaults fill only what the user left unset.
+npmTest("keeps the user's WITNESS_ASSETS, WITNESS_PROMPTS and WITNESS_RUNNER", async (load) => {
+  const p = await load()
+  await p.mod.default.setup(makeBus().ctx())
+  const env = startupImports(p.spawns)[0].env
+  assert.deepEqual([env.WITNESS_ASSETS, env.WITNESS_PROMPTS, env.WITNESS_RUNNER], ["/assets/e5-small", p.prompts, "opencode"])
+
+  const mine = await load({ env: { WITNESS_ASSETS: "/mine/model", WITNESS_PROMPTS: "/mine/prompts", WITNESS_RUNNER: "claude" } })
+  await mine.mod.default.setup(makeBus().ctx())
+  assert.ok(mine.spawns.length > 1, "the model fetch and the startup import")
+  for (const s of mine.spawns) {
+    assert.deepEqual([s.env.WITNESS_ASSETS, s.env.WITNESS_PROMPTS, s.env.WITNESS_RUNNER], ["/mine/model", "/mine/prompts", "claude"], s.args.join(" "))
+  }
+})
