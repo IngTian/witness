@@ -870,7 +870,6 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 	return nil
 }
 
-// ErrOpenCodeV2 marks an OpenCode v2 install or database. v2 removed what this package relies
 // ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 2.2.7 up to, not
 // including, 3.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
 // pending for retry.
