@@ -3,6 +3,7 @@ package lens
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -141,23 +142,39 @@ func TestEmptyRootSkipsOverrideLookup(t *testing.T) {
 // Hiding an EACCES would mask a permissions mistake as "no override configured", so the user's
 // prompt would be silently ignored with a green result.
 func TestUnreadableOverrideIsAnError(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: mode bits do not deny access")
+	check := func(t *testing.T, root string) {
+		t.Helper()
+		if _, _, err := LoadSummarizePrompts(root); err == nil {
+			t.Error("an unreadable override must return an error; swallowing it reports 'no override' " +
+				"and silently ignores the user's prompt")
+		} else if !strings.Contains(err.Error(), "override") {
+			t.Errorf("error %q should name the override so the cause is actionable", err)
+		}
 	}
-	root := bundleWithSummarizePrompts(t, "BUNDLED LENS", "BUNDLED UNIFIED")
-	p := filepath.Join(root, SummarizeOverrideDir, "unified.md")
-	write(t, p, "MY PROMPT")
-	if err := os.Chmod(p, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
-
-	if _, _, err := LoadSummarizePrompts(root); err == nil {
-		t.Error("an unreadable override must return an error; swallowing it reports 'no override' " +
-			"and silently ignores the user's prompt")
-	} else if !strings.Contains(err.Error(), "override") {
-		t.Errorf("error %q should name the override so the cause is actionable", err)
-	}
+	t.Run("no read permission", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows ignores chmod's read bits; the directory case covers it")
+		}
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: mode bits do not deny access")
+		}
+		root := bundleWithSummarizePrompts(t, "BUNDLED LENS", "BUNDLED UNIFIED")
+		p := filepath.Join(root, SummarizeOverrideDir, "unified.md")
+		write(t, p, "MY PROMPT")
+		if err := os.Chmod(p, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+		check(t, root)
+	})
+	// Unreadable on every OS, Windows included: reading a directory fails, and not as not-exist.
+	t.Run("a directory in the file's place", func(t *testing.T) {
+		root := bundleWithSummarizePrompts(t, "BUNDLED LENS", "BUNDLED UNIFIED")
+		if err := os.MkdirAll(filepath.Join(root, SummarizeOverrideDir, "unified.md"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		check(t, root)
+	})
 }
 
 // TestLoadResolvePromptsIgnoresOverrides verifies that LoadResolvePrompts reads only the

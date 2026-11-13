@@ -44,10 +44,12 @@ func TestExportProducesConsistentSnapshot(t *testing.T) {
 			t.Errorf("snapshot has %s sidecar; not a clean single-file export", sfx)
 		}
 	}
-	// Snapshot is 0600 (private growth data).
+	// Snapshot is 0600 (private growth data). Windows has no mode bits — Go reports 0666 for any
+	// writable file — and the snapshot's privacy there is the user profile's inherited ACL, which
+	// witness does not change, so only the POSIX side is asserted.
 	if fi, err := os.Stat(dst); err != nil {
 		t.Fatalf("stat snapshot: %v", err)
-	} else if perm := fi.Mode().Perm(); perm != 0o600 {
+	} else if perm := fi.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("snapshot perms = %o, want 600", perm)
 	}
 
