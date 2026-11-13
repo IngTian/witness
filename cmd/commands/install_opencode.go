@@ -7,6 +7,8 @@ import (
 	"github.com/IngTian/witness/internal/platform/opencode"
 )
 
+const openCodePluginName = opencode.PluginFileName
+
 // opencodeDir is where `wire opencode` writes the plugin and MCP entry. It is OpenCode's own
 // lookup, opencode.ConfigDir — the one the auth probe uses too — rather than a copy here: the copy
 // that lived here skipped XDG_CONFIG_HOME, so with XDG set the wiring landed where OpenCode never

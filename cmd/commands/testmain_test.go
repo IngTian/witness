@@ -22,6 +22,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	_ = os.Setenv("WITNESS_HOME", filepath.Join(root, "witness"))
+	_ = os.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(root, "opencode-config"))
 	_ = os.Setenv("WITNESS_OPENCODE_DB", filepath.Join(root, "opencode.db"))
 	_ = os.Setenv("WITNESS_CODEX_HOME", filepath.Join(root, "codex"))
 	_ = os.Setenv("WITNESS_ASSETS", assets)

@@ -109,6 +109,20 @@ func ConfigDir() string {
 	return filepath.Join(home, ".config", "opencode")
 }
 
+// PluginFileName is the name of the witness plugin for OpenCode, installed by `witness wire opencode`.
+const PluginFileName = "witness.js"
+
+// PluginPath returns the absolute path to the OpenCode plugin file.
+func PluginPath() string {
+	return filepath.Join(ConfigDir(), "plugins", PluginFileName)
+}
+
+// PluginInstalled reports whether the witness plugin file exists in OpenCode's plugins directory.
+func PluginInstalled() bool {
+	_, err := os.Stat(PluginPath())
+	return err == nil
+}
+
 // openSourceDB opens the user's OpenCode DB read-only and probes its schema.
 func openSourceDB(ctx context.Context, path string) (*sql.DB, error) {
 	if _, err := os.Stat(path); err != nil {

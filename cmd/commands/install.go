@@ -456,10 +456,7 @@ func opencodeConfigPath() string {
 	return jsonPath
 }
 
-const (
-	openCodePluginName       = "witness.js"
-	legacyOpenCodePluginName = "claude-witness.js"
-)
+const legacyOpenCodePluginName = "claude-witness.js"
 
 func openCodePluginPath(dir, name string) string {
 	return filepath.Join(dir, "plugins", name)
