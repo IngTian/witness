@@ -17,9 +17,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: build · vet · test
+  # The test suite, defined once and run on every OS witness ships a native binary for. Same
+  # command everywhere: `go test` directly, because the Windows runner promises no make and the
+  # Makefile's -p 1 / GOMAXPROCS limits exist for a laptop, not a CI box. Windows earned its place
+  # here: every Windows defect before it ran in CI was found by hand, and #220's six fixes made it
+  # green. fail-fast is off so one OS failing still reports the other.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # A hung test fails in minutes instead of holding a required check for GitHub's 6-hour default.
+    # Measured over 25 runs: the Windows runner starts within seconds and the suite takes ~3 min.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CGO_ENABLED: "0"
+      WITNESS_DISABLE_EXTERNAL_RUNNERS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test
+        run: go test ./...
+
+  # Everything that is not the test suite and only needs to run once: formatting, vet, the race
+  # detector, the release artefacts' own checks, and the cross-compile.
+  checks:
+    name: checks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -38,15 +70,11 @@ jobs:
             exit 1
           fi
 
-      # Reuse the Makefile so the CGO_ENABLED=0 + cross-compile invariant
-      # lives in exactly one place. No model or `claude` CLI needed: tests
-      # inject fake embedders, and the only go:embed files (the OpenCode plugin
-      # JS, the view's page.js/page.css) are committed.
+      # Reuse the Makefile so the CGO_ENABLED=0 + cross-compile invariant lives in exactly one
+      # place. No model or `claude` CLI needed: tests inject fake embedders, and the only go:embed
+      # files (the OpenCode plugin JS, the view's page.js/page.css) are committed.
       - name: vet
         run: make vet
-
-      - name: test
-        run: make test
 
       # -race needs cgo on Linux, so this one step turns it on; the shipped binary stays
       # CGO_ENABLED=0 (build-all below). Targeted at the two packages with concurrent passes,
@@ -61,7 +89,6 @@ jobs:
       # The rest of what a release ships. These ran only on the release event before, so a
       # stale JS assertion passed PR CI and then blocked the v0.7.0 publish (release gotcha
       # #1), and a manifest that drifted from the version surfaced only after the tag existed.
-      # Steps of THIS job, so they inherit its required-check status.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -75,27 +102,3 @@ jobs:
       # Prove the "one pure-Go binary" promise on every target we ship.
       - name: cross-compile (darwin/linux × amd64/arm64)
         run: make build-all
-
-  # Every Windows defect before this job was found by hand. It was continue-on-error while the
-  # six native-Windows failures first seen on 67b837a were triaged; #220 fixed them, so it now
-  # fails the run like any other job and is meant to be one of main's required checks. Measured
-  # over 25 runs: it starts within seconds and takes ~3 min (one push waited 23h on GitHub's side).
-  # The timeout makes a hung test fail in minutes rather than hold a required check for 6 hours.
-  windows:
-    name: windows · test
-    runs-on: windows-latest
-    timeout-minutes: 20
-    env:
-      CGO_ENABLED: "0"
-      WITNESS_DISABLE_EXTERNAL_RUNNERS: "1"
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # `go test` directly: the Makefile is POSIX-shell and the runner promises no make.
-      - name: test
-        run: go test ./...

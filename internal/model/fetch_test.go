@@ -145,21 +145,24 @@ func TestFetchFailsOnAStalledDownload(t *testing.T) {
 }
 
 // The stall timer measures silence, not the whole download: a slow but steady transfer of the
-// real 470MB file takes far longer than stallTimeout and must still finish.
+// real 470MB file takes far longer than stallTimeout and must still finish. The transfer here
+// outlasts the timeout (~500ms against 300ms) while each gap stays 15x under it: the first version
+// left only 50ms of headroom per gap (30ms against 80ms), and on a CI box running every package's
+// tests at once one scheduling delay was enough to read as a stall.
 func TestFetchSurvivesASlowSteadyDownload(t *testing.T) {
 	old := stallTimeout
-	stallTimeout = 80 * time.Millisecond
+	stallTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { stallTimeout = old })
-	body := strings.Repeat("x", 12)
+	body := strings.Repeat("x", 25)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/onnx/model.onnx" {
 			_, _ = w.Write([]byte("t"))
 			return
 		}
-		for i := range body { // ~360ms in all, never silent for long
+		for i := range body { // ~500ms in all, never silent for long
 			_, _ = w.Write([]byte{body[i]})
 			w.(http.Flusher).Flush()
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		}
 	}))
 	t.Cleanup(srv.Close)
