@@ -76,14 +76,15 @@ jobs:
       - name: cross-compile (darwin/linux × amd64/arm64)
         run: make build-all
 
-  # Every Windows defect so far was found by hand. This job is NOT required and is
-  # continue-on-error until the native-Windows suite failures first seen on 67b837a are
-  # triaged (issue #220) — it is expected red until then. Once it is green, drop
-  # continue-on-error and add "windows · test" to main's required checks.
+  # Every Windows defect before this job was found by hand. It was continue-on-error while the
+  # six native-Windows failures first seen on 67b837a were triaged; #220 fixed them, so it now
+  # fails the run like any other job and is meant to be one of main's required checks. Measured
+  # over 25 runs: it starts within seconds and takes ~3 min (one push waited 23h on GitHub's side).
+  # The timeout makes a hung test fail in minutes rather than hold a required check for 6 hours.
   windows:
     name: windows · test
     runs-on: windows-latest
-    continue-on-error: true
+    timeout-minutes: 20
     env:
       CGO_ENABLED: "0"
       WITNESS_DISABLE_EXTERNAL_RUNNERS: "1"
