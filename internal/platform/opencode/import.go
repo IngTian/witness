@@ -20,9 +20,13 @@ import (
 )
 
 const (
-	SessionPrefix        = "opencode:"
-	syncMetaKey          = "opencode_sync_time_updated_ms"
-	seenMetaKey          = "opencode_seen_time_updated_ms" // full-sync watermark only moves on full syncs; staleness needs what ANY import saw
+	SessionPrefix = "opencode:"
+	syncMetaKey   = "opencode_sync_time_updated_ms"
+	// seenMetaKey is the newest turn end (`idle` time_created) any import read, targeted or full: the
+	// full-sync watermark moves only on full syncs, and staleness needs the clock NewestActivity
+	// reads. The name predates the switch from time_updated and stays, since builds of this branch
+	// already wrote it.
+	seenMetaKey          = "opencode_seen_time_updated_ms"
 	importKeysMetaPrefix = store.OpenCodeImportKeysNS + ":"
 	StaleAfter           = 15 * time.Minute
 )
@@ -189,12 +193,14 @@ func ProbeSchema(ctx context.Context, db *sql.DB) error {
 
 	// If v1 table exists, require migration completed
 	if hasV1 {
-		var phase string
+		// A NULL phase and no row both read as "not completed". A kv table that cannot be read leaves
+		// the state unknown, so that refuses too, worded rather than as a raw SQL error.
+		var phase sql.NullString
 		err := db.QueryRowContext(ctx, `SELECT json_extract(value,'$.phase') FROM kv WHERE key='migration.v1-v2'`).Scan(&phase)
-		if err != nil && err != sql.ErrNoRows {
-			return err
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %v — witness cannot tell whether OpenCode finished migrating this database from v1", ErrOpenCodeSchema, err)
 		}
-		if phase != "completed" {
+		if phase.String != "completed" {
 			return fmt.Errorf("%w: OpenCode is still migrating this database from v1; import again when it finishes", ErrOpenCodeSchema)
 		}
 	}
@@ -231,7 +237,8 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 	// The whole session list is read before the first import, so the total is exact.
 	progress := platform.ImportProgressFrom(ctx)
 	progress(0, len(sessions))
-	var maxUpdated int64 // the incremental-sync watermark and the seen watermark
+	var maxUpdated int64 // the incremental-sync watermark
+	var newestIdle int64 // the seen watermark, on NewestActivity's clock
 	for i, s := range sessions {
 		n, err := im.importSession(ctx, db, s)
 		progress(i+1, len(sessions))
@@ -243,15 +250,16 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 			stats.Records += n
 		}
 		maxUpdated = max(maxUpdated, s.TimeUpdated)
+		idle, err := sessionNewestIdle(ctx, db, s.ID)
+		if err != nil {
+			return stats, err
+		}
+		newestIdle = max(newestIdle, idle)
 	}
-	// seenMetaKey: the full-sync watermark only moves on full syncs, so it lags every per-session
-	// plugin import; staleness needs what ANY import saw
-	if maxUpdated > 0 {
-		oldSeen, _ := strconv.ParseInt(strings.TrimSpace(im.Store.MetaString(seenMetaKey)), 10, 64)
-		if maxUpdated > oldSeen {
-			if err := im.Store.SetMetaString(seenMetaKey, strconv.FormatInt(maxUpdated, 10)); err != nil {
-				return stats, err
-			}
+	// Only upward: a targeted import of an older session must not make a newer one look unimported
+	if oldSeen, _ := strconv.ParseInt(strings.TrimSpace(im.Store.MetaString(seenMetaKey)), 10, 64); newestIdle > oldSeen {
+		if err := im.Store.SetMetaString(seenMetaKey, strconv.FormatInt(newestIdle, 10)); err != nil {
+			return stats, err
 		}
 	}
 	if len(sessionIDs) == 0 && maxUpdated > 0 {
@@ -448,7 +456,17 @@ func NewestActivity(ctx context.Context, dbPath string) (time.Time, error) {
 	return time.UnixMilli(ms), nil
 }
 
-// LastImported returns when the most recent import (targeted OR full) saw activity, zero when unset.
+// sessionNewestIdle is the session's newest turn end, 0 when none has ended. Seen is recorded on
+// this clock, not time_updated: an idle written with no step after it (an interrupt before the
+// first step, a refused route) is newer than any time_updated, so comparing the two warned about
+// a turn the import had already read.
+func sessionNewestIdle(ctx context.Context, db *sql.DB, sessionID string) (int64, error) {
+	var ms int64
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(time_created),0) FROM session_message WHERE session_id = ? AND type = 'idle'`, sessionID).Scan(&ms)
+	return ms, err
+}
+
+// LastImported returns the newest turn end any import (targeted OR full) read, zero when unset.
 func LastImported(st store.MetaKV) time.Time {
 	ms, _ := strconv.ParseInt(strings.TrimSpace(st.MetaString(seenMetaKey)), 10, 64)
 	if ms == 0 {
@@ -456,6 +474,13 @@ func LastImported(st store.MetaKV) time.Time {
 	}
 	return time.UnixMilli(ms)
 }
+
+// ForgetCapture is unwire's half of the capture switch. The seen watermark is what keeps
+// ImportAtDrainStart, and status's capture rows, on for a machine with no plugin file, so leaving
+// it would keep importing an editor the user turned off. The full-sync watermark stays, so a
+// re-wire resumes incrementally. A still-loaded npm plugin sets it again on its next import, which
+// is right: that OpenCode is still wired.
+func ForgetCapture(st store.MetaKV) error { return st.SetMetaString(seenMetaKey, "") }
 
 func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow) (int, error) {
 	turns, err := ReadTurns(ctx, db, s.ID)

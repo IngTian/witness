@@ -56,9 +56,9 @@ func (Platform) Import(ctx context.Context, st store.ImportStore, sessionIDs []s
 	return (&Importer{Store: st}).Import(ctx, sessionIDs)
 }
 
-// ImportAtDrainStart answers true when OpenCode is wired: the plugin file exists OR an earlier
-// import already captured OpenCode sessions (npm users have no plugin file but are still wired).
-// An unwired machine (no plugin, no prior import) never triggers drain-start capture.
+// ImportAtDrainStart answers true when OpenCode is wired: the plugin file exists OR an import has
+// read a finished turn since the last unwire (npm users have no plugin file but are still wired;
+// unwire clears it through ForgetCapture). An unwired machine never triggers drain-start capture.
 func (Platform) ImportAtDrainStart(st store.MetaKV) bool {
 	return PluginInstalled() || !LastImported(st).IsZero()
 }

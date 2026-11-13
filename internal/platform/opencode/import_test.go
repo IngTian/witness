@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -235,6 +236,12 @@ func TestProbeSchemaGuards(t *testing.T) {
 		{"v2 missing a column", `ALTER TABLE session_v2 DROP COLUMN fork_session_id;`, ErrOpenCodeSchema, ": missing session_v2.fork_session_id"},
 		{"v2 with v1 + migration running", v1Leftover("running"), ErrOpenCodeSchema, "still migrating this database from v1; import again when it finishes"},
 		{"v2 with v1 + migration completed", v1Leftover("completed"), nil, ""},
+		// A NULL phase scanned into a string was a raw "converting NULL" error, not a refusal
+		{"v2 with v1 + migration record without a phase", `CREATE TABLE session (id text PRIMARY KEY);
+			INSERT INTO kv (key, value, time_created, time_updated) VALUES ('migration.v1-v2', '{}', 1000, 1000);`,
+			ErrOpenCodeSchema, "still migrating this database from v1; import again when it finishes"},
+		{"v2 with v1 + no kv table", `DROP TABLE kv; CREATE TABLE session (id text PRIMARY KEY);`,
+			ErrOpenCodeSchema, "witness cannot tell whether OpenCode finished migrating this database from v1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -560,16 +567,18 @@ func TestTranscriptDigestMatchesTheImportedL0(t *testing.T) {
 
 func TestImportRecordsTheNewestActivityItSaw(t *testing.T) {
 	dbPath := seedV2DB(t,
-		session("ses_new", 9000),
-		session("ses_old", 5000),
+		session("ses_new", 9500),
+		session("ses_old", 5500),
 		user("ses_new", 1, 1100, "new"),
+		idle("ses_new", 2, 9000),
 		user("ses_old", 1, 1100, "old"),
+		idle("ses_old", 2, 5000),
 	)
 	fake := newFakeImportStore()
 
 	mustImport(t, fake, dbPath, "ses_new")
 	if got := LastImported(fake).UnixMilli(); got != 9000 {
-		t.Fatalf("after importing ses_new: LastImported = %d, want 9000", got)
+		t.Fatalf("after importing ses_new: LastImported = %d, want 9000 (its idle, not time_updated)", got)
 	}
 	if fake.meta[syncMetaKey] != "" {
 		t.Fatalf("targeted import advanced full-sync watermark")
@@ -577,6 +586,50 @@ func TestImportRecordsTheNewestActivityItSaw(t *testing.T) {
 	mustImport(t, fake, dbPath, "ses_old")
 	if got := LastImported(fake).UnixMilli(); got != 9000 {
 		t.Fatalf("after importing ses_old: LastImported = %d, want 9000 (unchanged)", got)
+	}
+}
+
+// An idle written with no step after it (an interrupt before the first step, a refused route) is
+// newer than the session's time_updated. Seen recorded on time_updated read that turn as unimported
+// for as long as no later turn moved it.
+func TestATurnEndWithNoNewStepDoesNotReadAsStale(t *testing.T) {
+	const updated = 1_000_000
+	idleAt := updated + (StaleAfter + time.Minute).Milliseconds()
+	dbPath := seedV2DB(t,
+		session("ses_cut", updated),
+		user("ses_cut", 1, updated, "stop that"),
+		idle("ses_cut", 2, idleAt),
+	)
+	fake := newFakeImportStore()
+	mustImport(t, fake, dbPath, "ses_cut")
+
+	newest, err := NewestActivity(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lag := newest.Sub(LastImported(fake)); lag > StaleAfter {
+		t.Fatalf("after importing the session, NewestActivity is %s ahead of LastImported, want <= %s", lag, StaleAfter)
+	}
+}
+
+// Unwire clears only the seen watermark: drain-start capture stops, and a re-wire still resumes
+// from the full-sync watermark instead of re-reading every session.
+func TestForgetCaptureStopsTheDrainStartImportAndKeepsTheSyncWatermark(t *testing.T) {
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir()) // no plugin file
+	dbPath := seedV2DB(t, session("ses_a", 5000), user("ses_a", 1, 1100, "a"), idle("ses_a", 2, 4000))
+	fake := newFakeImportStore()
+	mustImport(t, fake, dbPath)
+	if !(Platform{}).ImportAtDrainStart(fake) {
+		t.Fatal("after an import: ImportAtDrainStart = false, want true")
+	}
+	if err := ForgetCapture(fake); err != nil {
+		t.Fatal(err)
+	}
+	if (Platform{}).ImportAtDrainStart(fake) {
+		t.Fatal("after ForgetCapture: ImportAtDrainStart = true, want false")
+	}
+	if fake.meta[syncMetaKey] != "5000" {
+		t.Fatalf("after ForgetCapture: sync watermark = %q, want 5000 (kept)", fake.meta[syncMetaKey])
 	}
 }
 
