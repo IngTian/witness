@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -323,10 +324,12 @@ func TestNativePrepareAuthCopiesPrivately(t *testing.T) {
 	if err != nil || string(b) != `{"token":"secret"}` {
 		t.Fatalf("auth copy: %q %v", b, err)
 	}
-	if info, err := os.Stat(dst); err != nil || info.Mode().Perm() != 0o600 {
+	// Mode bits are POSIX: Windows reports 0666 for any writable file and keeps the copy private
+	// by the profile directory's inherited ACL, which this code does not touch.
+	if info, err := os.Stat(dst); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("auth mode=%v err=%v", info.Mode(), err)
 	}
-	if info, err := os.Stat(auth); err != nil || info.Mode().Perm() != 0o644 {
+	if info, err := os.Stat(auth); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o644) {
 		t.Fatalf("source auth changed: %v %v", info, err)
 	}
 }

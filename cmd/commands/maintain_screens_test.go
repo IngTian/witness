@@ -549,7 +549,14 @@ func TestProvisionSaysCreatedOrAdoptedAndSelectsTheArchive(t *testing.T) {
 	if err != nil || !strings.HasPrefix(out, "[ok] archive adopted at ") || !strings.Contains(out, "(0 sessions)") {
 		t.Fatalf("(%v)\n%s", err, out)
 	}
-	if err := cmdProvision("/dev/null/x"); err == nil || !strings.HasPrefix(err.Error(), "cannot create an archive at /dev/null/x") {
+	// Under a regular file: no OS can create a directory there. (/dev/null/x was the Unix-only
+	// spelling of this; on Windows it is an ordinary, creatable path.)
+	blocker := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(blocker, "x")
+	if err := cmdProvision(bad); err == nil || !strings.HasPrefix(err.Error(), "cannot create an archive at "+tildePath(bad)) {
 		t.Errorf("a path that cannot hold an archive: %v", err)
 	}
 }

@@ -3,6 +3,7 @@ package commands
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -48,12 +49,18 @@ func TestUninstallClaudeReportsFailureInsteadOfClaimingSuccess(t *testing.T) {
 		if err := os.WriteFile(settings, []byte(`{"hooks":{}}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		// The atomic write stages a temp file in this directory, so removing write
-		// permission on the DIRECTORY is what blocks it (the file mode would not).
-		if err := os.Chmod(dir, 0o500); err != nil {
+		// Unix: the atomic write stages a temp file in this directory, so removing write
+		// permission on the DIRECTORY is what blocks it (the file mode would not). Windows ignores
+		// a directory's read-only bit, but refuses to replace a read-only FILE, so there the file is
+		// what is made read-only (and made writable again so TempDir can delete it).
+		target, mode, restore := dir, os.FileMode(0o500), os.FileMode(0o700)
+		if runtime.GOOS == "windows" {
+			target, mode, restore = settings, 0o444, 0o600
+		}
+		if err := os.Chmod(target, mode); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		t.Cleanup(func() { _ = os.Chmod(target, restore) })
 		if _, _, err := cmdUninstallClaude(); err == nil {
 			t.Fatal("uninstall reported success when settings.json could not be written")
 		}

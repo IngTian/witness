@@ -297,7 +297,7 @@ func writeAtomic(path string, data []byte) error {
 	if err := os.Chmod(tmp, 0o600); err != nil { // CreateTemp makes 0600 already; explicit for clarity
 		return err
 	}
-	return os.Rename(tmp, path)
+	return renameReplace(tmp, path) // Windows refuses a replace while another writer is mid-replace (#220)
 }
 
 // WriteFileAtomic writes data to path atomically (temp file, explicit 0600, rename). It is
