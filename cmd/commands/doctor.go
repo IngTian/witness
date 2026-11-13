@@ -217,10 +217,10 @@ func cmdDoctor(asJSON bool) error {
 	} else if stat.BackedOff > 0 || driftTotal > 0 || deferredErr != nil || stat.Sessions == 0 {
 		overall = warnGlyph()
 	}
-	// Any non-OK capture check upgrades overall to at least warnGlyph
+	// A capture warning or failure upgrades overall to at least warnGlyph; checkInfo does not
 	for _, h := range capture {
 		for _, c := range h.checks {
-			if c.level != checkOK && overall == okGlyph() {
+			if c.level >= checkWarn && overall == okGlyph() {
 				overall = warnGlyph()
 			}
 		}
@@ -387,6 +387,11 @@ func cmdDoctor(asJSON bool) error {
 			switch c.level {
 			case checkOK:
 				row(c.key, okGlyph()+" "+c.value, "")
+			case checkInfo:
+				row(c.key, skipGlyph()+" "+c.value, "")
+				if c.fix[0] != "" {
+					fix(c.fix[0], c.fix[1])
+				}
 			case checkWarn:
 				warn(c.key + ": " + c.value)
 				if c.why != "" {

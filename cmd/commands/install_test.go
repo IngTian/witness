@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -617,51 +618,95 @@ func TestWireOpenCodeWritesThePluginAndSaysItIsPickedUpLive(t *testing.T) {
 	}
 }
 
-// wire opencode warns when it cannot find OpenCode but still wires.
+// wire opencode warns when it cannot read OpenCode's version but still wires, and says "not found"
+// only when there is no `opencode` to run: the Windows desktop app has no CLI on PATH, and a probe
+// that times out is an OpenCode that is there.
 func TestWireOpenCodeSaysWhenItCannotFindOpenCode(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("OPENCODE_CONFIG", "")
-	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
-	prevVer := openCodeVersion
-	prevTarget := openCodeInstallTarget
-	t.Cleanup(func() {
-		openCodeVersion = prevVer
-		openCodeInstallTarget = prevTarget
-	})
-	openCodeVersion = func(context.Context) (opencode.Version, error) {
-		return opencode.Version{}, fmt.Errorf("opencode --version: exec: \"opencode\": executable file not found in $PATH")
+	notFound := fmt.Errorf("opencode --version: %w", &exec.Error{Name: "opencode", Err: exec.ErrNotFound})
+	for _, tc := range []struct {
+		name     string
+		probeErr error
+		want     []string
+		notWant  string
+	}{
+		{"not on PATH", notFound, []string{"not found", "capture needs OpenCode 2.2.7+"}, "could not check"},
+		{"probe failed", errors.New("opencode --version: signal: killed"), []string{"version unknown", "could not check OpenCode's version: opencode --version: signal: killed"}, "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
+			prevVer := openCodeVersion
+			prevTarget := openCodeInstallTarget
+			t.Cleanup(func() {
+				openCodeVersion = prevVer
+				openCodeInstallTarget = prevTarget
+			})
+			openCodeVersion = func(context.Context) (opencode.Version, error) { return opencode.Version{}, tc.probeErr }
+			openCodeInstallTarget = func() (string, error) { return "/x/hooks/witness.sh", nil }
+
+			var err error
+			output := captureStdout(t, func() { _, err = cmdInstallOpenCode() })
+			if err != nil {
+				t.Fatalf("wire opencode: %v", err)
+			}
+			// Wiring must still happen
+			if _, err := os.Stat(filepath.Join(opencodeDir(), "plugins", openCodePluginName)); err != nil {
+				t.Errorf("plugin not written when the version is unknown: %v", err)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(output, w) {
+					t.Errorf("output missing %q:\n%s", w, output)
+				}
+			}
+			if strings.Contains(output, tc.notWant) {
+				t.Errorf("output says %q:\n%s", tc.notWant, output)
+			}
+		})
 	}
-	openCodeInstallTarget = func() (string, error) {
-		return "/x/hooks/witness.sh", nil
-	}
+}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	t.Cleanup(func() { os.Stdout = old })
+// A failed version probe says nothing about the DB, so a v1-only DB still refuses before any write.
+func TestWireOpenCodeChecksTheDatabaseWhenTheVersionProbeFails(t *testing.T) {
+	for name, probeErr := range map[string]error{
+		"not on PATH":  &exec.Error{Name: "opencode", Err: exec.ErrNotFound},
+		"probe failed": errors.New("signal: killed"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			dbPath := filepath.Join(home, "opencode.db")
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
+			t.Setenv("WITNESS_OPENCODE_DB", dbPath)
+			prevVer := openCodeVersion
+			prevTarget := openCodeInstallTarget
+			t.Cleanup(func() {
+				openCodeVersion = prevVer
+				openCodeInstallTarget = prevTarget
+			})
+			openCodeVersion = func(context.Context) (opencode.Version, error) { return opencode.Version{}, probeErr }
+			openCodeInstallTarget = func() (string, error) { return "/x/hooks/witness.sh", nil }
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`CREATE TABLE session (id TEXT PRIMARY KEY)`); err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
 
-	_, err := cmdInstallOpenCode()
-	if err != nil {
-		t.Fatalf("wire opencode: %v", err)
-	}
-
-	w.Close()
-	buf := new(strings.Builder)
-	io.Copy(buf, r)
-	os.Stdout = old
-	output := buf.String()
-
-	// Wiring must still happen
-	pluginPath := filepath.Join(opencodeDir(), "plugins", openCodePluginName)
-	if _, err := os.Stat(pluginPath); err != nil {
-		t.Errorf("plugin not written when OpenCode not found: %v", err)
-	}
-
-	// Output must name the minimum version requirement
-	if !strings.Contains(output, "2.2.7") {
-		t.Errorf("output missing 2.2.7: %s", output)
+			captureStdout(t, func() { _, err = cmdInstallOpenCode() })
+			if !errors.Is(err, opencode.ErrOpenCodeV1) {
+				t.Errorf("v1-only DB with a failed probe: err = %v, want ErrOpenCodeV1", err)
+			}
+			if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
+				t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
+			}
+		})
 	}
 }
 

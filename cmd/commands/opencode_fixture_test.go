@@ -43,3 +43,22 @@ func seedOpenCodeV2DB(t *testing.T, updatedMs int64) string {
 	}
 	return path
 }
+
+// addOpenCodeSession adds session id to a seeded DB: a user turn, a completed assistant turn and an
+// idle, all at atMs, so a later import has something new to take.
+func addOpenCodeSession(t *testing.T, path, id string, atMs int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	at := strconv.FormatInt(atMs, 10)
+	if _, err := db.Exec("PRAGMA foreign_keys=OFF;\n" +
+		"INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated) VALUES ('" + id + "', 'prj', 'slug', '/repo', '2.2.7', " + at + ", " + at + ");\n" +
+		"INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES ('msg_" + id + "1', '" + id + "', 'user', 1, " + at + ", " + at + ", '{\"text\":\"again\"}');\n" +
+		"INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES ('msg_" + id + "2', '" + id + "', 'assistant', 2, " + at + ", " + at + ", '{\"time\":{\"completed\":" + at + "},\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}');\n" +
+		"INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES ('msg_" + id + "3', '" + id + "', 'idle', 3, " + at + ", " + at + ", '{\"outcome\":\"completed\"}');"); err != nil {
+		t.Fatal(err)
+	}
+}

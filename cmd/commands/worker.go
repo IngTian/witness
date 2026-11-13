@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strconv"
@@ -576,7 +578,9 @@ func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Conf
 // importAtDrainStart runs an incremental import for every wired source that supports
 // drain-start imports (platform.AutoImporter). OpenCode's plugin can be silently rejected
 // by the editor with only a log line, so Claude-kicked drains re-import it to pick up
-// sessions the rejected plugin missed. Import errors are logged but never fail the drain.
+// sessions the rejected plugin missed. Import errors are logged but never fail the drain. A source
+// whose store does not exist yet (wired before the editor was first used) has nothing to import,
+// as missingSource words it for the CLI; logging it would warn on every drain.
 func importAtDrainStart(ctx context.Context, st *store.Store) {
 	for _, name := range editorNames() {
 		p, ok := platform.ByName(name)
@@ -587,7 +591,7 @@ func importAtDrainStart(ctx context.Context, st *store.Store) {
 		if !ok || !ai.ImportAtDrainStart(st) {
 			continue
 		}
-		if _, err := platform.ImportFor(ctx, p, st, nil); err != nil {
+		if _, err := platform.ImportFor(ctx, p, st, nil); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("worker: drain-start import failed; draining what is captured", "agent", name, "err", err)
 		}
 	}

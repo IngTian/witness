@@ -1099,14 +1099,14 @@ func claudeCLIOutput(args ...string) (string, error) {
 // cmdUninstallOpenCode reports, per part, what it removed. It used to print three "removed (if it
 // was present)" lines on every run, and to rewrite opencode.json even when witness was not in it —
 // which, for a .jsonc config, also dropped the user's comments.
-func cmdUninstallOpenCode() (removed bool, err error) {
+func cmdUninstallOpenCode() (removed bool, warning string, err error) {
 	dir := opencodeDir()
 	config := opencodeConfigPath()
 	switch data, err := os.ReadFile(config); {
 	case err == nil:
 		root, err := parseOpenCodeConfig(data)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 		if mcp, _ := root["mcp"].(map[string]any); mcp["witness"] == nil {
 			fmt.Println(resultRow(skipGlyph(), "MCP server", "none in "+tildePath(config), ""))
@@ -1114,17 +1114,17 @@ func cmdUninstallOpenCode() (removed bool, err error) {
 		}
 		cleaned, err := removeOpenCodeMCP(data)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 		if err := store.WriteFileAtomic(config, cleaned); err != nil {
-			return false, err
+			return false, "", err
 		}
 		fmt.Println(resultRow(okGlyph(), "MCP server", "removed from "+tildePath(config), ""))
 		removed = true
 	case os.IsNotExist(err):
 		fmt.Println(resultRow(skipGlyph(), "MCP server", "none — there is no "+tildePath(config), ""))
 	default:
-		return false, err
+		return false, "", err
 	}
 	gone := removeAllOpenCodePlugins(dir)
 	for _, p := range gone {
@@ -1133,7 +1133,11 @@ func cmdUninstallOpenCode() (removed bool, err error) {
 	if len(gone) == 0 {
 		fmt.Println(resultRow(skipGlyph(), "plugin", "none in "+tildePath(filepath.Join(dir, "plugins")), ""))
 	}
-	return removed || len(gone) > 0, nil
+	stopped, warning, err := stopOpenCodeCapture()
+	if err != nil {
+		return false, "", err
+	}
+	return removed || len(gone) > 0 || stopped, warning, nil
 }
 
 func mergeOpenCodeMCP(data []byte, shim string) ([]byte, error) {

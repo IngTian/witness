@@ -97,7 +97,7 @@ func TestOpenCodeHealthVersionLevels(t *testing.T) {
 			if found.level != tc.wantLevel {
 				t.Errorf("level = %d, want %d", found.level, tc.wantLevel)
 			}
-			if tc.wantContain != "" && !contains(text, tc.wantContain) {
+			if tc.wantContain != "" && !strings.Contains(text, tc.wantContain) {
 				t.Errorf("text %q does not contain %q", text, tc.wantContain)
 			}
 		})
@@ -143,7 +143,7 @@ func TestOpenCodeHealthVersionLevels(t *testing.T) {
 		if found.level != checkWarn {
 			t.Errorf("level = %d, want checkWarn", found.level)
 		}
-		if !contains(found.value+found.why, "2.2.7") {
+		if !strings.Contains(found.value+found.why, "2.2.7") {
 			t.Errorf("text does not name 2.2.7")
 		}
 	})
@@ -152,24 +152,45 @@ func TestOpenCodeHealthVersionLevels(t *testing.T) {
 func TestOpenCodeHealthFlagsAnOutOfDatePlugin(t *testing.T) {
 	cases := []struct {
 		name        string
-		pluginBody  string
+		pluginBody  func(shim string) string // shim is a real file
 		wantLevel   checkLevel
 		wantKey     string
 		wantContain string
 	}{
 		{
-			name:        "v1 body",
-			pluginBody:  `globalThis.WITNESS_SHIM = "/r"\n\nconst plugin = async () => ({})`,
+			// A valid shim line, so the v1 BODY is what fails it
+			name: "v1 body",
+			pluginBody: func(shim string) string {
+				q, _ := json.Marshal(shim)
+				return "globalThis.WITNESS_SHIM = " + string(q) + "\n\nconst plugin = async () => ({})\nexport default plugin\n"
+			},
 			wantLevel:   checkFail,
 			wantKey:     "plugin",
 			wantContain: "witness wire opencode",
 		},
 		{
-			name:        "current body",
-			pluginBody:  "", // will be set in the test with a real shim path
-			wantLevel:   checkOK,
+			// An older witness build's v2 body still captures: a warning, never a failed doctor
+			name:        "older v2 body",
+			pluginBody:  func(shim string) string { return plugin.Source(shim) + "\n// a line this build does not have\n" },
+			wantLevel:   checkWarn,
 			wantKey:     "plugin",
-			wantContain: "",
+			wantContain: "witness wire opencode",
+		},
+		{
+			name: "v2 body with an unparseable shim line",
+			pluginBody: func(shim string) string {
+				_, rest, _ := strings.Cut(plugin.Source(shim), "\n")
+				return "globalThis.WITNESS_SHIM = not json\n" + rest
+			},
+			wantLevel:   checkFail,
+			wantKey:     "plugin",
+			wantContain: "witness wire opencode",
+		},
+		{
+			name:       "current body",
+			pluginBody: plugin.Source,
+			wantLevel:  checkOK,
+			wantKey:    "plugin",
 		},
 	}
 
@@ -190,15 +211,11 @@ func TestOpenCodeHealthFlagsAnOutOfDatePlugin(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(opencode.PluginPath()), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			// For "current body", create a real shim file
-			body := tc.pluginBody
-			if tc.name == "current body" {
-				shimPath := filepath.Join(home, "witness.sh")
-				if err := os.WriteFile(shimPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				body = plugin.Source(shimPath)
+			shimPath := filepath.Join(home, "witness.sh")
+			if err := os.WriteFile(shimPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
 			}
+			body := tc.pluginBody(shimPath)
 			if err := os.WriteFile(opencode.PluginPath(), []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -222,7 +239,7 @@ func TestOpenCodeHealthFlagsAnOutOfDatePlugin(t *testing.T) {
 			}
 			if tc.wantContain != "" {
 				text := found.value + found.why + found.fix[0] + found.fix[1]
-				if !contains(text, tc.wantContain) {
+				if !strings.Contains(text, tc.wantContain) {
 					t.Errorf("text %q does not contain %q", text, tc.wantContain)
 				}
 			}
@@ -264,7 +281,7 @@ func TestOpenCodeHealthFlagsAnOutOfDatePlugin(t *testing.T) {
 		if found.level != checkFail {
 			t.Errorf("level = %d, want checkFail", found.level)
 		}
-		if !contains(found.value+found.why, "/missing") {
+		if !strings.Contains(found.value+found.why, "/missing") {
 			t.Errorf("text does not name the missing path")
 		}
 	})
@@ -558,7 +575,7 @@ func TestOpenCodeHealthWarnsWhenOpenCodeIsAheadOfTheImport(t *testing.T) {
 			}
 			if tc.wantContain != "" {
 				text := found.value + found.why + found.fix[0] + found.fix[1]
-				if !contains(text, tc.wantContain) {
+				if !strings.Contains(text, tc.wantContain) {
 					t.Errorf("text %q does not contain %q", text, tc.wantContain)
 				}
 			}
@@ -669,8 +686,20 @@ func TestDoctorShowsTheCaptureBlockAndFailsOnACaptureFailure(t *testing.T) {
 		t.Errorf("JSON output has 'capture' key, should be unchanged")
 	}
 
-	// Test 2: stale plugin → err != nil
-	if err := os.WriteFile(opencode.PluginPath(), []byte(`globalThis.WITNESS_SHIM = "/r"\n\nconst plugin = async () => ({})`), 0o644); err != nil {
+	// Test 2: an older witness build's v2 body still captures → a warning, err == nil
+	if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source(shimPath)+"\n// an older build\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	humanOut, humanErr = captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	if humanErr != nil {
+		t.Errorf("cmdDoctor(false) with an older v2 plugin returned %v, want nil (it still captures)", humanErr)
+	}
+	if !strings.Contains(humanOut, "plugin: an older witness build") || !strings.Contains(humanOut, "witness wire opencode") {
+		t.Errorf("human output missing the older-build warning and its fix; got:\n%s", humanOut)
+	}
+
+	// Test 3: a v1 plugin (valid shim line, v1 body) → err != nil
+	if err := os.WriteFile(opencode.PluginPath(), []byte("globalThis.WITNESS_SHIM = \"/r\"\n\nconst plugin = async () => ({})\nexport default plugin\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -737,6 +766,10 @@ func TestStatusWarnsWhenOpenCodeCaptureIsStale(t *testing.T) {
 	st.Close()
 
 	staleOut := captureStdout(t, func() { _ = cmdDistillStatus(false) })
+	// Under the editor's name: "freshness: …" alone does not say whose capture is behind
+	if !strings.Contains(staleOut, "opencode freshness: ") {
+		t.Errorf("stale output does not name the editor; got:\n%s", staleOut)
+	}
 	if !strings.Contains(staleOut, "witness import --agent opencode") {
 		t.Errorf("stale output missing import command; got:\n%s", staleOut)
 	}
@@ -769,15 +802,117 @@ func TestStatusWarnsWhenOpenCodeCaptureIsStale(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || findInString(s, substr))
+// An OpenCode the user never wired, or just unwired, whose DB has sessions: doctor says so in one
+// neutral row with the wire step. No freshness verdict, no import command and no version verdict,
+// so not even an out-of-range OpenCode can fail doctor for someone who never opted into capturing it.
+func TestDoctorOnlyNotesAnUnwiredOpenCodeWithSessions(t *testing.T) {
+	for _, unwired := range []bool{false, true} {
+		name := "never wired"
+		if unwired {
+			name = "just unwired"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("WITNESS_HOME", home)
+			t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+			t.Setenv("OPENCODE_CONFIG", "")
+			t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+			t.Setenv("WITNESS_OPENCODE_DB", seedOpenCodeV2DB(t, time.Now().UnixMilli()))
+			prevEmb := newDoctorEmbedder
+			newDoctorEmbedder = func() (distill.Embedder, error) { return fixedEmbedder{vec: []float32{1, 0, 0}}, nil }
+			prevVer := openCodeVersion
+			openCodeVersion = func(context.Context) (opencode.Version, error) {
+				return opencode.Version{Major: 2, Minor: 2, Patch: 6}, nil
+			}
+			t.Cleanup(func() { newDoctorEmbedder, openCodeVersion = prevEmb, prevVer })
+
+			st, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := configApplySet(st, "mine_model", "claude-haiku-4-5", ""); err != nil {
+				t.Fatal(err)
+			}
+			if unwired {
+				// Wired, imported once, then unwired
+				if err := os.MkdirAll(filepath.Dir(opencode.PluginPath()), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source(filepath.Join(home, "witness.sh"))), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.SetMetaString("opencode_seen_time_updated_ms", fmt.Sprintf("%d", time.Now().Add(-time.Hour).UnixMilli())); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st.Close()
+			if unwired {
+				captureStdout(t, func() { _ = cmdUninstall([]string{"opencode"}) })
+			}
+
+			st, err = store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			full, quick := openCodeHealth(st, false), openCodeHealth(st, true)
+			st.Close()
+			if len(full) != 1 || full[0].level != checkInfo || full[0].fix[1] != "witness wire opencode" {
+				t.Errorf("doctor checks = %+v, want one checkInfo row whose fix is `witness wire opencode`", full)
+			}
+			if quick != nil {
+				t.Errorf("status checks = %+v, want none", quick)
+			}
+
+			out, err := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+			if err != nil {
+				t.Errorf("doctor returned %v, want nil (an unwired OpenCode is not a capture failure)", err)
+			}
+			if !strings.Contains(out, "sessions here, not wired") || !strings.Contains(out, "witness wire opencode") {
+				t.Errorf("doctor output missing the not-wired row and its wire step; got:\n%s", out)
+			}
+			for _, bad := range []string{"freshness", "witness import --agent opencode", "2.2.6"} {
+				if strings.Contains(out, bad) {
+					t.Errorf("doctor output has %q for an unwired OpenCode; got:\n%s", bad, out)
+				}
+			}
+		})
+	}
 }
 
-func findInString(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+// status runs on every call: a machine that has OpenCode but never wired it must not have its DB
+// opened (a schema probe plus a scan of session_message) by `witness status`.
+func TestStatusNeverOpensTheDatabaseOfAnUnwiredOpenCode(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+	t.Setenv("WITNESS_OPENCODE_DB", seedOpenCodeV2DB(t, time.Now().UnixMilli()))
+	opens := 0
+	prev := openCodeNewestActivity
+	openCodeNewestActivity = func(ctx context.Context, path string) (time.Time, error) {
+		opens++
+		return prev(ctx, path)
 	}
-	return false
+	t.Cleanup(func() { openCodeNewestActivity = prev })
+
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checks := openCodeHealth(st, true); checks != nil {
+		t.Errorf("quick checks = %+v, want none", checks)
+	}
+	st.Close()
+	captureStdout(t, func() { _ = cmdDistillStatus(false) })
+	if opens != 0 {
+		t.Fatalf("status opened the OpenCode DB %d times for an OpenCode that was never wired, want 0", opens)
+	}
+
+	// The seam is the one health reads through: doctor still opens the DB to find the sessions
+	st, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if openCodeHealth(st, false) == nil || opens == 0 {
+		t.Fatalf("doctor found no sessions (opens = %d); the counting seam is not the one health uses", opens)
+	}
 }

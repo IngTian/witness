@@ -331,12 +331,16 @@ func renderCurrentFacets(name, dataName string, facets []store.Facet, decaySeq i
 	}
 }
 
+// npmWireStep is the npm launcher's stand-in for wire, apart from wireCommand so an editor's health
+// check (which the editors registry names) can use it without an initialization cycle.
+const npmWireStep = `add "@witness-ai/opencode" to the "plugins" list in opencode.json`
+
 // wireCommand is the copyable "connect an editor" step, naming the editors wire really accepts.
 // Under the npm launcher (WITNESS_NPM_PACKAGE=1), wire is refused, so every screen that
 // offered it pointed npm users at a command that exits 1 (#218 comment).
 func wireCommand() string {
 	if os.Getenv("WITNESS_NPM_PACKAGE") == "1" {
-		return `add "@witness-ai/opencode" to the "plugins" list in opencode.json`
+		return npmWireStep
 	}
 	return "witness wire <" + strings.Join(editorNames(), "|") + ">"
 }

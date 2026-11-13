@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/platform/opencode"
@@ -34,41 +36,67 @@ var openCodeVersion = func(ctx context.Context) (opencode.Version, error) {
 // Windows do not copy the test binary.
 var openCodeInstallTarget = resolveOpenCodeInstall
 
+// openCodeNewestActivity is opencode.NewestActivity, a var so a test can prove `witness status`
+// never opens the OpenCode DB of a machine that never wired OpenCode.
+var openCodeNewestActivity = opencode.NewestActivity
+
 // checkOpenCodeForWire probes OpenCode and its database before wiring. It returns a slice of
-// result rows to print (one per check), or an error that refuses wiring. An absent OpenCode is a
-// warning only (capture needs it installed, but wiring continues so it works once installed).
+// result rows to print (one per check), or an error that refuses wiring. An OpenCode whose version
+// cannot be read is a warning only (wiring continues so capture works once it is installed).
 // Unsupported versions and unreadable databases refuse before any write.
 func checkOpenCodeForWire(ctx context.Context) (rows []string, err error) {
 	v, probeErr := openCodeVersion(ctx)
-	if probeErr != nil {
-		// OpenCode not found: wire continues so it works once installed
-		return []string{
-			resultRow(warnGlyph(), "OpenCode", "not found", fmt.Sprintf("capture needs OpenCode %s+", opencode.MinVersion)),
-		}, nil
+	switch {
+	case errors.Is(probeErr, exec.ErrNotFound):
+		rows = append(rows, resultRow(warnGlyph(), "OpenCode", "not found", fmt.Sprintf("capture needs OpenCode %s+", opencode.MinVersion)))
+	case probeErr != nil:
+		// Not "not found": the Windows desktop app has no CLI on PATH, and a probe that times out
+		// or prints no version is an OpenCode that is there
+		rows = append(rows, resultRow(warnGlyph(), "OpenCode", "version unknown", "could not check OpenCode's version: "+probeErr.Error()))
+	default:
+		if err := opencode.CheckVersion(v); err != nil {
+			return nil, err
+		}
+		if opencode.AboveTested(v) {
+			rows = append(rows, resultRow(warnGlyph(), "OpenCode", v.String(), fmt.Sprintf("newer than witness has been tested with (%d.%d.x); doctor will say if capture breaks", opencode.NewestTestedMinor.Major, opencode.NewestTestedMinor.Minor)))
+		} else {
+			rows = append(rows, resultRow(okGlyph(), "OpenCode", v.String(), ""))
+		}
 	}
 
-	if err := opencode.CheckVersion(v); err != nil {
-		return nil, err
-	}
-
-	vStr := v.String()
-	if opencode.AboveTested(v) {
-		rows = append(rows, resultRow(warnGlyph(), "OpenCode", vStr, fmt.Sprintf("newer than witness has been tested with (%d.%d.x); doctor will say if capture breaks", opencode.NewestTestedMinor.Major, opencode.NewestTestedMinor.Minor)))
-	} else {
-		rows = append(rows, resultRow(okGlyph(), "OpenCode", vStr, ""))
-	}
-
-	// Check database readability (v1-only or mid-migration refuses before writing anything)
+	// Whatever the probe said: a DB that is v1-only or mid-migration refuses before anything is
+	// written, and a missing CLI says nothing about the DB
 	dbPath, err := opencode.DefaultDBPath()
 	if err != nil {
 		return nil, fmt.Errorf("resolve opencode db path: %w", err)
 	}
-	_, err = opencode.NewestActivity(ctx, dbPath)
+	_, err = openCodeNewestActivity(ctx, dbPath)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 
 	return rows, nil
+}
+
+// stopOpenCodeCapture is unwire's last part. Unwire is the consent switch, and removing the files
+// is not enough: an earlier import (the plugin's, or one manual `witness import --agent opencode`)
+// keeps every later drain importing OpenCode, and status and doctor checking it, until
+// ForgetCapture clears it.
+func stopOpenCodeCapture() (stopped bool, warning string, err error) {
+	st, err := store.Open()
+	if err != nil {
+		fmt.Println(resultRow(warnGlyph(), "capture", "not stopped", "could not open the archive: "+err.Error()))
+		return false, "drains may still import OpenCode", nil
+	}
+	defer st.Close()
+	if opencode.LastImported(st).IsZero() {
+		return false, "", nil
+	}
+	if err := opencode.ForgetCapture(st); err != nil {
+		return false, "", fmt.Errorf("stop OpenCode capture: %w", err)
+	}
+	fmt.Println(resultRow(okGlyph(), "capture", "stopped", "drains no longer import OpenCode"))
+	return true, "", nil
 }
 
 // openCodeHealth checks OpenCode capture status for doctor and status. Returns nil (silent)
@@ -77,24 +105,32 @@ func openCodeHealth(st *store.Store, quick bool) []captureCheck {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Gate: silent unless OpenCode is in use
+	// In use: a plugin file, or an import since the last unwire (an npm user has no plugin file)
 	wired := opencode.PluginInstalled()
 	seen := opencode.LastImported(st)
+	inUse := wired || !seen.IsZero()
+	// Status runs often: it must not open (and scan) the DB of anyone who merely has OpenCode
+	if quick && !inUse {
+		return nil
+	}
 	dbPath, dbPathErr := opencode.DefaultDBPath()
 	var newest time.Time
 	var dbErr error
 	if dbPathErr == nil {
-		newest, dbErr = opencode.NewestActivity(ctx, dbPath)
-	}
-
-	inUse := false
-	if quick {
-		inUse = wired || !seen.IsZero()
-	} else {
-		inUse = wired || !seen.IsZero() || (dbErr == nil && !newest.IsZero())
+		newest, dbErr = openCodeNewestActivity(ctx, dbPath)
 	}
 	if !inUse {
-		return nil
+		// Doctor still speaks when the DB has sessions (spec §7.8), but OpenCode was never wired
+		// here or was unwired: there is no plugin to blame and no capture to fail, so one neutral
+		// row, never a freshness verdict, an import command or a failed version
+		if dbErr != nil || newest.IsZero() {
+			return nil
+		}
+		wire := "witness wire opencode"
+		if os.Getenv("WITNESS_NPM_PACKAGE") == "1" {
+			wire = npmWireStep // the npm launcher refuses wire
+		}
+		return []captureCheck{{level: checkInfo, key: "opencode", value: "sessions here, not wired", fix: [2]string{"capture them", wire}}}
 	}
 
 	var checks []captureCheck
@@ -159,32 +195,45 @@ func openCodeHealth(st *store.Store, quick bool) []captureCheck {
 					fix:   [2]string{"re-wire", "witness wire opencode"},
 				})
 			} else {
-				shim, current := plugin.InstalledShim(string(body))
-				if !current {
+				src := string(body)
+				shim, current := plugin.InstalledShim(src)
+				// Only a v1 or unparseable file fails: an older witness build's v2 body still
+				// captures, and failing on any byte difference would fail every wired user's
+				// doctor after each release that edits witness.js, until they re-wire. v2 loads
+				// only `export default { id, setup }`, which no v1 body has.
+				v2 := shim != "" && strings.Contains(src, "export default {") && strings.Contains(src, `id: "witness"`)
+				_, shimErr := os.Stat(shim)
+				switch {
+				case !current && !v2:
 					checks = append(checks, captureCheck{
 						level: checkFail,
 						key:   "plugin",
 						value: "out of date",
-						why:   "the installed plugin body does not match the current witness version",
+						why:   "the installed plugin is a v1 file or was edited by hand; OpenCode v2 may not load it",
 						fix:   [2]string{"re-wire", "witness wire opencode"},
 					})
-				} else {
-					// Check shim file exists
-					if _, err := os.Stat(shim); err != nil {
-						checks = append(checks, captureCheck{
-							level: checkFail,
-							key:   "plugin",
-							value: "shim missing",
-							why:   fmt.Sprintf("the plugin points to %s, which does not exist", shim),
-							fix:   [2]string{"re-wire", "witness wire opencode"},
-						})
-					} else {
-						checks = append(checks, captureCheck{
-							level: checkOK,
-							key:   "plugin",
-							value: "current",
-						})
-					}
+				case shimErr != nil:
+					checks = append(checks, captureCheck{
+						level: checkFail,
+						key:   "plugin",
+						value: "shim missing",
+						why:   fmt.Sprintf("the plugin points to %s, which does not exist", shim),
+						fix:   [2]string{"re-wire", "witness wire opencode"},
+					})
+				case !current:
+					checks = append(checks, captureCheck{
+						level: checkWarn,
+						key:   "plugin",
+						value: "an older witness build",
+						why:   "it still captures; re-wire to update it to this build's copy",
+						fix:   [2]string{"re-wire", "witness wire opencode"},
+					})
+				default:
+					checks = append(checks, captureCheck{
+						level: checkOK,
+						key:   "plugin",
+						value: "current",
+					})
 				}
 			}
 
@@ -215,7 +264,7 @@ func openCodeHealth(st *store.Store, quick bool) []captureCheck {
 							level: checkWarn,
 							key:   "MCP entry",
 							value: "missing",
-							why:   "mcp.witness is not in opencode.json; the plugin may not be able to call record_observation",
+							why:   "mcp.witness is not in opencode.json; OpenCode's agent will not see witness's MCP tools",
 							fix:   [2]string{"re-wire", "witness wire opencode"},
 						})
 					}
