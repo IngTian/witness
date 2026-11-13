@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -331,6 +332,11 @@ func renderCurrentFacets(name, dataName string, facets []store.Facet, decaySeq i
 }
 
 // wireCommand is the copyable "connect an editor" step, naming the editors wire really accepts.
+// Under the npm launcher (WITNESS_NPM_PACKAGE=1), wire is refused, so every screen that
+// offered it pointed npm users at a command that exits 1 (#218 comment).
 func wireCommand() string {
+	if os.Getenv("WITNESS_NPM_PACKAGE") == "1" {
+		return `add "@witness-ai/opencode" to the "plugins" list in opencode.json`
+	}
 	return "witness wire <" + strings.Join(editorNames(), "|") + ">"
 }

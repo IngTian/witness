@@ -109,3 +109,43 @@ func TestInternalWorkerCommandResolution(t *testing.T) {
 		t.Error("worker group must have a 'run' subcommand")
 	}
 }
+
+func TestNpmScreensHintThePluginNotWire(t *testing.T) {
+	// Under the npm launcher (WITNESS_NPM_PACKAGE=1), cmdDistillStatus and cmdDoctor must
+	// hint the npm users to add the plugin to opencode.json instead of running `witness wire`.
+	// The npm launcher refuses wire (exit 1), so every screen that offered it pointed npm users
+	// at a command that exits 1 (#218 comment).
+	home := t.TempDir()
+	t.Setenv("WITNESS_HOME", home)
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+
+	// Test with npm launcher disabled: expect wire command
+	t.Setenv("WITNESS_NPM_PACKAGE", "")
+	statusOut := captureStdout(t, func() { _ = cmdDistillStatus(false) })
+	if !strings.Contains(statusOut, "witness wire") {
+		t.Errorf("without npm launcher, status should hint witness wire; got: %s", statusOut)
+	}
+
+	doctorOut, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	if !strings.Contains(doctorOut, "witness wire") {
+		t.Errorf("without npm launcher, doctor should hint witness wire; got: %s", doctorOut)
+	}
+
+	// Test with npm launcher enabled: expect plugin hint instead
+	t.Setenv("WITNESS_NPM_PACKAGE", "1")
+	statusOut = captureStdout(t, func() { _ = cmdDistillStatus(false) })
+	if strings.Contains(statusOut, "witness wire") {
+		t.Errorf("with npm launcher, status should not hint witness wire; got: %s", statusOut)
+	}
+	if !strings.Contains(statusOut, "@witness-ai/opencode") {
+		t.Errorf("with npm launcher, status should hint @witness-ai/opencode; got: %s", statusOut)
+	}
+
+	doctorOut, _ = captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	if strings.Contains(doctorOut, "witness wire") {
+		t.Errorf("with npm launcher, doctor should not hint witness wire; got: %s", doctorOut)
+	}
+	if !strings.Contains(doctorOut, "@witness-ai/opencode") {
+		t.Errorf("with npm launcher, doctor should hint @witness-ai/opencode; got: %s", doctorOut)
+	}
+}
