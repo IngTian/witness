@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -15,8 +16,21 @@ import (
 // counts too (it was read), and witness's own legacy scratch session is not work at all.
 func TestImportProgressCountsEverySessionRead(t *testing.T) {
 	dbPath := seedOpenCodeDB(t)
-	mutateOpenCodeDB(t, dbPath, `INSERT INTO session VALUES ('ses_empty', '/repo', 'nothing said yet', 1000, 6000),
-		('ses_scratch', '/repo', 'witness-distill', 1000, 7000)`)
+	// v2 rows: ses_empty (no messages, updated 6000), ses_scratch (agent=witness-distill, updated 7000)
+	mutateV2DB := func(path, stmt string) {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mutateV2DB(dbPath, `
+		INSERT INTO session_v2 VALUES ('ses_empty', 'proj1', NULL, NULL, NULL, NULL, 'empty', '/repo', NULL, NULL, '2.2.7', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL, NULL, 1000, 6000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
+		INSERT INTO session_v2 VALUES ('ses_scratch', 'proj1', NULL, NULL, NULL, NULL, 'scratch', '/repo', NULL, NULL, '2.2.7', NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, NULL, NULL, 'witness-distill', NULL, 1000, 7000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
+	`)
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
 	if err != nil {
