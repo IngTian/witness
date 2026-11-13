@@ -267,7 +267,7 @@ func TestReapPriorServeIgnoresGarbageRecords(t *testing.T) {
 func TestEmptyRuntimeRootIsRefused(t *testing.T) {
 	prevVersion, prevExec := openCodeVersionCommand, execCommandContext
 	t.Cleanup(func() { openCodeVersionCommand, execCommandContext = prevVersion, prevExec })
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("opencode v2.2.7\n"), nil }
 	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		t.Errorf("spawned %s %v with no runtime root", name, args)
 		return exec.CommandContext(ctx, os.Args[0], "-test.run=XXX_NONE")
