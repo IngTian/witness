@@ -55,9 +55,11 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - `internal/platform/{claude,opencode,codex,file}/` — the per-source adapters.
   `registry.go` requires only identity; rendering, import, capture and runner are
   optional capabilities (rendering falls back to the shared `RenderChunks`, import to
-  nothing); `cmd/commands/root.go` imports the adapters. Installers register
-  separately: a cmd-local wire-target map (`cmd/commands/installers.go`) with cmd-side
-  implementations.
+  nothing), and so are `AutoImporter` (a wired source re-imported at every drain start,
+  because it can go stale without a live trigger) and `ModelRequirer` (a runner that
+  refuses an empty stage model, so wire asks for one); `cmd/commands/root.go` imports
+  the adapters. Installers register separately: a cmd-local wire-target map
+  (`cmd/commands/installers.go`) with cmd-side implementations.
   `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS — the one source of
   `npm/opencode/witness.js` (regenerate with `WITNESS_WRITE_NPM_PLUGIN=1 go test ./internal/platform/opencode/plugin/`).
 - `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding

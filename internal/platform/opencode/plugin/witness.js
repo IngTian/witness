@@ -51,6 +51,11 @@ function spawnWitness(args) {
 // One witness import at a time, the startup one included: witness's import lock is non-blocking,
 // so an import started while another holds it exits 0 having imported nothing, and nothing would
 // retry it. track makes proc the active import and drains the queue once it exits.
+//
+// ponytail: one contender is outside this queue. A turn-end `import --session X` that runs while a
+// worker's drain-start import holds the lock (~100 ms per drain) imports nothing; the next import
+// of X, the next drain-start import or the next startup sync picks it up. Make a targeted import
+// wait briefly for the lock if that delay ever matters.
 function track(proc) {
   if (!proc) return
   S.active = proc

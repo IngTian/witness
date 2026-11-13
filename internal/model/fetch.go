@@ -44,8 +44,8 @@ const (
 )
 
 // SkipEnv=1 turns off every AUTOMATIC download (the airgapped / metered / bring-your-own-model
-// switch, shared with model.js). Fetch does not read it: `witness model fetch` is an explicit
-// request, as model.js's own CLI is.
+// switch, the same one the deleted model.js read, so an older plugin honours it too). Fetch does
+// not read it: `witness model fetch` is an explicit request, as model.js's own CLI was.
 const SkipEnv = "WITNESS_SKIP_MODEL_DOWNLOAD"
 
 // ErrBusy means another process holds the download lock and is alive. Its files land
@@ -59,8 +59,8 @@ const (
 	lockStaleAfter = 12 * time.Hour
 )
 
-// stallTimeout cancels a download that receives no bytes for this long (model.js's default),
-// so a dead connection fails instead of hanging. A var so tests can shorten it.
+// stallTimeout cancels a download that receives no bytes for this long (the deleted model.js's
+// default), so a dead connection fails instead of hanging. A var so tests can shorten it.
 var stallTimeout = 30 * time.Second
 
 type file struct{ remote, name, sha string }

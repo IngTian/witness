@@ -822,8 +822,9 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `process.env.WITNESS_BIN || "witness"`) {
 		t.Fatalf("npm plugin should fall back to witness on PATH: %s", src)
 	}
-	// The body's behaviour pins (exports, idle sync, quiet-period kick, disposal) live in
-	// internal/platform/opencode/plugin/plugin_test.go; Source only prepends the shim line.
+	// The body's behaviour pins (the v2 export, the startup import, turn-end imports, the
+	// quiet-period kick, a cleanup that never stops a worker) live in plugin_test.go and the npm
+	// package's witness.test.js; Source only prepends the shim line.
 }
 
 func TestNpmPackageHidesSourceOnlyWireCommands(t *testing.T) {

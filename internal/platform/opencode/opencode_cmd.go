@@ -32,9 +32,9 @@ import (
 //     recursion guard. isolatedEnv(root) points OPENCODE_DB and XDG_DATA_HOME at
 //     witness's runtime root, because several subcommands open their DB read-WRITE and
 //     apply migrations, so the ambient env would reach into the USER's database. That
-//     holds for root "" too: every production caller passes a root (the entry points
-//     refuse an empty one), and if one ever does not, the relative paths land under the
-//     temp-dir cwd — never the user's DB, so the default fails safe. And
+//     holds for root "" too, which ProbeVersion passes (wire and doctor have no runtime
+//     root; the runner's entry points refuse an empty one): the relative paths land under
+//     the temp-dir cwd — never the user's DB, so the default fails safe. And
 //     procCtl.BindToParent makes the child die with the worker on Linux. A caller layers
 //     its own variables on top with replaceEnv(cmd.Env, …).
 func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd {

@@ -872,7 +872,10 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 
 // ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 2.2.7 up to, not
 // including, 3.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
-// pending for retry.
+// pending for retry. runtimeRoot is unused now that the probe goes through ProbeVersion, which
+// needs no root (`--version` opens no DB, and wire and doctor have none to give); it stays because
+// the v2 runner port (PR 2) is written against this signature, and dropping it here would churn
+// both callers twice.
 func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
 	v, err := ProbeVersion(ctx)
 	if err != nil {

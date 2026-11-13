@@ -13,7 +13,7 @@ OpenCode plugin for witness. It reconciles OpenCode's local session database on 
 
 These are the only platforms supported by the npm distribution. macOS Intel and Linux ARM are not supported; the CLI exits with a clear supported-platform message on those systems.
 
-Requires OpenCode **2.2.7 or newer** (v1 is not supported; witness v0.13.0 was the last release for v1). On Windows, if you prefer a self-contained install with the embedding model already included — no first-run download — use the zip from the [latest release](https://github.com/IngTian/witness/releases/latest) instead.
+Requires OpenCode **2.2.7 or newer** (v1 is not supported; witness v0.13.0 was the last release for v1). Capture works on v2 now; distilling through OpenCode on v2 arrives in a later release, so until then route your lenses to another runner (`witness config set runner claude`). On Windows, if you prefer a self-contained install with the embedding model already included — no first-run download — use the zip from the [latest release](https://github.com/IngTian/witness/releases/latest) instead.
 
 ## Install
 
@@ -44,7 +44,7 @@ npm exec --yes --package=@witness-ai/opencode -- witness doctor
 
 The main package includes the plugin, CLI wrapper, and prompts. npm installs one optional platform package containing the matching `witness` binary; it does not download binaries for other operating systems or architectures. The embedding model is not in the package: the plugin runs `witness model fetch` once each time OpenCode starts (~470 MB the first time, into the witness data directory's `assets/e5-small`; later starts only check it); `witness mcp` answers search once it lands, and the other tools work at once. Run as an MCP server alone (`npx @witness-ai/opencode mcp`, as the MCP Registry entry does), witness downloads the model itself in the background. `npx @witness-ai/opencode model fetch` downloads it in the foreground instead. Set `WITNESS_BIN` to override the platform package binary.
 
-After the download completes, verify the model, OpenCode runner, archive, and queue:
+After the download completes, verify the model, capture, archive, and queue:
 
 ```sh
 npm exec --yes --package=@witness-ai/opencode -- witness doctor

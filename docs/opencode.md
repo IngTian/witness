@@ -5,8 +5,8 @@ supported platforms, first-run model download) is documented in the
 [npm package README](../npm/opencode/README.md).
 
 > **OpenCode 2.2.7 or newer.** v1 is refused by name (`opencode upgrade --major`); witness v0.13.0
-> was the last release for v1. Distilling through OpenCode on v2 arrives in the next PR; capture
-> works now.
+> was the last release for v1. Capture works on v2 now; distilling through OpenCode on v2 arrives
+> in a later release.
 
 ### OpenCode support
 
