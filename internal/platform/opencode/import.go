@@ -126,63 +126,51 @@ func openSourceDB(ctx context.Context, path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// ProbeSchema checks that the DB has the v2 tables and columns the importer reads.
-// Refuses v1-only DBs and mid-migration states.
+// v2Reads is every table and column the importer reads; ProbeSchema refuses a DB lacking any.
+var v2Reads = []struct {
+	table string
+	cols  []string
+}{
+	{"session_v2", []string{"id", "directory", "title", "time_created", "time_updated", "parent_id", "fork_session_id", "agent"}},
+	{"session_message", []string{"id", "session_id", "type", "seq", "time_created", "data"}},
+	{"session_part", []string{"message_id", "ordinal", "type", "data"}},
+}
+
+// ProbeSchema checks that the DB has the v2 tables and columns the importer reads, and names
+// exactly the missing ones: after an OpenCode schema change the refusal is the only report of
+// what moved. Refuses v1-only DBs and mid-migration states.
 func ProbeSchema(ctx context.Context, db *sql.DB) error {
-	var tables []string
-	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_v2','session_message','session_part','session')`)
+	tables, err := queryNames(ctx, db, `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_v2','session_message','session_part','session')`)
 	if err != nil {
 		return err
 	}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return err
-		}
-		tables = append(tables, name)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	hasV2 := slices.Contains(tables, "session_v2") && slices.Contains(tables, "session_message") && slices.Contains(tables, "session_part")
 	hasV1 := slices.Contains(tables, "session")
-
-	if !hasV2 && hasV1 {
+	var missing []string
+	for _, r := range v2Reads {
+		if !slices.Contains(tables, r.table) {
+			missing = append(missing, r.table)
+		}
+	}
+	if len(missing) == len(v2Reads) && hasV1 {
 		return fmt.Errorf("this opencode.db was written by OpenCode v1: %w", ErrOpenCodeV1)
 	}
-	if !hasV2 {
-		return fmt.Errorf("%w: missing session_v2 or session_message or session_part", ErrOpenCodeSchema)
+	if len(missing) > 0 {
+		// Tables first: probing a missing table would report every one of its columns too
+		return fmt.Errorf("%w: missing %s", ErrOpenCodeSchema, strings.Join(missing, ", "))
 	}
-
-	// Check column sets
-	check := func(table string, cols []string, want int) error {
-		placeholders := make([]string, len(cols))
-		args := make([]any, len(cols))
-		for i, c := range cols {
-			placeholders[i] = "?"
-			args[i] = c
-		}
-		var count int
-		q := fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name IN (%s)`, table, strings.Join(placeholders, ","))
-		if err := db.QueryRowContext(ctx, q, args...).Scan(&count); err != nil {
+	for _, r := range v2Reads {
+		have, err := queryNames(ctx, db, `SELECT name FROM pragma_table_info(?)`, r.table)
+		if err != nil {
 			return err
 		}
-		if count != want {
-			return fmt.Errorf("%w: table %s missing columns", ErrOpenCodeSchema, table)
+		for _, c := range r.cols {
+			if !slices.Contains(have, c) {
+				missing = append(missing, r.table+"."+c)
+			}
 		}
-		return nil
 	}
-	if err := check("session_v2", []string{"id", "directory", "title", "time_created", "time_updated", "parent_id", "fork_session_id", "agent"}, 8); err != nil {
-		return err
-	}
-	if err := check("session_message", []string{"id", "session_id", "type", "seq", "time_created", "data"}, 6); err != nil {
-		return err
-	}
-	if err := check("session_part", []string{"message_id", "ordinal", "type", "data"}, 4); err != nil {
-		return err
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: missing %s", ErrOpenCodeSchema, strings.Join(missing, ", "))
 	}
 
 	// If v1 table exists, require migration completed
@@ -315,6 +303,24 @@ func scanSessions(ctx context.Context, db *sql.DB, q string, args ...any) ([]ses
 	for rows.Next() {
 		var s sessionRow
 		if err := rows.Scan(&s.ID, &s.Directory, &s.TimeCreated, &s.TimeUpdated); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// queryNames returns the one text column q yields (table or column names for ProbeSchema).
+func queryNames(ctx context.Context, db *sql.DB, q string, args ...any) ([]string, error) {
+	rows, err := db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

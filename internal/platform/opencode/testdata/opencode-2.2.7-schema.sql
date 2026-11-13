@@ -271,8 +271,8 @@ CREATE INDEX `session_inbox_session_delivery_seq_idx` ON `session_inbox` (`sessi
 CREATE UNIQUE INDEX `session_inbox_session_enqueued_seq_idx` ON `session_inbox` (`session_id`,`enqueued_seq`);
 CREATE UNIQUE INDEX `session_message_session_seq_idx` ON `session_message` (`session_id`,`seq`);
 CREATE INDEX `session_message_session_type_seq_idx` ON `session_message` (`session_id`,`type`,`seq`);
-CREATE INDEX `session_message_time_created_idx` ON `session_message` (`time_created`);
 CREATE INDEX `session_message_session_time_created_id_idx` ON `session_message` (`session_id`,`time_created`,`id`);
+CREATE INDEX `session_message_time_created_idx` ON `session_message` (`time_created`);
 CREATE INDEX `session_part_session_message_idx` ON `session_part` (`session_id`,`message_id`,`ordinal`);
 CREATE INDEX `session_v2_project_idx` ON `session_v2` (`project_id`);
 CREATE INDEX `session_v2_workspace_idx` ON `session_v2` (`workspace_id`);
