@@ -1,12 +1,15 @@
 package commands
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/platform/opencode"
 )
 
 func TestMain(m *testing.M) {
@@ -44,9 +47,12 @@ func TestMain(m *testing.M) {
 	// then calls ensureOnUserPath, which writes HKCU\Environment, and no env var redirects that —
 	// so no test may let installSelf succeed on Windows.
 	_ = os.Setenv("LOCALAPPDATA", filepath.Join(root, "localappdata"))
-	// `wire opencode` probes `opencode --version` to refuse v2 (#218). Package-wide for the same
-	// reason as above: no test may spawn the user's real opencode, including future ones.
-	openCodeV2Check = func() error { return nil }
+	// `wire opencode` probes `opencode --version` and the install target. Package-wide for the same
+	// reason as above: no test may spawn the user's real opencode or copy the test binary, including
+	// future ones.
+	openCodeVersion = func(context.Context) (opencode.Version, error) { return opencode.MinVersion, nil }
+	// On Windows the real openCodeInstallTarget copies the test binary.
+	openCodeInstallTarget = func() (string, error) { return "", errors.New("no install target under go test") }
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)

@@ -792,10 +792,15 @@ func mcpServerRegistered(out, name string) bool {
 func cmdInstallOpenCode() (wireOutcome, error) {
 	// Before anything is copied or written: on Windows resolveOpenCodeInstall installs the
 	// bundle, and a refusal must leave the machine as it found it.
-	if err := openCodeV2Check(); err != nil {
+	rows, err := checkOpenCodeForWire(context.Background())
+	if err != nil {
 		return wireOutcome{}, err
 	}
-	target, err := resolveOpenCodeInstall()
+	for _, row := range rows {
+		fmt.Println(row)
+	}
+
+	target, err := openCodeInstallTarget()
 	if err != nil {
 		return wireOutcome{}, err
 	}
@@ -831,7 +836,7 @@ func cmdInstallOpenCode() (wireOutcome, error) {
 		return wireOutcome{}, err
 	}
 	fmt.Println(resultRow(okGlyph(), "MCP server", "witness", "in "+tildePath(config)))
-	return wireOutcome{glyph: okGlyph(), line: "wired — restart OpenCode so the plugin and MCP server load", note: pullOnlyNote}, nil
+	return wireOutcome{glyph: okGlyph(), line: "wired — OpenCode picks it up live (no restart needed)", note: pullOnlyNote}, nil
 }
 
 // cmdUninstall removes the witness hooks/plugin and MCP server (idempotent).
