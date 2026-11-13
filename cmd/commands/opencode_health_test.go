@@ -2,15 +2,21 @@ package commands
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/platform/opencode/plugin"
 	"github.com/IngTian/witness/internal/store"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestOpenCodeHealthIsSilentWhenOpenCodeIsNotInUse(t *testing.T) {
@@ -79,13 +85,13 @@ func TestOpenCodeHealthVersionLevels(t *testing.T) {
 			checks := openCodeHealth(st, false)
 			var found *captureCheck
 			for i := range checks {
-				if checks[i].key == "version" || checks[i].level == tc.wantLevel {
+				if checks[i].key == "version" {
 					found = &checks[i]
 					break
 				}
 			}
 			if found == nil {
-				t.Fatalf("no check with level %d found (want contains %q)", tc.wantLevel, tc.wantContain)
+				t.Fatalf("no version check found")
 			}
 			text := found.key + found.value + found.why + found.fix[0] + found.fix[1]
 			if found.level != tc.wantLevel {
@@ -305,6 +311,92 @@ func TestOpenCodeHealthFlagsAnOutOfDatePlugin(t *testing.T) {
 			t.Errorf("level = %d, want checkWarn", found.level)
 		}
 	})
+
+	// correctly wired config → no MCP warning
+	t.Run("correctly wired config", func(t *testing.T) {
+		home := t.TempDir()
+		configDir := t.TempDir()
+		t.Setenv("WITNESS_HOME", home)
+		t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+		dbPath := seedOpenCodeV2DB(t, time.Now().UnixMilli())
+		t.Setenv("WITNESS_OPENCODE_DB", dbPath)
+
+		st, err := store.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+
+		if err := os.MkdirAll(filepath.Dir(opencode.PluginPath()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		shimPath := filepath.Join(home, "witness.sh")
+		if err := os.WriteFile(shimPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source(shimPath)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write a correctly wired opencode.json with mcp.witness
+		wiredConfig := `{"mcp":{"witness":{"command":"witness","args":["mcp"]}}}`
+		if err := os.WriteFile(filepath.Join(configDir, "opencode.json"), []byte(wiredConfig), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		checks := openCodeHealth(st, false)
+		for _, c := range checks {
+			if c.key == "MCP entry" {
+				t.Errorf("found 'MCP entry' check with correctly wired config: %+v", c)
+			}
+		}
+	})
+
+	// missing config → checkWarn
+	t.Run("missing config", func(t *testing.T) {
+		home := t.TempDir()
+		configDir := t.TempDir()
+		t.Setenv("WITNESS_HOME", home)
+		t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+		dbPath := seedOpenCodeV2DB(t, time.Now().UnixMilli())
+		t.Setenv("WITNESS_OPENCODE_DB", dbPath)
+
+		st, err := store.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+
+		if err := os.MkdirAll(filepath.Dir(opencode.PluginPath()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		shimPath := filepath.Join(home, "witness.sh")
+		if err := os.WriteFile(shimPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source(shimPath)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// No opencode.json file
+		checks := openCodeHealth(st, false)
+		var found *captureCheck
+		for i := range checks {
+			if checks[i].key == "MCP entry" {
+				found = &checks[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatal("no MCP entry check found for missing config")
+		}
+		if found.level != checkWarn {
+			t.Errorf("level = %d, want checkWarn", found.level)
+		}
+		if !strings.Contains(found.value, "missing") {
+			t.Errorf("value should mention 'missing'; got %q", found.value)
+		}
+	})
 }
 
 func TestOpenCodeHealthSkipsThePluginRowForNpmUsers(t *testing.T) {
@@ -336,11 +428,16 @@ func TestOpenCodeHealthFlagsADatabaseItCannotRead(t *testing.T) {
 	t.Setenv("WITNESS_HOME", home)
 	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
 
-	// v1-only DB
+	// v1-only DB: CREATE TABLE session (id TEXT PRIMARY KEY) with no session_v2
 	v1db := filepath.Join(t.TempDir(), "opencode.db")
-	if err := os.WriteFile(v1db, []byte("SQLite format 3\x00"), 0o600); err != nil {
+	db, err := sql.Open("sqlite", v1db)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`CREATE TABLE session (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
 	t.Setenv("WITNESS_OPENCODE_DB", v1db)
 
 	st, err := store.Open()
@@ -352,7 +449,11 @@ func TestOpenCodeHealthFlagsADatabaseItCannotRead(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(opencode.PluginPath()), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source("/r/witness.sh")), 0o644); err != nil {
+	shimPath := filepath.Join(home, "witness.sh")
+	if err := os.WriteFile(shimPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source(shimPath)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -369,6 +470,10 @@ func TestOpenCodeHealthFlagsADatabaseItCannotRead(t *testing.T) {
 	}
 	if found.level != checkFail {
 		t.Errorf("level = %d, want checkFail", found.level)
+	}
+	// Assert ErrOpenCodeV1's text is in the check
+	if !strings.Contains(found.why, "OpenCode v1") && !strings.Contains(found.value, "OpenCode v1") {
+		t.Errorf("database check missing ErrOpenCodeV1 text; got value=%q why=%q", found.value, found.why)
 	}
 }
 
@@ -512,11 +617,20 @@ func TestDoctorShowsTheCaptureBlockAndFailsOnACaptureFailure(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("WITNESS_HOME", home)
 	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
 	dbPath := seedOpenCodeV2DB(t, time.Now().UnixMilli())
 	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
 
+	// Use fixedEmbedder so the test doesn't fail from embedder unavailable
+	prev := newDoctorEmbedder
+	newDoctorEmbedder = func() (distill.Embedder, error) { return fixedEmbedder{vec: []float32{1, 0, 0}}, nil }
+	t.Cleanup(func() { newDoctorEmbedder = prev })
+
 	st, err := store.Open()
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configApplySet(st, "mine_model", "claude-haiku-4-5", ""); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
@@ -524,24 +638,63 @@ func TestDoctorShowsTheCaptureBlockAndFailsOnACaptureFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(opencode.PluginPath()), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// stale plugin
+
+	// Test 1: current plugin → err == nil
+	shimPath := filepath.Join(home, "witness.sh")
+	if err := os.WriteFile(shimPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source(shimPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	humanOut, humanErr := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	if humanErr != nil {
+		t.Errorf("cmdDoctor(false) with current plugin returned error: %v", humanErr)
+	}
+	if !strings.Contains(humanOut, "Capture · opencode") {
+		t.Errorf("human output missing 'Capture · opencode' block; got:\n%s", humanOut)
+	}
+
+	jsonOut, jsonErr := captureStdoutErr(t, func() error { return cmdDoctor(true) })
+	if jsonErr != nil {
+		t.Errorf("cmdDoctor(true) with current plugin returned error: %v", jsonErr)
+	}
+	var report map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("JSON output not parseable: %v", err)
+	}
+	// Assert no capture keys in JSON
+	if _, ok := report["capture"]; ok {
+		t.Errorf("JSON output has 'capture' key, should be unchanged")
+	}
+
+	// Test 2: stale plugin → err != nil
 	if err := os.WriteFile(opencode.PluginPath(), []byte(`globalThis.WITNESS_SHIM = "/r"\n\nconst plugin = async () => ({})`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// human output
-	err = cmdDoctor(false)
-	if err == nil {
+	humanOut, humanErr = captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	if humanErr == nil {
 		t.Error("cmdDoctor(false) with stale plugin returned nil, want non-nil")
 	}
-	// The output check requires redirecting stdout, so we trust the render logic; the key part is the error.
+	if !strings.Contains(humanOut, "Capture · opencode") {
+		t.Errorf("human output missing 'Capture · opencode' block; got:\n%s", humanOut)
+	}
+	if !strings.Contains(humanOut, "plugin") || !strings.Contains(humanOut, "out of date") {
+		t.Errorf("human output missing plugin failure headline; got:\n%s", humanOut)
+	}
 
-	// JSON output
-	err = cmdDoctor(true)
-	if err == nil {
+	jsonOut, jsonErr = captureStdoutErr(t, func() error { return cmdDoctor(true) })
+	if jsonErr == nil {
 		t.Error("cmdDoctor(true) with stale plugin returned nil, want non-nil")
 	}
-	// JSON shape unchanged is verified by inspecting that no new keys appear; that's implicit.
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("JSON output not parseable: %v", err)
+	}
+	if _, ok := report["capture"]; ok {
+		t.Errorf("JSON output has 'capture' key, should be unchanged")
+	}
 }
 
 func TestStatusWarnsWhenOpenCodeCaptureIsStale(t *testing.T) {
@@ -560,14 +713,13 @@ func TestStatusWarnsWhenOpenCodeCaptureIsStale(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(opencode.PluginPath()), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source("/r/witness.sh")), 0o644); err != nil {
+	shimPath := filepath.Join(home, "witness.sh")
+	if err := os.WriteFile(shimPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	// Mark as 1h behind
-	st, _ = store.Open()
-	st.SetMetaString("opencode_seen_time_updated_ms", fmt.Sprintf("%d", time.Now().Add(-1*time.Hour).UnixMilli()))
-	st.Close()
+	if err := os.WriteFile(opencode.PluginPath(), []byte(plugin.Source(shimPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	oldVersion := openCodeVersion
 	openCodeVersion = func(context.Context) (opencode.Version, error) {
@@ -576,9 +728,45 @@ func TestStatusWarnsWhenOpenCodeCaptureIsStale(t *testing.T) {
 	}
 	t.Cleanup(func() { openCodeVersion = oldVersion })
 
-	// The output check requires redirecting stdout. The key part is that it runs and doesn't probe the version.
-	_ = cmdDistillStatus(false)
-	// The staleness warning is text-based; we trust the render logic.
+	// Test 1: stale → warning with why line
+	st, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetMetaString("opencode_seen_time_updated_ms", fmt.Sprintf("%d", time.Now().Add(-1*time.Hour).UnixMilli()))
+	st.Close()
+
+	staleOut := captureStdout(t, func() { _ = cmdDistillStatus(false) })
+	if !strings.Contains(staleOut, "witness import --agent opencode") {
+		t.Errorf("stale output missing import command; got:\n%s", staleOut)
+	}
+	if !strings.Contains(staleOut, "plugin may not be loading") {
+		t.Errorf("stale output missing why line; got:\n%s", staleOut)
+	}
+
+	// Test 2: healthy → no OpenCode capture warning line
+	st, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetMetaString("opencode_seen_time_updated_ms", fmt.Sprintf("%d", time.Now().UnixMilli()))
+	st.Close()
+
+	healthyOut := captureStdout(t, func() { _ = cmdDistillStatus(false) })
+	// Check for the capture health warning pattern, not just any mention of "opencode"
+	if strings.Contains(healthyOut, "freshness:") || strings.Contains(healthyOut, "OpenCode has activity") {
+		t.Errorf("healthy output has OpenCode capture warning when it should not; got:\n%s", healthyOut)
+	}
+
+	// Test 3: JSON unchanged
+	jsonOut := captureStdout(t, func() { _ = cmdDistillStatus(true) })
+	var report map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &report); err != nil {
+		t.Fatalf("JSON output not parseable: %v", err)
+	}
+	if _, ok := report["capture"]; ok {
+		t.Errorf("JSON output has 'capture' key, should be unchanged")
+	}
 }
 
 func contains(s, substr string) bool {

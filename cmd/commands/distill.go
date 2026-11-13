@@ -460,6 +460,9 @@ func cmdDistillStatus(asJSON bool) error {
 			if c.level != checkOK {
 				line := warnGlyph() + " " + c.key + ": " + c.value
 				fmt.Println(line)
+				if c.why != "" {
+					fmt.Println("  " + dim(c.why))
+				}
 				if c.fix[0] != "" {
 					fmt.Println(hint(c.fix[0], c.fix[1]))
 				}

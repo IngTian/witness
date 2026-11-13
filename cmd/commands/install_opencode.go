@@ -144,7 +144,9 @@ func openCodeHealth(st *store.Store, quick bool) []captureCheck {
 			}
 		}
 
-		// Plugin check when wired
+		// Plugin check when wired. This check compares the BODY (InstalledShim + os.Stat of the
+		// shim), never a target re-resolved here, because on Windows resolveOpenCodeInstall copies
+		// the binary, which doctor must never do.
 		if wired {
 			pluginPath := opencode.PluginPath()
 			body, readErr := os.ReadFile(pluginPath)
@@ -187,20 +189,28 @@ func openCodeHealth(st *store.Store, quick bool) []captureCheck {
 			}
 
 			// MCP check when wired
-			if data, err := os.ReadFile(opencodeConfigPath()); err == nil {
+			data, err := os.ReadFile(opencodeConfigPath())
+			if err != nil {
+				checks = append(checks, captureCheck{
+					level: checkWarn,
+					key:   "MCP entry",
+					value: "config missing",
+					why:   fmt.Sprintf("cannot read opencode.json at %s: %v", opencodeConfigPath(), err),
+					fix:   [2]string{"re-wire", "witness wire opencode"},
+				})
+			} else {
 				root, perr := parseOpenCodeConfig(data)
-				if perr == nil {
-					if mcps, ok := root["mcps"].(map[string]any); ok {
-						if _, found := mcps["witness"]; !found {
-							checks = append(checks, captureCheck{
-								level: checkWarn,
-								key:   "MCP entry",
-								value: "missing",
-								why:   "mcp.witness is not in opencode.json; the plugin may not be able to call record_observation",
-								fix:   [2]string{"re-wire", "witness wire opencode"},
-							})
-						}
-					} else {
+				if perr != nil {
+					checks = append(checks, captureCheck{
+						level: checkWarn,
+						key:   "MCP entry",
+						value: "config unparseable",
+						why:   fmt.Sprintf("cannot parse opencode.json: %v", perr),
+						fix:   [2]string{"re-wire", "witness wire opencode"},
+					})
+				} else {
+					mcp, _ := root["mcp"].(map[string]any)
+					if mcp["witness"] == nil {
 						checks = append(checks, captureCheck{
 							level: checkWarn,
 							key:   "MCP entry",
