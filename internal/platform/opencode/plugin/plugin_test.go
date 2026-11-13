@@ -77,8 +77,13 @@ func TestInstalledShimRecognisesOnlyTheCurrentBody(t *testing.T) {
 		"a v1-shaped plugin": "globalThis.WITNESS_SHIM = \"/r\"\n\nconst plugin = async () => ({})",
 		"an empty file":      "",
 	} {
-		if _, current := InstalledShim(src); current {
+		shim, current := InstalledShim(src)
+		if current {
 			t.Errorf("%s is reported current", name)
+		}
+		// The v1-shaped case must still return the parsed shim
+		if name == "a v1-shaped plugin" && shim != "/r" {
+			t.Errorf("v1-shaped plugin: got shim %q, want %q", shim, "/r")
 		}
 	}
 }

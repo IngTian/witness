@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"time"
 
 	"github.com/IngTian/witness/internal/platform/opencode"
+	"github.com/IngTian/witness/internal/platform/opencode/plugin"
+	"github.com/IngTian/witness/internal/store"
 )
 
 const openCodePluginName = opencode.PluginFileName
@@ -65,4 +69,205 @@ func checkOpenCodeForWire(ctx context.Context) (rows []string, err error) {
 	}
 
 	return rows, nil
+}
+
+// openCodeHealth checks OpenCode capture status for doctor and status. Returns nil (silent)
+// when OpenCode is not in use. quick skips version and plugin checks (for status).
+func openCodeHealth(st *store.Store, quick bool) []captureCheck {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Gate: silent unless OpenCode is in use
+	wired := opencode.PluginInstalled()
+	seen := opencode.LastImported(st)
+	dbPath, dbPathErr := opencode.DefaultDBPath()
+	var newest time.Time
+	var dbErr error
+	if dbPathErr == nil {
+		newest, dbErr = opencode.NewestActivity(ctx, dbPath)
+	}
+
+	inUse := false
+	if quick {
+		inUse = wired || !seen.IsZero()
+	} else {
+		inUse = wired || !seen.IsZero() || (dbErr == nil && !newest.IsZero())
+	}
+	if !inUse {
+		return nil
+	}
+
+	var checks []captureCheck
+
+	// Full path only: version, plugin, MCP checks
+	if !quick {
+		// Version check
+		v, verr := openCodeVersion(ctx)
+		if verr != nil {
+			checks = append(checks, captureCheck{
+				level: checkWarn,
+				key:   "version",
+				value: "cannot probe",
+				why:   fmt.Sprintf("witness expects OpenCode %s+ but cannot check: %v", opencode.MinVersion, verr),
+			})
+		} else {
+			if cerr := opencode.CheckVersion(v); cerr != nil {
+				vStr := v.String()
+				msg := cerr.Error()
+				fix := [2]string{}
+				if errors.Is(cerr, opencode.ErrOpenCodeV1) {
+					fix = [2]string{"upgrade", "opencode upgrade --major"}
+				} else if errors.Is(cerr, opencode.ErrOpenCodeTooOld) {
+					fix = [2]string{"upgrade", "opencode upgrade"}
+				}
+				checks = append(checks, captureCheck{
+					level: checkFail,
+					key:   "version",
+					value: vStr,
+					why:   msg,
+					fix:   fix,
+				})
+			} else if opencode.AboveTested(v) {
+				vStr := v.String()
+				checks = append(checks, captureCheck{
+					level: checkWarn,
+					key:   "version",
+					value: vStr,
+					why:   fmt.Sprintf("newer than witness has been tested with (%d.%d.x)", opencode.NewestTestedMinor.Major, opencode.NewestTestedMinor.Minor),
+				})
+			} else {
+				checks = append(checks, captureCheck{
+					level: checkOK,
+					key:   "version",
+					value: v.String(),
+				})
+			}
+		}
+
+		// Plugin check when wired
+		if wired {
+			pluginPath := opencode.PluginPath()
+			body, readErr := os.ReadFile(pluginPath)
+			if readErr != nil {
+				checks = append(checks, captureCheck{
+					level: checkFail,
+					key:   "plugin",
+					value: "cannot read",
+					why:   fmt.Sprintf("plugin file expected at %s: %v", pluginPath, readErr),
+					fix:   [2]string{"re-wire", "witness wire opencode"},
+				})
+			} else {
+				shim, current := plugin.InstalledShim(string(body))
+				if !current {
+					checks = append(checks, captureCheck{
+						level: checkFail,
+						key:   "plugin",
+						value: "out of date",
+						why:   "the installed plugin body does not match the current witness version",
+						fix:   [2]string{"re-wire", "witness wire opencode"},
+					})
+				} else {
+					// Check shim file exists
+					if _, err := os.Stat(shim); err != nil {
+						checks = append(checks, captureCheck{
+							level: checkFail,
+							key:   "plugin",
+							value: "shim missing",
+							why:   fmt.Sprintf("the plugin points to %s, which does not exist", shim),
+							fix:   [2]string{"re-wire", "witness wire opencode"},
+						})
+					} else {
+						checks = append(checks, captureCheck{
+							level: checkOK,
+							key:   "plugin",
+							value: "current",
+						})
+					}
+				}
+			}
+
+			// MCP check when wired
+			if data, err := os.ReadFile(opencodeConfigPath()); err == nil {
+				root, perr := parseOpenCodeConfig(data)
+				if perr == nil {
+					if mcps, ok := root["mcps"].(map[string]any); ok {
+						if _, found := mcps["witness"]; !found {
+							checks = append(checks, captureCheck{
+								level: checkWarn,
+								key:   "MCP entry",
+								value: "missing",
+								why:   "mcp.witness is not in opencode.json; the plugin may not be able to call record_observation",
+								fix:   [2]string{"re-wire", "witness wire opencode"},
+							})
+						}
+					} else {
+						checks = append(checks, captureCheck{
+							level: checkWarn,
+							key:   "MCP entry",
+							value: "missing",
+							why:   "mcp.witness is not in opencode.json; the plugin may not be able to call record_observation",
+							fix:   [2]string{"re-wire", "witness wire opencode"},
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Both paths: database check
+	if dbPathErr != nil {
+		checks = append(checks, captureCheck{
+			level: checkFail,
+			key:   "database",
+			value: "cannot resolve path",
+			why:   fmt.Sprintf("cannot determine OpenCode database location: %v", dbPathErr),
+		})
+	} else if dbErr != nil {
+		if errors.Is(dbErr, fs.ErrNotExist) {
+			checks = append(checks, captureCheck{
+				level: checkOK,
+				key:   "database",
+				value: "none yet",
+			})
+		} else {
+			checks = append(checks, captureCheck{
+				level: checkFail,
+				key:   "database",
+				value: "unreadable",
+				why:   fmt.Sprintf("witness cannot read the OpenCode database at %s: %v", dbPath, dbErr),
+			})
+		}
+	} else {
+		checks = append(checks, captureCheck{
+			level: checkOK,
+			key:   "database",
+			value: "readable",
+		})
+	}
+
+	// Both paths: freshness check when database exists and has activity
+	if dbErr == nil && !newest.IsZero() {
+		stale := newest.Sub(seen) > opencode.StaleAfter
+		if stale {
+			seenStr := "never"
+			if !seen.IsZero() {
+				seenStr = shortTime(seen.Format(time.RFC3339))
+			}
+			checks = append(checks, captureCheck{
+				level: checkWarn,
+				key:   "freshness",
+				value: fmt.Sprintf("OpenCode has activity from %s that witness has not imported (last import saw %s)", shortTime(newest.Format(time.RFC3339)), seenStr),
+				why:   "the plugin may not be loading — OpenCode reports a plugin it rejects only in its own log",
+				fix:   [2]string{"import now", "witness import --agent opencode"},
+			})
+		} else {
+			checks = append(checks, captureCheck{
+				level: checkOK,
+				key:   "freshness",
+				value: "current",
+			})
+		}
+	}
+
+	return checks
 }
