@@ -322,6 +322,30 @@ for (const variant of PLUGINS) {
     { env: { WITNESS_OPENCODE_BIN: "/stale/opencode" } },
   )
 
+  // witness's import lock is non-blocking: an `import --session` started while the startup import
+  // holds it exits 0 having imported nothing, and nothing retries it. So it must wait its turn.
+  let releaseStartup
+  it(
+    "a turn end during the startup import waits for it",
+    async (p) => {
+      const bus = makeBus()
+      await p.mod.default.setup(bus.ctx())
+      assert.equal(startupImports(p.spawns).length, 1)
+      await bus.publish(turn("evt_1", "succeeded", "ses_x"))
+      assert.deepEqual(sessionImports(p.spawns), [], "no --session import while the startup import runs")
+      releaseStartup(0)
+      await settle()
+      assert.deepEqual(sessionImports(p.spawns), [["ses_x"]])
+    },
+    {
+      spawn(argv, options, spawns) {
+        spawns.push({ bin: argv[0], args: argv.slice(1), env: options?.env })
+        if (argv[1] === "import" && !argv.includes("--session")) return { exited: new Promise((resolve) => (releaseStartup = resolve)), unref() {} }
+        return exitedProc()
+      },
+    },
+  )
+
   let throwing = true
   it(
     "a throwing Bun.spawn never breaks setup or the event loop",

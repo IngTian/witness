@@ -64,14 +64,10 @@ function spawnWitness(args) {
   }
 }
 
-// The turn-end import is L0-only (--no-kick): distillation starts from the quiet-period kick,
-// not after every turn.
-function drain() {
-  if (S.active || S.pending.size === 0) return
-  const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]
-  for (const id of S.pending) args.push("--session", id)
-  S.pending.clear()
-  const proc = spawnWitness(args)
+// One witness import at a time, the startup one included: witness's import lock is non-blocking,
+// so an import started while another holds it exits 0 having imported nothing, and nothing would
+// retry it. track makes proc the active import and drains the queue once it exits.
+function track(proc) {
   if (!proc) return
   S.active = proc
   Promise.resolve(proc.exited)
@@ -80,6 +76,16 @@ function drain() {
       S.active = null
       drain()
     })
+}
+
+// The turn-end import is L0-only (--no-kick): distillation starts from the quiet-period kick,
+// not after every turn.
+function drain() {
+  if (S.active || S.pending.size === 0) return
+  const args = ["import", "--agent", "opencode", "--quiet", "--no-kick"]
+  for (const id of S.pending) args.push("--session", id)
+  S.pending.clear()
+  track(spawnWitness(args))
 }
 
 // worker-kick, not `worker-run --auto`: the kick is the gate that clears a latched
@@ -121,7 +127,7 @@ export default {
     if (!S.synced) {
       // Once per server process, not per Location and not per hot reload.
       S.synced = true
-      spawnWitness(["import", "--agent", "opencode", "--quiet", "--no-kick"])
+      track(spawnWitness(["import", "--agent", "opencode", "--quiet", "--no-kick"]))
     }
     const ac = new AbortController()
     ;(async () => {
