@@ -879,6 +879,23 @@ func TestDoctorOnlyNotesAnUnwiredOpenCodeWithSessions(t *testing.T) {
 	}
 }
 
+// Under the npm launcher wire is refused, so an npm plugin that never loaded is pointed at the
+// plugins list instead.
+func TestTheNotWiredRowNamesTheNpmPluginUnderNpm(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+	t.Setenv("WITNESS_OPENCODE_DB", seedOpenCodeV2DB(t, time.Now().UnixMilli()))
+	t.Setenv("WITNESS_NPM_PACKAGE", "1")
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if checks := openCodeHealth(st, false); len(checks) != 1 || checks[0].fix[1] != npmWireStep {
+		t.Fatalf("checks = %+v, want one row whose fix is %q", checks, npmWireStep)
+	}
+}
+
 // status runs on every call: a machine that has OpenCode but never wired it must not have its DB
 // opened (a schema probe plus a scan of session_message) by `witness status`.
 func TestStatusNeverOpensTheDatabaseOfAnUnwiredOpenCode(t *testing.T) {
