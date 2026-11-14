@@ -282,6 +282,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			continue
 		}
 		lm := LensMining{Lens: ln.Name}
+		quota := false // a free-allowance refusal: skip this lens without a backoff
 		if total > done {
 			anyDelta = true
 			// Track drift across ALL of this lens's inputs (a session may render to
@@ -337,6 +338,15 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 					lm.Native = append(lm.Native, native)
 				}
 				if err != nil {
+					// The free allowance is used up: cmd's gate now holds every free-model call
+					// until the reset, so this is not this session's failure. Skip the lens
+					// entirely (below) — no IncRetry/next_attempt, watermark kept — and it mines
+					// once the pause lifts. A backoff here would add hours per session on top.
+					var qe *platform.QuotaExhaustedError
+					if errors.As(err, &qe) {
+						quota = true
+						break
+					}
 					if errors.Is(err, errNoArray) {
 						// prose drift: the model replied but emitted no array (likely below the
 						// lens's model floor). NOT a transport failure — do not back off; the
@@ -368,6 +378,11 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 				lm.Mined = append(lm.Mined, obs...)
 			}
 			lm.Drifted = sawDrift && !producedObs
+		}
+		if quota {
+			// CommitMining advances and backs off only lenses in m.Lenses, so leaving it out
+			// keeps the watermark and next_attempt untouched (the same skip as a backed-off lens).
+			continue
 		}
 		m.Lenses = append(m.Lenses, lm)
 	}

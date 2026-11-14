@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -76,8 +77,17 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 	return srv.Close()
 }
 
+// OnFreeModel: only OpenCode Zen's own opencode/* models are free, and their allowance is counted
+// per network (evidence freetier §4). opencode-go/* is the paid subscription, a different provider.
+func (*runner) OnFreeModel(model string) bool {
+	return strings.HasPrefix(strings.TrimSpace(model), "opencode/")
+}
+
 // Discovered by type assertion like the platform capabilities; pinned the same way.
-var _ platform.NativeSessionSupport = (*runner)(nil)
+var (
+	_ platform.NativeSessionSupport = (*runner)(nil)
+	_ platform.FreeAllowance        = (*runner)(nil)
+)
 
 func (*runner) InvocationHint() string      { return "opencode serve --stdio" }
 func (*runner) SupportsNativeSession() bool { return true }

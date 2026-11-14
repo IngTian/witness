@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	_ "github.com/IngTian/witness/internal/platform/claude"   // register the default platform for ForSession
 	_ "github.com/IngTian/witness/internal/platform/opencode" // register the opencode platform (prefixed sessions)
 	"github.com/IngTian/witness/internal/store"
@@ -852,6 +853,61 @@ func twoLensWorker(s *store.Store, r *lensRouter) *Worker {
 		},
 		Config: store.Config{},
 		Run:    r.run,
+	}
+}
+
+// A free-allowance refusal is not a mining failure (spec §7.7): cmd's gate holds every
+// free-model call until the reset, so the lens is skipped with its watermark AND its backoff
+// untouched — no IncRetry, no next_attempt — while a sibling on a paid model commits and a
+// plain transport error still backs off as before.
+func TestQuotaErrorSkipsTheLensWithoutBackoff(t *testing.T) {
+	s := newStore(t)
+	capture(t, s, "s", "user", "alpha")
+	capture(t, s, "s", "assistant", "reply")
+	paid := &fakeMiner{}
+	w := &Worker{
+		Store:    s,
+		Embedder: fakeEmbedder{},
+		Lenses: []*lens.Lens{
+			{Name: "free", Extract: "mine-free", Dimensions: []string{"thinking"}},
+			{Name: "paid", Extract: "mine-paid", Dimensions: []string{"thinking"}},
+			{Name: "broken", Extract: "mine-broken", Dimensions: []string{"thinking"}},
+		},
+		Run: paid.run,
+		RunFor: func(ln *lens.Lens) MineFunc {
+			switch ln.Name {
+			case "free":
+				return func(context.Context, string, string, string) (string, error) {
+					return "", fmt.Errorf("opencode: %w", &platform.QuotaExhaustedError{})
+				}
+			case "broken":
+				return func(context.Context, string, string, string) (string, error) {
+					return "", fmt.Errorf("connection reset")
+				}
+			}
+			return nil
+		},
+	}
+	if err := w.Process(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DistilledCount("s", "free"); got != 0 {
+		t.Fatalf("a refused lens must keep its watermark, got %d", got)
+	}
+	if got := s.RetryCount("s", "free"); got != 0 {
+		t.Fatalf("a refusal must not count a retry, got %d", got)
+	}
+	if s.LensBackedOff("s", "free", time.Now()) {
+		t.Fatal("a refusal must not set a next_attempt")
+	}
+	if got, _ := s.PendingSessions([]string{"free"}); len(got) != 1 {
+		t.Fatalf("the refused lens's delta must stay pending, got %v", got)
+	}
+	if got := s.DistilledCount("s", "paid"); got != 2 {
+		t.Fatalf("the paid sibling must commit, got %d", got)
+	}
+	if got := s.RetryCount("s", "broken"); got != 1 {
+		t.Fatalf("a plain error must still back off, got %d retries", got)
 	}
 }
 

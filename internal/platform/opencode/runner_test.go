@@ -11,6 +11,23 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
+// The free-model pause keys on this capability, never on the runner's name: only OpenCode Zen's
+// own opencode/* models draw on the free allowance.
+func TestOnFreeModelMatchesOnlyOpenCodeModels(t *testing.T) {
+	var fa platform.FreeAllowance = &runner{}
+	for model, want := range map[string]bool{
+		"opencode/glm-5.3-flash-free": true,
+		" opencode/x ":                true,
+		"openai/x":                    false,
+		"opencode-go/x":               false,
+		"":                            false,
+	} {
+		if got := fa.OnFreeModel(model); got != want {
+			t.Errorf("OnFreeModel(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
 // Close on a runner that was never Opened (no work this drain) must be a safe no-op.
 func TestRunnerCloseUnopened(t *testing.T) {
 	r := &runner{cfg: store.Config{Runner: "opencode"}}

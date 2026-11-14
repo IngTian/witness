@@ -28,6 +28,7 @@ type runnerSet struct {
 	lenses   []*lens.Lens             // the active lenses this drain will run
 	byName   map[string]*openedRunner // runtime name → lazily-opened runner (or a broken marker)
 	defaultR string                   // the resolved default runner name (the "" / default routing target)
+	gate     *freeGate                // pauses every runtime's free-model calls after a refusal (freepause.go)
 }
 
 type openedRunner struct {
@@ -60,7 +61,7 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 	if err := st.ArchiveNewer(); err != nil {
 		return nil, err
 	}
-	rs := &runnerSet{cfg: cfg, lenses: lenses, byName: map[string]*openedRunner{}, defaultR: strings.TrimSpace(cfg.Runner)}
+	rs := &runnerSet{cfg: cfg, lenses: lenses, byName: map[string]*openedRunner{}, defaultR: strings.TrimSpace(cfg.Runner), gate: newFreeGate(st)}
 
 	// Which runtimes are actually needed, and the model union per runtime.
 	needed := map[string]bool{}
@@ -122,7 +123,7 @@ func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name stri
 		rs.byName[name] = &openedRunner{err: err}
 		return
 	}
-	rs.byName[name] = &openedRunner{runner: runner, run: distill.RunnerMine(runner)}
+	rs.byName[name] = &openedRunner{runner: runner, run: rs.gate.wrap(name, runner, distill.RunnerMine(runner))}
 }
 
 // RunFor is the per-lens MineFunc resolver handed to the engine. A lens on a broken

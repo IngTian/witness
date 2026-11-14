@@ -83,6 +83,11 @@ func (e *QuotaExhaustedError) Error() string {
 	return fmt.Sprintf("%s free usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
 }
 
+// FreeAllowance is the Runner capability "this model draws on a shared free allowance", which is
+// what a QuotaExhaustedError refusal exhausts. cmd's free-model gate asks it per call so it can
+// pause exactly those calls without naming a runtime; a runner without it has no free allowance.
+type FreeAllowance interface{ OnFreeModel(model string) bool }
+
 // NativeSessionSupport is implemented only by runners that understand the retained
 // scratch-context protocol (create once, prompt, resume on retry, delete after L1 is durable).
 type NativeSessionSupport interface{ SupportsNativeSession() bool }
