@@ -10,7 +10,7 @@ import (
 // concerns and the spawn policy are decided in exactly one place instead of at each spawn
 // site.
 //
-//  1. WHICH BINARY. openCodeExe resolves it (see opencode_exe_windows.go: the desktop
+//  1. WHICH BINARY. ResolveExe resolves it (see opencode_exe_windows.go: the desktop
 //     build puts a GUI shim on PATH ahead of the real CLI). Falling back to the bare
 //     name on error is deliberate — a PATH lookup failure should surface as the
 //     familiar "executable file not found" from Start(), not as a different error

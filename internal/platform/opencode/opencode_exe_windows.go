@@ -5,7 +5,6 @@ package opencode
 import (
 	"os"
 	"os/exec"
-	osuser "os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -139,8 +138,8 @@ func ResolveExe() (string, error) {
 	}
 
 	// 3. curl installer's canonical path
-	if u, err := osuser.Current(); err == nil {
-		curlExe := filepath.Join(u.HomeDir, ".opencode", "bin", "opencode.exe")
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		curlExe := filepath.Join(homeDir, ".opencode", "bin", "opencode.exe")
 		if info, err := os.Stat(curlExe); err == nil && !info.IsDir() {
 			return curlExe, nil
 		}
