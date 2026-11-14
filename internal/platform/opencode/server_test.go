@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -197,6 +198,69 @@ func TestRunFailsWhenTheAgentNeverLoads(t *testing.T) {
 	}
 	if slices.Contains(fake.seen(), "POST /api/session") {
 		t.Errorf("a session was created for an agent the serve never listed: %v", fake.seen())
+	}
+}
+
+// A failing /api/agent is not "the agent did not load": a serve that died after readiness, or a
+// 500, must be named, or the timeout sends the user hunting for a config problem.
+func TestAgentLoadTimeoutNamesThePollError(t *testing.T) {
+	prev := healthCheckBudget
+	healthCheckBudget = 300 * time.Millisecond
+	t.Cleanup(func() { healthCheckBudget = prev })
+	for name, tc := range map[string]struct {
+		dead bool
+		want string
+	}{
+		"500":  {false, "500 Internal Server Error"},
+		"dead": {true, "dial tcp"}, // connection refused (connectex on Windows)
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", http.StatusInternalServerError)
+			}))
+			defer ts.Close()
+			srv := newOpenCodeServer(ts.URL, "Basic test", filepath.Join(t.TempDir(), "opencode.json"), ts.Client())
+			if tc.dead {
+				ts.Close()
+			}
+			_, err := srv.ensureAgent(context.Background(), "P")
+			if err == nil || !strings.Contains(err.Error(), "did not load") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want the load timeout naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A caller that gives up (worker stop, Ctrl-C, its own deadline) gets its own error back, not a
+// claim that the agent failed to load within the budget.
+func TestAgentLoadHonoursTheCallersContext(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		"cancelled": {func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(50*time.Millisecond, cancel)
+			return ctx, cancel
+		}, context.Canceled},
+		"deadline": {func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 50*time.Millisecond)
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, srv := newFakeV2(t)
+			fake.agentDelay = math.MaxInt // never listed, so only the caller can end the wait
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			start := time.Now()
+			_, err := srv.ensureAgent(ctx, "P")
+			if !errors.Is(err, tc.want) || strings.Contains(err.Error(), "within") {
+				t.Errorf("err = %v, want one wrapping %v that claims no load timeout", err, tc.want)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("took %s; the caller's ctx must end the wait at once", d)
+			}
+		})
 	}
 }
 

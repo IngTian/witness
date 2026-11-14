@@ -239,16 +239,21 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 		delete(s.agents, id)
 		return "", err
 	}
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, healthCheckBudget)
 	defer cancel()
+	// lastErr keeps the poll failure, so a serve that died after readiness (connection refused) or
+	// a 401/500 is reported as such, not as an agent that "did not load" (lastPollNote's reason).
+	var lastErr error
 	for {
-		if data, err := s.doJSON(ctx, http.MethodGet, "/api/agent", nil, http.StatusOK); err == nil {
+		data, err := s.doJSON(ctx, http.MethodGet, "/api/agent", nil, http.StatusOK)
+		if err == nil {
 			var list struct {
 				Data []struct {
 					ID string `json:"id"`
 				} `json:"data"`
 			}
-			if json.Unmarshal(data, &list) == nil {
+			if err = json.Unmarshal(data, &list); err == nil {
 				for _, a := range list.Data {
 					if a.ID == id {
 						return id, nil
@@ -256,10 +261,16 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 				}
 			}
 		}
+		if err != nil && (ctx.Err() == nil || lastErr == nil) { // a poll the budget cut off says only that
+			lastErr = err
+		}
 		select {
 		case <-ctx.Done():
 			delete(s.agents, id)
-			return "", fmt.Errorf("opencode did not load witness's agent %s within %s", id, healthCheckBudget)
+			if parent.Err() != nil { // the caller gave up (worker stop, Ctrl-C): not a load failure
+				return "", fmt.Errorf("stopped waiting for opencode to load witness's agent %s: %w", id, parent.Err())
+			}
+			return "", fmt.Errorf("opencode did not load witness's agent %s within %s%s", id, healthCheckBudget, lastPollNote(lastErr))
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
