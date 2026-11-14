@@ -1,11 +1,11 @@
 package opencode
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,12 +17,6 @@ import (
 
 	"github.com/IngTian/witness/internal/platform"
 )
-
-// nativeCommand is injectable so tests prove the two DB environments without a
-// real OpenCode binary. Production uses CommandContext through this small port.
-var nativeCommand = func(ctx context.Context, root string, env []string, args ...string) ([]byte, error) {
-	return commandOutput(ctx, root, env, args...)
-}
 
 type nativeRuntime struct {
 	root   string
@@ -63,9 +57,6 @@ func (n *nativeRuntime) path(w *platform.NativeSession, model, prompt string) st
 	h := sha256.Sum256([]byte(w.Session + "\x00" + fmt.Sprint(w.RawHigh) + "\x00" + w.Lens + "\x00" + w.Input +
 		"\x00" + model + "\x00" + prompt))
 	return filepath.Join(n.dir(), fmt.Sprintf("%x.json", h[:]))
-}
-func (n *nativeRuntime) snapshot(p string) string {
-	return strings.TrimSuffix(p, ".json") + ".snapshot.json"
 }
 
 // isolatedEnv returns the data, cache, state dirs and DB path under witness's runtime root,
@@ -153,46 +144,37 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		w.SetFinalizer(func() error { return n.finalize(p) })
 		return m.Reply, nil
 	}
-	if m.Fork == "" {
-		snap := n.snapshot(p)
-		if _, err := os.Stat(snap); os.IsNotExist(err) {
-			if err = n.export(ctx, w, snap); err != nil {
-				return "", err
-			}
-		} else if err != nil {
-			return "", err
-		} else if w.Digest != "" {
-			// A RETAINED snapshot is reused, but only if it is still readable AND matches
-			// this L0 generation. An unusable one is discarded and re-exported once rather
-			// than returned as an error: a snapshot truncated by a crash or ENOSPC would
-			// otherwise satisfy the existence check above forever, failing validation on
-			// every retry with nothing able to replace it (a permanently wedged lens).
-			// A digest mismatch on the FRESH export is still fatal — that means the user's
-			// session genuinely changed after L0 capture, which must not be distilled.
-			data, err := os.ReadFile(snap)
-			if err != nil || validateExportDigest(data, w.Digest) != nil {
-				if err = os.Remove(snap); err != nil && !os.IsNotExist(err) {
-					return "", err
-				}
-				if err = n.export(ctx, w, snap); err != nil {
-					return "", err
-				}
-			}
+	// Manifest work is serialized; the HTTP waits (harvest, agent load, generation) are not.
+	unlock := func() { n.mu.Unlock(); locked = false }
+	lock := func() { n.mu.Lock(); locked = true }
+	if m.Fork != "" {
+		// An earlier attempt left its scratch session without a saved reply: it died mid-turn, or
+		// its turn failed. Harvest the reply if the turn finished; otherwise start over in a FRESH
+		// session. Re-prompting the old one cannot work: a private --stdio serve never resumes a
+		// turn, and resubmitting the same message id is a no-op that returns the original (critic
+		// C3), so it would wait out the whole budget. A session the private DB no longer has (a
+		// v0.13 manifest named one in the deleted v1 DB) is a 404 here and starts over too, as does
+		// such a manifest with no MessageID (an empty id matches no record).
+		unlock()
+		reply, err := n.server.replyForMessage(ctx, m.Fork, m.MessageID)
+		harvested := err == nil && reply != ""
+		// No createSession line names a harvested session's model and agent, so this one does.
+		slog.Info("opencode native: resuming a retained session", "session", m.Fork, "message", m.MessageID,
+			"model", model, "agent", agentID(prompt), "reply_ready", harvested, "err", err)
+		if !harvested {
+			n.server.deleteSessionBestEffort(m.Fork)
 		}
-		// No delete + import here any more.
-		//
-		// That pair existed ONLY to materialize a parent for the fork: importing the exported
-		// snapshot re-created the user's session inside the private database (under the same id,
-		// hence the delete-first) so that fork() had something to copy. With a fresh session
-		// there is nothing to copy, so both steps are gone — along with the whole class of
-		// failure they carried (a half-imported session, an id collision with a previous lens's
-		// leftover import, and one more OpenCode subprocess per lens per session).
-		//
-		// The EXPORT above stays, and is the reason this block still exists at all: its digest is
-		// compared against the L0 generation (validateExportDigest), which is what refuses to
-		// distill a session the user has changed since capture. That check reads the exported
-		// BYTES, before anything is imported — so it is unaffected by dropping the import.
-
+		lock()
+		if harvested {
+			m.Reply = reply
+		} else {
+			m.Fork, m.MessageID = "", ""
+		}
+	}
+	if m.Reply == "" {
+		if err = n.checkDigest(ctx, w); err != nil {
+			return "", err
+		}
 		// A FRESH, EMPTY session — not a fork of the user's conversation.
 		//
 		// Forking was the original design, and it was the wrong shape for this job. A fork
@@ -215,88 +197,79 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		// context, the identical system prompt (prompt + CorpusNotice) and the identical fenced
 		// corpus (WrapCorpus(input)) — in 118 lines, and it works.
 		//
-		// ISOLATION IS UNAFFECTED, which is the thing to be sure of: it comes from isolatedEnv
-		// (OPENCODE_DB + XDG_DATA_HOME) applied to the SERVE PROCESS (serve.go
-		// buildServeCmd), so every session this server creates already lives in
-		// witness's private database — fork or fresh. The user's own opencode.db is only ever
-		// opened read-only, to VACUUM INTO a snapshot. Nothing here touches it.
+		// ISOLATION: every session this server creates lives in witness's private database
+		// (serve.go buildServeCmd). The user's own opencode.db is only ever read, by
+		// checkDigest, through a read-only handle.
 		//
 		// This also makes mining match what the other three stages have always done: L2 review,
 		// L4 profile, and `witness lens try` all reach the plain server path, whose createSession
-		// is this same call. `lens try` previewing a fresh session while production mining forked
-		// meant the tool for judging mining quality did not reflect production.
-		// The session names its agent by id; ensureAgent loads it before the prompt below (the serve
-		// does not validate the agent at create).
+		// is this same call. The session names its agent by id; ensureAgent loads it before the
+		// prompt below (the serve does not validate the agent at create).
 		id, err := n.server.createSession(ctx, model, agentID(prompt))
 		if err != nil {
 			return "", err
 		}
-		m.Fork = id
-		// KNOWN LIMITATION (accepted, bounded): a kill in the two statements between
-		// createSession returning and this save leaves a scratch session in the ISOLATED db that
-		// no manifest names, so reconcile — which only knows m.Fork — can never reap it. The
-		// resume creates a new one (m.Fork is still ""), so nothing is lost or
-		// double-committed; the cost is one stranded session per crash landing in that window,
-		// inside witness's own private database. Reaping it would need a session-LIST endpoint
-		// plus "delete every session no manifest claims", which is more machinery (and more
-		// delete authority) than a leak of this size justifies. Saving BEFORE the create cannot
-		// help: the id does not exist yet, so the manifest still would not name it.
+		m.Fork, m.MessageID = id, "msg_"+randomHex(12)
+		// KNOWN LIMITATION (accepted, bounded): a kill between createSession returning and this
+		// save leaves a scratch session in the ISOLATED db that no manifest names, so reconcile —
+		// which only knows m.Fork — can never reap it. The resume creates a new one (m.Fork is still
+		// ""), so nothing is lost or double-committed; the cost is one stranded session per crash
+		// landing in that window, inside witness's own private database. Reaping it would need a
+		// session-LIST endpoint plus "delete every session no manifest claims", which is more
+		// machinery (and more delete authority) than a leak of this size justifies. Saving BEFORE
+		// the create cannot help: the id does not exist yet, so the manifest still would not name it.
 		if err = n.save(p, m); err != nil {
 			return "", err
 		}
-	}
-	newRequest := m.MessageID == ""
-	if newRequest {
-		m.MessageID = "msg_" + randomHex(12)
-		if err = n.save(p, m); err != nil {
-			return "", err
-		}
-	}
-	// Scratch-session setup is serialized; the generations themselves are not.
-	n.mu.Unlock()
-	locked = false
-	if reply, err := n.server.replyForMessage(ctx, m.Fork, m.MessageID); err == nil && reply != "" {
-		m.Reply = reply
-	} else if m.Reply == "" {
-		// A retained request with no completed assistant reply was interrupted.
-		// Retry in the same retained scratch session with a fresh message id, rather than
-		// colliding with OpenCode's unique message-id constraint.
-		//
-		// The retry therefore sees the PREVIOUS attempt's turns as context. That is explicitly
-		// permitted by the fresh-context invariant (platform.Runner.Run): a runner may retain a
-		// context across a crash and add its OWN retry turns to it — what it may never do is
-		// inherit a conversation witness did not author. And the reply parser locates our NEW
-		// message id and reads only messages after it, so a prior attempt's output can never be
-		// mistaken for this one's.
-		if !newRequest {
-			m.MessageID = "msg_" + randomHex(12)
-			n.mu.Lock()
-			locked = true
-			if err = n.save(p, m); err != nil {
-				return "", err
-			}
-			n.mu.Unlock()
-			locked = false
-		}
-		// The prompt travels as the session's agent. Ensured here, for a retained session too: each
-		// Open is a fresh serve with a fresh config, and agentID(prompt) names the same agent again.
+		unlock()
+		// The prompt travels as the session's agent, loaded into THIS serve: each Open is a fresh
+		// serve with a fresh config dir.
 		if _, err = n.server.ensureAgent(ctx, prompt); err != nil {
 			return "", err
 		}
-		m.Reply, err = n.server.runSessionWithMessage(ctx, m.Fork, m.MessageID, input)
-		if err != nil {
-			return "", err
+		if m.Reply, err = n.server.runSessionWithMessage(ctx, m.Fork, m.MessageID, input); err != nil {
+			return "", err // the manifest keeps the session; the next attempt reaps it and starts over
 		}
+		lock()
 	}
-	n.mu.Lock()
-	locked = true
 	if err = n.save(p, m); err != nil {
 		return "", err
 	}
-	n.mu.Unlock()
-	locked = false
 	w.SetFinalizer(func() error { return n.finalize(p) })
 	return m.Reply, nil
+}
+
+// errNativeSessionChanged leaves a generation pending: the user's session moved on after its L0
+// capture, so the next import brings the new turns and a later drain mines them.
+var errNativeSessionChanged = errors.New("opencode native session changed after L0 capture; generation remains pending")
+
+// checkDigest refuses to distill a session the user changed after L0 capture. It reads the
+// session from the user's opencode.db with the importer's own reader and compares its digest with
+// the one the worker computed from L0; TestTranscriptDigestMatchesTheImportedL0 pins that the two
+// agree on an unchanged session. openSourceDB is the importer's read-only open (mode=ro, then the
+// schema probe), so this cannot write the user's DB — the `opencode export` it replaced
+// opened that DB read-WRITE. An empty digest (the worker always sets one) skips the check.
+func (n *nativeRuntime) checkDigest(ctx context.Context, w *platform.NativeSession) error {
+	if w.Digest == "" {
+		return nil
+	}
+	path, err := DefaultDBPath()
+	if err != nil {
+		return err
+	}
+	db, err := openSourceDB(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	turns, err := ReadTurns(ctx, db, strings.TrimPrefix(w.Session, SessionPrefix))
+	if err != nil {
+		return err
+	}
+	if TranscriptDigest(turns) != w.Digest {
+		return errNativeSessionChanged
+	}
+	return nil
 }
 
 func (n *nativeRuntime) load(p string) (nativeManifest, error) {
@@ -328,136 +301,6 @@ func (n *nativeRuntime) save(p string, m nativeManifest) error {
 	return os.Rename(tmp, p)
 }
 
-// export writes the user's session transcript to snap as an `opencode export --pure`
-// payload.
-//
-// The source session lives in the USER's opencode.db, but witness must never hand that
-// path to a writable subprocess: `opencode export` opens its OPENCODE_DB read-WRITE and
-// durably mutates it on every run (empirically, ~4KB of WAL per export, and it applies
-// schema migrations), which would defeat this package's whole read-only-user-DB premise
-// and leave witness able to corrupt the user's DB if killed mid-write. So we snapshot
-// the user DB read-only first (VACUUM INTO through a mode=ro DSN — a consistent copy
-// even while OpenCode is writing, and pure-Go) and point the subprocess at the COPY,
-// with isolatedEnv so XDG_DATA_HOME can't lead it back to the user's data dir either.
-// The copy is disposable: it is removed here, and reconcile sweeps any leftover.
-func (n *nativeRuntime) export(ctx context.Context, w *platform.NativeSession, snap string) error {
-	src, err := DefaultDBPath()
-	if err != nil {
-		return err
-	}
-	if err = os.MkdirAll(n.dir(), 0o700); err != nil {
-		return err
-	}
-	// A per-call name so concurrent lenses/sessions can never share (or delete) one
-	// another's copy; sweepable by reconcile via the sourceCopyPrefix.
-	copyPath := filepath.Join(n.dir(), sourceCopyPrefix+randomHex(8)+".db")
-	if err = snapshotSourceDB(src, copyPath); err != nil {
-		return err
-	}
-	defer func() {
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			_ = os.Remove(copyPath + suffix)
-		}
-	}()
-	b, err := nativeCommand(ctx, n.root, []string{"OPENCODE_DB=" + copyPath}, "export", "--pure", strings.TrimPrefix(w.Session, SessionPrefix))
-	if err != nil {
-		return fmt.Errorf("opencode native export unavailable; upgrade to OpenCode 1.18.0+: %w", err)
-	}
-	if w.Digest != "" {
-		if err := validateExportDigest(b, w.Digest); err != nil {
-			return err
-		}
-	}
-	// Atomic, like save(): a partial snapshot (crash or ENOSPC mid-write) would pass the
-	// existence check in run() and then fail digest validation forever, wedging the
-	// generation with no path to re-export.
-	tmp := snap + ".tmp"
-	if err = os.WriteFile(tmp, b, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, snap)
-}
-
-// sourceCopyPrefix marks the disposable read-only copies export() makes of the user's
-// opencode.db, so reconcile can sweep one left behind by a crash.
-const sourceCopyPrefix = "source-"
-
-// snapshotSourceDB copies src to dst via VACUUM INTO over a READ-ONLY connection, so
-// the user's database is never opened writable. VACUUM INTO reads a consistent view
-// even while OpenCode is writing, and folds the WAL in, so dst needs no sidecars.
-func snapshotSourceDB(src, dst string) error {
-	if _, err := os.Stat(src); err != nil {
-		return fmt.Errorf("opencode source db: %w", err)
-	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		_ = os.Remove(dst + suffix) // VACUUM INTO requires a fresh destination
-	}
-	db, err := sql.Open("sqlite", readOnlyURI(src))
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	if _, err = db.Exec("VACUUM INTO ?", dst); err != nil {
-		return fmt.Errorf("snapshot opencode source db: %w", err)
-	}
-	return nil
-}
-
-func validateExportDigest(data []byte, want string) error {
-	digest, err := exportedTranscriptDigest(data)
-	if err != nil {
-		return err
-	}
-	if digest != want {
-		return fmt.Errorf("opencode native session changed after L0 capture; generation remains pending")
-	}
-	return nil
-}
-
-func exportedTranscriptDigest(data []byte) (string, error) {
-	var exported struct {
-		Messages []struct {
-			Info struct {
-				Role string `json:"role"`
-				Time struct {
-					Completed int64 `json:"completed"`
-				} `json:"time"`
-			} `json:"info"`
-			Parts []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(data, &exported); err != nil {
-		return "", fmt.Errorf("decode opencode native export: %w", err)
-	}
-	entries := make([]platform.TranscriptEntry, 0, len(exported.Messages))
-	for _, message := range exported.Messages {
-		if message.Info.Role != "user" && message.Info.Role != "assistant" {
-			continue
-		}
-		if message.Info.Role == "assistant" && message.Info.Time.Completed == 0 {
-			continue
-		}
-		var text strings.Builder
-		for _, part := range message.Parts {
-			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
-				continue
-			}
-			if text.Len() > 0 {
-				text.WriteString("\n\n")
-			}
-			text.WriteString(part.Text)
-		}
-		if value := strings.TrimSpace(text.String()); value != "" {
-			entries = append(entries, platform.TranscriptEntry{Role: message.Info.Role, Text: value})
-		}
-	}
-	return platform.TranscriptDigest(entries), nil
-}
-
 func (n *nativeRuntime) finalize(p string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -476,9 +319,6 @@ func (n *nativeRuntime) finalize(p string) error {
 			return err
 		}
 	}
-	if err = os.Remove(n.snapshot(p)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
 	return os.Remove(p)
 }
 
@@ -494,11 +334,8 @@ func (n *nativeRuntime) finalize(p string) error {
 // distillation. A manifest that cannot be parsed at all is reaped (its session id is
 // unrecoverable, so retaining it leaks forever) rather than retained.
 //
-// It also sweeps residue the manifest loop cannot see (orphan snapshots, .tmp files,
-// and leftover source-db copies), which is otherwise unreachable: export() writes the
-// snapshot BEFORE the manifest exists, so a crash in that window leaves a file nothing
-// ever deletes. Safe to do here — reconcile runs from runner Open before any Run, so no
-// generation is in flight.
+// It also sweeps the residue the manifest loop cannot see (sweepResidue). Safe to do here —
+// reconcile runs from runner Open before any Run, so no generation is in flight.
 func (n *nativeRuntime) reconcile() error {
 	entries, err := os.ReadDir(n.dir())
 	if os.IsNotExist(err) {
@@ -507,20 +344,17 @@ func (n *nativeRuntime) reconcile() error {
 	if err != nil {
 		return err
 	}
-	manifests := map[string]bool{}
 	for _, x := range entries {
 		name := x.Name()
 		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".snapshot.json") {
 			continue
 		}
-		manifests[strings.TrimSuffix(name, ".json")] = true
 		p := filepath.Join(n.dir(), name)
 		m, err := n.load(p)
 		if err != nil {
 			// Unparseable: the scratch-session id is unrecoverable, so nothing can ever finalize it.
-			// Drop the manifest + its snapshot so the directory converges.
+			// Drop the manifest so the directory converges.
 			slog.Warn("opencode native: discarding unreadable manifest", "path", p, "err", err)
-			_ = os.Remove(n.snapshot(p))
 			_ = os.Remove(p)
 			continue
 		}
@@ -546,26 +380,19 @@ func (n *nativeRuntime) reconcile() error {
 			}
 		}
 	}
-	n.sweepResidue(entries, manifests)
+	n.sweepResidue(entries)
 	return nil
 }
 
-// sweepResidue removes files in the native dir that no live manifest owns: a snapshot
-// whose manifest is gone (or was never written — export() writes the snapshot first),
-// an interrupted save()/export() .tmp, and a disposable source-db copy left by a crash
-// mid-export. Called at the end of reconcile, when nothing is in flight.
-func (n *nativeRuntime) sweepResidue(entries []os.DirEntry, manifests map[string]bool) {
+// sweepResidue removes what no generation still uses: an interrupted save()'s .tmp (never live
+// at Open, since save renames into place) and v0.13-era residue — the per-generation
+// .snapshot.json that `opencode export` filled, and the source-* copies of the user's
+// opencode.db it exported from. Nothing writes those two any more, so each one is residue, even
+// beside a live manifest. Called at the end of reconcile, when nothing is in flight.
+func (n *nativeRuntime) sweepResidue(entries []os.DirEntry) {
 	for _, x := range entries {
 		name := x.Name()
-		switch {
-		case strings.HasSuffix(name, ".snapshot.json"):
-			if manifests[strings.TrimSuffix(name, ".snapshot.json")] {
-				continue // still owned by a live manifest
-			}
-		case strings.HasSuffix(name, ".tmp"), strings.HasPrefix(name, sourceCopyPrefix):
-			// Never live at Open: save/export rename into place, and a source copy is
-			// deleted by the export that made it.
-		default:
+		if !strings.HasSuffix(name, ".tmp") && !strings.HasSuffix(name, ".snapshot.json") && !strings.HasPrefix(name, "source-") {
 			continue
 		}
 		p := filepath.Join(n.dir(), name)
@@ -613,23 +440,6 @@ func (n *nativeRuntime) generationStatus(m nativeManifest) (current, committed b
 // platform.SQLiteFileURI, never url.URL (issue #10 — see there).
 func readOnlyURI(path string) string {
 	return platform.SQLiteFileURI(path, "mode=ro")
-}
-
-// commandOutput runs one `opencode` subcommand under openCodeCommand's spawn policy, with
-// env layered on top (export repoints OPENCODE_DB at its read-only copy of the user's DB).
-func commandOutput(ctx context.Context, root string, env []string, args ...string) ([]byte, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("missing opencode command")
-	}
-	c := openCodeCommand(ctx, root, args...)
-	c.Env = replaceEnv(c.Env, env)
-	var stdout, stderr bytes.Buffer
-	c.Stdout = &stdout
-	c.Stderr = &stderr
-	if err := c.Run(); err != nil {
-		return stdout.Bytes(), fmt.Errorf("%w: %s", err, platform.StderrExcerpt(stderr.String()))
-	}
-	return stdout.Bytes(), nil
 }
 
 // indirection keeps command execution testable without touching process globals.

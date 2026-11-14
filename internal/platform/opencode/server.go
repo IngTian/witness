@@ -304,11 +304,14 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	// The corpus alone: distill.RunnerMine already fenced it (and put CorpusNotice on the system
 	// prompt, which travels as the session's agent), the one place every runner's fence is applied.
 	body := map[string]string{"id": messageID, "text": input}
-	if _, err := s.doJSON(ctx, http.MethodPost, "/api/session/"+sessionID+"/prompt", body, http.StatusOK); err != nil {
-		return "", err
+	_, err := s.doJSON(ctx, http.MethodPost, "/api/session/"+sessionID+"/prompt", body, http.StatusOK)
+	var reply string
+	if err == nil {
+		reply, err = s.waitForReply(ctx, sessionID, messageID)
 	}
-	reply, err := s.waitForReply(ctx, sessionID, messageID)
 	if err != nil {
+		// A failed prompt POST is interrupted too: the serve may have recorded the turn before the
+		// response failed, and a native session is retained, not deleted (spec 7.5: any error).
 		// Attribute the failure to a SIZE and a DURATION, so a stall is diagnosable from the log
 		// alone rather than by re-running with a debugger attached.
 		slog.Warn("opencode: generation did not complete", "session", sessionID, "corpus_chars", corpusChars,
@@ -323,7 +326,7 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 
 // replyForMessage harvests a retained turn (native resume): the reply once the turn is idle
 // `succeeded`, else "". A turn with no idle never finishes — a private --stdio serve does not resume
-// one after a restart (critic C3) — so the caller re-prompts rather than waiting on it.
+// one after a restart (critic C3) — so the caller starts a fresh session rather than waiting on it.
 func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, messageID string) (string, error) {
 	data, err := s.doJSON(ctx, http.MethodGet, messagesPath(sessionID), nil, http.StatusOK)
 	if err != nil {

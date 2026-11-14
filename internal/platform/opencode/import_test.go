@@ -774,6 +774,12 @@ func TestReadersNeverWriteTheSourceDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close() // before hashing: a writer would checkpoint on the last close
+	// The native runner's drift check reads the same DB.
+	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
+	w := &platform.NativeSession{Session: SessionPrefix + "ses_test", Digest: "captured earlier"}
+	if err := newNativeRuntime(t.TempDir(), nil).checkDigest(context.Background(), w); !errors.Is(err, errNativeSessionChanged) {
+		t.Fatalf("checkDigest = %v, want errNativeSessionChanged", err)
+	}
 
 	if after := sum(); before != after {
 		t.Fatalf("opencode.db was modified: before=%x after=%x", before, after)

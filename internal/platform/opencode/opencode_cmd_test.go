@@ -3,7 +3,6 @@ package opencode
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -91,43 +90,6 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	cmd = openCodeCommand(context.Background(), "", "--version")
 	if !slices.Contains(cmd.Env, "OPENCODE_DB=opencode-v2.db") {
 		t.Errorf("root-less command did not use relative DB path: env=%v", cmd.Env)
-	}
-}
-
-// export reads the USER's sessions, so commandOutput must layer the caller's OPENCODE_DB (the
-// read-only copy of their opencode.db) over the shared policy's isolated one. Dropping that
-// layer still runs, but `opencode export` then reads witness's own empty DB and every
-// native-session export fails. Every native test stubs nativeCommand, so only this drives the
-// real commandOutput.
-func TestCommandOutputLayersTheCallerEnvOverThePolicy(t *testing.T) {
-	prev := execCommandContext
-	t.Cleanup(func() { execCommandContext = prev })
-	var got *exec.Cmd
-	execCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		// The test binary itself, running no tests: harmless, and present on every OS.
-		got = prev(ctx, os.Args[0], "-test.run=^$")
-		return got
-	}
-
-	root := t.TempDir()
-	copyDB := filepath.Join(t.TempDir(), "copy.db")
-	if _, err := commandOutput(context.Background(), root, []string{"OPENCODE_DB=" + copyDB}, "export", "ses_1"); err != nil {
-		t.Fatalf("commandOutput: %v", err)
-	}
-	var dbs []string
-	for _, e := range got.Env {
-		if v, ok := strings.CutPrefix(e, "OPENCODE_DB="); ok {
-			dbs = append(dbs, v)
-		}
-	}
-	if len(dbs) != 1 || dbs[0] != copyDB {
-		t.Errorf("OPENCODE_DB = %q, want exactly [%q]: export must read the user's DB copy", dbs, copyDB)
-	}
-	if !slices.Contains(got.Env, "XDG_DATA_HOME="+filepath.Join(root, "opencode-data")) || !slices.Contains(got.Env, "WITNESS_WORKER=1") {
-		t.Errorf("caller env replaced the policy instead of layering on it: %v", got.Env)
-	}
-	if got.Dir != os.TempDir() {
-		t.Errorf("cwd = %q, want the neutral temp dir", got.Dir)
 	}
 }
 
