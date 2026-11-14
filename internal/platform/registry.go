@@ -96,6 +96,15 @@ type Importer interface {
 	Import(ctx context.Context, st store.ImportStore, sessionIDs []string) (ImportStats, error)
 }
 
+// AutoImporter is the optional capability for sources that can go stale without a live trigger
+// (OpenCode's plugin can be silently rejected by the editor, logging only to the OpenCode log)
+// to re-import incrementally at every drain start. Only a source the user wired answers true:
+// ImportAtDrainStart guards against capturing an editor the user never opted into.
+type AutoImporter interface {
+	Importer
+	ImportAtDrainStart(st store.MetaKV) bool
+}
+
 // ImportFor runs p's Importer, or reports an empty import when p has nothing to pull.
 func ImportFor(ctx context.Context, p Platform, st store.ImportStore, sessionIDs []string) (ImportStats, error) {
 	if im, ok := p.(Importer); ok {
@@ -248,6 +257,14 @@ func RenderChunks(raw []store.RawRecord, policy ChunkPolicy) []string {
 		start = next
 	}
 	return chunks
+}
+
+// ModelRequirer is the optional capability for a runner that refuses to run without
+// a stage model set (OpenCode's runner errors on an empty mine_model because the
+// platform default may train on inputs). Wire asks for models when binding a runner
+// that implements this and the effective mine_model is empty.
+type ModelRequirer interface {
+	RequiresModel() bool
 }
 
 // registry holds the registered platforms, keyed by Name(). It is populated by

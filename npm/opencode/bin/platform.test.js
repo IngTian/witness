@@ -1,10 +1,12 @@
 import assert from "node:assert/strict"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
+import { mkdtemp, rm } from "node:fs/promises"
 
-import { platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"
+import { platformPackage, platformWitnessBin, supportedPlatforms, modelDir, promptsDir } from "./platform.js"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, "..", "..", "..")
@@ -107,4 +109,55 @@ test("optionalDependencies cover every platform package at one version", () => {
       `${pkg.name} must be an optionalDependency of @witness-ai/opencode at ${pkg.version}`,
     )
   }
+})
+
+test("modelDir honours WITNESS_ASSETS, then WITNESS_HOME, then adopts an existing claude-witness dir, else witness", async () => {
+  const original = { WITNESS_ASSETS: process.env.WITNESS_ASSETS, WITNESS_HOME: process.env.WITNESS_HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME }
+
+  try {
+    // Test 1: WITNESS_ASSETS wins
+    process.env.WITNESS_ASSETS = "/a"
+    delete process.env.WITNESS_HOME
+    delete process.env.XDG_DATA_HOME
+    assert.equal(modelDir(), "/a")
+
+    // Test 2: WITNESS_HOME fallback
+    delete process.env.WITNESS_ASSETS
+    process.env.WITNESS_HOME = "/h"
+    delete process.env.XDG_DATA_HOME
+    assert.equal(modelDir(), "/h/assets/e5-small")
+
+    // Test 3: adopts existing claude-witness dir
+    delete process.env.WITNESS_ASSETS
+    delete process.env.WITNESS_HOME
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "modeldir-"))
+    try {
+      const claudeWitness = path.join(tmp, "claude-witness")
+      fs.mkdirSync(claudeWitness)
+      process.env.XDG_DATA_HOME = tmp
+      assert.equal(modelDir(), path.join(tmp, "claude-witness", "assets", "e5-small"))
+    } finally {
+      await rm(tmp, { recursive: true, force: true })
+    }
+
+    // Test 4: empty tmp creates witness dir
+    delete process.env.WITNESS_ASSETS
+    delete process.env.WITNESS_HOME
+    const tmp2 = await mkdtemp(path.join(os.tmpdir(), "modeldir2-"))
+    try {
+      process.env.XDG_DATA_HOME = tmp2
+      assert.equal(modelDir(), path.join(tmp2, "witness", "assets", "e5-small"))
+    } finally {
+      await rm(tmp2, { recursive: true, force: true })
+    }
+  } finally {
+    process.env.WITNESS_ASSETS = original.WITNESS_ASSETS
+    process.env.WITNESS_HOME = original.WITNESS_HOME
+    process.env.XDG_DATA_HOME = original.XDG_DATA_HOME
+  }
+})
+
+test("promptsDir is <package>/prompts", () => {
+  assert.equal(promptsDir("/my/package"), "/my/package/prompts")
+  assert.equal(promptsDir("/other"), "/other/prompts")
 })

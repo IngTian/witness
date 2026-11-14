@@ -29,7 +29,7 @@ import (
 
 const (
 	// ponytail: Dim is one face of an UNSTAMPED embedding contract: multilingual-e5-small at
-	// revision 614241f (internal/model, npm/opencode/bin/model.js), a "query: " prefix
+	// revision 614241f (internal/model; the deleted npm model.js pinned it too), a "query: " prefix
 	// on every input, masked mean-pool, L2-normalize, maxLen 512 tokens. Every stored L1 vector
 	// was made under it and nothing records that. Changing any part needs a re-embed of all of
 	// L1; merge.go copies embedding blobs verbatim between archives, so both sides must agree;

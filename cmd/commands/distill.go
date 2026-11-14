@@ -454,6 +454,21 @@ func cmdDistillStatus(asJSON bool) error {
 	for _, n := range compactionNudges(st) { // manual by design; this only points at it
 		fmt.Println(hint("compact", n.command()) + dim("  "+n.text()))
 	}
+	// Capture health warnings (quick path: no version probes), each under its editor's name
+	for _, h := range captureHealth(st, true) {
+		for _, c := range h.checks {
+			if c.level >= checkWarn {
+				line := warnGlyph() + " " + h.name + " " + c.key + ": " + c.value
+				fmt.Println(line)
+				if c.why != "" {
+					fmt.Println("  " + dim(c.why))
+				}
+				if c.fix[0] != "" {
+					fmt.Println(hint(c.fix[0], c.fix[1]))
+				}
+			}
+		}
+	}
 	switch {
 	case stat.Sessions == 0:
 		fmt.Println(warnGlyph() + " nothing captured yet — connect an editor")

@@ -150,9 +150,10 @@ namespaced per source, so none can corrupt another's data.
 | **Codex** | `witness wire codex`, then approve the hooks with `/hooks` inside Codex — see [Codex capture](docs/codex-capture.md) |
 | **Files / documents** | `witness ingest --file records.ndjson` — you convert your notes, articles or logs into NDJSON records first; witness owns the record format, not your data |
 
-`witness wire` sets up capture only and never prompts, so it is safe in CI or from a hook.
-(`witness install` is a different thing: it provisions a bare archive at a `--path`, for keeping
-an independent archive per data source. It does not wire any editor.)
+`witness wire` sets up capture. At a terminal it may ask whether to make the editor your default
+runner; piped, in CI or from a hook it never prompts. (`witness install` is a different thing:
+it provisions a bare archive at a `--path`, for keeping an independent archive per data source.
+It does not wire any editor.)
 
 Then just work. Capture runs in the background — no prompting, no ritual. Check it any time with
 `witness doctor`.

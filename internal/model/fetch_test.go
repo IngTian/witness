@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -254,27 +253,5 @@ func TestReapPartsKeepsOnlyOurs(t *testing.T) {
 		if (err == nil) != want {
 			t.Errorf("%s present=%v, want %v", n, err == nil, want)
 		}
-	}
-}
-
-// model.js still downloads for the OpenCode plugin (#218 folds the two). Both must fetch the
-// same bytes, or the plugin and npx would each call the other's model corrupt.
-func TestPinsMatchModelJS(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "npm", "opencode", "bin", "model.js"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, want := range map[string]string{
-		"MODEL_REVISION":   Revision,
-		"MODEL_SHA256":     ModelSHA256,
-		"TOKENIZER_SHA256": TokenizerSHA256,
-	} {
-		m := regexp.MustCompile(`const ` + name + ` = "([0-9a-f]+)"`).FindSubmatch(src)
-		if m == nil || string(m[1]) != want {
-			t.Errorf("model.js %s = %q, Go has %q", name, m, want)
-		}
-	}
-	if !strings.Contains(string(src), `"https://huggingface.co/intfloat/multilingual-e5-small/resolve/" + MODEL_REVISION`) {
-		t.Error("model.js's DEFAULT_BASE_URL no longer matches Go's defaultBaseURL")
 	}
 }

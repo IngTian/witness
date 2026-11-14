@@ -56,22 +56,28 @@ func TestBuildOpenCodeServeCmdUsesPrivateRuntimeEnv(t *testing.T) {
 func TestValidateOpenCodeCapability(t *testing.T) {
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.17.9\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "upgrade") {
-		t.Fatalf("unsupported version error = %v", err)
-	}
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
+
+	// Supported version passes
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.7\n"), nil }
 	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
-		t.Fatal(err)
+		t.Fatalf("2.2.7 must be accepted, got %v", err)
 	}
-	// v2 is refused by name (#218), not passed as "newer": it removed what witness relies on.
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.0.0\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); !errors.Is(err, ErrOpenCodeV2) {
-		t.Fatalf("v2 error = %v, want ErrOpenCodeV2", err)
+
+	// Below MinVersion is refused
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.6\n"), nil }
+	err := ValidateOpenCodeCapability(context.Background(), "")
+	if !errors.Is(err, ErrOpenCodeTooOld) {
+		t.Fatalf("2.2.6 error = %v, want ErrOpenCodeTooOld", err)
 	}
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("version unknown\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "upgrade") {
-		t.Fatalf("malformed version error=%v", err)
+	if strings.Contains(err.Error(), "deadline") {
+		t.Errorf("an old version was rejected by TIMEOUT instead of by version check: %v", err)
+	}
+
+	// v1 is refused by name
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.19.5\n"), nil }
+	err = ValidateOpenCodeCapability(context.Background(), "")
+	if !errors.Is(err, ErrOpenCodeV1) {
+		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
 	}
 }
 

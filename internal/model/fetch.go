@@ -3,16 +3,15 @@
 //
 // witness is one static binary, but the 470MB model is too large to ride along on every
 // channel: a source checkout fetches it once (`witness model fetch`, which install.sh and the
-// Makefile call), and the npm package ships without it. The npm package's OpenCode plugin has
-// its own JS downloader (npm/opencode/bin/model.js); this package is the Go one, used by the
-// command and by `npx @witness-ai/opencode mcp`, which never loads the plugin (#199 F127).
+// Makefile call), and the npm package ships without it: its OpenCode plugin runs `witness model
+// fetch` at startup, and a `witness mcp` started by npm fetches in the background. This is the
+// only downloader (#199 F127).
 //
-// The two downloaders can share one model directory, so this one follows model.js's on-disk
-// protocol exactly: the same pinned revision and hashes (TestPinsMatchModelJS), the same
-// `.download.lock` body ("<token> <pid> <hostname>", reaped when its same-host owner is dead
-// or it is 12h old), and the same per-pid `<file>.<pid>.part` temp names, so each side's crash
-// leftovers are reaped by the other. Folding them into one downloader changes the plugin and
-// waits for #218.
+// The on-disk protocol is still that of the JS downloader the npm plugin had up to v0.13.0
+// (npm/opencode/bin/model.js), so an older plugin sharing the model directory cannot collide with
+// this one: the same `.download.lock` body ("<token> <pid> <hostname>", reaped when its same-host
+// owner is dead or it is 12h old), and the same per-pid `<file>.<pid>.part` temp names, so each
+// side's crash leftovers are reaped by the other.
 package model
 
 import (
@@ -45,8 +44,8 @@ const (
 )
 
 // SkipEnv=1 turns off every AUTOMATIC download (the airgapped / metered / bring-your-own-model
-// switch, shared with model.js). Fetch does not read it: `witness model fetch` is an explicit
-// request, as model.js's own CLI is.
+// switch, the same one the deleted model.js read, so an older plugin honours it too). Fetch does
+// not read it: `witness model fetch` is an explicit request, as model.js's own CLI was.
 const SkipEnv = "WITNESS_SKIP_MODEL_DOWNLOAD"
 
 // ErrBusy means another process holds the download lock and is alive. Its files land
@@ -60,8 +59,8 @@ const (
 	lockStaleAfter = 12 * time.Hour
 )
 
-// stallTimeout cancels a download that receives no bytes for this long (model.js's default),
-// so a dead connection fails instead of hanging. A var so tests can shorten it.
+// stallTimeout cancels a download that receives no bytes for this long (the deleted model.js's
+// default), so a dead connection fails instead of hanging. A var so tests can shorten it.
 var stallTimeout = 30 * time.Second
 
 type file struct{ remote, name, sha string }

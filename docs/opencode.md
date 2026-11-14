@@ -4,23 +4,21 @@ From-source wiring and the isolated-runtime model. **Installing from npm** (`@wi
 supported platforms, first-run model download) is documented in the
 [npm package README](../npm/opencode/README.md).
 
-> **OpenCode v1 only (1.18 or newer, below 2.0).** OpenCode v2 (`@opencode/cli`) changed the
-> server, plugin and storage formats witness depends on, so witness refuses it by name: `doctor`,
-> `wire opencode` and `import --agent opencode` stop with "OpenCode v2 is not supported yet"
-> instead of silently capturing nothing. v2 support is tracked in
-> [#218](https://github.com/IngTian/witness/issues/218); until then use OpenCode v1.19.5
-> (`npm i -g opencode-ai@1.19.5`).
+> **OpenCode 2.2.7 or newer.** v1 is refused by name (`opencode upgrade --major`); witness v0.13.0
+> was the last release for v1. Capture works on v2 now; distilling through OpenCode on v2 arrives
+> in a later release.
 
 ### OpenCode support
 
 OpenCode support has two pieces:
 
-- A plugin reconciles OpenCode's SQLite DB on startup and when a session goes idle, then asks the
-  laptop-friendly auto-start gate to distill when allowed. From a source checkout,
-  `witness wire opencode` writes a local plugin to `~/.config/opencode/plugins/witness.js`;
-  published installs use the npm plugin `@witness-ai/opencode` instead. (That path is the same on
-  Windows — OpenCode resolves its config as `XDG_CONFIG_HOME` else `~/.config`, with no
-  Windows-specific branch, so the plugin lands in `%USERPROFILE%\.config\opencode\plugins\`.)
+- A plugin imports each session when a turn ends (succeeded, failed or interrupted) and syncs once
+  when OpenCode starts; `wire` writes it atomically and OpenCode picks it up live. From a source
+  checkout, `witness wire opencode` writes a local plugin to
+  `~/.config/opencode/plugins/witness.js`; published installs use the npm plugin
+  `@witness-ai/opencode` instead. (That path is the same on Windows — OpenCode resolves its config
+  as `XDG_CONFIG_HOME` else `~/.config`, with no Windows-specific branch, so the plugin lands in
+  `%USERPROFILE%\.config\opencode\plugins\`.)
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.

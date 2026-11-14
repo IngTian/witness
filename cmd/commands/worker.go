@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strconv"
@@ -11,6 +13,7 @@ import (
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -158,6 +161,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// signal-aware ctx (SIGINT+SIGTERM).
 	ctx, stopSignals := procCtl.NotifyStop(context.Background())
 	defer stopSignals()
+
+	// Run drain-start import for any wired sources that can go stale without a live
+	// trigger (OpenCode's plugin can be silently rejected by the editor with only a log
+	// line). This is read-only on the source's side (inside Import the source's own lock
+	// prevents concurrent writes), and makes Claude-kicked drains pick up sessions a
+	// rejected plugin missed (spec §7.2).
+	importAtDrainStart(ctx, st)
 
 	pending := func() []string {
 		p, _ := st.PendingSessionsUpdatedBetween(lensNames, timeRange.since, timeRange.until)
@@ -563,6 +573,28 @@ func resolvePortraitSources(ctx context.Context, st *store.Store, cfg store.Conf
 	}
 	_ = st.SetMetaString(sourcesRetryKey, "")
 	return nil
+}
+
+// importAtDrainStart runs an incremental import for every wired source that supports
+// drain-start imports (platform.AutoImporter). OpenCode's plugin can be silently rejected
+// by the editor with only a log line, so Claude-kicked drains re-import it to pick up
+// sessions the rejected plugin missed. Import errors are logged but never fail the drain. A source
+// whose store does not exist yet (wired before the editor was first used) has nothing to import,
+// as missingSource words it for the CLI; logging it would warn on every drain.
+func importAtDrainStart(ctx context.Context, st *store.Store) {
+	for _, name := range editorNames() {
+		p, ok := platform.ByName(name)
+		if !ok {
+			continue
+		}
+		ai, ok := p.(platform.AutoImporter)
+		if !ok || !ai.ImportAtDrainStart(st) {
+			continue
+		}
+		if _, err := platform.ImportFor(ctx, p, st, nil); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("worker: drain-start import failed; draining what is captured", "agent", name, "err", err)
+		}
+	}
 }
 
 // selfHealAllowed returns true when the end-of-run self-heal should run. It checks:

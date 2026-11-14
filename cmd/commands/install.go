@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +16,20 @@ import (
 	"github.com/IngTian/witness/internal/platform"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 	"github.com/IngTian/witness/internal/store"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
+
+// wireAnswers returns the input stream for wire prompts, or nil when there is no terminal
+// (piped stdin, --json, CI, or the npm launcher). When nil, wire never prompts and uses
+// the safe default (don't switch the runner, print the hint instead; don't ask for models,
+// print the hint). Tests stub this to feed canned answers or force the no-terminal path.
+var wireAnswers = func() io.Reader {
+	if !isatty.IsTerminal(os.Stdin.Fd()) || jsonOutputMode() || os.Getenv("WITNESS_NPM_PACKAGE") == "1" {
+		return nil
+	}
+	return os.Stdin
+}
 
 func newWireCmd() *cobra.Command {
 	c := &cobra.Command{
@@ -30,12 +43,16 @@ func newWireCmd() *cobra.Command {
 Wire witness into your editor: Claude Code (hooks + MCP), OpenCode (plugin + MCP)
 or Codex (hooks).
 
-This sets up CAPTURE only. It never prompts (safe in CI / as a hook), and it does
-not seed content — the built-in "default" lens is added automatically the first
+This sets up CAPTURE only. It asks a question only at a terminal: whether to switch the
+default runner when another one is already chosen (default no), and which model to use
+when the new default needs one. Piped, in CI or from a hook no questions are asked.
+
+It does not seed content — the built-in "default" lens is added automatically the first
 time your archive is opened.
 
-  runner    wire writes a sensible default (matching the editor); change it
-            any time with: witness config set runner ` + runnerChoice() + `
+  runner    the first wire makes the editor the default runner; later wires of another
+            editor leave it unless you say yes; change it any time with:
+            witness config set runner ` + runnerChoice() + `
             Codex runs no model, so wiring it leaves the runner alone.
   codex     Codex hooks are inert until you approve them with /hooks in Codex;
             wiring cannot grant that trust for you.
@@ -456,10 +473,7 @@ func opencodeConfigPath() string {
 	return jsonPath
 }
 
-const (
-	openCodePluginName       = "witness.js"
-	legacyOpenCodePluginName = "claude-witness.js"
-)
+const legacyOpenCodePluginName = "claude-witness.js"
 
 func openCodePluginPath(dir, name string) string {
 	return filepath.Join(dir, "plugins", name)
@@ -558,10 +572,11 @@ func cmdProvision(path string) error {
 // cmdInstall is `witness wire <editor>`. The target is required (enforced by cobra
 // ExactArgs) so wiring binds the matching distillation runtime into config.toml when
 // that editor can run a model (Codex cannot; see below). Since #102 wiring is a pure MECHANISM — hooks/plugin + MCP
-// + bind runner — and never prompts nor seeds content: the built-in default lens is
-// auto-seeded once by the first-open hook (which fires the moment bindRunner opens the
-// store) and is fully deletable. Keeping install prompt-free is what makes it safe to
-// run as a hook subprocess and in CI, where a stray prompt would hang the session.
+// + bind runner — and seeds no content: the built-in default lens is auto-seeded once by the
+// first-open hook (which fires the moment bindRunner opens the store) and is fully deletable.
+// It asks a question only at a terminal: whether to switch the default runner when another one
+// is already chosen (default no), and which model to use when the new default needs one. Piped,
+// in CI or from a hook it never prompts.
 //
 // The screen is a title, one glyph row per part (the installer's, then runner and lenses), and the
 // result line LAST. The result used to sit in the middle ("done — restart Claude Code" above the
@@ -589,8 +604,18 @@ func cmdInstall(args []string) error {
 	// with no edit here, and one that loses it stops. That is the same reasoning the
 	// function was introduced for — two writers of one config key must not disagree.
 	if platform.ValidateRunnerName(target) == nil {
-		if err := bindRunner(target); err != nil {
-			return err
+		in := wireAnswers()
+		st, err := store.Open()
+		if err != nil {
+			fmt.Println(resultRow(warnGlyph(), "runner", "not set", "could not open the archive: "+err.Error()))
+		} else {
+			defer st.Close()
+			if err := chooseRunner(st, target, in); err != nil {
+				return err
+			}
+			if err := askForModels(st, st.ResolvedConfig().Runner, in); err != nil {
+				return err
+			}
 		}
 	} else {
 		// The runner it leaves alone is the EFFECTIVE one (ResolveRunner), not the raw config field.
@@ -660,6 +685,86 @@ func reportEnabledLenses() []string {
 	}
 	fmt.Println(resultRow(enabledGlyph(true), "lenses", strings.Join(enabled, ", "), note))
 	return enabled
+}
+
+// chooseRunner decides whether to bind target as the default runner: when no runner is bound,
+// it binds target; when target is already the runner, it reports "unchanged"; when a different
+// runner is bound, it asks at a terminal (default no) or prints the hint to change it manually.
+func chooseRunner(st *store.Store, target string, in io.Reader) error {
+	if !st.RunnerBound() {
+		return bindRunner(target)
+	}
+	cur := st.ResolvedConfig().Runner
+	if cur == target {
+		fmt.Println(resultRow(okGlyph(), "runner", target, "the default, unchanged"))
+		return nil
+	}
+	// A different runner is bound: ask at a terminal, or print the hint.
+	if in != nil {
+		if confirmFrom(in)("Make " + target + " the default runner instead of " + cur + "? [y/N]: ") {
+			if err := st.SetRunner(target); err != nil {
+				return fmt.Errorf("write runner to config: %w", err)
+			}
+			fmt.Println(resultRow(okGlyph(), "runner", target, "the default"))
+			return nil
+		}
+	}
+	fmt.Println(resultRow(skipGlyph(), "runner", "unchanged ("+cur+")", target+" is available per lens"))
+	fmt.Println(hint("make it the default", "witness config set runner "+target))
+	return nil
+}
+
+// askForModels prompts for mine_model and review_model when the runner requires a model
+// (platform.ModelRequirer.RequiresModel() == true) and the effective mine model is empty.
+// At a terminal it prompts (an answer without "/", mine or review, refuses both and re-prints the
+// hint); when in == nil it prints the hint only. No model is suggested (owner, 2026-11-13: no
+// judgement).
+func askForModels(st *store.Store, runner string, in io.Reader) error {
+	p, ok := platform.ByName(runner)
+	if !ok {
+		return nil
+	}
+	mr, ok := p.(platform.ModelRequirer)
+	if !ok || !mr.RequiresModel() {
+		return nil
+	}
+	for _, s := range effectiveConfig(st, nil) { // by key: a reordered list must not read another setting
+		if s.key == "mine_model" && s.value != "" {
+			return nil
+		}
+	}
+	// Every exit without a model ends in this hint, the one place its text is spelled
+	refuse := func(why string) error {
+		if why != "" {
+			fmt.Println(resultRow(warnGlyph(), "model", "not set", why))
+		}
+		fmt.Println(hint("set a model", "witness config set mine_model <provider/model>"))
+		fmt.Println(dim("  `opencode models` lists what is available"))
+		return nil
+	}
+	if in == nil {
+		return refuse("")
+	}
+	// Both answers are checked before either is written, so a bad review model leaves nothing
+	// half-set and the one hint still names the whole fix.
+	mineVal := promptLine(in, "mine model (provider/model; `opencode models` lists them): ")
+	if !strings.Contains(mineVal, "/") {
+		return refuse("invalid format")
+	}
+	// Prompt for review model (optional: blank means same as mine).
+	reviewVal := promptLine(in, "review model (Enter: same as mine model): ")
+	if reviewVal != "" && !strings.Contains(reviewVal, "/") {
+		return refuse("invalid review model format")
+	}
+	if err := st.SetConfigString("triage_model", mineVal); err != nil {
+		return fmt.Errorf("write mine_model: %w", err)
+	}
+	if reviewVal != "" {
+		if err := st.SetConfigString("distill_model", reviewVal); err != nil {
+			return fmt.Errorf("write review_model: %w", err)
+		}
+	}
+	return nil
 }
 
 // bindRunner pins config.toml's runner field to the integration that was just
@@ -795,10 +900,15 @@ func mcpServerRegistered(out, name string) bool {
 func cmdInstallOpenCode() (wireOutcome, error) {
 	// Before anything is copied or written: on Windows resolveOpenCodeInstall installs the
 	// bundle, and a refusal must leave the machine as it found it.
-	if err := openCodeV2Check(); err != nil {
+	rows, err := checkOpenCodeForWire(context.Background())
+	if err != nil {
 		return wireOutcome{}, err
 	}
-	target, err := resolveOpenCodeInstall()
+	for _, row := range rows {
+		fmt.Println(row)
+	}
+
+	target, err := openCodeInstallTarget()
 	if err != nil {
 		return wireOutcome{}, err
 	}
@@ -834,7 +944,7 @@ func cmdInstallOpenCode() (wireOutcome, error) {
 		return wireOutcome{}, err
 	}
 	fmt.Println(resultRow(okGlyph(), "MCP server", "witness", "in "+tildePath(config)))
-	return wireOutcome{glyph: okGlyph(), line: "wired — restart OpenCode so the plugin and MCP server load", note: pullOnlyNote}, nil
+	return wireOutcome{glyph: okGlyph(), line: "wired — OpenCode picks it up live (no restart needed)", note: pullOnlyNote}, nil
 }
 
 // cmdUninstall removes the witness hooks/plugin and MCP server (idempotent).
@@ -998,14 +1108,14 @@ func claudeCLIOutput(args ...string) (string, error) {
 // cmdUninstallOpenCode reports, per part, what it removed. It used to print three "removed (if it
 // was present)" lines on every run, and to rewrite opencode.json even when witness was not in it —
 // which, for a .jsonc config, also dropped the user's comments.
-func cmdUninstallOpenCode() (removed bool, err error) {
+func cmdUninstallOpenCode() (removed bool, warning string, err error) {
 	dir := opencodeDir()
 	config := opencodeConfigPath()
 	switch data, err := os.ReadFile(config); {
 	case err == nil:
 		root, err := parseOpenCodeConfig(data)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 		if mcp, _ := root["mcp"].(map[string]any); mcp["witness"] == nil {
 			fmt.Println(resultRow(skipGlyph(), "MCP server", "none in "+tildePath(config), ""))
@@ -1013,17 +1123,17 @@ func cmdUninstallOpenCode() (removed bool, err error) {
 		}
 		cleaned, err := removeOpenCodeMCP(data)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 		if err := store.WriteFileAtomic(config, cleaned); err != nil {
-			return false, err
+			return false, "", err
 		}
 		fmt.Println(resultRow(okGlyph(), "MCP server", "removed from "+tildePath(config), ""))
 		removed = true
 	case os.IsNotExist(err):
 		fmt.Println(resultRow(skipGlyph(), "MCP server", "none — there is no "+tildePath(config), ""))
 	default:
-		return false, err
+		return false, "", err
 	}
 	gone := removeAllOpenCodePlugins(dir)
 	for _, p := range gone {
@@ -1032,7 +1142,11 @@ func cmdUninstallOpenCode() (removed bool, err error) {
 	if len(gone) == 0 {
 		fmt.Println(resultRow(skipGlyph(), "plugin", "none in "+tildePath(filepath.Join(dir, "plugins")), ""))
 	}
-	return removed || len(gone) > 0, nil
+	stopped, warning, err := stopOpenCodeCapture()
+	if err != nil {
+		return false, "", err
+	}
+	return removed || len(gone) > 0 || stopped, warning, nil
 }
 
 func mergeOpenCodeMCP(data []byte, shim string) ([]byte, error) {

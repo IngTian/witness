@@ -12,13 +12,14 @@ import (
 // point: it runs the SAME gate the capture hooks use (maybeSpawnAutoWorker), rather
 // than spawning `worker-run --auto` directly.
 //
-// Why it exists: `worker stop --auto-only` (the OpenCode plugin's dispose) latches a
-// DURABLE `worker_stop_requested` meta flag, and an auto worker refuses to run while
-// it is set (cmdWorker) — only maybeSpawnAutoWorker and a MANUAL run clear it. A
-// caller that spawns `worker-run --auto` itself therefore no-ops forever after the
-// first dispose, silently freezing automatic distillation for an OpenCode-only user
-// (a Claude Code user is rescued incidentally by their capture hook clearing it).
-// Routing the plugin's quiet-period start through this command keeps the flag's
+// Why it exists: `worker stop` (and its hidden --auto-only form) latches a DURABLE
+// `worker_stop_requested` meta flag, and an auto worker refuses to run while it is set
+// (cmdWorker) — only maybeSpawnAutoWorker and a MANUAL run clear it. A caller that spawns
+// `worker-run --auto` itself therefore no-ops forever after the first stop, silently freezing
+// automatic distillation for an OpenCode-only user (a Claude Code user is rescued incidentally
+// by their capture hook clearing it). The v1 plugin ran `worker stop --auto-only` on every
+// dispose, which is how this was found; the v2 plugin stops no worker, but a manual stop still
+// latches. Routing the plugin's quiet-period start through this command keeps the flag's
 // clear-on-intentional-start contract in ONE place.
 func newInternalWorkerKickCmd() *cobra.Command {
 	return &cobra.Command{Use: "worker-kick", Hidden: true, Args: cobra.NoArgs,
@@ -44,9 +45,9 @@ func newInternalWorkerKickCmd() *cobra.Command {
 // review-only work.
 func maybeSpawnAutoWorker(st *store.Store) bool {
 	cfg := st.LoadConfig()
-	// Clear the durable stop flag FIRST, before the should-start gate. `worker stop
-	// --auto-only` (the OpenCode plugin's dispose) latches it, and an auto worker refuses
-	// to run while it is set — so it must be released by the mere ARRIVAL of a fresh
+	// Clear the durable stop flag FIRST, before the should-start gate. `worker stop`
+	// latches it (a manual stop; the v1 plugin also did on every dispose), and an auto worker
+	// refuses to run while it is set — so it must be released by the mere ARRIVAL of a fresh
 	// auto-start intent, not by a successful spawn. Clearing it after the gate would leave
 	// a user frozen whenever the gate declines for a transient reason (no pending work
 	// yet, a worker already live, the embedding model still downloading): the flag would

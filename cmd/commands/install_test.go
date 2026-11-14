@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -444,26 +445,114 @@ func TestOpenCodeConfigPathHonoursXDGConfigHome(t *testing.T) {
 	}
 }
 
-// OpenCode v2 never loads witness's plugin, so `wire opencode` against it used to write the
-// plugin + MCP entry and report success while nothing was ever captured (#218, the #10 shape).
-// It must refuse with the v2 error and leave OpenCode's config untouched.
-func TestWireOpenCodeRefusesV2AndWritesNothing(t *testing.T) {
-	home, xdg := t.TempDir(), t.TempDir()
+// wireOpenCodeEnv sandboxes one `wire opencode`: HOME and OpenCode's config dir under a temp dir
+// that holds no DB yet, the version probe answering v and probeErr, and a shim target, so no test
+// copies the test binary.
+func wireOpenCodeEnv(t *testing.T, v opencode.Version, probeErr error) {
+	t.Helper()
+	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("OPENCODE_CONFIG", "")
-	t.Setenv("OPENCODE_CONFIG_DIR", "")
-	t.Setenv("XDG_CONFIG_HOME", xdg)
-	prev := openCodeV2Check
-	t.Cleanup(func() { openCodeV2Check = prev })
-	openCodeV2Check = func() error { return fmt.Errorf("found OpenCode 2.2.7: %w", opencode.ErrOpenCodeV2) }
+	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
+	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(home, "opencode.db"))
+	stubOpenCodeVersion(t, v, probeErr)
+	prev := openCodeInstallTarget
+	openCodeInstallTarget = func() (string, error) { return "/x/hooks/witness.sh", nil }
+	t.Cleanup(func() { openCodeInstallTarget = prev })
+}
 
-	_, err := cmdInstallOpenCode()
-	if !errors.Is(err, opencode.ErrOpenCodeV2) {
-		t.Fatalf("wire opencode on v2: err = %v, want ErrOpenCodeV2", err)
+// wire opencode refuses, before anything is written, an OpenCode it cannot capture: v1 by name, and
+// a DB that is v1-only or mid-migration whatever the version probe said, since a failed probe says
+// nothing about the DB.
+func TestWireOpenCodeRefusesAndWritesNothing(t *testing.T) {
+	v230 := opencode.Version{Major: 2, Minor: 3, Patch: 0}
+	migrating := func(t *testing.T) string {
+		path := seedOpenCodeV2DB(t, 1000)
+		execOpenCodeDB(t, path, `CREATE TABLE session (id TEXT PRIMARY KEY);`,
+			`INSERT INTO kv (key, value, time_created, time_updated) VALUES ('migration.v1-v2', '{"phase":"running"}', 1000, 1000);`)
+		return path
 	}
-	if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
-		t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
+	for _, tc := range []struct {
+		name     string
+		v        opencode.Version
+		probeErr error
+		db       func(*testing.T) string // nil: no DB
+		want     error
+	}{
+		{"OpenCode v1", opencode.Version{Major: 1, Minor: 19, Patch: 5}, nil, nil, opencode.ErrOpenCodeV1},
+		{"v1-only DB", v230, nil, v1OnlyOpenCodeDB, opencode.ErrOpenCodeV1},
+		{"mid-migration DB", v230, nil, migrating, opencode.ErrOpenCodeSchema},
+		{"v1-only DB, opencode not on PATH", opencode.Version{}, &exec.Error{Name: "opencode", Err: exec.ErrNotFound}, v1OnlyOpenCodeDB, opencode.ErrOpenCodeV1},
+		{"v1-only DB, version probe failed", opencode.Version{}, errors.New("signal: killed"), v1OnlyOpenCodeDB, opencode.ErrOpenCodeV1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wireOpenCodeEnv(t, tc.v, tc.probeErr)
+			if tc.db != nil {
+				t.Setenv("WITNESS_OPENCODE_DB", tc.db(t))
+			}
+			var err error
+			captureStdout(t, func() { _, err = cmdInstallOpenCode() })
+			if !errors.Is(err, tc.want) {
+				t.Errorf("err = %v, want %v", err, tc.want)
+			}
+			if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
+				t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
+			}
+		})
+	}
+}
+
+// wire opencode writes this build's plugin and the MCP entry, says OpenCode picks them up live, and
+// names what it found without refusing: the version; one above the newest tested minor; no
+// `opencode` to run; or a probe that failed, which is never "not found" (the Windows desktop app
+// has no CLI on PATH, and a probe that times out is an OpenCode that is there).
+func TestWireOpenCodeWiresAndSaysWhatItFound(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		v        opencode.Version
+		probeErr error
+		want     []string
+		notWant  string
+	}{
+		{"tested version", opencode.Version{Major: 2, Minor: 3, Patch: 0}, nil, []string{"2.3.0"}, ""},
+		{"above the newest tested minor", opencode.Version{Major: 2, Minor: 4, Patch: 0}, nil, []string{"2.4.0", "(2.3.x)"}, ""},
+		{"not on PATH", opencode.Version{}, fmt.Errorf("opencode --version: %w", &exec.Error{Name: "opencode", Err: exec.ErrNotFound}),
+			[]string{"not found", "capture needs OpenCode 2.2.7+"}, "could not check"},
+		{"probe failed", opencode.Version{}, errors.New("opencode --version: signal: killed"),
+			[]string{"version unknown", "could not check OpenCode's version: opencode --version: signal: killed"}, "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wireOpenCodeEnv(t, tc.v, tc.probeErr)
+			var outcome wireOutcome
+			var err error
+			output := captureStdout(t, func() { outcome, err = cmdInstallOpenCode() })
+			if err != nil {
+				t.Fatalf("wire opencode: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(opencodeDir(), "plugins", openCodePluginName)); err != nil || string(got) != opencodeplugin.Source("/x/hooks/witness.sh") {
+				t.Errorf("plugin file = %q (err %v), want this build's Source of the target", got, err)
+			}
+			var cfg map[string]any
+			configContent, err := os.ReadFile(filepath.Join(opencodeDir(), "opencode.json"))
+			if err == nil {
+				err = json.Unmarshal(configContent, &cfg)
+			}
+			if mcp, _ := cfg["mcp"].(map[string]any); err != nil || mcp["witness"] == nil {
+				t.Errorf("opencode.json missing mcp.witness (err %v): %s", err, configContent)
+			}
+			if !strings.Contains(outcome.line, "picks it up live") || strings.Contains(output, "restart OpenCode") {
+				t.Errorf("result line %q / output must say OpenCode picks it up live, never restart:\n%s", outcome.line, output)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(output, w) {
+					t.Errorf("output missing %q:\n%s", w, output)
+				}
+			}
+			if tc.notWant != "" && strings.Contains(output, tc.notWant) {
+				t.Errorf("output says %q:\n%s", tc.notWant, output)
+			}
+		})
 	}
 }
 
@@ -528,8 +617,9 @@ func TestOpenCodePluginSourceBakesShim(t *testing.T) {
 	if !strings.Contains(src, `process.env.WITNESS_BIN || "witness"`) {
 		t.Fatalf("npm plugin should fall back to witness on PATH: %s", src)
 	}
-	// The body's behaviour pins (exports, idle sync, quiet-period kick, disposal) live in
-	// internal/platform/opencode/plugin/plugin_test.go; Source only prepends the shim line.
+	// The body's behaviour pins (the v2 export, the startup import, turn-end imports, the
+	// quiet-period kick, a cleanup that never stops a worker) live in plugin_test.go and the npm
+	// package's witness.test.js; Source only prepends the shim line.
 }
 
 func TestNpmPackageHidesSourceOnlyWireCommands(t *testing.T) {

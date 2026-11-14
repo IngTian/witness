@@ -7,14 +7,15 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// `worker stop --auto-only` (what the OpenCode plugin runs on dispose) latches a
-// DURABLE worker_stop_requested meta flag, and cmdWorker refuses to run an AUTO worker
-// while it is set. Only maybeSpawnAutoWorker (the shared kick gate) and a MANUAL run
-// clear it — so any caller that spawns `worker-run --auto` itself no-ops forever after
-// the first dispose, silently freezing automatic distillation for an OpenCode-only user
-// (a Claude Code user is rescued incidentally by their capture hook clearing it).
+// `worker stop --auto-only` (what the v1 OpenCode plugin ran on every dispose; a manual
+// `worker stop` latches the same flag) sets a DURABLE worker_stop_requested meta flag, and
+// cmdWorker refuses to run an AUTO worker while it is set. Only maybeSpawnAutoWorker (the
+// shared kick gate) and a MANUAL run clear it — so any caller that spawns `worker-run --auto`
+// itself no-ops forever after the first stop, silently freezing automatic distillation for
+// an OpenCode-only user (a Claude Code user is rescued incidentally by their capture hook
+// clearing it).
 //
-// This locks the clear: the kick gate must reset the flag so a post-dispose start works.
+// This locks the clear: the kick gate must reset the flag so a post-stop start works.
 func TestAutoWorkerKickClearsStopFlagAfterDispose(t *testing.T) {
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))

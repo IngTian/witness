@@ -101,6 +101,16 @@ func cmdDoctor(asJSON bool) error {
 		}
 	}
 
+	// Capture health checks
+	capture := captureHealth(st, false)
+	for _, h := range capture {
+		for _, c := range h.checks {
+			if c.level == checkFail && deferredErr == nil {
+				deferredErr = fmt.Errorf("capture check failed: %s: %s", c.key, c.value)
+			}
+		}
+	}
+
 	// Embedder check — load the model and verify EN/ZH retrieval sanity.
 	embedderStatus := "OK"
 	var enZh, enUnrelated float64
@@ -206,6 +216,14 @@ func cmdDoctor(asJSON bool) error {
 		overall = badGlyph()
 	} else if stat.BackedOff > 0 || driftTotal > 0 || deferredErr != nil || stat.Sessions == 0 {
 		overall = warnGlyph()
+	}
+	// A capture warning or failure upgrades overall to at least warnGlyph; checkInfo does not
+	for _, h := range capture {
+		for _, c := range h.checks {
+			if c.level >= checkWarn && overall == okGlyph() {
+				overall = warnGlyph()
+			}
+		}
 	}
 	fmt.Printf("%s  %s\n", overall, title("doctor", tildePath(st.Root), ""))
 	row := func(key, value, note string) { fmt.Println("    " + kvRow(key, value, note)) }
@@ -357,6 +375,39 @@ func cmdDoctor(asJSON bool) error {
 				fix("catch up", "witness worker review")
 			} else {
 				row("unreviewed", dim(line), "")
+			}
+		}
+	}
+
+	// Capture block
+	for _, h := range capture {
+		fmt.Println()
+		fmt.Println("  " + bold("Capture · "+h.name))
+		for _, c := range h.checks {
+			switch c.level {
+			case checkOK:
+				row(c.key, okGlyph()+" "+c.value, "")
+			case checkInfo:
+				row(c.key, skipGlyph()+" "+c.value, "")
+				if c.fix[0] != "" {
+					fix(c.fix[0], c.fix[1])
+				}
+			case checkWarn:
+				warn(c.key + ": " + c.value)
+				if c.why != "" {
+					because(c.why)
+				}
+				if c.fix[0] != "" {
+					fix(c.fix[0], c.fix[1])
+				}
+			case checkFail:
+				fmt.Printf("    %s %s\n", badGlyph(), red(c.key+": "+c.value))
+				if c.why != "" {
+					because(c.why)
+				}
+				if c.fix[0] != "" {
+					fix(c.fix[0], c.fix[1])
+				}
 			}
 		}
 	}

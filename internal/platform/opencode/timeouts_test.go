@@ -310,17 +310,24 @@ func TestValidateOpenCodeCapabilityStillJudgesVersionsOnTheirMerits(t *testing.T
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
 
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.7\n"), nil }
 	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
-		t.Errorf("1.18.5 must be accepted, got %v", err)
+		t.Errorf("2.2.7 must be accepted, got %v", err)
 	}
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.17.9\n"), nil }
+
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.6\n"), nil }
 	err := ValidateOpenCodeCapability(context.Background(), "")
-	if err == nil {
-		t.Fatal("1.17.9 must be rejected")
+	if !errors.Is(err, ErrOpenCodeTooOld) {
+		t.Fatalf("2.2.6 error = %v, want ErrOpenCodeTooOld", err)
 	}
 	if strings.Contains(err.Error(), "deadline") {
 		t.Errorf("an old version was rejected by TIMEOUT instead of by version check: %v", err)
+	}
+
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.19.5\n"), nil }
+	err = ValidateOpenCodeCapability(context.Background(), "")
+	if !errors.Is(err, ErrOpenCodeV1) {
+		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
 	}
 }
 
@@ -331,7 +338,7 @@ func TestLoadOpenCodeModelsUsesTheCacheWithoutSpawning(t *testing.T) {
 	withShortTimeouts(t, 5*time.Second)
 	old := openCodeVersionCommand
 	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.18.5\n"), nil }
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("opencode v2.2.7\n"), nil }
 
 	// Seed the cache for a provider name no real install would have, and remove it after so
 	// the sync.Map does not leak into other tests in this package.

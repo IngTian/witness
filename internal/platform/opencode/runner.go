@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -32,22 +31,13 @@ func (r *runner) Open(ctx context.Context) error {
 	if r.cfg.RuntimeRoot == "" {
 		return fmt.Errorf("opencode isolated runtime root is unavailable")
 	}
-	if err := newNativeRuntime(r.cfg.RuntimeRoot, nil).prepareAuth(); err != nil {
+	// Check the version before prepareAuth copies credentials: an intermediate main must never
+	// drive the v1 serve protocol against v2 (the routes return 404 and fail silently). PR 2
+	// ports the runner; until then, refuse v2.
+	if err := ValidateOpenCodeCapability(ctx, r.cfg.RuntimeRoot); err != nil {
 		return err
 	}
-	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, r.cfg.TriageModel, r.cfg.DistillModel)
-	if err != nil {
-		return err
-	}
-	r.server = srv
-	r.native = newNativeRuntime(r.cfg.RuntimeRoot, srv)
-	// Reconcile is opportunistic CLEANUP of a previous run's crash residue, not a
-	// precondition for this one: failing Open on it would let one unreadable manifest
-	// block all OpenCode distillation. Log and proceed — the next Open retries.
-	if err := r.native.reconcile(); err != nil {
-		slog.Warn("opencode: native reconcile incomplete; continuing", "err", err)
-	}
-	return nil
+	return ErrOpenCodeRunnerPending
 }
 
 func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
@@ -76,9 +66,11 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	// Pass the runtime root so the `opencode models` probe (which opens its DB
-	// read-write) hits the isolated database, never the user's.
-	return ValidateOpenCodeModelsIn(ctx, r.cfg.RuntimeRoot, models...)
+	// Check the version before any models probe: PR 2 ports the runner; until then, refuse v2.
+	if err := ValidateOpenCodeCapability(ctx, r.cfg.RuntimeRoot); err != nil {
+		return err
+	}
+	return ErrOpenCodeRunnerPending
 }
 
 // Discovered by type assertion like the platform capabilities; pinned the same way.

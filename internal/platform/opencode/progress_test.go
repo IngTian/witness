@@ -2,12 +2,10 @@ package opencode
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/IngTian/witness/internal/platform"
-	"github.com/IngTian/witness/internal/store"
 )
 
 // The OpenCode session list is read before the first import, so `witness import --agent opencode`
@@ -15,14 +13,11 @@ import (
 // counts too (it was read), and witness's own legacy scratch session is not work at all.
 func TestImportProgressCountsEverySessionRead(t *testing.T) {
 	dbPath := seedOpenCodeDB(t)
-	mutateOpenCodeDB(t, dbPath, `INSERT INTO session VALUES ('ses_empty', '/repo', 'nothing said yet', 1000, 6000),
-		('ses_scratch', '/repo', 'witness-distill', 1000, 7000)`)
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	mutateV2DB(t, dbPath,
+		session("ses_empty", 6000), // no messages
+		session("ses_scratch", 7000, "agent", "witness-distill"),
+	)
+	st := testStore(t)
 
 	var got [][2]int
 	ctx := platform.WithImportProgress(context.Background(), func(done, total int) {

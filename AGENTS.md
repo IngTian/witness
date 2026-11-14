@@ -55,10 +55,13 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - `internal/platform/{claude,opencode,codex,file}/` — the per-source adapters.
   `registry.go` requires only identity; rendering, import, capture and runner are
   optional capabilities (rendering falls back to the shared `RenderChunks`, import to
-  nothing); `cmd/commands/root.go` imports the adapters. Installers register
-  separately: a cmd-local wire-target map (`cmd/commands/installers.go`) with cmd-side
-  implementations.
-  `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS.
+  nothing), and so are `AutoImporter` (a wired source re-imported at every drain start,
+  because it can go stale without a live trigger) and `ModelRequirer` (a runner that
+  refuses an empty stage model, so wire asks for one); `cmd/commands/root.go` imports
+  the adapters. Installers register separately: a cmd-local wire-target map
+  (`cmd/commands/installers.go`) with cmd-side implementations.
+  `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS — the one source of
+  `npm/opencode/witness.js` (regenerate with `WITNESS_WRITE_NPM_PLUGIN=1 go test ./internal/platform/opencode/plugin/`).
 - `internal/bundle/` — resolves bundled-asset dirs (`prompts/`, the embedding
   model) relative to the binary via `os.Executable()` when no env var points at
   them, so a copied/installed binary self-locates its assets.
@@ -76,11 +79,12 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   `codex:`, `file:`; Claude is unprefixed). Import state is source-namespaced.
   A capture source need not provide a distillation runner.
 - **Runners are resolved from the enabled-lens set (process-wide, never
-  repo-scoped).** A **default** `runner` (in `config.toml`, bound by `witness wire
-  <target>`) distills every session unless overridden, but a lens may declare its own
-  `runner` in its `lens.json` (#75 slice 2) — so one drain can span both Claude
-  and OpenCode, each lens routed to its runtime. The set of runtimes to open is
-  derived from the active lenses (`cmd/commands/runnerset.go`), never from a repo.
+  repo-scoped).** A **default** `runner` (in `config.toml`; the first `witness wire <target>`
+  binds it, a later wire of another agent asks at a terminal and never switches it otherwise)
+  distills every session unless overridden, but a lens may declare its own `runner` in its
+  `lens.json` (#75 slice 2) — so one drain can span both Claude and OpenCode, each lens routed
+  to its runtime. The set of runtimes to open is derived from the active lenses
+  (`cmd/commands/runnerset.go`), never from a repo.
 - **Capture must never break a session.** `capture`/`session-start`/`session-end`
   are best-effort: they log failures but always exit 0. Do not make them return
   errors on a bad hook payload.

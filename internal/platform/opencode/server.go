@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,9 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -873,74 +870,18 @@ func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ..
 	return nil
 }
 
-// ErrOpenCodeV2 marks an OpenCode v2 install or database. v2 removed what this package relies
-// on — `serve --pure`, the v1 server routes and plugin API, the v1 tables — and an ungated v2
-// failed SILENTLY: the gate passed 2.x as "newer", the importer read v1 tables v2 had frozen,
-// and wire reported success for a plugin v2 never loads. So it is refused by name, and callers
-// that tolerate other gate failures (wire, when OpenCode is merely absent) can single it out.
-var ErrOpenCodeV2 = errors.New("OpenCode v2 is not supported yet: witness works with OpenCode v1 " +
-	"(1.18 or newer, below 2.0); install v1.19.5 with `npm i -g opencode-ai@1.19.5` " +
-	"(see https://github.com/IngTian/witness/issues/218)")
-
-// ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 1.18.0 up to, not
-// including, 2.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
-// pending for retry.
+// ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 2.2.7 up to, not
+// including, 3.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
+// pending for retry. runtimeRoot is unused now that the probe goes through ProbeVersion, which
+// needs no root (`--version` opens no DB, and wire and doctor have none to give); it stays because
+// the v2 runner port (PR 2) is written against this signature, and dropping it here would churn
+// both callers twice.
 func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
-	// Bound the probe: a hung `opencode --version` would otherwise block Open (and doctor)
-	// for as long as the deadline-less drain ctx lives, holding the machine-wide WorkerLock.
-	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
-	defer cancel()
-	out, err := openCodeVersionCommand(ctx, runtimeRoot)
+	v, err := ProbeVersion(ctx)
 	if err != nil {
-		return fmt.Errorf("opencode native session isolation unavailable; upgrade to OpenCode 1.18.0+: %w", err)
+		return err
 	}
-	v := strings.TrimSpace(string(out))
-	major, minor, patch, parsed := parseOpenCodeVersion(v)
-	if parsed && major >= 2 {
-		return fmt.Errorf("found OpenCode %d.%d.%d: %w", major, minor, patch, ErrOpenCodeV2)
-	}
-	if !parsed || major < 1 || (major == 1 && minor < 18) {
-		return fmt.Errorf("opencode native session isolation unavailable in %q; upgrade to OpenCode 1.18.0+", v)
-	}
-	return nil
-}
-
-// openCodeVersionLabeled / openCodeVersionBare extract the semver from `opencode --version`.
-//
-// The old parser split on whitespace and Sscanf'd each field, which assumed the output is a
-// bare "1.18.13". On Windows it is not: the packaged build writes crash-reporter and startup
-// logging to the same stream, so a real 1.18.14 install produced (verbatim, from issue #10)
-//
-//	17:41:48.929 (crash) > crash reporter started {
-//	  path: 'C:\Users\tzy20\AppData\Roaming\ai.opencode.desktop\Crashpad'
-//	}
-//	17:41:48.947         > app starting { version: '1.18.14', packaged: true, ... }
-//
-// and every field failed to parse: the version is QUOTED ('1.18.14',) so Sscanf rejects the
-// leading quote, and the clock timestamps are not N.N.N either. So witness reported "native
-// session isolation unavailable … upgrade to 1.18.0+" against an install that was already
-// new enough — blocking distillation entirely, with a message pointing at the wrong problem.
-//
-// Two patterns, tried in order:
-//   - labeled: a `version: 'X.Y.Z'` (or version=X.Y.Z) key wins, because when the tool names
-//     its own version that is authoritative;
-//   - bare: any X.Y.Z not preceded by a digit, '.' or ':' — the ':' exclusion is what stops a
-//     clock like 17:41:48.929 from being read as version 41.48.929.
-var (
-	openCodeVersionLabeled = regexp.MustCompile(`(?i)version['"\s:=]+v?(\d+)\.(\d+)\.(\d+)`)
-	openCodeVersionBare    = regexp.MustCompile(`(?:^|[^\d.:])v?(\d+)\.(\d+)\.(\d+)(?:[^\d.]|$)`)
-)
-
-func parseOpenCodeVersion(out string) (major, minor, patch int, ok bool) {
-	for _, re := range []*regexp.Regexp{openCodeVersionLabeled, openCodeVersionBare} {
-		if m := re.FindStringSubmatch(out); m != nil {
-			major, _ = strconv.Atoi(m[1])
-			minor, _ = strconv.Atoi(m[2])
-			patch, _ = strconv.Atoi(m[3])
-			return major, minor, patch, true
-		}
-	}
-	return 0, 0, 0, false
+	return CheckVersion(v)
 }
 
 func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (openCodeModelList, error) {
