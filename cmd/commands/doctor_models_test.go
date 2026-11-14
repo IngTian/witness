@@ -182,7 +182,7 @@ type fakeRequirerValidatorPlatform struct {
 	rec *[]string
 }
 
-func (p *fakeRequirerValidatorPlatform) Name() string         { return "fakerequirer" }
+func (p *fakeRequirerValidatorPlatform) Name() string          { return "fakerequirer" }
 func (p *fakeRequirerValidatorPlatform) SessionPrefix() string { return "fakerequirer:" }
 func (p *fakeRequirerValidatorPlatform) Capture(*store.Store, []byte, time.Time) (bool, error) {
 	return false, nil
