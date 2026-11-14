@@ -34,10 +34,12 @@ func (sys) Detach(cmd *exec.Cmd) {
 // children on Unix) never runs here, and TerminateProcess does not cascade to
 // children — up to mine_concurrency `claude -p` can orphan on a Windows stop, with
 // nothing bounding them (the 20-min claudeRunTimeout is a context the worker itself
-// enforces, and the worker is what just died), and so does the `opencode serve` child,
-// which only the pid-file reaper (opencode reapPriorServe) cleans up, at the next
-// drain. The fix is to put the worker itself into a KILL_ON_JOB_CLOSE Job Object at
-// startup so its children inherit it; BindToParent runs before Start, so it cannot.
+// enforces, and the worker is what just died). The `opencode serve` child is not part
+// of the gap: it ends on its stdin lease, because TerminateProcess closes the worker's
+// write end of the serve's stdin pipe and the serve exits on that EOF (read in
+// OpenCode's source; a Windows run is still owed, windows.md §C4). The fix is to
+// put the worker itself into a KILL_ON_JOB_CLOSE Job Object at startup so its
+// children inherit it; BindToParent runs before Start, so it cannot.
 // That job would also kill the detached children the worker means to outlive it
 // (spawnDetached's wakeups), so those need CREATE_BREAKAWAY_FROM_JOB — part of why it
 // waits for a Windows box to verify on.
@@ -53,8 +55,8 @@ func (sys) TerminateGroup(pid int) error {
 }
 
 // Alive reports whether pid names a live process. Callers ask "is the OWNER of this record
-// still running" — the opencode serve reaper before a kill, the model download lock before
-// stealing it — so failing toward "alive" is the safe direction for both: it declines.
+// still running" — the model download lock before stealing it — so failing toward "alive" is
+// the safe direction: it declines.
 //
 // Windows has no signal-0 equivalent, and os.FindProcess is useless as a liveness test here:
 // it succeeds for a live pid AND is the very case pid reuse produces. So ask the OS for the

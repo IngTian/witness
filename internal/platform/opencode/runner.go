@@ -81,4 +81,5 @@ func (*runner) SupportsNativeSession() bool { return true }
 
 // (SweepsOnClose() false used to be here. The capability is gone from the port — see
 // platform.Runner — because this was its only implementation and the shared-DB sweep it reported on
-// was deleted with #119's private database. The sweeps still on the Open path are orphan-only.)
+// was deleted with #119's private database. Open sweeps only week-old serve dirs; each serve ends on
+// its own stdin lease.)

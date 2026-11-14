@@ -29,96 +29,29 @@ func withShortTimeouts(t *testing.T, d time.Duration) {
 	})
 }
 
-// waitHealthy must honor its OWN budget even when a probe never answers.
-//
-// It runs during Open — i.e. FIRST, before doJSON is ever reached — and calls s.client.Do
-// directly, so the per-request bound in doJSON does NOT cover it. Its loop condition
-// (`for time.Now().Before(deadline)`) is only evaluated BETWEEN iterations, so one Do() that
-// never returns was unbounded: measured before this fix, still blocked past 40s despite the
-// documented 30s gate. The caller holds the machine-WIDE WorkerLock at that point, so
-// `distill start` (and `doctor`, via validateRuntimeModels) hangs and `capture` never drains —
-// the whole tool goes silent with no error anywhere.
-func TestWaitHealthyBoundsAWedgedProbe(t *testing.T) {
-	withShortTimeouts(t, 400*time.Millisecond)
+// (waitReady's own-budget bound and its accept/refuse cases live in serve_test.go.)
 
-	release := make(chan struct{})
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-release // accept the connection, then never respond
-	}))
-	defer ts.Close()
-	defer close(release)
-
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: make(chan struct{}),
-		logs:     &safeBuffer{},
-	}
-
-	done := make(chan error, 1)
-	start := time.Now()
-	go func() { done <- srv.waitHealthy(context.Background()) }()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("a server that never answered reported healthy")
-		}
-		// It must give up at ITS OWN budget, not at some larger per-request timeout.
-		if elapsed := time.Since(start); elapsed > 5*time.Second {
-			t.Errorf("waitHealthy took %s against a 400ms budget — the bound is not derived "+
-				"from its own deadline", elapsed.Truncate(time.Millisecond))
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("waitHealthy never returned: a wedged serve pins the machine-wide WorkerLock, " +
-			"and capture stops draining with no error anywhere")
-	}
-}
-
-// A healthy server must still be accepted promptly — the bound is a backstop, not a race.
-func TestWaitHealthyAcceptsAHealthyServer(t *testing.T) {
-	withShortTimeouts(t, 5*time.Second)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: make(chan struct{}),
-		logs:     &safeBuffer{},
-	}
-	if err := srv.waitHealthy(context.Background()); err != nil {
-		t.Fatalf("a healthy server was rejected: %v", err)
-	}
-}
-
-// A serve process that DIES during the wait must be reported as such, not as a timeout —
-// that distinction is what surfaces a real crash cause instead of burying it.
-func TestWaitHealthyReportsAnExitedServe(t *testing.T) {
+// A serve that DIES during the wait must be reported as such, not as a timeout — that distinction
+// is what surfaces a real crash cause instead of burying it.
+func TestWaitReadyReportsAnExitedServe(t *testing.T) {
 	withShortTimeouts(t, 5*time.Second)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer ts.Close()
-	waitDone := make(chan struct{})
-	close(waitDone) // the child already exited
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: waitDone,
-		logs:     &safeBuffer{},
-	}
-	err := srv.waitHealthy(context.Background())
+	s, url := readyServe(ts.URL)
+	close(s.waitDone) // the child already exited
+	err := s.waitReady(context.Background(), url)
 	if err == nil {
-		t.Fatal("an exited serve reported healthy")
+		t.Fatal("an exited serve reported ready")
 	}
-	if !strings.Contains(err.Error(), "exited before health check") {
+	if !strings.Contains(err.Error(), "exited before") {
 		t.Errorf("want the exit reported explicitly, got %v", err)
 	}
 }
 
 // The caller's cancellation must still abort the wait promptly (a `distill stop` during Open).
-func TestWaitHealthyHonorsCallerCancellation(t *testing.T) {
+func TestWaitReadyHonorsCallerCancellation(t *testing.T) {
 	withShortTimeouts(t, 30*time.Second) // long, so only the cancel can end this
 	release := make(chan struct{})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,24 +59,19 @@ func TestWaitHealthyHonorsCallerCancellation(t *testing.T) {
 	}))
 	defer ts.Close()
 	defer close(release)
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: make(chan struct{}),
-		logs:     &safeBuffer{},
-	}
+	s, url := readyServe(ts.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- srv.waitHealthy(ctx) }()
+	go func() { done <- s.waitReady(ctx, url) }()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("a cancelled wait reported healthy")
+			t.Fatal("a cancelled wait reported ready")
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("caller cancellation no longer aborts waitHealthy")
+		t.Fatal("caller cancellation no longer aborts waitReady")
 	}
 }
 

@@ -70,7 +70,7 @@ func TestModelClearingTakesNoLensesParameter(t *testing.T) {
 	if strings.Contains(sig, "lens.") || strings.Contains(sig, "lenses") {
 		t.Errorf("model clearing must NOT take a lens list: %s\n"+
 			"That parameter existed for a per-lens model UNION that was never computed. Either "+
-			"implement the union (StartOpenCodeServerIn already accepts variadic models) or keep the "+
+			"implement the union (StartOpenCodeServerIn already accepts a model list) or keep the "+
 			"parameter out — a parameter that exists only to be ignored is how the original defect "+
 			"survived review.", sig)
 	}

@@ -217,10 +217,10 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// No WorkerLock here, deliberately. This used to take it when the runner reported
 	// SweepsOnClose() — a capability that existed because OpenCode's Close once swept the SHARED
 	// OpenCode database and could delete a live worker's in-flight distill session (#72). That sweep
-	// was deleted when #119 gave distillation its own private database, and the sweeps that remain on
-	// the Open path (reapPriorServe, procCtl.ReapOrphans) are ORPHAN-ONLY: they require the owning
-	// witness process to be gone (or ppid==1), so they cannot reach a running worker. The capability's
-	// only implementation therefore answered false and this branch was unreachable.
+	// was deleted when #119 gave distillation its own private database, and the Open path now sweeps
+	// nothing a live process owns: each runner gets its own lease serve and serve dir (an orphaned
+	// serve ends on its stdin lease), and only serve dirs older than a week are removed. The
+	// capability's only implementation therefore answered false and this branch was unreachable.
 	//
 	// Keeping `lens try` lock-free is the better behaviour anyway: it is a read-only preview, and
 	// blocking it behind a multi-minute backfill was the reason the guard was conditional rather than

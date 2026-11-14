@@ -13,45 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/IngTian/witness/internal/proc"
 )
-
-func TestBuildOpenCodeServeCmdIsolation(t *testing.T) {
-	cmd := buildOpenCodeServeCmdIn(context.Background(), t.TempDir(), 12345, "secret")
-	for _, want := range []string{"serve", "--pure", "--hostname", "127.0.0.1", "--port", "12345"} {
-		if !slices.Contains(cmd.Args, want) {
-			t.Fatalf("missing %q in args: %v", want, cmd.Args)
-		}
-	}
-	joinedEnv := strings.Join(cmd.Env, "\n")
-	for _, want := range []string{"WITNESS_WORKER=1", "OPENCODE_DISABLE_CLAUDE_CODE=1", "OPENCODE_SERVER_PASSWORD=secret", "OPENCODE_CONFIG_CONTENT="} {
-		if !strings.Contains(joinedEnv, want) {
-			t.Fatalf("missing %q in env: %s", want, joinedEnv)
-		}
-	}
-	if !strings.Contains(joinedEnv, `"permission":{"*":"deny"}`) {
-		t.Fatalf("agent permission config should deny tools: %s", joinedEnv)
-	}
-}
-
-func TestBuildOpenCodeServeCmdUsesPrivateRuntimeEnv(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", "/user/data")
-	t.Setenv("OPENCODE_DB", "/user/opencode.db")
-	cmd := buildOpenCodeServeCmdIn(context.Background(), root, 12345, "secret")
-	got := map[string]string{}
-	for _, e := range cmd.Env {
-		k, v, _ := strings.Cut(e, "=")
-		if _, exists := got[k]; exists {
-			t.Fatalf("duplicate env key %q", k)
-		}
-		got[k] = v
-	}
-	if got["XDG_DATA_HOME"] != filepath.Join(root, "opencode-data") || got["OPENCODE_DB"] != filepath.Join(root, "opencode-v2.db") {
-		t.Fatalf("serve used user runtime: %#v", got)
-	}
-}
 
 func TestValidateOpenCodeCapability(t *testing.T) {
 	old := openCodeVersionCommand
@@ -78,96 +40,6 @@ func TestValidateOpenCodeCapability(t *testing.T) {
 	err = ValidateOpenCodeCapability(context.Background(), "")
 	if !errors.Is(err, ErrOpenCodeV1) {
 		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
-	}
-}
-
-// TestIsStrayServeLine locks the reap fingerprint (issue #54 I2): it must match a
-// witness-launched `opencode serve` regardless of how the executable path is
-// printed, and must NOT match a user's own `opencode serve`, any other opencode
-// subcommand, or an unrelated process. This is one half of the safety gate; the
-// other (orphan-only) is enforced in TestStrayServePIDs.
-func TestIsStrayServeLine(t *testing.T) {
-	cases := []struct {
-		name string
-		line string
-		want bool
-	}{
-		{"witness serve absolute path", "/Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR", true},
-		{"witness serve bare basename", "opencode serve --pure --hostname 127.0.0.1 --port 40001", true},
-		{"user serve without --pure", "/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 4096", false},
-		{"user serve on a public hostname", "opencode serve --pure --hostname 0.0.0.0 --port 4096", false},
-		{"other opencode subcommand", "opencode models --pure openai", false},
-		{"not opencode at all", "claude -p --model haiku", false},
-		{"empty line", "", false},
-		{"opencode substring in another binary is fine (still needs serve+flags)", "/opt/my-opencode-helper/tool run", false},
-		// Windows quotes an argv[0] containing a space (syscall.makeCmdLine), so a profile such as
-		// `C:\Users\John Smith` puts the executable inside quotes. Splitting on whitespace alone made
-		// the executable `"C:\Users\John`, and the reaper matched nothing for that user.
-		{"windows quoted executable with a space", `"C:\Users\John Smith\.opencode\bin\opencode.exe" serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR`, true},
-		{"windows quoted executable that is not opencode", `"C:\Program Files\nodejs\node.exe" opencode serve --pure --hostname 127.0.0.1`, false},
-		{"unterminated quote", `"C:\Users\John Smith\opencode.exe serve --pure --hostname 127.0.0.1`, false},
-		{"unterminated quote around a bare opencode", `"opencode serve --pure --hostname 127.0.0.1`, false},
-		// The closing quote is the FIRST one: node running the npm script quotes two paths, and
-		// only the first is the executable.
-		{"node running the npm opencode script", `"C:\Program Files\nodejs\node.exe" "C:\Users\x\npm\node_modules\opencode-ai\bin\opencode" serve --pure --hostname 127.0.0.1`, false},
-		{"opencode in a directory, not the executable", "/Users/x/.opencode/bin/node serve --pure --hostname 127.0.0.1", false},
-		{"another opencode subcommand with the serve flags", "opencode web --pure --hostname 127.0.0.1", false},
-		// Go quotes argv[0] only for an ASCII space or tab, so a profile name with a full-width
-		// (U+3000) or no-break (U+00A0) space arrives UNQUOTED. Splitting on every Unicode space
-		// cut the path there, and the reaper never recognised that user's own serve.
-		{"unquoted path with a full-width space", "C:\\Users\\山田\u3000太郎\\.opencode\\bin\\opencode.exe serve --pure --hostname 127.0.0.1 --port 5321", true},
-		{"unquoted path with a no-break space", "/Users/a\u00a0b/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isStrayServeLine(tc.line); got != tc.want {
-				t.Fatalf("isStrayServeLine(%q) = %v, want %v", tc.line, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestStrayServeFingerprintGatesOrphanReap composes the opencode fingerprint with
-// the port's orphan-gate primitive (proc.OrphanPIDs) — the same combination
-// StartOpenCodeServer drives via procCtl.ReapOrphans(isStrayServeLine). Only an
-// ORPHANED witness serve (ppid==1, matching fingerprint) may be selected. A live
-// sibling serve (ppid != 1 — still owned by its worker), a user's own serve, a
-// non-serve process, the scanner's own pid, and init itself must all be skipped.
-// (The ppid/self gate itself is exhaustively covered by proc.TestOrphanPIDs; this
-// guards that our fingerprint is the predicate feeding it.)
-func TestStrayServeFingerprintGatesOrphanReap(t *testing.T) {
-	const self = 700
-	psOut := strings.Join([]string{
-		"  4321     1 /Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR", // orphan → reap
-		"  4400  4399 /Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5322 --log-level ERROR", // LIVE sibling (ppid!=1) → skip
-		"  4500     1 /usr/local/bin/opencode serve --hostname 127.0.0.1 --port 6000",                                  // user's own serve (no --pure) → skip
-		"  4600     1 opencode models --pure openai",                                                                   // other subcommand → skip
-		"   700     1 opencode serve --pure --hostname 127.0.0.1 --port 9999",                                          // self → skip
-		"     1     0 /sbin/launchd",         // init → skip
-		"  garbage line that does not parse", // skip
-	}, "\n")
-
-	got := proc.OrphanPIDs(psOut, self, isStrayServeLine)
-	want := []int{4321}
-	if !slices.Equal(got, want) {
-		t.Fatalf("orphan reap selection = %v, want %v", got, want)
-	}
-}
-
-// TestBuildOpenCodeServeCmdDrivesPort proves buildOpenCodeServeCmd binds the serve
-// child's lifetime to the worker through the port (proc.BindToParent) rather than
-// touching syscall.SysProcAttr directly — verified with a proc.Fake, no real
-// process spawned. The GOOS-specific effect of BindToParent (Pdeathsig on Linux,
-// no-op elsewhere) is covered in the proc package's own adapter tests.
-func TestBuildOpenCodeServeCmdDrivesPort(t *testing.T) {
-	prev := procCtl
-	fake := &proc.Fake{}
-	procCtl = fake
-	defer func() { procCtl = prev }()
-
-	cmd := buildOpenCodeServeCmdIn(context.Background(), t.TempDir(), 12345, "secret")
-	if len(fake.Bound) != 1 || fake.Bound[0] != cmd {
-		t.Fatalf("buildOpenCodeServeCmd did not call BindToParent on the serve cmd: %+v", fake.Bound)
 	}
 }
 

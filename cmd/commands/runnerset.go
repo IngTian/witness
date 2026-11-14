@@ -57,7 +57,7 @@ type openedRunner struct {
 // That model is already validated when it is first used: the run fails, the lens backs off, and the
 // error names the model. Trading a new config field plus its migration for moving one error message
 // earlier is not worth it. If per-lens models ever become common enough that a fail-at-Open check
-// pays for itself, StartOpenCodeServerIn already accepts variadic models — the plumbing is there.
+// pays for itself, StartOpenCodeServerIn already accepts a model list — the plumbing is there.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
 	// Every model call opens through here (worker, review + emergent, compact + claims, profile
 	// regeneration), so this is the one place to refuse an archive a newer witness wrote — before

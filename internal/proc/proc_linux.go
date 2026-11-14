@@ -24,9 +24,3 @@ import (
 func (sys) BindToParent(cmd *exec.Cmd) {
 	ensureSysProcAttr(cmd).Pdeathsig = syscall.SIGKILL
 }
-
-// ReapOrphans is a no-op on Linux: Pdeathsig guarantees the kernel has already
-// killed any child whose parent died, so a startup scan would never find an orphan.
-// The pattern-based reap is the macOS/Windows fallback (proc_other.go), for the
-// platforms that lack a Pdeathsig equivalent.
-func (sys) ReapOrphans(want func(cmdline string) bool) {}

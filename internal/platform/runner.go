@@ -199,8 +199,8 @@ type RunnerProvider interface {
 
 // (SweepsOnCloser used to live here: "does Close sweep shared state a live worker needs?", so
 // `witness lens try` could take WorkerLock only then. True in #72, when OpenCode's Close swept the
-// SHARED database; v0.7.0's private database deleted that sweep, and the Open-path reapers are
-// orphan-only. A sweeping runner would need three lines of locking at the call site.)
+// SHARED database; v0.7.0's private database deleted that sweep, and the Open path now sweeps only
+// week-old OpenCode serve dirs. A sweeping runner would need three lines of locking at the call site.)
 
 // RunnerForName mints the Runner for an explicit runner NAME: empty means the default
 // platform, and an unknown name fails closed so a typo surfaces instead of silently
