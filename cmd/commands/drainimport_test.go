@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"database/sql"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -10,87 +9,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 )
 
-// TestDrainStartsWithAnOpenCodeImportWhenWired: a wired OpenCode (plugin file exists)
-// is imported incrementally at every drain start, so Claude-kicked drains pick up sessions
-// a silently-rejected plugin missed.
-func TestDrainStartsWithAnOpenCodeImportWhenWired(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
-	configDir := t.TempDir()
-	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
-	t.Setenv("WITNESS_OPENCODE_DB", seedOpenCodeV2DB(t, 5000))
-
-	// Write the plugin file to wire OpenCode.
-	pluginPath := filepath.Join(configDir, "plugins", opencode.PluginFileName)
-	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(pluginPath, []byte("// wired"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ran, err := runWorker(false)
-	if err != nil {
-		t.Fatalf("runWorker: %v", err)
-	}
-	if !ran {
-		t.Fatal("worker should have run")
-	}
-
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	if got := st.RawCount("opencode:ses_fixture"); got != 2 {
-		t.Fatalf("RawCount(opencode:ses_fixture) = %d, want 2 (user+assistant)", got)
-	}
-}
-
-// TestDrainDoesNotImportAnUnwiredOpenCode: an unwired OpenCode (no plugin file, no prior
-// import) is never imported at drain start — the user never wired it, so witness must not
-// capture an editor they did not opt into.
-func TestDrainDoesNotImportAnUnwiredOpenCode(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
-	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir()) // empty, no plugin
-	t.Setenv("WITNESS_OPENCODE_DB", seedOpenCodeV2DB(t, 5000))
-
-	ran, err := runWorker(false)
-	if err != nil {
-		t.Fatalf("runWorker: %v", err)
-	}
-	if !ran {
-		t.Fatal("worker should have run")
-	}
-
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	if got := st.RawCount("opencode:ses_fixture"); got != 0 {
-		t.Fatalf("unwired OpenCode must not be imported, got %d raw records", got)
-	}
-}
-
-// wireOpenCodeForTest plants a plugin file in configDir, which is what makes OpenCode "wired" for
-// ImportAtDrainStart and health.
-func wireOpenCodeForTest(t *testing.T, configDir string) {
+// drainEnv sandboxes one drain: a fresh archive with no default lens and an empty OpenCode config
+// dir (nothing wired yet).
+func drainEnv(t *testing.T) {
 	t.Helper()
-	pluginPath := filepath.Join(configDir, "plugins", opencode.PluginFileName)
-	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(pluginPath, []byte("// wired"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
 }
 
 // drainLog runs one foreground drain and returns what it logged: runWorker points slog at the
@@ -118,28 +46,50 @@ func drainLog(t *testing.T) string {
 	return string(b)
 }
 
+// rawCount is how many L0 records the archive holds for session.
+func rawCount(t *testing.T, session string) int {
+	t.Helper()
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	return st.RawCount(session)
+}
+
+// A wired OpenCode (a plugin file) is imported incrementally at every drain start, so Claude-kicked
+// drains pick up sessions a silently-rejected plugin missed. An unwired one (no plugin file, no
+// prior import) never is: witness must not capture an editor the user did not opt into.
+func TestDrainStartImportFollowsTheWiring(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		wired bool
+		want  int
+	}{
+		{"wired", true, 2}, // user + assistant
+		{"unwired", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			drainEnv(t)
+			t.Setenv("WITNESS_OPENCODE_DB", seedOpenCodeV2DB(t, 5000))
+			if tc.wired {
+				plantOpenCodePlugin(t, "// wired")
+			}
+			drainLog(t)
+			if got := rawCount(t, "opencode:ses_fixture"); got != tc.want {
+				t.Fatalf("RawCount(opencode:ses_fixture) = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDrainStartImportNeverFailsTheDrain: even when the drain-start import fails (here a v1-only
 // DB, which ProbeSchema refuses), the drain proceeds with what was already captured. Import errors
 // are logged but never surfaced as drain errors.
 func TestDrainStartImportNeverFailsTheDrain(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
-	configDir := t.TempDir()
-	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
-
-	// A real v1-only DB (a v1 table, no session_v2): a fake header would fail as "file is not a
-	// database" before ProbeSchema ever ran.
-	v1Path := filepath.Join(t.TempDir(), "v1.db")
-	db, err := sql.Open("sqlite", v1Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE session (id TEXT PRIMARY KEY)`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	t.Setenv("WITNESS_OPENCODE_DB", v1Path)
-	wireOpenCodeForTest(t, configDir)
+	drainEnv(t)
+	t.Setenv("WITNESS_OPENCODE_DB", v1OnlyOpenCodeDB(t))
+	plantOpenCodePlugin(t, "// wired")
 
 	// The drain must succeed even though the import fails, and the failure is logged, naming v1
 	logged := drainLog(t)
@@ -150,12 +100,9 @@ func TestDrainStartImportNeverFailsTheDrain(t *testing.T) {
 
 // Wired before OpenCode was first used: no DB yet is nothing to import, not a warning on every drain.
 func TestDrainStartImportIsQuietWhenOpenCodeHasNoDatabaseYet(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
-	configDir := t.TempDir()
-	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+	drainEnv(t)
 	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(t.TempDir(), "opencode.db"))
-	wireOpenCodeForTest(t, configDir)
+	plantOpenCodePlugin(t, "// wired")
 
 	if logged := drainLog(t); strings.Contains(logged, "drain-start import failed") {
 		t.Fatalf("a missing OpenCode DB was logged as a failed import; got:\n%s", logged)
@@ -165,27 +112,16 @@ func TestDrainStartImportIsQuietWhenOpenCodeHasNoDatabaseYet(t *testing.T) {
 // Unwire is the consent switch: after `witness unwire opencode`, no drain imports OpenCode again,
 // even though an earlier import had recorded what it saw, and status no longer checks it.
 func TestUnwireStopsOpenCodeCapture(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
-	configDir := t.TempDir()
-	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+	drainEnv(t)
 	t.Setenv("OPENCODE_CONFIG", "")
 	dbPath := seedOpenCodeV2DB(t, 5000)
 	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
-	wireOpenCodeForTest(t, configDir)
+	plantOpenCodePlugin(t, "// wired")
 
-	if _, err := runWorker(false); err != nil {
-		t.Fatal(err)
-	}
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := st.RawCount("opencode:ses_fixture"); got != 2 {
-		st.Close()
+	drainLog(t)
+	if got := rawCount(t, "opencode:ses_fixture"); got != 2 {
 		t.Fatalf("precondition: wired drain imported %d records, want 2", got)
 	}
-	st.Close()
 
 	var unwireErr error
 	out := captureStdout(t, func() { unwireErr = cmdUninstall([]string{"opencode"}) })
@@ -197,18 +133,11 @@ func TestUnwireStopsOpenCodeCapture(t *testing.T) {
 	}
 
 	addOpenCodeSession(t, dbPath, "ses_after", 9000)
-	if _, err := runWorker(false); err != nil {
-		t.Fatal(err)
-	}
-	st, err = store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if got := st.RawCount("opencode:ses_after"); got != 0 {
+	drainLog(t)
+	if got := rawCount(t, "opencode:ses_after"); got != 0 {
 		t.Fatalf("a drain after unwire imported %d records of a new OpenCode session, want 0", got)
 	}
-	if checks := openCodeHealth(st, true); checks != nil {
+	if checks := openCodeChecks(t, true); checks != nil {
 		t.Errorf("status still checks an unwired OpenCode: %+v", checks)
 	}
 }
