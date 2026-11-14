@@ -733,12 +733,12 @@ func askForModels(st *store.Store, runner string, in io.Reader) error {
 			return nil
 		}
 	}
-	modelHint := "witness config set mine_model <provider/model>"
+	// Every exit without a model ends in this hint, the one place its text is spelled
 	refuse := func(why string) error {
 		if why != "" {
 			fmt.Println(resultRow(warnGlyph(), "model", "not set", why))
 		}
-		fmt.Println(hint("set a model", modelHint))
+		fmt.Println(hint("set a model", "witness config set mine_model <provider/model>"))
 		fmt.Println(dim("  `opencode models` lists what is available"))
 		return nil
 	}

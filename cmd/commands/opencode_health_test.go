@@ -191,8 +191,11 @@ func TestOpenCodeHealthPluginMCPAndDatabaseRows(t *testing.T) {
 		{"missing shim", func(string) string { return current("/missing/witness.sh") }, "", nil, "plugin", checkFail, "shim missing", "/missing"},
 		{"no MCP entry", current, "{}", nil, "MCP entry", checkWarn, "missing", ""},
 		{"missing config", current, "", nil, "MCP entry", checkWarn, "config missing", ""},
+		{"unparseable config", current, "{not json", nil, "MCP entry", checkWarn, "config unparseable", "witness wire opencode"},
 		{"correctly wired config", current, wiredConfig, nil, "MCP entry", 0, "", ""},
 		{"v1-only database", current, "", v1OnlyOpenCodeDB, "database", checkFail, "unreadable", "OpenCode v1"},
+		// Wired before OpenCode's first run
+		{"no database yet", current, "", func(t *testing.T) string { return filepath.Join(t.TempDir(), "opencode.db") }, "database", checkOK, "none yet", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shim := currentOpenCodePlugin(t, openCodeHealthEnv(t, time.Now().UnixMilli()))
