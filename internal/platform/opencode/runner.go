@@ -31,13 +31,16 @@ func (r *runner) Open(ctx context.Context) error {
 	if r.cfg.RuntimeRoot == "" {
 		return fmt.Errorf("opencode isolated runtime root is unavailable")
 	}
-	// Check the version before prepareAuth copies credentials: an intermediate main must never
-	// drive the v1 serve protocol against v2 (the routes return 404 and fail silently). PR 2
-	// ports the runner; until then, refuse v2.
-	if err := ValidateOpenCodeCapability(ctx, r.cfg.RuntimeRoot); err != nil {
+	// <root>/xdg held a COPY of the user's auth.json made by the v1 prepareAuth; 2.2.7+ imports
+	// such a file into a fresh DB (runner §(d) Credentials), and 7.6 copies nothing.
+	removeV1Runtime(r.cfg.RuntimeRoot)
+	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, r.cfg.RunnerModels)
+	if err != nil {
 		return err
 	}
-	return ErrOpenCodeRunnerPending
+	r.server = srv
+	r.native = newNativeRuntime(r.cfg.RuntimeRoot, srv)
+	return r.native.reconcile()
 }
 
 func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
@@ -66,17 +69,17 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	// Check the version before any models probe: PR 2 ports the runner; until then, refuse v2.
-	if err := ValidateOpenCodeCapability(ctx, r.cfg.RuntimeRoot); err != nil {
+	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, models)
+	if err != nil {
 		return err
 	}
-	return ErrOpenCodeRunnerPending
+	return srv.Close()
 }
 
 // Discovered by type assertion like the platform capabilities; pinned the same way.
 var _ platform.NativeSessionSupport = (*runner)(nil)
 
-func (*runner) InvocationHint() string      { return "opencode serve" }
+func (*runner) InvocationHint() string      { return "opencode serve --stdio" }
 func (*runner) SupportsNativeSession() bool { return true }
 
 // (SweepsOnClose() false used to be here. The capability is gone from the port — see

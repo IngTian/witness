@@ -18,7 +18,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/proc"
 )
 
@@ -27,18 +26,11 @@ import (
 // proc.Fake to prove the wiring without spawning real processes.
 var procCtl proc.Control = proc.System()
 
-var openCodeModelsCache sync.Map // provider -> openCodeModelList
-
 var openCodeVersionCommand = func(ctx context.Context, runtimeRoot string) ([]byte, error) {
 	return openCodeCommand(ctx, runtimeRoot, "--version").Output()
 }
 
 var openCodeAsyncPollInterval = time.Second
-
-type openCodeModelList struct {
-	set  map[string]bool
-	list []string
-}
 
 // OpenCodeServer is the HTTP client for one private `opencode serve` (serve.go). Each Run creates a
 // fresh short-lived OpenCode session, sends one prompt, then deletes that session so distillation
@@ -69,12 +61,17 @@ func newOpenCodeServer(baseURL, authHeader, configPath string, client *http.Clie
 }
 
 // StartOpenCodeServerIn starts a private lease serve under runtimeRoot and returns its client.
+// It validates the version, refuses an empty model, spawns the serve, and validates that the
+// configured models are available. On any failure it closes the serve.
 //
 // There is no runtimeRoot-less variant: the empty root once meant "use the AMBIENT OpenCode
 // database", i.e. opt out of the private per-witness database that #119 made the isolation
 // boundary, so callers pass the root explicitly and an empty one is refused.
 func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models []string) (*OpenCodeServer, error) {
-	if err := ValidateOpenCodeModelsIn(ctx, runtimeRoot, models...); err != nil {
+	if err := requireModels(models); err != nil {
+		return nil, err
+	}
+	if err := ValidateOpenCodeCapability(ctx, runtimeRoot); err != nil {
 		return nil, err // also refuses an empty runtimeRoot
 	}
 	serve, err := startPrivateServe(ctx, runtimeRoot, allowsFree(models))
@@ -83,6 +80,10 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models []str
 	}
 	srv := newOpenCodeServer(serve.URL, serve.AuthHeader(), serve.ConfigPath(), &http.Client{})
 	srv.serve = serve
+	if err := srv.validateModels(ctx, models); err != nil {
+		_ = srv.Close()
+		return nil, err
+	}
 	return srv, nil
 }
 
@@ -592,41 +593,6 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 	return nil, fmt.Errorf("opencode %s %s failed: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))
 }
 
-// ValidateOpenCodeModelsIn ensures configured OpenCode model names are available from
-// `opencode models`, running the probe against the witness-owned runtime root rather than the user's
-// database (the probe opens its OPENCODE_DB read-write). Empty model strings are valid and mean "use
-// OpenCode's default".
-//
-// runtimeRoot is MANDATORY. "" used to keep the ambient env — the user's own opencode.db — which
-// #152 called a trap when it deleted the wrappers that passed it; this refuses it instead, and
-// StartOpenCodeServerIn calls this first, so serve inherits the refusal.
-func ValidateOpenCodeModelsIn(ctx context.Context, runtimeRoot string, models ...string) error {
-	if runtimeRoot == "" {
-		return fmt.Errorf("opencode isolated runtime root is unavailable")
-	}
-	if err := ValidateOpenCodeCapability(ctx, runtimeRoot); err != nil {
-		return err
-	}
-	for _, model := range models {
-		model = strings.TrimSpace(model)
-		if model == "" {
-			continue
-		}
-		provider, _, ok := strings.Cut(model, "/")
-		if !ok || provider == "" {
-			return fmt.Errorf("opencode model %q must use provider/model format; choose one from `opencode models`", model)
-		}
-		available, err := loadOpenCodeModels(ctx, runtimeRoot, provider)
-		if err != nil {
-			return err
-		}
-		if !available.set[model] {
-			return fmt.Errorf("opencode model %q is not available from `opencode models %s`%s", model, provider, modelHint(available.list))
-		}
-	}
-	return nil
-}
-
 // ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 2.2.7 up to, not
 // including, 3.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
 // pending for retry. runtimeRoot is unused now that the probe goes through ProbeVersion, which
@@ -639,56 +605,6 @@ func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
 		return err
 	}
 	return CheckVersion(v)
-}
-
-func loadOpenCodeModels(ctx context.Context, runtimeRoot, provider string) (openCodeModelList, error) {
-	if cached, ok := openCodeModelsCache.Load(provider); ok {
-		return cached.(openCodeModelList), nil
-	}
-	// Bound the probe (see openCodeProbeTimeout): `opencode models` opens its DB and
-	// applies migrations, so it can genuinely block — and with a deadline-less ctx it
-	// blocked Open/doctor forever while holding the machine-wide WorkerLock.
-	ctx, cancel := context.WithTimeout(ctx, openCodeProbeTimeout)
-	defer cancel()
-	// Isolated (openCodeCommand + the mandatory runtime root): `opencode models` opens its
-	// OPENCODE_DB read-WRITE (and applies schema migrations), so the ambient env would reach
-	// into the USER's database from the hot Open/doctor paths — the one thing this package
-	// must never do.
-	cmd := openCodeCommand(ctx, runtimeRoot, "models", "--pure", provider)
-	var out, errb bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
-		return openCodeModelList{}, fmt.Errorf("opencode models %s failed: %w (stderr: %s)", provider, err, platform.StderrExcerpt(errb.String()))
-	}
-	list := parseOpenCodeModels(out.String())
-	set := make(map[string]bool, len(list))
-	for _, m := range list {
-		set[m] = true
-	}
-	available := openCodeModelList{set: set, list: list}
-	openCodeModelsCache.Store(provider, available)
-	return available, nil
-}
-
-func parseOpenCodeModels(output string) []string {
-	seen := map[string]bool{}
-	var models []string
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		for _, field := range strings.Fields(line) {
-			field = strings.TrimSpace(field)
-			if !strings.Contains(field, "/") || seen[field] {
-				continue
-			}
-			seen[field] = true
-			models = append(models, field)
-		}
-	}
-	return models
 }
 
 func modelHint(models []string) string {

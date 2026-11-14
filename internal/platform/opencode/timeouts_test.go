@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -256,65 +255,5 @@ func TestValidateOpenCodeCapabilityStillJudgesVersionsOnTheirMerits(t *testing.T
 	err = ValidateOpenCodeCapability(context.Background(), "")
 	if !errors.Is(err, ErrOpenCodeV1) {
 		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
-	}
-}
-
-// loadOpenCodeModels bounds its probe too. It is exercised through ValidateOpenCodeModelsIn
-// with a cached provider so no `opencode` process is ever spawned — the point is that the
-// cache short-circuit still works and the deadline plumbing did not break the happy path.
-func TestLoadOpenCodeModelsUsesTheCacheWithoutSpawning(t *testing.T) {
-	withShortTimeouts(t, 5*time.Second)
-	old := openCodeVersionCommand
-	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("opencode v2.2.7\n"), nil }
-
-	// Seed the cache for a provider name no real install would have, and remove it after so
-	// the sync.Map does not leak into other tests in this package.
-	const provider = "witness-test-provider"
-	openCodeModelsCache.Store(provider, openCodeModelList{
-		set: map[string]bool{provider + "/m1": true}, list: []string{provider + "/m1"},
-	})
-	t.Cleanup(func() { openCodeModelsCache.Delete(provider) })
-
-	if err := ValidateOpenCodeModelsIn(context.Background(), t.TempDir(), provider+"/m1"); err != nil {
-		t.Errorf("a cached model must validate without spawning `opencode models`: %v", err)
-	}
-	err := ValidateOpenCodeModelsIn(context.Background(), t.TempDir(), provider+"/absent")
-	if err == nil {
-		t.Fatal("a model absent from the cached list must be rejected")
-	}
-	if strings.Contains(err.Error(), "deadline") {
-		t.Errorf("rejected by timeout rather than by availability: %v", err)
-	}
-}
-
-// The probe deadline must derive from the caller's ctx. (That every `opencode` spawn goes through
-// the context-bound openCodeCommand is TestEveryOpenCodeSpawnGoesThroughTheOneHelper's scan.)
-func TestEveryOpenCodeSpawnIsContextBound(t *testing.T) {
-	src, err := os.ReadFile("server.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// LF-normalize: a CRLF checkout (git's Windows default) makes the "\n}\n" scan below
-	// miss, and the slice that follows then panics on a negative bound. Seen on a real
-	// Windows run. .gitattributes pins *.go to LF too; this keeps the test honest regardless.
-	src = []byte(normalizeOpenCodeNewlines(string(src)))
-	// loadOpenCodeModels must apply the probe bound (it builds its command inline).
-	i := strings.Index(string(src), "func loadOpenCodeModels(")
-	if i < 0 {
-		t.Fatal("loadOpenCodeModels not found")
-	}
-	end := strings.Index(string(src)[i:], "\n}\n")
-	if end < 0 {
-		t.Fatal("could not delimit loadOpenCodeModels; the scan would slice out of range")
-	}
-	fn := string(src)[i : i+end]
-	if !strings.Contains(fn, "openCodeProbeTimeout") {
-		t.Error("loadOpenCodeModels must bound its `opencode models` probe: a hung one blocks " +
-			"Open/doctor while holding the machine-wide WorkerLock")
-	}
-	if !strings.Contains(fn, "context.WithTimeout(ctx") {
-		t.Error("loadOpenCodeModels's deadline must derive from the CALLER's ctx, so a " +
-			"cancelled drain aborts it promptly")
 	}
 }

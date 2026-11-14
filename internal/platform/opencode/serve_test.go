@@ -61,7 +61,7 @@ func TestPrivateServeHelperProcess(t *testing.T) {
 			case "/api/info":
 				_, _ = w.Write([]byte(`{"version":"2.3.0"}`))
 			case "/api/model":
-				_, _ = w.Write([]byte(`[]`))
+				_, _ = w.Write([]byte(`{"data":[{"providerID":"openai","id":"gpt-5.5"}]}`))
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
@@ -395,10 +395,9 @@ func TestStaleServeDirsAreSwept(t *testing.T) {
 	}
 }
 
-// An empty root used to mean the AMBIENT OpenCode database (#152's trap): the `opencode models`
-// probe and serve itself ran against the USER's opencode.db. Both entry points refuse it before
-// spawning; the stub fails loudly if anything is spawned at all. The cached provider means the
-// pre-fix ValidateOpenCodeModelsIn returned nil here instead of spawning.
+// An empty root used to mean the AMBIENT OpenCode database (#152's trap): serve ran against the
+// USER's opencode.db. StartOpenCodeServerIn refuses it before spawning; the stub fails loudly if
+// anything is spawned at all.
 func TestEmptyRuntimeRootIsRefused(t *testing.T) {
 	prevVersion, prevExec := openCodeVersionCommand, execCommandContext
 	t.Cleanup(func() { openCodeVersionCommand, execCommandContext = prevVersion, prevExec })
@@ -407,16 +406,13 @@ func TestEmptyRuntimeRootIsRefused(t *testing.T) {
 		t.Errorf("spawned %s %v with no runtime root", name, args)
 		return exec.CommandContext(ctx, os.Args[0], "-test.run=XXX_NONE")
 	}
-	const provider = "witness-test-emptyroot"
-	openCodeModelsCache.Store(provider, openCodeModelList{set: map[string]bool{provider + "/m": true}})
-	t.Cleanup(func() { openCodeModelsCache.Delete(provider) })
 
 	if s, err := startPrivateServe(context.Background(), "", false); err == nil {
 		_ = s.Close()
 		t.Error("startPrivateServe accepted an empty runtime root")
 	}
-	if err := ValidateOpenCodeModelsIn(context.Background(), "", provider+"/m"); err == nil {
-		t.Error("ValidateOpenCodeModelsIn accepted an empty runtime root")
+	if _, err := StartOpenCodeServerIn(context.Background(), "", []string{"openai/x"}); err == nil {
+		t.Error("StartOpenCodeServerIn accepted an empty runtime root")
 	}
 }
 

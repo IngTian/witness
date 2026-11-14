@@ -5,8 +5,7 @@ supported platforms, first-run model download) is documented in the
 [npm package README](../npm/opencode/README.md).
 
 > **OpenCode 2.2.7 or newer.** v1 is refused by name (`opencode upgrade --major`); witness v0.13.0
-> was the last release for v1. Capture works on v2 now; distilling through OpenCode on v2 arrives
-> in a later release.
+> was the last release for v1. Both capture and the runner work on v2.2.7+ now.
 
 ### OpenCode support
 
@@ -32,8 +31,10 @@ entry, it is left untouched.
 witness reads your OpenCode database **read-only** to import sessions and never writes to it.
 Distillation runs on a private `opencode serve` whose `XDG_DATA_HOME` and `OPENCODE_DB` point under
 witness's own runtime directory, so its scratch sessions never appear in your OpenCode session list.
-Your `auth.json` is copied (never linked) into that runtime so the private serve can reach your
-providers; environment-backed providers (e.g. `ANTHROPIC_API_KEY`) work without it.
+The runner can use free `opencode/*` models, API keys exported as environment variables (e.g.
+`ANTHROPIC_API_KEY`), and ambient cloud credentials such as `AWS_PROFILE`/`AWS_REGION` for Amazon
+Bedrock. It never uses logins saved with `opencode auth login`, ChatGPT or other OAuth sign-ins, or
+providers defined in your `opencode.json`.
 
 > **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is
 > `witness-distill` when distillation was interrupted. Current releases never create them and skip

@@ -41,6 +41,9 @@ type Config struct {
 	ReviewPoignancy int    // ...OR when accumulated observation poignancy since last review crosses this (0 = disabled)
 	AutoDistill     bool   // whether hooks/plugins may start the worker automatically
 	MineConcurrency int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and a memory-safe ceiling (issue #22). <=0 means DefaultMineConcurrency.
+	// RunnerModels is not persisted: every model the caller will ask this runner for (filled by
+	// cmd's runtimeModels); "" marks an unnamed stage.
+	RunnerModels []string
 	// ChunkMaxChars is the per-input character budget for shaping a session into model
 	// input (issue #57). 0 (the default) = NEVER chunk: mine each session whole, which
 	// the measured data shows is the best-quality path (splitting a session into

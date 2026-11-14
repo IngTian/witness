@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -211,33 +210,6 @@ func TestNativeRunsGenerateConcurrentlyAfterIsolatedScratchSetup(t *testing.T) {
 	}
 	if fake.peak() != wantConcurrent {
 		t.Fatalf("peak concurrent native generations=%d, want %d", fake.peak(), wantConcurrent)
-	}
-}
-
-func TestNativePrepareAuthCopiesPrivately(t *testing.T) {
-	root, user := t.TempDir(), t.TempDir()
-	db := filepath.Join(user, "opencode.db")
-	auth := filepath.Join(user, "auth.json")
-	t.Setenv("WITNESS_OPENCODE_DB", db)
-	if err := os.WriteFile(auth, []byte(`{"token":"secret"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	n := newNativeRuntime(root, nil)
-	if err := n.prepareAuth(); err != nil {
-		t.Fatal(err)
-	}
-	dst := filepath.Join(root, "xdg", "opencode", "auth.json")
-	b, err := os.ReadFile(dst)
-	if err != nil || string(b) != `{"token":"secret"}` {
-		t.Fatalf("auth copy: %q %v", b, err)
-	}
-	// Mode bits are POSIX: Windows reports 0666 for any writable file and keeps the copy private
-	// by the profile directory's inherited ACL, which this code does not touch.
-	if info, err := os.Stat(dst); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
-		t.Fatalf("auth mode=%v err=%v", info.Mode(), err)
-	}
-	if info, err := os.Stat(auth); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o644) {
-		t.Fatalf("source auth changed: %v %v", info, err)
 	}
 }
 

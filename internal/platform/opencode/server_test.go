@@ -44,20 +44,6 @@ func TestValidateOpenCodeCapability(t *testing.T) {
 	}
 }
 
-func TestParseOpenCodeModels(t *testing.T) {
-	out := strings.Join([]string{
-		"openai/gpt-5.5",
-		"openai/gpt-5.5-fast",
-		"openai/gpt-5.5",
-		"metadata without model",
-	}, "\n")
-	got := parseOpenCodeModels(out)
-	want := []string{"openai/gpt-5.5", "openai/gpt-5.5-fast"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("got %#v, want %#v", got, want)
-	}
-}
-
 func TestModelHint(t *testing.T) {
 	if got := modelHint(nil); !strings.Contains(got, "returned no models") {
 		t.Fatalf("empty hint = %q", got)
