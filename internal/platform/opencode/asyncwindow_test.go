@@ -151,12 +151,6 @@ func TestCompletedWithoutTextFailsFast(t *testing.T) {
 	}
 }
 
-// Missing credentials must be LOUD, and must be searched for in more than one place.
-//
-// This is the defect that made an unauthenticated isolated serve indistinguishable from a slow
-// model. witness points the serve's XDG_DATA_HOME at its own runtime root, so the serve cannot see
-// the user's OpenCode data dir; credentials are there only because prepareAuth copied them. The old
-// code probed exactly ONE path — beside the database, which is the Unix layout — and returned nil
 // The #143 budget, v2 shape: a request OpenCode is still retrying has not started.
 //
 // Reported from a real run (v1): witness fired four simultaneous prompts and all four died at

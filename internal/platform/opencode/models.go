@@ -10,13 +10,13 @@ import (
 	"strings"
 )
 
-// requireModels refuses an empty model name (an unnamed stage): OpenCode's default model (opencode/
-// big-pickle with free models on) may train on inputs, so witness never lets OpenCode choose.
+// requireModels refuses an empty model name (an unnamed stage) and bad formats (no provider/model
+// slash): OpenCode's default model (opencode/big-pickle with free models on) may train on inputs,
+// so witness never lets OpenCode choose. It checks format before any spawn.
 func requireModels(models []string) error {
 	for _, m := range models {
-		if strings.TrimSpace(m) == "" {
-			return fmt.Errorf("%w; set one with `witness config set mine_model <provider/model>` (and review_model), "+
-				"or a lens's extract_model/review_model; `opencode models` lists the ids", ErrOpenCodeNoModel)
+		if _, err := splitOpenCodeModel(m); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -26,23 +26,9 @@ func requireModels(models []string) error {
 // fetches GET /api/model once, builds the available set (provider/id, plus provider/id#variant for
 // every variant), and fails on the first model not in that set with unavailableModel.
 func (s *OpenCodeServer) validateModels(ctx context.Context, models []string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/api/model", nil)
+	data, err := s.doJSON(ctx, http.MethodGet, "/api/model", nil, http.StatusOK)
 	if err != nil {
 		return err
-	}
-	if s.authHeader != "" {
-		req.Header.Set("Authorization", s.authHeader)
-	}
-	ctx, cancel := context.WithTimeout(ctx, openCodeRequestTimeout)
-	defer cancel()
-	req = req.WithContext(ctx)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("opencode GET /api/model: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opencode GET /api/model: %s", resp.Status)
 	}
 
 	var result struct {
@@ -54,7 +40,7 @@ func (s *OpenCodeServer) validateModels(ctx context.Context, models []string) er
 			} `json:"variants"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return fmt.Errorf("opencode /api/model decode: %w", err)
 	}
 
@@ -113,22 +99,8 @@ func (s *OpenCodeServer) unavailableModel(ctx context.Context, model string, ava
 // It returns nil on any error (the provider might not have an integration route, or the route might
 // be missing; the unavailableModel hint survives this and still names the three credential kinds).
 func (s *OpenCodeServer) providerEnvVars(ctx context.Context, provider string) []string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/api/integration/"+provider, nil)
+	data, err := s.doJSON(ctx, http.MethodGet, "/api/integration/"+provider, nil, http.StatusOK)
 	if err != nil {
-		return nil
-	}
-	if s.authHeader != "" {
-		req.Header.Set("Authorization", s.authHeader)
-	}
-	ctx, cancel := context.WithTimeout(ctx, openCodeRequestTimeout)
-	defer cancel()
-	req = req.WithContext(ctx)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
 
@@ -140,7 +112,7 @@ func (s *OpenCodeServer) providerEnvVars(ctx context.Context, provider string) [
 			} `json:"methods"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil
 	}
 
@@ -152,12 +124,13 @@ func (s *OpenCodeServer) providerEnvVars(ctx context.Context, provider string) [
 	return nil
 }
 
-// removeV1Runtime removes the v1 artifacts from <root>: xdg/opencode/auth.json (a stale secret
-// witness copied; plus a v1 DB and pid file nothing reads), opencode.db, opencode.db-wal, and
-// .witness-serve.pid. It keeps opencode-v2.db and everything else.
+// removeV1Runtime removes the v1 artifacts from <root>: a stale secret witness copied
+// (xdg/opencode/auth.json), plus a v1 DB and pid file nothing reads (opencode.db, opencode.db-wal,
+// opencode.db-shm, .witness-serve.pid). It keeps opencode-v2.db and everything else.
 func removeV1Runtime(runtimeRoot string) {
 	_ = os.RemoveAll(filepath.Join(runtimeRoot, "xdg"))
 	_ = os.Remove(filepath.Join(runtimeRoot, "opencode.db"))
 	_ = os.Remove(filepath.Join(runtimeRoot, "opencode.db-wal"))
+	_ = os.Remove(filepath.Join(runtimeRoot, "opencode.db-shm"))
 	_ = os.Remove(filepath.Join(runtimeRoot, ".witness-serve.pid"))
 }

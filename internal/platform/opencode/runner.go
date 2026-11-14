@@ -31,8 +31,8 @@ func (r *runner) Open(ctx context.Context) error {
 	if r.cfg.RuntimeRoot == "" {
 		return fmt.Errorf("opencode isolated runtime root is unavailable")
 	}
-	// <root>/xdg held a COPY of the user's auth.json made by the v1 prepareAuth; 2.2.7+ imports
-	// such a file into a fresh DB (runner §(d) Credentials), and 7.6 copies nothing.
+	// <root>/xdg/opencode/auth.json was a stale secret witness copied; plus a v1 DB and pid file
+	// nothing reads.
 	removeV1Runtime(r.cfg.RuntimeRoot)
 	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, r.cfg.RunnerModels)
 	if err != nil {

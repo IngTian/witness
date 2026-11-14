@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/store"
 )
 
 func TestRequireModelsRefusesAnUnnamedStage(t *testing.T) {
@@ -89,13 +92,14 @@ func TestUnavailableHintSurvivesAMissingIntegrationRoute(t *testing.T) {
 }
 
 func TestStartRefusesAnEmptyModelBeforeSpawning(t *testing.T) {
-	spawns := 0
-	prevExec := execCommandContext
-	t.Cleanup(func() { execCommandContext = prevExec })
+	prevExec, prevVersion := execCommandContext, openCodeVersionCommand
+	t.Cleanup(func() { execCommandContext, openCodeVersionCommand = prevExec, prevVersion })
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) {
+		return []byte("opencode v2.3.0"), nil
+	}
 	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		spawns++
 		t.Errorf("execCommandContext called with empty model: %s %v", name, args)
-		return prevExec(ctx, name, args...)
+		return exec.CommandContext(ctx, "/nonexistent")
 	}
 
 	root := t.TempDir()
@@ -103,16 +107,64 @@ func TestStartRefusesAnEmptyModelBeforeSpawning(t *testing.T) {
 	if !errors.Is(err, ErrOpenCodeNoModel) {
 		t.Errorf("StartOpenCodeServerIn with empty model = %v, want ErrOpenCodeNoModel", err)
 	}
-	if spawns != 0 {
-		t.Errorf("StartOpenCodeServerIn with empty model spawned %d processes, want 0", spawns)
+}
+
+func TestStartRefusesBadFormatBeforeSpawning(t *testing.T) {
+	prevExec, prevVersion := execCommandContext, openCodeVersionCommand
+	t.Cleanup(func() { execCommandContext, openCodeVersionCommand = prevExec, prevVersion })
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) {
+		return []byte("opencode v2.3.0"), nil
+	}
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		t.Fatalf("execCommandContext called with bad format model: %s %v", name, args)
+		return exec.CommandContext(ctx, "/nonexistent")
+	}
+
+	root := t.TempDir()
+	_, err := StartOpenCodeServerIn(context.Background(), root, []string{"gpt-5.5"})
+	if err == nil || !strings.Contains(err.Error(), "provider/model") {
+		t.Errorf("StartOpenCodeServerIn with model without / = %v, want format error", err)
 	}
 }
 
-// TestRunnerValidateModelsBootsAndClosesItsServe is tested through the real-world usage in
-// TestValidateModelsAgainstTheServesList via newFakeV2, which exercises the same path: booting a
-// serve, calling validateModels, and closing. The runner.ValidateModels wrapper just adds Close.
-// A dedicated test would need to spawn a real opencode serve --stdio or replicate all of
-// newFakeV2's protocol; the former is slow and the latter is redundant.
+func TestRunnerValidateModelsBootsAndClosesItsServe(t *testing.T) {
+	t.Setenv(platform.DisableExternalRunnersEnv, "")
+	useFakeServe(t, "lease")
+
+	root := t.TempDir()
+	r := &runner{cfg: store.Config{RuntimeRoot: root}}
+
+	ctx := context.Background()
+	// ValidateModels with a valid model (fake serves openai/gpt-5.5): should succeed and close
+	if err := r.ValidateModels(ctx, "openai/gpt-5.5"); err != nil {
+		t.Fatalf("ValidateModels(openai/gpt-5.5) = %v, want nil", err)
+	}
+
+	// Serve dir should be empty afterwards (Close cleaned up)
+	serveDir := filepath.Join(root, "opencode-serve")
+	entries, err := os.ReadDir(serveDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading serve dir: %v", err)
+	}
+	if len(entries) > 0 {
+		t.Errorf("serve dir has %d entries after ValidateModels, want 0", len(entries))
+	}
+
+	// ValidateModels with an unavailable model: should error and still close
+	err = r.ValidateModels(ctx, "opencode/crouton-free")
+	if err == nil {
+		t.Fatalf("ValidateModels(opencode/crouton-free) = nil, want error")
+	}
+
+	// Serve dir should still be empty (Close on failure path)
+	entries, err = os.ReadDir(serveDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading serve dir after error: %v", err)
+	}
+	if len(entries) > 0 {
+		t.Errorf("serve dir has %d entries after ValidateModels error, want 0", len(entries))
+	}
+}
 
 func TestOpenRemovesTheV1RuntimeCredentialCopy(t *testing.T) {
 	root := t.TempDir()
