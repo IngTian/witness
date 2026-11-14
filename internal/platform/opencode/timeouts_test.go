@@ -86,11 +86,11 @@ func TestDoJSONBoundsAWedgedRequest(t *testing.T) {
 	defer ts.Close()
 	defer close(release)
 
-	srv := &OpenCodeServer{baseURL: ts.URL, client: ts.Client()}
+	srv := newOpenCodeServer(ts.URL, "", "", ts.Client())
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := srv.doJSON(context.Background(), http.MethodGet, "/session/x/message", nil, http.StatusOK)
+		_, err := srv.doJSON(context.Background(), http.MethodGet, "/api/session/x/message", nil, http.StatusOK)
 		done <- err
 	}()
 	select {
@@ -120,11 +120,11 @@ func TestDoJSONStillHonorsCallerCancellation(t *testing.T) {
 	defer ts.Close()
 	defer close(release)
 
-	srv := &OpenCodeServer{baseURL: ts.URL, client: ts.Client()}
+	srv := newOpenCodeServer(ts.URL, "", "", ts.Client())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := srv.doJSON(ctx, http.MethodGet, "/session/x/message", nil, http.StatusOK)
+		_, err := srv.doJSON(ctx, http.MethodGet, "/api/session/x/message", nil, http.StatusOK)
 		done <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -150,8 +150,8 @@ func TestDoJSONDoesNotAbortAHealthyRequest(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	srv := &OpenCodeServer{baseURL: ts.URL, client: ts.Client()}
-	data, err := srv.doJSON(context.Background(), http.MethodGet, "/session/x/message", nil, http.StatusOK)
+	srv := newOpenCodeServer(ts.URL, "", "", ts.Client())
+	data, err := srv.doJSON(context.Background(), http.MethodGet, "/api/session/x/message", nil, http.StatusOK)
 	if err != nil {
 		t.Fatalf("a healthy slow request was aborted: %v", err)
 	}

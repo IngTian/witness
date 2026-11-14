@@ -216,8 +216,8 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		// corpus (WrapCorpus(input)) — in 118 lines, and it works.
 		//
 		// ISOLATION IS UNAFFECTED, which is the thing to be sure of: it comes from isolatedEnv
-		// (OPENCODE_DB + XDG_DATA_HOME) applied to the SERVE PROCESS (server.go
-		// buildOpenCodeServeCmdIn), so every session this server creates already lives in
+		// (OPENCODE_DB + XDG_DATA_HOME) applied to the SERVE PROCESS (serve.go
+		// buildServeCmd), so every session this server creates already lives in
 		// witness's private database — fork or fresh. The user's own opencode.db is only ever
 		// opened read-only, to VACUUM INTO a snapshot. Nothing here touches it.
 		//
@@ -225,7 +225,9 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		// L4 profile, and `witness lens try` all reach the plain server path, whose createSession
 		// is this same call. `lens try` previewing a fresh session while production mining forked
 		// meant the tool for judging mining quality did not reflect production.
-		id, err := n.server.createSession(ctx, model)
+		// The session names its agent by id; ensureAgent loads it before the prompt below (the serve
+		// does not validate the agent at create).
+		id, err := n.server.createSession(ctx, model, agentID(prompt))
 		if err != nil {
 			return "", err
 		}
@@ -276,7 +278,12 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 			n.mu.Unlock()
 			locked = false
 		}
-		m.Reply, err = n.server.runSessionWithMessage(ctx, m.Fork, m.MessageID, model, prompt, input)
+		// The prompt travels as the session's agent. Ensured here, for a retained session too: each
+		// Open is a fresh serve with a fresh config, and agentID(prompt) names the same agent again.
+		if _, err = n.server.ensureAgent(ctx, prompt); err != nil {
+			return "", err
+		}
+		m.Reply, err = n.server.runSessionWithMessage(ctx, m.Fork, m.MessageID, input)
 		if err != nil {
 			return "", err
 		}

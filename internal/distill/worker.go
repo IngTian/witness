@@ -181,7 +181,7 @@ type LensMining struct {
 	// was going to be slow anyway.
 	//
 	// If it ever needs splitting, the runner already has the fact: OpenCode tracks
-	// generationStarted and reports the two phases in distinct messages ("never began
+	// when generation started and reports the two phases in distinct messages ("never began
 	// generating after ..." vs "generation exceeded ..."). The clean shape is a typed
 	// sentinel from the platform port, not string matching here. Not done because there is
 	// no evidence yet that the slow-model case actually fires — the flag would need to be

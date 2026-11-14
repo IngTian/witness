@@ -3,7 +3,6 @@ package opencode
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +11,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,84 +48,36 @@ func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 		return []byte(`{"info":{},"messages":[]}`), nil
 	}
 	defer func() { nativeCommand = oldCommand }()
-	oldPoll := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = oldPoll }()
-	var forks, prompts, forkDeletes int
-	prompted := map[string]bool{}
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/session":
-			// A FRESH scratch session, not a fork of the user's conversation. The request
-			// path carries no source id at all — that is the property under test.
-			forks++
-			_, _ = w.Write([]byte(`{"id":"fork_` + string(rune('0'+forks)) + `"}`))
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/message"):
-			if prompted[strings.Split(r.URL.Path, "/")[2]] {
-				manifests, _ := os.ReadDir(filepath.Join(root, "opencode-native"))
-				messageID := ""
-				for _, entry := range manifests {
-					if strings.HasSuffix(entry.Name(), ".json") && !strings.HasSuffix(entry.Name(), ".snapshot.json") {
-						b, _ := os.ReadFile(filepath.Join(root, "opencode-native", entry.Name()))
-						var manifest nativeManifest
-						_ = json.Unmarshal(b, &manifest)
-						if manifest.Fork == strings.Split(r.URL.Path, "/")[2] {
-							messageID = manifest.MessageID
-						}
-					}
-				}
-				// A fresh scratch session contains ONLY witness's own turns, so our request
-				// is the first message — never buried behind inherited history (which is what
-				// used to push it out of the reply window on a long session).
-				_, _ = fmt.Fprintf(w, `[
-					{"info":{"id":%q,"role":"user"},"parts":[{"type":"text","text":"request"}]},
-					{"info":{"id":"reply","role":"assistant"},"parts":[{"type":"text","text":"[]"}]}
-				]`, messageID)
-			} else {
-				_, _ = w.Write([]byte(`[]`))
-			}
-		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/prompt_async"):
-			prompts++
-			prompted[strings.Split(r.URL.Path, "/")[2]] = true
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodDelete:
-			if strings.HasPrefix(r.URL.Path, "/session/fork_") {
-				forkDeletes++
-			} else {
-				// Setup only ever deletes sessions it created. A DELETE for the user's own id
-				// was left over from the fork design (#143) and always 404'd in the private db.
-				t.Errorf("deleted %s, a session this runtime never created", r.URL.Path)
-			}
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
-		}
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	n := newNativeRuntime(root, &OpenCodeServer{baseURL: ts.URL, client: ts.Client()})
+	// A FRESH scratch session per job, not a fork of the user's conversation: POST /api/session
+	// carries no source id at all, and the fake fails on any route it does not know (a fork).
+	fake, srv := newFakeV2(t)
+	fake.turn = okTurn("[]")
+	sessions := func() int { return fake.count(func(c string) bool { return c == "POST /api/session" }) }
+	prompts := func() int { return fake.count(func(c string) bool { return strings.HasSuffix(c, "/prompt") }) }
+	deletes := func() int { return fake.count(func(c string) bool { return strings.HasPrefix(c, "DELETE ") }) }
+	n := newNativeRuntime(root, srv)
 	jobs := []struct{ lens, input string }{{"a", "0:same"}, {"a", "1:same"}, {"b", "0:same"}}
 	for _, job := range jobs {
 		w := &platform.NativeSession{Session: "opencode:source", RawHigh: 7, Total: 2, Lens: job.lens, Input: job.input}
-		if _, err := n.run(context.Background(), w, "", "P", "I"); err != nil {
+		if _, err := n.run(context.Background(), w, "openai/gpt-5.5", "P", "I"); err != nil {
 			t.Fatal(err)
 		}
-		if forkDeletes != 0 {
+		if deletes() != 0 {
 			t.Fatal("the scratch session was deleted before finalization")
 		}
 	}
 	// Three jobs, three DISTINCT scratch sessions, three prompts: no sharing of context
 	// between lenses or chunks.
-	if forks != 3 || prompts != 3 {
-		t.Fatalf("scratch sessions=%d prompts=%d, want 3 and 3", forks, prompts)
+	if sessions() != 3 || prompts() != 3 {
+		t.Fatalf("scratch sessions=%d prompts=%d, want 3 and 3", sessions(), prompts())
 	}
-	beforeCommands, beforePrompts := len(commands), prompts
+	beforeCommands, beforePrompts := len(commands), prompts()
 	n2 := newNativeRuntime(root, n.server)
-	if _, err := n2.run(context.Background(), &platform.NativeSession{Session: "opencode:source", RawHigh: 7, Total: 2, Lens: "a", Input: "0:same"}, "", "P", "I"); err != nil {
+	if _, err := n2.run(context.Background(), &platform.NativeSession{Session: "opencode:source", RawHigh: 7, Total: 2, Lens: "a", Input: "0:same"}, "openai/gpt-5.5", "P", "I"); err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != beforeCommands || prompts != beforePrompts {
-		t.Fatalf("completed reply was not reused: commands=%d prompts=%d", len(commands), prompts)
+	if len(commands) != beforeCommands || prompts() != beforePrompts {
+		t.Fatalf("completed reply was not reused: commands=%d prompts=%d", len(commands), prompts())
 	}
 	// ONE subprocess per job: the export. There is no import any more — it existed only to
 	// materialize a fork parent, and the scratch session is now created empty. Asserting the
@@ -214,81 +164,38 @@ func TestNativeRunsGenerateConcurrentlyAfterIsolatedScratchSetup(t *testing.T) {
 		return []byte(`{"info":{},"messages":[]}`), nil
 	}
 	defer func() { nativeCommand = oldCommand }()
-	oldPoll := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = oldPoll }()
-
-	var forks, inFlight, peak atomic.Int32
-	var replies sync.Map
-	// A RENDEZVOUS, not a sleep: every generation blocks until all three have arrived, so
-	// the concurrency assertion is deterministic. The previous version slept 20ms and hoped
-	// the windows overlapped, which flaked to peak=1 whenever CPU contention serialized
-	// them (observed in a full-suite run). If the native path ever re-serializes
-	// generation, the barrier never fills and the test fails by timeout instead.
+	// A RENDEZVOUS, not a sleep: no turn starts until all three are prompted, so the concurrency
+	// assertion is deterministic. (A version that slept 20ms and hoped the windows overlapped
+	// flaked to peak=1 whenever CPU contention serialized them.) If the native path ever
+	// re-serializes generation, the first turn never starts and its queue budget fails the test.
+	prev := queueWaitBudget
+	queueWaitBudget = 10 * time.Second
+	t.Cleanup(func() { queueWaitBudget = prev })
 	const wantConcurrent = 3
-	barrier := make(chan struct{})
-	var arrived atomic.Int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/session":
-			id := forks.Add(1)
-			_, _ = fmt.Fprintf(w, `{"id":"fork_%d"}`, id)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/prompt_async"):
-			var body struct {
-				MessageID string `json:"messageID"`
+	fake, srv := newFakeV2(t)
+	fake.turn = func(s *fakeSession) []map[string]any { // runs under fake.mu
+		prompted := 0
+		for _, o := range fake.sessions {
+			if o.MsgID != "" {
+				prompted++
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			current := inFlight.Add(1)
-			for {
-				old := peak.Load()
-				if current <= old || peak.CompareAndSwap(old, current) {
-					break
-				}
-			}
-			// Hold every generation open until all of them are in flight together.
-			if arrived.Add(1) == wantConcurrent {
-				close(barrier)
-			}
-			select {
-			case <-barrier:
-			case <-time.After(10 * time.Second):
-				t.Error("native generations did not run concurrently: barrier never filled")
-			}
-			inFlight.Add(-1)
-			replies.Store(strings.Split(r.URL.Path, "/")[2], body.MessageID)
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/message"):
-			fork := strings.Split(r.URL.Path, "/")[2]
-			messageID, ok := replies.Load(fork)
-			if !ok {
-				_, _ = w.Write([]byte(`[]`))
-				return
-			}
-			_, _ = fmt.Fprintf(w, `[
-				{"info":{"id":%q,"role":"user"},"parts":[{"type":"text","text":"request"}]},
-				{"info":{"id":"reply","role":"assistant"},"parts":[{"type":"text","text":"[]"}]}
-			]`, messageID)
-		default:
-			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected", http.StatusBadRequest)
 		}
-	}))
-	defer ts.Close()
-	n := newNativeRuntime(root, &OpenCodeServer{baseURL: ts.URL, client: ts.Client()})
+		if prompted < wantConcurrent {
+			return []map[string]any{s.user()} // queued until every generation is in flight
+		}
+		return okTurn("[]")(s)
+	}
+	n := newNativeRuntime(root, srv)
 
 	var wg sync.WaitGroup
-	errs := make(chan error, 3)
-	for i := range 3 {
+	errs := make(chan error, wantConcurrent)
+	for i := range wantConcurrent {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			_, err := n.run(context.Background(), &platform.NativeSession{
 				Session: "opencode:source", RawHigh: 7, Total: 2, Lens: fmt.Sprintf("lens-%d", i), Input: "0:chunk",
-			}, "", "P", "I")
+			}, "openai/gpt-5.5", "P", "I")
 			errs <- err
 		}()
 	}
@@ -299,11 +206,11 @@ func TestNativeRunsGenerateConcurrentlyAfterIsolatedScratchSetup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if forks.Load() != 3 {
-		t.Fatalf("forks=%d, want 3", forks.Load())
+	if got := fake.count(func(c string) bool { return c == "POST /api/session" }); got != wantConcurrent {
+		t.Fatalf("scratch sessions=%d, want %d", got, wantConcurrent)
 	}
-	if peak.Load() < 2 {
-		t.Fatalf("peak concurrent native generations=%d, want at least 2", peak.Load())
+	if fake.peak() != wantConcurrent {
+		t.Fatalf("peak concurrent native generations=%d, want %d", fake.peak(), wantConcurrent)
 	}
 }
 
@@ -374,7 +281,7 @@ func TestNativeReconcileCleansCommittedAndStaleGenerations(t *testing.T) {
 	if len(deletes) != 2 {
 		t.Fatalf("deletes=%v", deletes)
 	}
-	if strings.Join(deletes, ",") != "/session/f2,/session/f3" {
+	if strings.Join(deletes, ",") != "/api/session/f2,/api/session/f3" {
 		t.Fatalf("deleted forks=%v", deletes)
 	}
 	if _, err := os.Stat(filepath.Join(n.dir(), "current.json")); err != nil {
@@ -408,7 +315,7 @@ func TestNativeCleanupFailureKeepsCommittedManifestForRetry(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer ts.Close()
-	n.server = &OpenCodeServer{baseURL: ts.URL, client: ts.Client()}
+	n.server = newOpenCodeServer(ts.URL, "", "", ts.Client())
 	p := filepath.Join(n.dir(), "retry.json")
 	if err := n.save(p, nativeManifest{Session: "opencode:s", Lens: "l", RawHigh: 1, Total: 1, Fork: "fork"}); err != nil {
 		t.Fatal(err)
@@ -474,7 +381,7 @@ func nativeReconcileFixture(t *testing.T, rawRows int, distilledLens string) (*n
 		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 	}))
 	t.Cleanup(ts.Close)
-	n := newNativeRuntime(root, &OpenCodeServer{baseURL: ts.URL, client: ts.Client()})
+	n := newNativeRuntime(root, newOpenCodeServer(ts.URL, "", "", ts.Client()))
 	if err := os.MkdirAll(n.dir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +412,7 @@ func TestNativeReconcileIsolatesUnreadableManifest(t *testing.T) {
 	}
 
 	// The committed manifest AFTER the bad one was still finalized.
-	if len(*deletes) != 1 || (*deletes)[0] != "/session/f_good" {
+	if len(*deletes) != 1 || (*deletes)[0] != "/api/session/f_good" {
 		t.Fatalf("later manifest was not reconciled: deletes=%v", *deletes)
 	}
 	if _, err := os.Stat(good); !os.IsNotExist(err) {
@@ -588,7 +495,7 @@ func TestNativeReconcileReapsGenerationSupersededByNewerRaw(t *testing.T) {
 	if _, err := os.Stat(n.snapshot(superseded)); !os.IsNotExist(err) {
 		t.Fatal("superseded snapshot must be reaped")
 	}
-	if len(*deletes) != 1 || (*deletes)[0] != "/session/f_old" {
+	if len(*deletes) != 1 || (*deletes)[0] != "/api/session/f_old" {
 		t.Fatalf("only the superseded fork should be deleted, got %v", *deletes)
 	}
 	// The CURRENT generation (still the high-water mark, uncommitted) must survive.
@@ -610,40 +517,11 @@ func TestNativeManifestKeyCoversModelAndPrompt(t *testing.T) {
 		return []byte(`{"info":{},"messages":[]}`), nil
 	}
 	defer func() { nativeCommand = oldCommand }()
-	oldPoll := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = oldPoll }()
 
-	var prompts int
-	var replies sync.Map
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPost && r.URL.Path == "/session":
-			_, _ = fmt.Fprintf(w, `{"id":"fork_%d"}`, prompts+1)
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/prompt_async"):
-			var body struct{ MessageID string }
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			prompts++
-			replies.Store(strings.Split(r.URL.Path, "/")[2], body.MessageID)
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/message"):
-			id, ok := replies.Load(strings.Split(r.URL.Path, "/")[2])
-			if !ok {
-				_, _ = w.Write([]byte(`[]`))
-				return
-			}
-			_, _ = fmt.Fprintf(w, `[
-				{"info":{"id":%q,"role":"user"},"parts":[{"type":"text","text":"request"}]},
-				{"info":{"id":"reply","role":"assistant"},"parts":[{"type":"text","text":"[]"}]}
-			]`, id)
-		default:
-			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer ts.Close()
-	n := newNativeRuntime(root, &OpenCodeServer{baseURL: ts.URL, client: ts.Client()})
+	fake, srv := newFakeV2(t)
+	fake.turn = okTurn("[]")
+	prompts := func() int { return fake.count(func(c string) bool { return strings.HasSuffix(c, "/prompt") }) }
+	n := newNativeRuntime(root, srv)
 	session := func() *platform.NativeSession {
 		return &platform.NativeSession{Session: "opencode:s", RawHigh: 7, Total: 1, Lens: "l", Input: "0:chunk"}
 	}
@@ -651,28 +529,28 @@ func TestNativeManifestKeyCoversModelAndPrompt(t *testing.T) {
 	if _, err := n.run(context.Background(), session(), "prov/modelA", "promptA", "I"); err != nil {
 		t.Fatal(err)
 	}
-	if prompts != 1 {
-		t.Fatalf("first run should generate once, got %d", prompts)
+	if prompts() != 1 {
+		t.Fatalf("first run should generate once, got %d", prompts())
 	}
 	// Same request → resume from the manifest, no new generation.
 	if _, err := n.run(context.Background(), session(), "prov/modelA", "promptA", "I"); err != nil {
 		t.Fatal(err)
 	}
-	if prompts != 1 {
-		t.Fatalf("identical request must reuse the retained reply, got %d generations", prompts)
+	if prompts() != 1 {
+		t.Fatalf("identical request must reuse the retained reply, got %d generations", prompts())
 	}
 	// Changed PROMPT → must re-generate, not replay.
 	if _, err := n.run(context.Background(), session(), "prov/modelA", "promptB", "I"); err != nil {
 		t.Fatal(err)
 	}
-	if prompts != 2 {
-		t.Fatalf("a changed prompt must re-generate (stale reply replayed?), got %d generations", prompts)
+	if prompts() != 2 {
+		t.Fatalf("a changed prompt must re-generate (stale reply replayed?), got %d generations", prompts())
 	}
 	// Changed MODEL → must re-generate too.
 	if _, err := n.run(context.Background(), session(), "prov/modelB", "promptB", "I"); err != nil {
 		t.Fatal(err)
 	}
-	if prompts != 3 {
-		t.Fatalf("a changed model must re-generate (stale reply replayed?), got %d generations", prompts)
+	if prompts() != 3 {
+		t.Fatalf("a changed model must re-generate (stale reply replayed?), got %d generations", prompts())
 	}
 }

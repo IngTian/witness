@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -99,6 +100,9 @@ func startPrivateServe(ctx context.Context, runtimeRoot string, allowFree bool) 
 	if s.stdin, err = s.cmd.StdinPipe(); err != nil {
 		return fail(fmt.Errorf("opencode serve stdin: %w", err))
 	}
+	// A cancelled ctx ends the lease (EOF) instead of exec.CommandContext's default SIGKILL, so
+	// every shutdown takes the serve's own exit path; WaitDelay still kills one that ignores EOF.
+	s.cmd.Cancel = s.stdin.Close
 	if err := s.cmd.Start(); err != nil {
 		return fail(fmt.Errorf("opencode serve start: %w", err))
 	}
@@ -190,7 +194,11 @@ func (s *privateServe) waitReady(ctx context.Context, url <-chan string) error {
 		}
 		req.Header.Set("Authorization", s.AuthHeader())
 		if resp, err := http.DefaultClient.Do(req); err != nil {
-			lastErr = err
+			// A probe the budget cancelled mid-flight fails with the ctx error, which the timeout
+			// message names anyway; keep the last real answer (a 401, say) instead.
+			if ctx.Err() == nil || lastErr == nil {
+				lastErr = err
+			}
 		} else {
 			var info struct {
 				Version string `json:"version"`
@@ -256,6 +264,11 @@ func sweepStaleServeDirs(runtimeRoot string, olderThan time.Duration) {
 	}
 }
 
+// privateConfigOverlay is merged into every private config, under witness's own keys. It is nil in
+// production; PR 3's contract job sets it to add a mock provider. Nothing from the user's
+// opencode.json ever goes here (spec 7.6).
+var privateConfigOverlay map[string]any
+
 // writePrivateConfig writes the serve's whole config: one deny-all agent per id (prompts never
 // travel in env vars, which Windows caps at 32,767 chars). Nothing is copied from the user's
 // opencode.json (spec 7.6). Atomic, because a running serve re-reads it when agents are added.
@@ -268,7 +281,10 @@ func writePrivateConfig(path string, agents map[string]string) error {
 			"permissions": []map[string]string{{"action": "*", "resource": "*", "effect": "deny"}},
 		}
 	}
-	b, err := json.Marshal(map[string]any{"$schema": "https://opencode.ai/config.json", "agents": defs})
+	cfg := map[string]any{}
+	maps.Copy(cfg, privateConfigOverlay)
+	cfg["$schema"], cfg["agents"] = "https://opencode.ai/config.json", defs
+	b, err := json.Marshal(cfg)
 	if err != nil {
 		return err
 	}

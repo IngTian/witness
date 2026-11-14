@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -216,6 +217,27 @@ func TestPrivateServeCloseKillsAServeThatIgnoresEOF(t *testing.T) {
 	}
 }
 
+// A cancelled ctx (a drain stopped mid-Open, `lens try` interrupted) ends the lease the way Close
+// does, through EOF and the serve's own exit path, not with exec.CommandContext's default SIGKILL.
+func TestACancelledContextEndsTheLeaseInsteadOfKilling(t *testing.T) {
+	useFakeServe(t, "lease")
+	ctx, cancel := context.WithCancel(context.Background())
+	s, err := startPrivateServe(ctx, t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	cancel()
+	select {
+	case <-s.waitDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the serve outlived its cancelled ctx")
+	}
+	if code := s.cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("serve exit code = %d after the ctx was cancelled, want 0 (a lease end, not a kill)", code)
+	}
+}
+
 func TestStartPrivateServeReportsAnEarlyExit(t *testing.T) {
 	useFakeServe(t, "exit")
 	_, err := startPrivateServe(context.Background(), t.TempDir(), false)
@@ -277,6 +299,29 @@ func TestWaitReadyRequiresAnAuthenticatedInfoWithAVersion(t *testing.T) {
 				t.Errorf("URL = %q, want %q", s.URL, ts.URL)
 			}
 		})
+	}
+}
+
+// The not-ready error names the last real answer, not the ctx error of the probe the budget cut
+// off mid-flight: the serve answers 401 once, then never again until the budget ends.
+func TestWaitReadyKeepsTheLastRealStatus(t *testing.T) {
+	prev := healthCheckBudget
+	healthCheckBudget = 500 * time.Millisecond
+	t.Cleanup(func() { healthCheckBudget = prev })
+	release := make(chan struct{})
+	var probes atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if probes.Add(1) == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		<-release
+	}))
+	defer ts.Close()
+	defer close(release)
+	s, url := readyServe(ts.URL)
+	if err := s.waitReady(context.Background(), url); err == nil || !strings.Contains(err.Error(), "401 Unauthorized") {
+		t.Errorf("err = %v, want the 401 named", err)
 	}
 }
 

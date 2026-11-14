@@ -2,125 +2,16 @@ package opencode
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
-
-// The reply window must be large enough, and its size must be USED — both poll sites.
-//
-// witness prompts a FORK of the user's session, and a fork carries that whole conversation
-// (parseOpenCodeAsyncReply says so, and TestAsyncProviderErrorIgnoresHistoryAndPreRequest pins the
-// consequence). So the window is a tail of a conversation that may already be hundreds of messages
-// long. At limit=20, a session with a long tail of tool/assistant messages after our prompt could
-// push our own request out of the window — and parseOpenCodeAsyncReply returns "" whenever the
-// request is absent, so the poll would spin silently until generateTimeout while holding the
-// machine-wide WorkerLock. That is indistinguishable from "the model is slow", which is exactly how
-// it was misdiagnosed as a rate-limit problem on a real Windows box.
-func TestAsyncReplyWindowIsBigEnoughAndUsedEverywhere(t *testing.T) {
-	if asyncReplyWindow <= 20 {
-		t.Errorf("asyncReplyWindow = %d; a fork carries the source conversation, so the window must "+
-			"comfortably exceed our request + the reply", asyncReplyWindow)
-	}
-	// Both poll sites (waitForAsyncReply, replyForMessage) must request exactly that window. Asserted
-	// on the wire: a source count passed with a poll hardcoded to limit=5, because the identifier
-	// still appeared often enough.
-	var mu sync.Mutex
-	var limits []string
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		limits = append(limits, r.URL.Query().Get("limit"))
-		mu.Unlock()
-		_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]},` +
-			`{"info":{"id":"a","role":"assistant","time":{"created":2,"completed":3}},"parts":[{"type":"text","text":"[]"}]}]`))
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := srv.replyForMessage(ctx, "sess", "msg_ours"); err != nil {
-		t.Fatal(err)
-	}
-	if len(limits) < 2 {
-		t.Fatalf("expected a poll from each site, got %d", len(limits))
-	}
-	for _, got := range limits {
-		if got != fmt.Sprint(asyncReplyWindow) {
-			t.Errorf("a poll requested limit=%q, want asyncReplyWindow=%d", got, asyncReplyWindow)
-		}
-	}
-}
-
-// A window that never contains our request must FAIL FAST, not poll to the timeout.
-//
-// This is the guard for the assumption above being wrong (the window is not a tail, the id was
-// rejected, the session was reset). Without it the symptom is a full generateTimeout of silence
-// with no error — the worst possible failure shape, because it looks like a slow provider and
-// sends you off tuning models instead of reading the code.
-func TestHasOpenCodeRequestMessageDetectsAMissingRequest(t *testing.T) {
-	// A history window that does NOT contain our request.
-	history := `[{"info":{"id":"msg_old1","role":"user"},"parts":[{"type":"text","text":"a"}]},` +
-		`{"info":{"id":"msg_old2","role":"assistant"},"parts":[{"type":"text","text":"b"}]}]`
-	if hasOpenCodeRequestMessage([]byte(history), "msg_ours") {
-		t.Error("our request was reported present in a window that does not contain it — the " +
-			"fail-fast guard would never fire and the poll would spin to the timeout")
-	}
-	// The same window WITH our request must be recognized.
-	withOurs := `[{"info":{"id":"msg_old1","role":"user"},"parts":[]},` +
-		`{"info":{"id":"msg_ours","role":"user"},"parts":[{"type":"text","text":"go"}]}]`
-	if !hasOpenCodeRequestMessage([]byte(withOurs), "msg_ours") {
-		t.Error("our request was NOT found in a window that contains it — every poll would count as " +
-			"missing and a healthy generation would be aborted")
-	}
-	// Degenerate inputs must not panic and must not claim presence.
-	for _, bad := range []string{"", "null", "{}", "[]", "not json", `[{"info":{}}]`} {
-		if hasOpenCodeRequestMessage([]byte(bad), "msg_ours") {
-			t.Errorf("claimed our request is present in %q", bad)
-		}
-	}
-	// An empty request id can never match anything.
-	if hasOpenCodeRequestMessage([]byte(withOurs), "") {
-		t.Error("an empty request id must never match")
-	}
-}
-
-// The two parsers must agree about what counts as "our request", or the fail-fast guard fires on
-// generations that are in fact progressing normally.
-func TestRequestPresenceAgreesWithTheReplyParser(t *testing.T) {
-	// Our request followed by an assistant reply: the parser returns the reply, and the presence
-	// check must agree the request is there.
-	data := `[{"info":{"id":"msg_ours","role":"user"},"parts":[{"type":"text","text":"go"}]},` +
-		`{"info":{"id":"msg_r","role":"assistant"},"parts":[{"type":"text","text":"[]"}]}]`
-	if reply := parseOpenCodeAsyncReply([]byte(data), "msg_ours"); strings.TrimSpace(reply) != "[]" {
-		t.Fatalf("precondition: the parser should find the reply, got %q", reply)
-	}
-	if !hasOpenCodeRequestMessage([]byte(data), "msg_ours") {
-		t.Error("the parser found our reply but the presence check says the request is absent — " +
-			"the guard would abort a healthy generation")
-	}
-
-	// And the pre-request case: the parser must withhold, and presence must be true (our request
-	// IS in the window), so the guard does NOT fire while we simply wait.
-	pending := `[{"info":{"id":"msg_ours","role":"user"},"parts":[{"type":"text","text":"go"}]}]`
-	if reply := parseOpenCodeAsyncReply([]byte(pending), "msg_ours"); reply != "" {
-		t.Errorf("no assistant message yet, so the parser must return empty, got %q", reply)
-	}
-	if !hasOpenCodeRequestMessage([]byte(pending), "msg_ours") {
-		t.Error("our request is present but reported missing — the guard would abort a generation " +
-			"that has merely not finished yet")
-	}
-}
 
 // requestMissingLimit must be a real bound: small enough to beat generateTimeout by a wide
 // margin (the whole point is an actionable error in seconds), and >1 so a single racy poll before
@@ -156,98 +47,35 @@ func normalizeOpenCodeNewlines(s string) string {
 	return strings.ReplaceAll(s, "\r", "\n")
 }
 
-// A fork whose window never contains our request must FAIL FAST, not spin to generateTimeout.
+// A turn that never contains our request must FAIL FAST, not spin to generateTimeout.
 //
-// This is the behavioral half of the window guard, and it reproduces the misdiagnosis it exists to
-// prevent. witness prompts a FORK of the user's session, so the message list starts with that whole
-// conversation. If our own request never lands in the fetched window, parseOpenCodeAsyncReply
-// correctly returns "" — every poll, forever. Before the guard, waitForAsyncReply kept polling for
-// the full 10-minute generateTimeout and then blamed a timeout, which on a real Windows box read as
-// "the free-tier model is too slow" and sent us tuning models instead of reading the code.
-//
-// The server here always answers with history that excludes our request — the shape a too-small or
-// non-tail window produces on a long session.
-func TestWaitForAsyncReplyFailsFastWhenOurRequestNeverAppears(t *testing.T) {
-	polls := 0
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		polls++
-		// Only ever the source conversation; our request id is nowhere in it.
-		_, _ = w.Write([]byte(`[{"info":{"id":"msg_hist1","role":"user"},"parts":[{"type":"text","text":"a"}]},` +
-			`{"info":{"id":"msg_hist2","role":"assistant"},"parts":[{"type":"text","text":"b"}]}]`))
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
-	// Poll fast so the test is quick; the guard counts POLLS, not wall clock.
-	prev := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = prev }()
-
-	// A ctx deadline far longer than the guard needs: if the guard does not fire, this test
-	// hangs until here, which is the bug. Kept well under `go test`'s own timeout.
+// parseTurn attributes nothing to this run until our own request is present, so a page without it
+// is byte-for-byte "still waiting" — every poll, forever. Before this guard (in the v1 fork era,
+// when our request could fall out of the fetched window) the poll kept going for the full
+// generateTimeout and then blamed a timeout, which on a real Windows box read as "the free-tier
+// model is too slow" and sent us tuning models instead of reading the code.
+func TestWaitForReplyFailsFastWhenOurRequestNeverAppears(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	fake.turn = func(*fakeSession) []map[string]any {
+		return []map[string]any{{"id": "msg_hist1", "type": "user"}, assistantRec("b", nil)}
+	}
+	// A ctx far longer than the guard needs: if the guard does not fire, this test hangs until
+	// here, which is the bug. Kept well under `go test`'s own timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
-	start := time.Now()
-	_, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
-	elapsed := time.Since(start)
-
-	if err == nil {
-		t.Fatal("a window that never contains our request must be an error, not a silent success")
+	_, err := srv.Run(ctx, "openai/gpt-5.5", "P", "D")
+	if err == nil || !strings.Contains(err.Error(), "never echoed our prompt") {
+		t.Fatalf("err = %v, want our request named as never echoed", err)
 	}
 	if ctx.Err() != nil {
-		t.Fatalf("waitForAsyncReply spun until the context deadline (%s) instead of failing fast — "+
-			"in production that is a full generateTimeout of silence misread as a slow model: %v",
-			elapsed, err)
+		t.Fatalf("spun until the context deadline instead of failing fast: %v", err)
 	}
-	// The message must name the actual problem, since diagnosing this from logs is the point.
-	if !strings.Contains(err.Error(), "never echoed our prompt") {
-		t.Errorf("the error must say our request never appeared; got %v", err)
+	polls := fake.count(func(c string) bool { return strings.HasSuffix(c, "/message") })
+	if polls < 2 || polls > requestMissingLimit+2 {
+		t.Errorf("gave up after %d polls for a limit of %d; one racy poll must not abort a healthy run, "+
+			"and the bound must apply", polls, requestMissingLimit)
 	}
-	if polls < 2 {
-		t.Errorf("gave up after %d poll(s); a single racy poll must not abort a healthy run", polls)
-	}
-	if polls > requestMissingLimit+2 {
-		t.Errorf("polled %d times for a limit of %d — the bound is not being applied", polls, requestMissingLimit)
-	}
-}
-
-// The counter must RESET once our request shows up, or a slow generation that took a few polls to
-// be echoed would be aborted mid-flight — turning the fix into a new failure.
-func TestWaitForAsyncReplyWaitsOnceOurRequestIsPresent(t *testing.T) {
-	polls := 0
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		polls++
-		switch {
-		case polls <= 3:
-			// Not echoed yet — the guard must tolerate this.
-			_, _ = w.Write([]byte(`[{"info":{"id":"msg_hist","role":"assistant"},"parts":[]}]`))
-		case polls <= 6:
-			// Echoed, still generating: no assistant message after ours.
-			_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user"},"parts":[{"type":"text","text":"go"}]}]`))
-		default:
-			_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user"},"parts":[{"type":"text","text":"go"}]},` +
-				`{"info":{"id":"msg_r","role":"assistant"},"parts":[{"type":"text","text":"[{\"observation\":\"x\"}]"}]}]`))
-		}
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
-	prev := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = prev }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	reply, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
-	if err != nil {
-		t.Fatalf("a generation whose request was echoed after a few polls must still be awaited: %v", err)
-	}
-	if !strings.Contains(reply, "observation") {
-		t.Errorf("got %q, want the assistant reply", reply)
-	}
+	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
 }
 
 // The distillation context must be seeded ONLY by witness's own turns — never by inheriting a
@@ -269,7 +97,7 @@ func TestWaitForAsyncReplyWaitsOnceOurRequestIsPresent(t *testing.T) {
 //
 // A source scan, because the property is "no code path forks", which no single behavioural test
 // can establish. The behavioural half is TestNativeRunUsesADistinctFreshScratchSessionPerJob,
-// whose fake server answers `POST /session` and would fail on a fork request.
+// whose fake (fakeV2) answers `POST /api/session` and fails on any route it does not know.
 func TestNoCodePathForksAConversation(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -300,135 +128,26 @@ func TestNoCodePathForksAConversation(t *testing.T) {
 	}
 }
 
-// A generation that COMPLETES without emitting text must fail fast, not poll to the deadline.
+// A turn that SUCCEEDS without emitting text must fail fast with that outcome named, not be
+// returned as an empty reply or waited on.
 //
-// This is the second invisible-completion shape, and the one the Windows reports kept landing on.
-// parseOpenCodeAsyncReply harvests only `type:"text"` parts, so an assistant message that finished
-// with TOOL-CALL parts (or none) yields "" — byte-for-byte what "still generating" looks like. The
-// poll then burned the full 10-minute generateTimeout and blamed `context deadline exceeded`, which
-// is why the cause was misdiagnosed three times (rate limits, the reply window, the session fork).
-//
-// Why it happens: witness's distillation agent sets permission {"*": "deny"}, so a model that
-// reaches for a tool has the call denied and can end its turn having said nothing. Invisible on a
-// trivial prompt (nothing to reach for), likely on a transcript full of file contents and tool
-// output — exactly the reported split, where a hand-built "2+2=4" probe answered in 3s while every
-// real code-reading session timed out.
-func TestCompletedWithoutTextIsDetected(t *testing.T) {
-	const req = `{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]}`
-
-	// A completed assistant turn whose only part is a TOOL CALL — the denied-tool shape.
-	toolOnly := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},` +
-		`"parts":[{"type":"tool","tool":"read","state":{"status":"error"}}]}`
-	if !completedWithoutText([]byte("["+req+","+toolOnly+"]"), "msg_ours") {
-		t.Error("a completed assistant message with only tool parts was not detected — the poll " +
-			"would spin to generateTimeout and blame the deadline")
+// Only `text` parts are the reply; reasoning parts are dropped (every free model is a reasoning
+// model, freetier §6). So a turn whose assistant only reasoned — or reached for a tool, which
+// witness's deny-all agent refuses — ends idle `succeeded` with nothing usable. In v1 that shape
+// was indistinguishable from "still generating" and burned the full generateTimeout; it was
+// misdiagnosed three times (rate limits, the reply window, the session fork). Retrying cannot help.
+func TestCompletedWithoutTextFailsFast(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	fake.turn = func(s *fakeSession) []map[string]any {
+		a := map[string]any{"type": "assistant", "content": []map[string]any{{"type": "reasoning", "text": "hmm"}}}
+		return []map[string]any{s.user(), a, idleRec("succeeded", nil)}
 	}
-
-	// Completed with NO parts at all (the verbatim shape in testdata/async_provider_error.json).
-	empty := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},"parts":[]}`
-	if !completedWithoutText([]byte("["+req+","+empty+"]"), "msg_ours") {
-		t.Error("a completed assistant message with no parts was not detected")
+	_, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D")
+	if err == nil || !strings.Contains(err.Error(), "without emitting any text") {
+		t.Fatalf("err = %v, want the textless completion named", err)
 	}
-
-	// STILL GENERATING must NOT be reported: no completion timestamp. This is the half the fix
-	// could break — a false positive here aborts every healthy generation mid-flight.
-	pending := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2}},"parts":[]}`
-	if completedWithoutText([]byte("["+req+","+pending+"]"), "msg_ours") {
-		t.Error("an in-flight generation was reported as completed-without-text; every slow but " +
-			"healthy model call would be aborted")
-	}
-
-	// A real reply must NOT trip it, even when a tool part precedes the text.
-	withText := `{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},` +
-		`"parts":[{"type":"tool","tool":"read"},{"type":"text","text":"[]"}]}`
-	if completedWithoutText([]byte("["+req+","+withText+"]"), "msg_ours") {
-		t.Error("a completed reply that DID emit text was reported as textless")
-	}
-
-	// History BEFORE our request is never this run's outcome — the same rule the reply and error
-	// parsers follow. A textless completed message ahead of our request must be ignored.
-	history := `{"info":{"id":"msg_old","role":"assistant","time":{"created":0,"completed":1}},"parts":[]}`
-	if completedWithoutText([]byte("["+history+","+req+"]"), "msg_ours") {
-		t.Error("a textless message PRECEDING our request was attributed to this run")
-	}
-	// And with our request absent entirely, nothing is attributable yet.
-	if completedWithoutText([]byte("["+history+"]"), "msg_ours") {
-		t.Error("a verdict was reached before our request even appeared")
-	}
-
-	// Degenerate inputs must not panic or claim a completion.
-	for _, bad := range []string{"", "null", "{}", "[]", "not json", `[{"info":{}}]`} {
-		if completedWithoutText([]byte(bad), "msg_ours") {
-			t.Errorf("claimed completed-without-text for %q", bad)
-		}
-	}
-}
-
-// The real 1.18.3 capture must be classified as completed — that fixture is the ground truth for
-// the info.time.completed shape this detector depends on. If OpenCode ever changes it, this fails
-// here rather than silently reverting the fix to a 10-minute stall.
-func TestOpenCodeMessageCompletedMatchesTheRealCaptureShape(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "async_provider_error.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var list []json.RawMessage
-	if err := json.Unmarshal(data, &list); err != nil {
-		t.Fatal(err)
-	}
-	var sawCompleted, sawPending bool
-	for _, m := range list {
-		if openCodeMessageCompleted(m) {
-			sawCompleted = true
-		} else {
-			sawPending = true
-		}
-	}
-	if !sawCompleted {
-		t.Error("no message in the real capture was seen as completed — info.time.completed is not " +
-			"being read, so completedWithoutText can never fire and the stall returns")
-	}
-	if !sawPending {
-		t.Error("every message read as completed, including the request; the check is too loose")
-	}
-}
-
-// The poll must SURFACE it, not just detect it. Behavioural half, against a fake serve that
-// answers with a completed-but-textless assistant turn forever.
-func TestWaitForAsyncReplyFailsFastOnACompletedTextlessGeneration(t *testing.T) {
-	polls := 0
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		polls++
-		_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]},` +
-			`{"info":{"id":"msg_r","role":"assistant","time":{"created":2,"completed":3}},` +
-			`"parts":[{"type":"tool","tool":"read","state":{"status":"error"}}]}]`))
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
-	prev := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = prev }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	start := time.Now()
-	_, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
-
-	if err == nil {
-		t.Fatal("a completed textless generation must be an error, not a silent success")
-	}
-	if ctx.Err() != nil {
-		t.Fatalf("spun to the context deadline (%s) instead of failing fast — in production that is "+
-			"a full 10-minute generateTimeout reported as `context deadline exceeded`: %v",
-			time.Since(start), err)
-	}
-	if !strings.Contains(err.Error(), "without emitting any text") {
-		t.Errorf("the error must name the actual outcome; got %v", err)
-	}
-	if polls > 3 {
-		t.Errorf("took %d polls to notice a completed message; it is visible on the first one", polls)
+	if polls := fake.count(func(c string) bool { return strings.HasSuffix(c, "/message") }); polls > 1 {
+		t.Errorf("took %d polls to notice a finished turn; it is visible on the first one", polls)
 	}
 }
 
@@ -559,208 +278,156 @@ func TestPrepareAuthIsNonFatalButCopiesNothingWhenAuthIsAbsent(t *testing.T) {
 	}
 }
 
-// A SERIAL provider must not starve concurrent requests — this is the measured Windows failure.
+// The #143 budget, v2 shape: a request OpenCode is still retrying has not started.
 //
-// Reported from a real run: witness fired four simultaneous prompts at 21:11:01 and all four died at
-// exactly 21:21:01 (the full 600s budget), then one solo retry three seconds later completed in 41s.
-// Four such generations are ~164s of real work — they fit comfortably inside ONE request's budget, so
-// concurrency was never too much work for the provider. The bug was that the deadline started when
-// witness SENT, so a request waiting its turn was charged the same budget as one being generated, and
-// the siblings at the back of the queue were killed having never been touched.
+// Reported from a real run (v1): witness fired four simultaneous prompts and all four died at
+// exactly the 600 s budget, then one solo retry completed in 41 s. Four such generations are ~164 s
+// of real work, so concurrency was never too much for the provider; the deadline started when
+// witness SENT, so a request waiting its turn was charged as generating. In v2 the same bug has a
+// new hiding place (runner.md (c)(3)): on any retryable failure the assistant record appears AT
+// ONCE, with `retry` set, while OpenCode backs off internally for up to ~85 s (or 10 x 15 min on
+// a long retry-after). "An assistant exists" alone would charge that backoff to the generation
+// budget, so "started" is assistant && retry == null (critic C5).
 //
-// The fake serve here IS that provider: it generates for exactly one request at a time and makes the
-// others wait. With the old single-phase budget the waiters die; with the two-phase budget they wait
-// and then succeed — which is what keeps concurrency worth having.
-func TestConcurrentRequestsSurviveASeriallyServingProvider(t *testing.T) {
-	var mu sync.Mutex
-	// queue is the arrival order of request ids; only the head is "generating".
-	var queue []string
-	started := map[string]bool{}
-	startTime := map[string]time.Time{}
-	done := map[string]bool{}
-
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.URL.Query().Get("id")
-		mu.Lock()
-		defer mu.Unlock()
-		switch {
-		case strings.Contains(r.URL.Path, "/prompt_async"):
-			var body struct{ MessageID string }
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			queue = append(queue, body.MessageID)
-			w.WriteHeader(http.StatusNoContent)
-		case strings.Contains(r.URL.Path, "/message"):
-			// Serve strictly one at a time: the head of the queue starts, then completes; only
-			// then does the next become eligible.
-			if len(queue) > 0 {
-				head := queue[0]
-				if !started[head] {
-					started[head] = true // generation begins for the head only
-					startTime[head] = time.Now()
-				} else if !done[head] && time.Since(startTime[head]) > 150*time.Millisecond {
-					// The head takes real time to generate, so siblings genuinely accumulate
-					// queue-wait. Without this the provider is effectively instant and no
-					// starvation pressure exists — the fixture would prove nothing.
-					done[head] = true
-					queue = queue[1:]
-				}
-			}
-			// Reply for whichever message the caller is polling about. The caller polls its own
-			// session, so derive the id from the path.
-			parts := strings.Split(r.URL.Path, "/")
-			sess := ""
-			if len(parts) > 2 {
-				sess = parts[2]
-			}
-			msg := sessionMsg[sess]
-			out := `[{"info":{"id":"` + msg + `","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]}`
-			if started[msg] {
-				if done[msg] {
-					out += `,{"info":{"id":"a_` + msg + `","role":"assistant","time":{"created":2,"completed":3}},` +
-						`"parts":[{"type":"text","text":"[]"}]}`
-				} else {
-					// STARTED but not finished: an assistant message with no text yet. This is the
-					// state the two-phase budget must treat as "generating", not "queued".
-					out += `,{"info":{"id":"a_` + msg + `","role":"assistant","time":{"created":2}},"parts":[]}`
-				}
-			}
-			out += `]`
-			_, _ = w.Write([]byte(out))
-		default:
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"id":"sess"}`))
-		}
-		_ = id
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-
-	prev := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = prev }()
-	// Shrink the generation budget below the ~450ms the LAST waiter queues (3 heads x 150ms) but
-	// above one 150ms generation. Measured from when the provider STARTS, every request fits; measured
-	// from when witness SENT — the #143 bug — the back of the queue dies.
-	prevGen := generateTimeout
+// The fake here IS that provider: it serves one request at a time; the others show an assistant in
+// backoff until their turn. The last waiter queues ~450 ms, past the 400 ms generation budget.
+func TestQueueTimeIsNotChargedAsGeneration(t *testing.T) {
+	prev := generateTimeout
 	generateTimeout = 400 * time.Millisecond
-	defer func() { generateTimeout = prevGen }()
-
-	// Four concurrent waiters against the serial provider.
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
+	t.Cleanup(func() { generateTimeout = prev })
+	fake, srv := newFakeV2(t)
+	var queue []string // arrival order; only the head generates (turn runs under fake.mu)
+	started, done := map[string]time.Time{}, map[string]bool{}
+	fake.turn = func(s *fakeSession) []map[string]any {
+		if !done[s.ID] && !slices.Contains(queue, s.ID) {
+			queue = append(queue, s.ID)
+		}
+		if len(queue) > 0 {
+			if head := queue[0]; started[head].IsZero() {
+				started[head] = time.Now()
+			} else if time.Since(started[head]) > 150*time.Millisecond {
+				done[head], queue = true, queue[1:]
+			}
+		}
+		switch {
+		case done[s.ID]:
+			return okTurn("[]")(s)
+		case !started[s.ID].IsZero():
+			return []map[string]any{s.user(), assistantRec("", nil)} // generating, no text yet
+		default:
+			return []map[string]any{s.user(), assistantRec("", retryRec(time.Now().Add(time.Second), "provider.rate-limit", "busy"))}
+		}
+	}
 	var wg sync.WaitGroup
 	errs := make([]error, 4)
-	for i := 0; i < 4; i++ {
+	for i := range errs {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			msg := fmt.Sprintf("msg_%d", i)
-			sess := fmt.Sprintf("s%d", i)
-			mu.Lock()
-			sessionMsg[sess] = msg
-			mu.Unlock()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_, errs[i] = srv.runSessionWithMessage(ctx, sess, msg, "", "P", "I")
-		}(i)
+			_, errs[i] = srv.Run(context.Background(), "openai/gpt-5.5", "P", fmt.Sprint(i))
+		}()
 	}
 	wg.Wait()
-
 	for i, err := range errs {
 		if err != nil {
 			t.Errorf("request %d failed against a serially-serving provider: %v\n"+
-				"Concurrency must survive a provider that serves one at a time — killing the "+
-				"waiters is the measured Windows starvation this budget exists to prevent.", i, err)
+				"OpenCode's backoff is queue time; charging it as generation kills the waiters.", i, err)
 		}
 	}
 }
 
-// sessionMsg maps a fake session id to the message id under test, so the handler can answer each
-// caller about its own request.
-var sessionMsg = map[string]string{}
+// A retry the provider scheduled past the remaining queue budget will not start in time, so
+// waiting it out only holds the WorkerLock: give up at once and say when the provider would retry.
+// The measured case: a 429 with retry-after 3600 makes OpenCode schedule the next attempt 15 min
+// out (runner.md (c)(3) r429l).
+func TestQueuedRetryPastTheBudgetGivesUpEarly(t *testing.T) {
+	prev := queueWaitBudget
+	queueWaitBudget = 2 * time.Second
+	t.Cleanup(func() { queueWaitBudget = prev })
+	fake, srv := newFakeV2(t)
+	fake.turn = func(s *fakeSession) []map[string]any {
+		at := s.Prompted.Add(15 * time.Minute)
+		return []map[string]any{s.user(), assistantRec("", retryRec(at, "provider.rate-limit", "mock rate limit"))}
+	}
+	// Bounded, so a regression that waits the retry out fails here instead of hanging the suite.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := srv.Run(ctx, "openai/gpt-5.5", "P", "D")
+	if d := time.Since(start); d >= time.Second {
+		t.Errorf("took %s; a retry scheduled past the 2 s queue budget must give up at once", d)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "retry at") {
+		t.Fatalf("err = %v, want a DeadlineExceeded naming the provider's retry time", err)
+	}
+	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
+}
+
+// The half the early give-up could break: a retry due INSIDE the budget is waited on.
+func TestRetryWithinTheBudgetKeepsWaiting(t *testing.T) {
+	prev := queueWaitBudget
+	queueWaitBudget = 2 * time.Second
+	t.Cleanup(func() { queueWaitBudget = prev })
+	fake, srv := newFakeV2(t)
+	fake.turn = func(s *fakeSession) []map[string]any {
+		if at := s.Prompted.Add(100 * time.Millisecond); time.Now().Before(at) {
+			return []map[string]any{s.user(), assistantRec("", retryRec(at, "provider.rate-limit", "mock rate limit"))}
+		}
+		return okTurn("RESULT")(s)
+	}
+	if got, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D"); err != nil || got != "RESULT" {
+		t.Fatalf("Run = %q, %v; want RESULT once the retry succeeds", got, err)
+	}
+}
 
 // The GENERATION deadline must still bite once generation has actually started — the two-phase
-// budget must not become "wait forever". This is the half the fix could break.
+// budget must not become "wait forever" — and it ends the turn upstream before deleting it.
 func TestGenerationDeadlineStillAppliesOnceStarted(t *testing.T) {
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always: our request, plus a STARTED assistant message that never completes.
-		_, _ = w.Write([]byte(`[{"info":{"id":"msg_ours","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"go"}]},` +
-			`{"info":{"id":"a","role":"assistant","time":{"created":2}},"parts":[]}]`))
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
-	prevPoll := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = prevPoll }()
-	prevGen := generateTimeout
-	generateTimeout = 100 * time.Millisecond
-	defer func() { generateTimeout = prevGen }()
-
+	prev := generateTimeout
+	generateTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { generateTimeout = prev })
+	fake, srv := newFakeV2(t)
+	fake.turn = func(s *fakeSession) []map[string]any {
+		return []map[string]any{s.user(), assistantRec("", nil)} // started, never idle
+	}
 	// The ctx is far longer than the shrunk generation budget, so whichever fires first tells us
 	// which mechanism bounded the request: the GENERATION phase must, not the ctx, and not the
 	// 30-minute queue allowance (which a turn never marked as started would fall through to).
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
-	if err == nil {
-		t.Fatal("a generation that starts and never completes must eventually fail")
+	_, err := srv.Run(ctx, "openai/gpt-5.5", "P", "D")
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "generation exceeded") {
+		t.Fatalf("err = %v, want the generation phase's DeadlineExceeded", err)
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("ran to the context deadline instead of the generation budget: %v", err)
 	}
-	if !strings.Contains(err.Error(), "generation exceeded") {
-		t.Errorf("want the generation-phase error, got %v", err)
-	}
+	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
 }
 
 // A serve that accepts the prompt and then FAILS every poll must still be bounded by the phase
 // budgets — not left to run to the blunt ctx ceiling.
 //
-// Found by an adversarial audit of my own two-phase change, and it is the sharpest kind of finding:
-// my fix for one stall made a DIFFERENT stall worse. Every phase check originally sat inside the
+// Found by an adversarial audit of the two-phase change, and it is the sharpest kind of finding:
+// the fix for one stall made a DIFFERENT stall worse. Every phase check originally sat inside the
 // `if err == nil` branch, so a poll that kept erroring was charged nothing — not the queue budget,
-// not the generation budget, not the request-missing streak. And because the two-phase change raised
-// the ctx ceiling from generateTimeout (10m) to requestLifetimeBudget (~41m), that unbudgeted path
-// got four times longer than before the "fix".
-//
-// The fake serve here is that failure: 204 on the prompt, then 500 on every message poll.
+// not the generation budget, not the request-missing streak — and ran to requestLifetimeBudget.
 func TestPollFailuresAreStillChargedAgainstThePhaseBudget(t *testing.T) {
-	polls := 0
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/prompt_async") {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		polls++
-		w.WriteHeader(http.StatusInternalServerError) // every poll fails
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
-	prevPoll := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Millisecond
-	defer func() { openCodeAsyncPollInterval = prevPoll }()
-	// Shrink the QUEUE budget so the assertion is about enforcement rather than about waiting 30
-	// real minutes. The ctx below is deliberately far longer than this, so whichever fires first
-	// tells us which mechanism actually bounded the request.
-	prevQueue := queueWaitBudget
+	prev := queueWaitBudget
 	queueWaitBudget = 200 * time.Millisecond
-	defer func() { queueWaitBudget = prevQueue }()
-
+	t.Cleanup(func() { queueWaitBudget = prev })
+	fake, srv := newFakeV2(t)
+	fake.turn = func(*fakeSession) []map[string]any { return nil } // every poll 500s
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-
-	_, err := srv.waitForAsyncReply(ctx, "sess", "msg_ours")
+	_, err := srv.Run(ctx, "openai/gpt-5.5", "P", "D")
 	if err == nil {
 		t.Fatal("a serve that fails every poll must be an error")
 	}
 	if ctx.Err() != nil {
-		t.Fatalf("ran to the context deadline instead of a phase budget — in production that is the "+
-			"~41m requestLifetimeBudget ceiling, worse than the 10m it replaced: %v", err)
+		t.Fatalf("ran to the context deadline instead of a phase budget: %v", err)
 	}
-	if polls < 2 {
+	if polls := fake.count(func(c string) bool { return strings.HasSuffix(c, "/message") }); polls < 2 {
 		t.Errorf("gave up after %d poll(s); a single transient 500 must not abort a request", polls)
 	}
 	// The error must NAME the transport failure. Reporting only a phase timeout would hide the
