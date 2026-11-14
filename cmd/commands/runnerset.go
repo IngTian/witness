@@ -25,6 +25,7 @@ import (
 // is the "an OpenCode outage doesn't touch Claude lenses" isolation.
 type runnerSet struct {
 	cfg      store.Config
+	lenses   []*lens.Lens             // the active lenses this drain will run
 	byName   map[string]*openedRunner // runtime name → lazily-opened runner (or a broken marker)
 	defaultR string                   // the resolved default runner name (the "" / default routing target)
 }
@@ -42,22 +43,16 @@ type openedRunner struct {
 // down. It DOES return an error only if the default runner itself can't even be resolved
 // (a config typo), matching slice-1's fail-closed behavior.
 //
-// Each runner is minted with a cfg carrying the models that runtime should VALIDATE at Open: the
-// configured default stage models for the default runtime, and none for a non-default one (see
-// clearCrossRuntimeModels).
+// Each runner is minted with a cfg carrying the models that runtime should VALIDATE at Open:
+// the union of every model its lenses will ask it for, computed by runtimeModels. This was
+// NOT IMPLEMENTED in #148 (the comment claimed it but nothing computed a union), and deliberately
+// left out — but Task 2.7 reversed that decision because two things need it:
+//  1. On the OpenCode runner, an empty stage model is an error at Open (spec §7.7), so the
+//     union must include "" when a cross-runtime lens has no per-lens model.
+//  2. OPENCODE_DISABLE_FREE_MODELS=1 unless an opencode/* model is configured, which requires
+//     knowing whether ANY lens will use a free model.
 //
-// It does NOT validate the union of that runtime's per-lens models, and the comment here used to
-// claim it did (#148). Nothing computed such a union — the parameter that was supposed to carry the
-// lenses was declared and never read, so the claim described behavior that never existed, which is
-// worse than an absent feature because it stops anyone from looking.
-//
-// NOT IMPLEMENTED DELIBERATELY, rather than left as a TODO. store.Config carries exactly two model
-// slots (TriageModel, DistillModel), so a real union needs a new Config field threaded through
-// every runner — and the only thing it buys is EARLIER failure for a mistyped per-lens model.
-// That model is already validated when it is first used: the run fails, the lens backs off, and the
-// error names the model. Trading a new config field plus its migration for moving one error message
-// earlier is not worth it. If per-lens models ever become common enough that a fail-at-Open check
-// pays for itself, StartOpenCodeServerIn already accepts a model list — the plumbing is there.
+// The plumbing (store.Config.RunnerModels, a slice) already existed; this task fills it.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
 	// Every model call opens through here (worker, review + emergent, compact + claims, profile
 	// regeneration), so this is the one place to refuse an archive a newer witness wrote — before
@@ -65,7 +60,7 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 	if err := st.ArchiveNewer(); err != nil {
 		return nil, err
 	}
-	rs := &runnerSet{cfg: cfg, byName: map[string]*openedRunner{}, defaultR: strings.TrimSpace(cfg.Runner)}
+	rs := &runnerSet{cfg: cfg, lenses: lenses, byName: map[string]*openedRunner{}, defaultR: strings.TrimSpace(cfg.Runner)}
 
 	// Which runtimes are actually needed, and the model union per runtime.
 	needed := map[string]bool{}
@@ -100,8 +95,8 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 }
 
 // openRuntime mints + Opens one runtime, recording either its MineFunc or a broken marker.
-// The cfg it mints with carries only the models this runtime should validate at Open — the
-// configured defaults for the default runtime, none for a cross-runtime one.
+// The cfg it mints with carries the union of models this runtime should validate at Open —
+// every model its lenses will ask it for, computed by runtimeModels.
 // st is currently UNREAD here, and that is a deliberate keep rather than an oversight: openRuntime
 // resolves via platform.RunnerForName (name + cfg) because cfg.Runner was already resolved through
 // the store's precedence ladder once, by the caller. Any per-runtime resolution that needs the store
@@ -111,6 +106,7 @@ func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name stri
 	rcfg := rs.cfg
 	rcfg.Runner = name
 	clearCrossRuntimeModels(&rcfg, name, rs.defaultR)
+	rcfg.RunnerModels = runtimeModels(rs.cfg, rs.lenses, name)
 
 	runner, err := platform.RunnerForName(name, rcfg)
 	if err != nil {
@@ -198,4 +194,35 @@ func clearCrossRuntimeModels(rcfg *store.Config, name, defaultRunner string) {
 	}
 	rcfg.TriageModel = ""
 	rcfg.DistillModel = ""
+}
+
+// runtimeModels returns the union of models a given runtime should validate: every model
+// its lenses will ask it for, across both stages (extract/review). On the default runtime
+// it also includes the cross-lens unified summary's review model. Empty models ("") are
+// kept (they represent an unnamed stage on a cross-runtime lens with no per-lens model)
+// and the list is deduped.
+func runtimeModels(cfg store.Config, lenses []*lens.Lens, runtime string) []string {
+	seen := map[string]bool{}
+	defaultRunner := strings.TrimSpace(cfg.Runner)
+	isDefault := strings.TrimSpace(runtime) == defaultRunner
+
+	// Add both stages of every lens routed to this runtime.
+	for _, ln := range lenses {
+		if distill.RunnerFor(cfg, ln) != strings.TrimSpace(runtime) {
+			continue
+		}
+		seen[distill.ModelFor(cfg, ln, distill.PhaseExtract)] = true
+		seen[distill.ModelFor(cfg, ln, distill.PhaseReview)] = true
+	}
+
+	// On the default runtime, add the cross-lens unified summary's review model.
+	if isDefault {
+		seen[distill.ModelFor(cfg, nil, distill.PhaseReview)] = true
+	}
+
+	out := make([]string, 0, len(seen))
+	for m := range seen {
+		out = append(out, m)
+	}
+	return out
 }

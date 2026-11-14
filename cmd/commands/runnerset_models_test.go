@@ -1,11 +1,28 @@
 package commands
 
 import (
+	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
+
+// openTestStore creates a fresh store in a temp dir for testing.
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
 
 // A cross-runtime runner must not inherit the other runtime's model names.
 //
@@ -86,3 +103,103 @@ func TestModelClearingTakesNoLensesParameter(t *testing.T) {
 			"clearing function: %s", osig)
 	}
 }
+
+// runtimeModels must return both stages of every lens routed to the given runtime, plus on the
+// default runtime the cross-lens unified summary's review model. Empty models ("") are kept and
+// the list is deduped.
+func TestRuntimeModelsCoversEveryStageOnItsRuntime(t *testing.T) {
+	cfg := store.Config{Runner: "opencode", TriageModel: "opencode/a"}
+	ls := []*lens.Lens{
+		{Name: "default"},
+		{Name: "x", Runner: "claude"},
+		{Name: "y", Runner: "opencode", ExtractModel: "opencode/b"},
+	}
+
+	// runtimeModels(cfg, ls, "opencode") == ["opencode/a","opencode/b"]
+	// (y's review falls back to triage on the default runtime)
+	oc := runtimeModels(cfg, ls, "opencode")
+	want := map[string]bool{"opencode/a": true, "opencode/b": true}
+	if len(oc) != len(want) {
+		t.Errorf("opencode models len = %d, want %d: %v", len(oc), len(want), oc)
+	}
+	for _, m := range oc {
+		if !want[m] {
+			t.Errorf("opencode models contain unexpected %q", m)
+		}
+	}
+
+	// runtimeModels(cfg, ls, "claude") == [""]
+	// (a cross-runtime lens with no per-lens model: an unnamed stage)
+	cl := runtimeModels(cfg, ls, "claude")
+	if len(cl) != 1 || cl[0] != "" {
+		t.Errorf("claude models = %v, want [\"\"] (unnamed stage on cross-runtime lens)", cl)
+	}
+}
+
+// newRunnerSet must hand each runtime the models its lenses will ask it for.
+func TestRunnerSetHandsEachRuntimeItsModels(t *testing.T) {
+	// Register a fake that records the cfg from NewRunner
+	var recorded *store.Config
+	registerFakeModelsRecorder.Do(func() {
+		platform.Register(&fakeModelsRecorderPlatform{rec: &recorded})
+	})
+
+	cfg := store.Config{Runner: "fakemodelsrec", TriageModel: "fake/m1"}
+	ls := []*lens.Lens{{Name: "a", ExtractModel: "fake/m2"}}
+
+	st := openTestStore(t)
+	defer st.Close()
+	ctx := context.Background()
+
+	rs, err := newRunnerSet(ctx, st, cfg, ls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rs.Close()
+
+	if recorded == nil {
+		t.Fatal("NewRunner was not called")
+	}
+
+	got := recorded.RunnerModels
+	want := runtimeModels(cfg, ls, "fakemodelsrec")
+	if len(got) != len(want) {
+		t.Errorf("RunnerModels len = %d, want %d: got %v, want %v", len(got), len(want), got, want)
+	}
+	// Build a set from want for comparison (order doesn't matter)
+	wantSet := map[string]bool{}
+	for _, m := range want {
+		wantSet[m] = true
+	}
+	for _, m := range got {
+		if !wantSet[m] {
+			t.Errorf("RunnerModels contains unexpected %q; got %v, want %v", m, got, want)
+		}
+	}
+}
+
+var registerFakeModelsRecorder sync.Once
+
+type fakeModelsRecorderPlatform struct {
+	rec **store.Config
+}
+
+func (p *fakeModelsRecorderPlatform) Name() string          { return "fakemodelsrec" }
+func (p *fakeModelsRecorderPlatform) SessionPrefix() string { return "fakemodelsrec:" }
+func (p *fakeModelsRecorderPlatform) Capture(*store.Store, []byte, time.Time) (bool, error) {
+	return false, nil
+}
+func (p *fakeModelsRecorderPlatform) NewRunner(cfg store.Config) platform.Runner {
+	*p.rec = &cfg
+	return fakeModelsRecorderRunner{}
+}
+
+type fakeModelsRecorderRunner struct{}
+
+func (fakeModelsRecorderRunner) Open(context.Context) error { return nil }
+func (fakeModelsRecorderRunner) Close() error               { return nil }
+func (fakeModelsRecorderRunner) Run(context.Context, string, string, string) (string, error) {
+	return "[]", nil
+}
+func (fakeModelsRecorderRunner) ValidateModels(context.Context, ...string) error { return nil }
+func (fakeModelsRecorderRunner) InvocationHint() string                          { return "fakemodelsrec" }

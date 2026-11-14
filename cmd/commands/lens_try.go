@@ -174,10 +174,6 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	}
 
 	cfg := st.ResolvedConfig()
-	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
-	// (a single candidate = one runner) and clear the wrong-runtime default models. See
-	// tryRunnerCfg.
-	cfg = tryRunnerCfg(cfg, ln)
 	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
 	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
 	// override would silently not reach the server. --model overrides EXTRACT (triage);
@@ -209,6 +205,12 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	}
 
 	ctx := context.Background()
+
+	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
+	// (a single candidate = one runner) and clear the wrong-runtime default models. This
+	// must run AFTER the --model / --review-model overrides so RunnerModels contains the
+	// overridden values (F7).
+	cfg = tryRunnerCfg(cfg, ln, opts.review)
 
 	runner, err := runnerForName(cfg.Runner, cfg)
 	if err != nil {
@@ -439,12 +441,27 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // mint it by name (RunnerForName), never through the store's precedence ladder again, which
 // would let an unbound store's WITNESS_RUNNER override the lens (F030). Pure (returns a
 // modified copy) so it is unit-testable.
-func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
+//
+// It also populates RunnerModels with the stages that will actually run: extract alone or
+// extract + review, so the runner validates exactly what lens try will use.
+func tryRunnerCfg(cfg store.Config, ln *lens.Lens, review bool) store.Config {
 	defaultRunner := cfg.Runner
 	if r := distill.RunnerFor(cfg, ln); r != "" {
 		cfg.Runner = r
 	}
 	clearCrossRuntimeModels(&cfg, cfg.Runner, defaultRunner)
+
+	// Populate RunnerModels with the stages that will run.
+	seen := map[string]bool{}
+	seen[distill.ModelFor(cfg, ln, distill.PhaseExtract)] = true
+	if review {
+		seen[distill.ModelFor(cfg, ln, distill.PhaseReview)] = true
+	}
+	cfg.RunnerModels = make([]string, 0, len(seen))
+	for m := range seen {
+		cfg.RunnerModels = append(cfg.RunnerModels, m)
+	}
+
 	return cfg
 }
 
