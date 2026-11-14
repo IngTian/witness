@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,23 +66,55 @@ func TestParseTurnCountsRetryAsQueued(t *testing.T) {
 }
 
 func TestParseTurnStartsWhenRetryClears(t *testing.T) {
-	// Same fixture as retrying, but with retry deleted and content present
+	// Read the retrying fixture
 	data := readFixture(t, "v2_turn_retrying.json")
-	// Manually modify to clear retry and add content - in practice this is done in the fixture
+
+	// First: verify the retrying fixture shows Started=false
 	st, err := parseTurn(data, "msg_req")
 	if err != nil {
-		t.Fatalf("parseTurn: %v", err)
+		t.Fatalf("parseTurn with retry: %v", err)
+	}
+	if st.Started {
+		t.Error("Started = true when retry is present, want false")
+	}
+	if st.Retry == nil {
+		t.Error("Retry = nil when assistant has retry field")
 	}
 
-	// When retry is null (not present in JSON) and content exists, Started should be true
-	// The fixture v2_turn_retrying has retry set, so we test the logic by checking
-	// that when we read a message without retry, it's Started
-	// For this test, we need a fixture where the assistant has no retry field
-	// Let's check the current state
-	if st.Started {
-		// If the fixture was modified to have no retry, this would pass
-		// Otherwise we verify the predicate logic is correct
-		t.Skip("This test requires a modified fixture or separate fixture without retry")
+	// Second: clear retry and verify Started=true
+	var response struct {
+		Data []v2Message `json:"data"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Find the assistant and clear its retry
+	for i := range response.Data {
+		if response.Data[i].Type == "assistant" {
+			response.Data[i].Retry = nil
+			// Add content so there's something to parse
+			response.Data[i].Content = []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}{
+				{Type: "text", Text: "reply after retry cleared"},
+			}
+		}
+	}
+	clearedData, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	st2, err := parseTurn(clearedData, "msg_req")
+	if err != nil {
+		t.Fatalf("parseTurn without retry: %v", err)
+	}
+	if !st2.Started {
+		t.Error("Started = false when retry is cleared, want true")
+	}
+	if st2.Retry != nil {
+		t.Errorf("Retry = %v when assistant has no retry, want nil", st2.Retry)
 	}
 }
 
@@ -138,6 +171,68 @@ func TestFreeLimitIsDetectedFromTheGatewayBody(t *testing.T) {
 	err := turnError(st, time.Now())
 	if !errors.As(err, &qe) {
 		t.Errorf("turnError did not return QuotaExhaustedError for gateway body: %v", err)
+	}
+}
+
+func TestPlainRateLimitIsNotFreeLimit(t *testing.T) {
+	// A provider.rate-limit error (429) without FreeUsageLimitError in the body
+	// should NOT become QuotaExhaustedError
+	plainRateLimit := v2Error{
+		Type:    "provider.rate-limit",
+		Message: "Rate limit exceeded. Please try again later.",
+		Status:  429,
+	}
+	plainRateLimit.Response = &struct {
+		Body string `json:"body"`
+	}{
+		Body: `{"type":"error","error":{"type":"RateLimitError","message":"Rate limit exceeded"}}`,
+	}
+
+	// Test on idle error
+	idle := v2Message{
+		Outcome: "failed",
+		Error:   &plainRateLimit,
+	}
+	idle.Time.Created = 1763046000000
+	st := turnState{
+		Idle: &idle,
+	}
+
+	var qe *platform.QuotaExhaustedError
+	err := turnError(st, time.Now())
+	if err == nil {
+		t.Fatal("turnError returned nil for rate-limit error")
+	}
+	if errors.As(err, &qe) {
+		t.Errorf("turnError returned QuotaExhaustedError for plain rate-limit: %v", err)
+	}
+	if !containsString(err.Error(), "rate-limit") {
+		t.Errorf("error message does not contain 'rate-limit': %v", err)
+	}
+
+	// Test on assistant error (when idle has no error)
+	idle2 := v2Message{
+		Outcome: "failed",
+	}
+	idle2.Time.Created = 1763046000000
+	last := v2Message{
+		Error: &plainRateLimit,
+	}
+	last.Time.Created = 1763046000000
+	st2 := turnState{
+		Idle: &idle2,
+		Last: &last,
+	}
+
+	err2 := turnError(st2, time.Now())
+	if err2 == nil {
+		t.Fatal("turnError returned nil for rate-limit error on Last")
+	}
+	if errors.As(err2, &qe) {
+		t.Errorf("turnError returned QuotaExhaustedError for plain rate-limit on Last: %v", err2)
+	}
+	if !containsString(err2.Error(), "rate-limit") {
+		t.Errorf("error message does not contain 'rate-limit': %v", err2)
 	}
 }
 
