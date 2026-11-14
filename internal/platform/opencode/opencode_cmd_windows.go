@@ -9,10 +9,9 @@ import (
 
 // hideOpenCodeWindow suppresses the console window Windows creates for a child process.
 //
-// witness spawns `opencode` several ways (serve, models, export, --version) and
-// every one flashed a blank console on the desktop — the worker is detached with
-// DETACHED_PROCESS, so its children have no console to inherit and Windows allocates a
-// fresh one. HideWindow tells the loader not to show it.
+// witness spawns `opencode` (serve, --version) and both flash a blank console on the
+// desktop — the worker is detached with DETACHED_PROCESS, so its children have no console
+// to inherit and Windows allocates a fresh one. HideWindow tells the loader not to show it.
 //
 // It sets the field on any EXISTING SysProcAttr rather than assigning a fresh struct, so it
 // composes with an attr another layer already set (proc.BindToParent does the same via

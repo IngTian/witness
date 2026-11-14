@@ -68,8 +68,41 @@ func (n *nativeRuntime) snapshot(p string) string {
 	return strings.TrimSuffix(p, ".json") + ".snapshot.json"
 }
 
+// isolatedEnv returns the data, cache, state dirs and DB path under witness's runtime root,
+// so every spawned opencode process writes to witness's private copy, never the user's.
 func isolatedEnv(root string) []string {
-	return []string{"XDG_DATA_HOME=" + filepath.Join(root, "xdg"), "OPENCODE_DB=" + filepath.Join(root, "opencode.db")}
+	db := "opencode-v2.db"
+	data := "opencode-data"
+	cache := "opencode-cache"
+	state := "opencode-state"
+	if root != "" {
+		db = filepath.Join(root, db)
+		data = filepath.Join(root, data)
+		cache = filepath.Join(root, cache)
+		state = filepath.Join(root, state)
+	}
+	return []string{
+		"XDG_DATA_HOME=" + data,
+		"XDG_CACHE_HOME=" + cache,
+		"XDG_STATE_HOME=" + state,
+		"OPENCODE_DB=" + db,
+	}
+}
+
+// withoutOpenCodeEnv drops every inherited OPENCODE_* variable (case-insensitively, since
+// Windows env names are case-insensitive) to prevent the user's config, plugins, MCP servers
+// and credentials from leaking into witness's private opencode serve (critic.md G1). HOME
+// stays (Bedrock's credential chain reads ~/.aws). API-key env vars stay (the runner copies
+// no credentials, spec §7.6).
+func withoutOpenCodeEnv(env []string) []string {
+	var out []string
+	for _, e := range env {
+		k, _, _ := strings.Cut(e, "=")
+		if !strings.HasPrefix(strings.ToUpper(k), "OPENCODE_") {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 func replaceEnv(base, updates []string) []string {
 	m := map[string]string{}

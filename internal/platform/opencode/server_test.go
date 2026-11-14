@@ -48,7 +48,7 @@ func TestBuildOpenCodeServeCmdUsesPrivateRuntimeEnv(t *testing.T) {
 		}
 		got[k] = v
 	}
-	if got["XDG_DATA_HOME"] != filepath.Join(root, "xdg") || got["OPENCODE_DB"] != filepath.Join(root, "opencode.db") {
+	if got["XDG_DATA_HOME"] != filepath.Join(root, "opencode-data") || got["OPENCODE_DB"] != filepath.Join(root, "opencode-v2.db") {
 		t.Fatalf("serve used user runtime: %#v", got)
 	}
 }
