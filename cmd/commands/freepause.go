@@ -22,9 +22,9 @@ import (
 // place every model call opens through, so nothing reaches a free model until the reset.
 //
 // Reset times are unreliable (freetier §4 Reliability: a "7h25m" refusal answered by a success
-// seconds later), so T is never trusted to release a burst: after T exactly one call probes. A
-// refusal re-arms the pause with its own T, a success clears it, and any other failure keeps it
-// and lets the next call probe again.
+// seconds later), so T is never trusted to release a burst: after T exactly one call probes, and
+// calls arriving meanwhile wait for its verdict. A refusal re-arms the pause with its own T, a
+// success clears it, and any other failure (a panic included) keeps it and lets the next call probe.
 //
 // T lives in meta so the pause spans the short-lived worker processes and `lens try`.
 // ponytail: `probing` is per process, so two processes past T may each probe once; a meta CAS
@@ -38,13 +38,18 @@ func freeModelsPausedUntil(st store.MetaKV) (time.Time, bool) {
 }
 
 type freeGate struct {
-	st      store.MetaKV
-	now     func() time.Time
-	mu      sync.Mutex // serializes probing and each meta read-decide-write: the drain runs up to 16 miners
-	probing bool
+	st        store.MetaKV
+	now       func() time.Time
+	mu        sync.Mutex // serializes probing and each meta read-decide-write: the drain runs up to 16 miners
+	probing   bool
+	probeDone chan struct{} // closed when the in-flight probe settles; its waiters then re-admit
 }
 
 func newFreeGate(st store.MetaKV) *freeGate { return &freeGate{st: st, now: time.Now} }
+
+// errRunPanicked is how a panicking call settles: a non-quota failure, so the key stays armed and
+// the next call probes.
+var errRunPanicked = errors.New("free-model call panicked")
 
 // wrap gates the calls run makes to r's free models. It returns run unchanged when r has no free
 // allowance, and passes any non-free model straight through.
@@ -53,41 +58,62 @@ func (g *freeGate) wrap(runtime string, r platform.Runner, run distill.MineFunc)
 	if !ok {
 		return run
 	}
-	return func(ctx context.Context, model, prompt, input string) (string, error) {
+	return func(ctx context.Context, model, prompt, input string) (out string, err error) {
 		if !fa.OnFreeModel(model) {
 			return run(ctx, model, prompt, input)
 		}
-		probe, err := g.admit(runtime)
-		if err != nil {
-			return "", err
+		probe, aerr := g.admit(ctx, runtime)
+		if aerr != nil {
+			return "", aerr
 		}
-		out, err := run(ctx, model, prompt, input) // outside mu: a generation runs for minutes
-		g.settle(probe, err)
-		return out, err
+		// Settle in a defer so a panicking probe still ends: the drain recovers miner panics, and
+		// every later free call would otherwise wait on a probeDone that never closes. err holds
+		// errRunPanicked until run returns, so a panic settles as a non-quota failure and goes on
+		// propagating.
+		err = errRunPanicked
+		defer func() { g.settle(probe, err) }()
+		return run(ctx, model, prompt, input) // outside mu: a generation runs for minutes
 	}
 }
 
-// admit: unarmed → run; armed and before T, or past T with the probe already in flight →
-// refused with the stored T, never reaching the runner; armed and past T → run as the one probe.
-func (g *freeGate) admit(runtime string) (probe bool, err error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	until, armed := freeModelsPausedUntil(g.st)
-	if !armed {
-		return false, nil
+// admit: unarmed → run; armed and before T → refused with the stored T, never reaching the
+// runner; armed and past T → run as the one probe. A call arriving while the probe is in flight
+// WAITS for its verdict and re-admits, rather than being refused: a refusal skips its session for
+// the rest of the drain, and a probe that succeeds arms no wakeup, so the reset would resume only
+// the probe's own session and strand the rest until an unrelated trigger.
+func (g *freeGate) admit(ctx context.Context, runtime string) (probe bool, err error) {
+	for {
+		g.mu.Lock()
+		until, armed := freeModelsPausedUntil(g.st)
+		switch {
+		case !armed:
+			g.mu.Unlock()
+			return false, nil
+		case g.now().Before(until):
+			g.mu.Unlock()
+			return false, &platform.QuotaExhaustedError{ResetAt: until, Runtime: runtime}
+		case !g.probing:
+			g.probing, g.probeDone = true, make(chan struct{})
+			g.mu.Unlock()
+			return true, nil
+		}
+		done := g.probeDone
+		g.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
 	}
-	if g.now().Before(until) || g.probing {
-		return false, &platform.QuotaExhaustedError{ResetAt: until, Runtime: runtime}
-	}
-	g.probing = true
-	return true, nil
 }
 
 func (g *freeGate) settle(probe bool, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if probe {
+		// Waiters re-admit only after mu is released, so they read the verdict written below.
 		g.probing = false
+		close(g.probeDone)
 	}
 	var qe *platform.QuotaExhaustedError
 	switch {
@@ -102,7 +128,10 @@ func (g *freeGate) settle(probe bool, err error) {
 			slog.Error("distill: could not store the free-model pause; free-model calls are not paused", "until", until, "err", werr)
 		}
 	case probe && err == nil:
-		_ = g.st.SetMetaString(freeModelsPausedKey, "")
+		if werr := g.st.SetMetaString(freeModelsPausedKey, ""); werr != nil {
+			slog.Error("distill: could not clear the free-model pause; the next free-model call probes again", "err", werr)
+			return
+		}
 		slog.Info("distill: the free model allowance is back; free-model calls resume")
 	}
 }

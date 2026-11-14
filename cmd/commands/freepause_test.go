@@ -106,38 +106,146 @@ func TestPausedFreeModelCallsNeverReachTheRunner(t *testing.T) {
 	}
 }
 
-func TestAfterThePauseOneCallProbes(t *testing.T) {
-	meta := armedMeta(gateNow.Add(-time.Second))
-	entered, release := make(chan struct{}), make(chan struct{})
-	var n atomic.Int32
-	run := testGate(meta).wrap("fakefree", freeRunner{}, func(context.Context, string, string, string) (string, error) {
-		if n.Add(1) == 1 {
+// recv waits for ch, failing (not hanging) on a regression.
+func recv[T any](t *testing.T, ch chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+	var zero T
+	return zero
+}
+
+// stillWaiting fails if ch delivers within a short window: its call must be parked on the probe.
+func stillWaiting(t *testing.T, ch chan error, what string) {
+	t.Helper()
+	select {
+	case err := <-ch:
+		t.Fatalf("%s returned (%v) while the probe was still in flight", what, err)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// heldProbe is a pause past its T whose probe is parked inside the runner until release; the
+// probe then answers verdict, and every later runner call answers "[]".
+type heldProbe struct {
+	run     distill.MineFunc
+	meta    *mapMeta
+	calls   atomic.Int32
+	probe   chan error
+	release func()
+}
+
+func startHeldProbe(t *testing.T, verdict error) *heldProbe {
+	h := &heldProbe{meta: armedMeta(gateNow.Add(-time.Second)), probe: make(chan error, 1)}
+	entered, held := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.release = func() { once.Do(func() { close(held) }) }
+	t.Cleanup(h.release) // a failed test must not leave the probe parked
+	h.run = testGate(h.meta).wrap("fakefree", freeRunner{}, func(context.Context, string, string, string) (string, error) {
+		if h.calls.Add(1) == 1 {
 			close(entered)
-			<-release
+			<-held
+			if verdict != nil {
+				return "", verdict
+			}
 		}
 		return "[]", nil
 	})
+	go func() { _, err := h.run(context.Background(), freeModel, "p", "i"); h.probe <- err }()
+	recv(t, entered, "the probe to reach the runner")
+	return h
+}
 
-	probe := make(chan error, 1)
-	go func() { _, err := run(context.Background(), freeModel, "p", "i"); probe <- err }()
-	<-entered
-	_, err := run(context.Background(), freeModel, "p", "i")
-	var qe *platform.QuotaExhaustedError
-	if !errors.As(err, &qe) {
-		t.Fatalf("a call during the probe must be refused by the gate, got %v", err)
-	}
-	if got := n.Load(); got != 1 {
+// call starts one more gated call; its error arrives on the returned channel.
+func (h *heldProbe) call(ctx context.Context) chan error {
+	ch := make(chan error, 1)
+	go func() { _, err := h.run(ctx, freeModel, "p", "i"); ch <- err }()
+	return ch
+}
+
+// After T exactly one call probes. A call arriving meanwhile does not reach the runner until the
+// probe settles, and after a successful probe it runs — refused, it would skip its session for the
+// rest of the drain, and a cleared pause arms no wakeup to bring it back.
+func TestAfterThePauseOneCallProbes(t *testing.T) {
+	h := startHeldProbe(t, nil)
+	second := h.call(context.Background())
+	stillWaiting(t, second, "a call during the probe")
+	if got := h.calls.Load(); got != 1 {
 		t.Fatalf("%d calls reached the runner while one probe was in flight, want 1", got)
 	}
-	close(release)
-	if err := <-probe; err != nil {
+	h.release()
+	if err := recv(t, h.probe, "the probe"); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if got := meta.MetaString(freeModelsPausedKey); got != "" {
+	if err := recv(t, second, "the waiting call"); err != nil || h.calls.Load() != 2 {
+		t.Fatalf("after a good probe the waiting call runs: err %v, runner calls %d", err, h.calls.Load())
+	}
+	if got := h.meta.MetaString(freeModelsPausedKey); got != "" {
 		t.Fatalf("a successful probe must clear the pause, still %q", got)
 	}
-	if _, err := run(context.Background(), freeModel, "p", "i"); err != nil || n.Load() != 2 {
-		t.Fatalf("after a good probe calls go through: err %v, runner calls %d", err, n.Load())
+}
+
+func TestAWaiterOnARefusedProbeGetsTheNewReset(t *testing.T) {
+	reset2 := gateNow.Add(2 * time.Hour)
+	h := startHeldProbe(t, &platform.QuotaExhaustedError{ResetAt: reset2, Runtime: "fakefree"})
+	waiter := h.call(context.Background())
+	stillWaiting(t, waiter, "a call during the probe")
+	h.release()
+	err := recv(t, waiter, "the waiting call")
+	var qe *platform.QuotaExhaustedError
+	if !errors.As(err, &qe) || !qe.ResetAt.Equal(reset2) {
+		t.Fatalf("a waiter on a refused probe must be refused with the re-armed %s, got %v", reset2, err)
+	}
+	if got := h.calls.Load(); got != 1 {
+		t.Fatalf("only the probe may reach the runner, got %d calls", got)
+	}
+}
+
+func TestAWaiterHonoursItsContext(t *testing.T) {
+	h := startHeldProbe(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	waiter := h.call(ctx)
+	stillWaiting(t, waiter, "a call during the probe")
+	cancel()
+	if err := recv(t, waiter, "the cancelled call"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled waiter must return context.Canceled, got %v", err)
+	}
+	if got := h.calls.Load(); got != 1 {
+		t.Fatalf("a cancelled waiter must not reach the runner, got %d calls", got)
+	}
+}
+
+// The drain recovers a miner's panic, so a probe that panics must still settle: otherwise every
+// later free call waits on it for the rest of the run.
+func TestAPanickingProbeStillSettles(t *testing.T) {
+	past := gateNow.Add(-time.Second)
+	meta := armedMeta(past)
+	var n atomic.Int32
+	run := testGate(meta).wrap("fakefree", freeRunner{}, func(context.Context, string, string, string) (string, error) {
+		if n.Add(1) == 1 {
+			panic("boom")
+		}
+		return "[]", nil
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the probe's panic must propagate")
+			}
+		}()
+		_, _ = run(context.Background(), freeModel, "p", "i")
+	}()
+	if got, want := meta.MetaString(freeModelsPausedKey), past.Format(time.RFC3339); got != want {
+		t.Fatalf("a panicked probe must leave the pause as it was: %q, want %q", got, want)
+	}
+	next := make(chan error, 1)
+	go func() { _, err := run(context.Background(), freeModel, "p", "i"); next <- err }()
+	if err := recv(t, next, "the call after a panicked probe"); err != nil || n.Load() != 2 {
+		t.Fatalf("the next call must probe: err %v, runner calls %d", err, n.Load())
 	}
 }
 
@@ -184,11 +292,17 @@ func TestPauseLogsOnce(t *testing.T) {
 
 	// Two calls in flight before the first refusal lands: both are refused with the same reset.
 	reset := gateNow.Add(time.Hour)
-	var arrived sync.WaitGroup
-	arrived.Add(2)
+	var arrived atomic.Int32
+	bothIn := make(chan struct{})
 	run := testGate(&mapMeta{}).wrap("fakefree", freeRunner{}, func(context.Context, string, string, string) (string, error) {
-		arrived.Done()
-		arrived.Wait()
+		if arrived.Add(1) == 2 {
+			close(bothIn)
+		}
+		select {
+		case <-bothIn:
+		case <-time.After(5 * time.Second):
+			t.Error("the two calls never overlapped")
+		}
 		return "", &platform.QuotaExhaustedError{ResetAt: reset, Runtime: "fakefree"}
 	})
 	var wg sync.WaitGroup
@@ -198,6 +312,31 @@ func TestPauseLogsOnce(t *testing.T) {
 	wg.Wait()
 	if got := strings.Count(buf.String(), "pausing every free-model call"); got != 1 {
 		t.Fatalf("want one pause line, got %d:\n%s", got, buf.String())
+	}
+}
+
+// clearFails is meta whose clear (an empty write) fails.
+type clearFails struct{ mapMeta }
+
+func (s *clearFails) SetMetaString(k, v string) error {
+	if v == "" {
+		return errors.New("disk full")
+	}
+	return s.mapMeta.SetMetaString(k, v)
+}
+
+// A probe that succeeds but cannot clear the pause says so, and does not claim calls resume.
+func TestAFailedClearIsLoggedNotAnnounced(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	meta := &clearFails{}
+	_ = meta.SetMetaString(freeModelsPausedKey, gateNow.Add(-time.Second).Format(time.RFC3339))
+	var n atomic.Int32
+	_, _ = testGate(meta).wrap("fakefree", freeRunner{}, counted(&n, ok))(context.Background(), freeModel, "p", "i")
+	if out := buf.String(); !strings.Contains(out, "could not clear the free-model pause") || strings.Contains(out, "allowance is back") {
+		t.Fatalf("want the clear failure logged and no resume line:\n%s", out)
 	}
 }
 
