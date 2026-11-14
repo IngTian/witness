@@ -479,3 +479,31 @@ func TestTryRunnerCfgNamesOnlyTheStagesThatRun(t *testing.T) {
 			"\"opencode/old\", tryRunnerCfg ran before the override (F7 bug)", got3.RunnerModels)
 	}
 }
+
+// F7 guard through the real ordering: applyOverridesAndBuildRunnerCfg must apply overrides
+// BEFORE calling tryRunnerCfg, so RunnerModels contains the --model value, not the lens's
+// configured model. If the order is wrong (tryRunnerCfg before overrides), the runner would
+// be minted with the old model in RunnerModels, potentially validating the wrong model and
+// setting OPENCODE_DISABLE_FREE_MODELS incorrectly.
+func TestApplyOverridesAndBuildRunnerCfgMintsTheRunnerAfterItsOverrides(t *testing.T) {
+	// A lens configured with prov/paid, but user passes --model opencode/x (a free model).
+	// The runner must be minted with opencode/x in RunnerModels, not prov/paid.
+	cfg := store.Config{Runner: "opencode", TriageModel: "opencode/default"}
+	ln := &lens.Lens{Name: "test", Runner: "opencode", ExtractModel: "prov/paid"}
+
+	// Apply --model opencode/x override
+	got := applyOverridesAndBuildRunnerCfg(cfg, ln, "opencode/x", "", false)
+
+	// Verify RunnerModels contains the override, not the configured model
+	if len(got.RunnerModels) != 1 {
+		t.Fatalf("RunnerModels len = %d, want 1: %v", len(got.RunnerModels), got.RunnerModels)
+	}
+	if got.RunnerModels[0] != "opencode/x" {
+		t.Errorf("RunnerModels[0] = %q, want \"opencode/x\" (the --model override); got %q means "+
+			"tryRunnerCfg ran before the override was applied (F7 bug)", got.RunnerModels[0], got.RunnerModels[0])
+	}
+	if got.RunnerModels[0] == "prov/paid" {
+		t.Errorf("RunnerModels contains the lens's configured model %q instead of the --model override "+
+			"\"opencode/x\"; this is the F7 bug (tryRunnerCfg before overrides)", got.RunnerModels[0])
+	}
+}

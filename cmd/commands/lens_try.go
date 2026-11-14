@@ -174,28 +174,8 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	}
 
 	cfg := st.ResolvedConfig()
-	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
-	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
-	// override would silently not reach the server. --model overrides EXTRACT (triage);
-	// --review-model overrides REVIEW (distill) — the two engine stages use two models.
-	//
-	// Apply the override onto BOTH cfg (so OpenCode prewarms the right model) AND the
-	// lens's own per-lens model fields (#75): distill.ModelFor prefers a lens's
-	// ExtractModel/ReviewModel over the default, so overriding only cfg would let a
-	// registered lens's own per-lens model shadow the explicit --model the user asked to
-	// preview ON. Explicit --model is the user's stated preview intent and must win.
-	if opts.model != "" {
-		cfg.TriageModel = opts.model
-		ln.ExtractModel = opts.model
-	}
-	// Only apply --review-model when review actually runs. Otherwise, on an OpenCode
-	// runner, Open validates cfg.DistillModel up front and a bad --review-model would
-	// abort an extract-only preview on a model that is never used (on Claude it'd be
-	// silently ignored) — a confusing runner-dependent side effect for a review-only knob.
-	if opts.review && opts.reviewModel != "" {
-		cfg.DistillModel = opts.reviewModel
-		ln.ReviewModel = opts.reviewModel
-	}
+	// Apply overrides, then build the runner cfg with tryRunnerCfg in the correct order (F7).
+	cfg = applyOverridesAndBuildRunnerCfg(cfg, ln, opts.model, opts.reviewModel, opts.review)
 
 	// Resolve the session set (validation happens BEFORE any runner work, so a bad file/
 	// session never spawns a server or takes a lock).
@@ -205,12 +185,6 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	}
 
 	ctx := context.Background()
-
-	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
-	// (a single candidate = one runner) and clear the wrong-runtime default models. This
-	// must run AFTER the --model / --review-model overrides so RunnerModels contains the
-	// overridden values (F7).
-	cfg = tryRunnerCfg(cfg, ln, opts.review)
 
 	runner, err := runnerForName(cfg.Runner, cfg)
 	if err != nil {
@@ -463,6 +437,42 @@ func tryRunnerCfg(cfg store.Config, ln *lens.Lens, review bool) store.Config {
 	}
 
 	return cfg
+}
+
+// applyOverridesAndBuildRunnerCfg is the F7-ordered sequence: apply --model and --review-model
+// overrides to both cfg and ln, THEN call tryRunnerCfg so RunnerModels contains the overridden
+// values. Extracted from cmdLensTry so the ordering is testable (the F7 guard). Returns the
+// final cfg ready to mint a runner. Pure (returns a modified copy; ln is mutated in place per
+// the cmdLensTry contract).
+func applyOverridesAndBuildRunnerCfg(cfg store.Config, ln *lens.Lens, modelOverride, reviewModelOverride string, review bool) store.Config {
+	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
+	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
+	// override would silently not reach the server. --model overrides EXTRACT (triage);
+	// --review-model overrides REVIEW (distill) — the two engine stages use two models.
+	//
+	// Apply the override onto BOTH cfg (so OpenCode prewarms the right model) AND the
+	// lens's own per-lens model fields (#75): distill.ModelFor prefers a lens's
+	// ExtractModel/ReviewModel over the default, so overriding only cfg would let a
+	// registered lens's own per-lens model shadow the explicit --model the user asked to
+	// preview ON. Explicit --model is the user's stated preview intent and must win.
+	if modelOverride != "" {
+		cfg.TriageModel = modelOverride
+		ln.ExtractModel = modelOverride
+	}
+	// Only apply --review-model when review actually runs. Otherwise, on an OpenCode
+	// runner, Open validates cfg.DistillModel up front and a bad --review-model would
+	// abort an extract-only preview on a model that is never used (on Claude it'd be
+	// silently ignored) — a confusing runner-dependent side effect for a review-only knob.
+	if review && reviewModelOverride != "" {
+		cfg.DistillModel = reviewModelOverride
+		ln.ReviewModel = reviewModelOverride
+	}
+
+	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
+	// (a single candidate = one runner) and clear the wrong-runtime default models. This
+	// must run AFTER the --model / --review-model overrides so RunnerModels contains the
+	// overridden values (F7).
+	return tryRunnerCfg(cfg, ln, review)
 }
 
 // modelLabel renders a model name for display ("runner default" when unset, so the
