@@ -1,0 +1,37 @@
+{
+  "_source": "freetier.md §4(a) - free limit reached with retryAfterMs",
+  "data": [
+    {
+      "id": "msg_req",
+      "type": "user",
+      "time": {"created": 1763046000000},
+      "content": [{"type": "text", "text": "test"}]
+    },
+    {
+      "id": "msg_asst",
+      "type": "assistant",
+      "time": {"created": 1763046001000, "completed": 1763046000000},
+      "content": [],
+      "error": {
+        "type": "provider.free-limit",
+        "message": "Free usage limit reached. Connect a provider or subscribe to OpenCode Go to keep going, or switch models.",
+        "status": 429,
+        "response": {"body": "{\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Rate limit exceeded. Please try again later.\"}}"},
+        "retryAfterMs": 3600000
+      }
+    },
+    {
+      "id": "msg_idle",
+      "type": "idle",
+      "outcome": "failed",
+      "time": {"created": 1763046002000},
+      "error": {
+        "type": "provider.free-limit",
+        "message": "Free usage limit reached. Connect a provider or subscribe to OpenCode Go to keep going, or switch models.",
+        "status": 429,
+        "response": {"body": "{\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Rate limit exceeded. Please try again later.\"}}"},
+        "retryAfterMs": 3600000
+      }
+    }
+  ]
+}

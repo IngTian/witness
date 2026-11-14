@@ -1,0 +1,45 @@
+{
+  "_source": "test that records before requestID are ignored",
+  "data": [
+    {
+      "id": "msg_earlier_user",
+      "type": "user",
+      "time": {"created": 1763045000000},
+      "content": [{"type": "text", "text": "earlier message"}]
+    },
+    {
+      "id": "msg_earlier_asst",
+      "type": "assistant",
+      "time": {"created": 1763045001000, "completed": 1763045002000},
+      "content": [{"type": "text", "text": "earlier reply"}],
+      "error": {
+        "type": "provider.internal",
+        "message": "Earlier error that should be ignored",
+        "status": 500
+      }
+    },
+    {
+      "id": "msg_earlier_idle",
+      "type": "idle",
+      "outcome": "failed",
+      "time": {"created": 1763045003000},
+      "error": {
+        "type": "provider.internal",
+        "message": "Earlier error that should be ignored",
+        "status": 500
+      }
+    },
+    {
+      "id": "msg_req",
+      "type": "user",
+      "time": {"created": 1763046000000},
+      "content": [{"type": "text", "text": "current request"}]
+    },
+    {
+      "id": "msg_asst",
+      "type": "assistant",
+      "time": {"created": 1763046001000, "completed": 1763046002000},
+      "content": [{"type": "text", "text": "current reply"}]
+    }
+  ]
+}

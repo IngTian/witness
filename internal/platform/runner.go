@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/IngTian/witness/internal/store"
 )
@@ -68,6 +69,18 @@ type TranscriptEntry struct {
 func TranscriptDigest(entries []TranscriptEntry) string {
 	b, _ := json.Marshal(entries)
 	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// QuotaExhaustedError is returned when a runtime's free usage limit is reached and will reset
+// at a known time. The distill drain recognises this via errors.As and pauses free-model calls
+// until ResetAt, without incrementing per-session backoff.
+type QuotaExhaustedError struct {
+	ResetAt time.Time
+	Runtime string
+}
+
+func (e *QuotaExhaustedError) Error() string {
+	return fmt.Sprintf("%s free usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
 }
 
 // NativeSessionSupport is implemented only by runners that understand the retained
