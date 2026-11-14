@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -93,5 +94,41 @@ func TestCommandOutputLayersTheCallerEnvOverThePolicy(t *testing.T) {
 	}
 	if got.Dir != os.TempDir() {
 		t.Errorf("cwd = %q, want the neutral temp dir", got.Dir)
+	}
+}
+
+func TestResolveExePrefersThePluginBinary(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "opencode-cli.exe")
+	os.WriteFile(bin, nil, 0o755)
+	empty := t.TempDir()
+	t.Setenv("PATH", empty)
+	t.Setenv("USERPROFILE", empty)
+	t.Setenv("LOCALAPPDATA", empty)
+	t.Setenv("WITNESS_OPENCODE_BIN", bin)
+	if got, err := ResolveExe(); err != nil || got != bin {
+		t.Fatalf("got %q, %v; want the plugin's %q", got, err, bin)
+	}
+	t.Setenv("WITNESS_OPENCODE_BIN", empty) // a directory is not a binary
+	if got, err := ResolveExe(); err == nil {
+		t.Fatalf("a directory must be ignored; got %q", got)
+	}
+}
+
+// Review Focus: `brew upgrade opencode` deletes the Cellar path the plugin passed, while a sleeping
+// worker-wakeup still carries it in its env. Nothing is executed: LookPath only stats the file.
+func TestResolveExeFallsBackWhenThePluginBinaryIsGone(t *testing.T) {
+	name := "opencode"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	dir := t.TempDir()
+	onPath := filepath.Join(dir, name)
+	os.WriteFile(onPath, nil, 0o755)
+	t.Setenv("PATH", dir)
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("WITNESS_OPENCODE_BIN", filepath.Join(t.TempDir(), "Cellar", "opencode", "2.2.7", "bin", "opencode"))
+	if got, err := ResolveExe(); err != nil || !strings.EqualFold(got, onPath) {
+		t.Fatalf("got %q, %v; want PATH's %q", got, err, onPath)
 	}
 }

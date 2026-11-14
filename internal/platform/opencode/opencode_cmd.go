@@ -38,7 +38,7 @@ import (
 //     procCtl.BindToParent makes the child die with the worker on Linux. A caller layers
 //     its own variables on top with replaceEnv(cmd.Env, …).
 func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
-	binary, err := openCodeExe()
+	binary, err := ResolveExe()
 	if err != nil {
 		binary = "opencode"
 	}
