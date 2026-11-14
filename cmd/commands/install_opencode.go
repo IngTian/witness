@@ -80,8 +80,14 @@ func checkOpenCodeForWire(ctx context.Context) (rows []string, err error) {
 // stopOpenCodeCapture is unwire's last part. Unwire is the consent switch, and removing the files
 // is not enough: an earlier import (the plugin's, or one manual `witness import --agent opencode`)
 // keeps every later drain importing OpenCode, and status and doctor checking it, until
-// ForgetCapture clears it.
+// ForgetCapture clears it. Only open the store if an archive exists (unwire must not create one).
 func stopOpenCodeCapture() (stopped bool, warning string, err error) {
+	// Do not create an archive: unwire on a fresh machine that has no witness data must not
+	// create a data dir. ExistingRoot follows the adoption ladder (WITNESS_HOME, then dataDirNames
+	// including legacy "claude-witness"), so a legacy-named archive is still cleared.
+	if _, exists := store.ExistingRoot(); !exists {
+		return false, "", nil
+	}
 	st, err := store.Open()
 	if err != nil {
 		fmt.Println(resultRow(warnGlyph(), "capture", "not stopped", "could not open the archive: "+err.Error()))
@@ -103,8 +109,10 @@ func stopOpenCodeCapture() (stopped bool, warning string, err error) {
 var reWire = [2]string{"re-wire", "witness wire opencode"}
 
 // openCodeHealth is OpenCode's capture health for doctor and, quick, for status, which runs on
-// every call and so never probes the version or reads the plugin and MCP files. It is nil when
-// OpenCode is not in use.
+// every call and so never probes the version or reads the plugin and MCP files. Returns nil when
+// OpenCode is not in use AND (quick path OR no sessions in the DB); returns one neutral row when
+// OpenCode is not wired but the DB has sessions (doctor's unwired-OpenCode case). Otherwise returns
+// the full health checks (version, database, freshness, and plugin/MCP when wired).
 func openCodeHealth(st *store.Store, quick bool) []captureCheck {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

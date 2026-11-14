@@ -109,6 +109,71 @@ func TestDrainStartImportIsQuietWhenOpenCodeHasNoDatabaseYet(t *testing.T) {
 	}
 }
 
+// Unwire must not create an archive: on a fresh machine with no witness data, the data dir
+// must still not exist after unwire.
+func TestUnwireNeverCreatesAnArchive(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", base)
+	t.Setenv("WITNESS_HOME", "") // let it resolve via XDG
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+
+	// Fresh machine: no witness dir exists yet
+	witnessDir := filepath.Join(base, "witness")
+	if _, err := os.Stat(witnessDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("precondition: %s must not exist, got err=%v", witnessDir, err)
+	}
+
+	// Unwire on a fresh machine: must not create the dir
+	if err := cmdUninstall([]string{"opencode"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(witnessDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("after unwire: %s exists, want it still absent", witnessDir)
+	}
+}
+
+// Unwire must clear the seen key from a legacy-named archive (claude-witness) so the adoption
+// ladder works even when the archive predates the repo rename.
+func TestUnwireClearsSeenFromLegacyNamedArchive(t *testing.T) {
+	base := t.TempDir()
+	legacyDir := filepath.Join(base, "claude-witness") // the legacy name
+	t.Setenv("XDG_DATA_HOME", base)
+	t.Setenv("WITNESS_HOME", "") // let it resolve via XDG + adoption
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+
+	// Create a legacy-named archive with OpenCode data
+	t.Setenv("WITNESS_HOME", legacyDir)
+	dbPath := seedOpenCodeV2DB(t, 5000)
+	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
+	plantOpenCodePlugin(t, "// legacy")
+	drainLog(t) // import so seen is set
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if _, err := os.Stat(legacyDir); err != nil {
+		t.Fatalf("precondition: legacy dir must exist, got err=%v", err)
+	}
+
+	// Unwire with no WITNESS_HOME: it must adopt the legacy dir and clear seen
+	t.Setenv("WITNESS_HOME", "")
+	if err := cmdUninstall([]string{"opencode"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if st.Root != legacyDir {
+		t.Fatalf("after unwire: store root = %q, want %q (adopted)", st.Root, legacyDir)
+	}
+	if seen := st.MetaString("opencode_seen_time_updated_ms"); seen != "" {
+		t.Fatalf("after unwire: seen = %q, want empty (cleared from legacy archive)", seen)
+	}
+}
+
 // Unwire is the consent switch: after `witness unwire opencode`, no drain imports OpenCode again,
 // even though an earlier import had recorded what it saw, and status no longer checks it.
 func TestUnwireStopsOpenCodeCapture(t *testing.T) {

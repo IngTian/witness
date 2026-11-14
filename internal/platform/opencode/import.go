@@ -239,7 +239,32 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 	progress(0, len(sessions))
 	var maxUpdated int64 // the incremental-sync watermark
 	var newestIdle int64 // the seen watermark, on NewestActivity's clock
+	// A full import reads every importable session, so take the global newest idle (on the same
+	// handle, before the loop, per fix (a)'s ordering) so a full import leaves freshness current
+	// when every finished turn has been imported — even when the newest time_updated is not the
+	// newest finished turn (e.g. a rename after the last turn). A targeted import advances seen
+	// only from the sessions it reads.
+	if len(sessionIDs) == 0 {
+		err := db.QueryRowContext(ctx, `
+			SELECT COALESCE(MAX(m.time_created),0)
+			  FROM session_message m
+			  JOIN session_v2 s ON s.id = m.session_id
+			 WHERE m.type = 'idle'
+			   AND s.parent_id IS NULL
+			   AND s.agent IS NOT ?`, legacyMarkerName).Scan(&newestIdle)
+		if err != nil {
+			return stats, err
+		}
+	}
 	for i, s := range sessions {
+		// Take the idle BEFORE importing turns: seen must never run ahead of what was imported.
+		// A turn that ends between the two reads would be marked seen but not imported.
+		idle, err := sessionNewestIdle(ctx, db, s.ID)
+		if err != nil {
+			return stats, err
+		}
+		newestIdle = max(newestIdle, idle)
+
 		n, err := im.importSession(ctx, db, s)
 		progress(i+1, len(sessions))
 		if err != nil {
@@ -250,11 +275,6 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 			stats.Records += n
 		}
 		maxUpdated = max(maxUpdated, s.TimeUpdated)
-		idle, err := sessionNewestIdle(ctx, db, s.ID)
-		if err != nil {
-			return stats, err
-		}
-		newestIdle = max(newestIdle, idle)
 	}
 	// Only upward: a targeted import of an older session must not make a newer one look unimported
 	if oldSeen, _ := strconv.ParseInt(strings.TrimSpace(im.Store.MetaString(seenMetaKey)), 10, 64); newestIdle > oldSeen {

@@ -132,6 +132,35 @@ func Open() (*Store, error) {
 // no seeding — the correct behavior for tests and any store-only consumer.
 var SeedDefaultLens func(*Store)
 
+// ExistingRoot resolves the data-root directory if it exists, WITHOUT creating it. Returns
+// (path, true) when an archive exists, ("", false) when none does. Follows the same adoption
+// ladder as resolveRoot (WITNESS_HOME, then dataDirNames), so unwire can clear the seen key
+// from a legacy-named archive without re-listing the names in cmd.
+func ExistingRoot() (string, bool) {
+	if home := os.Getenv("WITNESS_HOME"); home != "" {
+		path := filepath.Clean(home)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path, true
+		}
+		return "", false
+	}
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	for _, name := range dataDirNames {
+		cand := filepath.Join(base, name)
+		if info, err := os.Stat(cand); err == nil && info.IsDir() {
+			return cand, true
+		}
+	}
+	return "", false
+}
+
 // resolveRoot picks the data-root directory. WITNESS_HOME, if set, wins verbatim
 // (explicit user intent — used by tests and power users). Otherwise the root is
 // <base>/<name>, where base is $XDG_DATA_HOME or ~/.local/share and <name> is

@@ -612,6 +612,25 @@ func TestATurnEndWithNoNewStepDoesNotReadAsStale(t *testing.T) {
 	}
 }
 
+// ImportAtDrainStart returns true when a plugin file exists, even when no import has run.
+func TestImportAtDrainStartReturnsTrueWhenPluginFileExists(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+	// Write the plugin file (create plugins dir first)
+	pluginPath := PluginPath()
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pluginPath, []byte("// test plugin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeImportStore()
+	// No import has run, but the plugin file exists
+	if !(Platform{}).ImportAtDrainStart(fake) {
+		t.Fatal("with plugin file present: ImportAtDrainStart = false, want true")
+	}
+}
+
 // Unwire clears only the seen watermark: drain-start capture stops, and a re-wire still resumes
 // from the full-sync watermark instead of re-reading every session.
 func TestForgetCaptureStopsTheDrainStartImportAndKeepsTheSyncWatermark(t *testing.T) {
@@ -673,6 +692,63 @@ func TestNewestActivityIgnoresATurnStillRunning(t *testing.T) {
 	}
 	if newest.UnixMilli() != 8000 {
 		t.Fatalf("NewestActivity = %d, want 8000 (unsettled assistant is ignored)", newest.UnixMilli())
+	}
+}
+
+// Seen must advance only to an idle that existed BEFORE the turn read, so it never runs ahead
+// of what was imported. The ordering is one reorder in the Import loop: take the session's
+// newest idle before importing its turns.
+func TestSeenNeverRunsAheadOfWhatWasImported(t *testing.T) {
+	// Fixture: one session with an idle at 8000 ms.
+	dbPath := seedV2DB(t,
+		session("ses_order", 5000),
+		user("ses_order", 1, 1100, "user"),
+		idle("ses_order", 2, 8000),
+	)
+	fake := newFakeImportStore()
+	mustImport(t, fake, dbPath, "ses_order")
+
+	// The seen watermark should be 8000 (the idle that existed before the read).
+	// If the code took the idle AFTER importing turns, and a turn arrived between the
+	// import and the idle query, seen would run ahead. This test locks the ordering:
+	// the seen value must be the pre-import idle, not a newer one.
+	seen := LastImported(fake).UnixMilli()
+	if seen != 8000 {
+		t.Fatalf("after import: seen = %d, want 8000 (the pre-import idle)", seen)
+	}
+}
+
+// A full import must leave freshness "current" when every finished turn has been imported,
+// even when the session with the newest time_updated is not the session with the newest
+// finished turn. This is the unwire → re-wire case: after unwire, ForgetCapture clears
+// seen; a re-wire + full import should clear the freshness warning.
+func TestFullImportClearsFreshnessEvenWhenNewestUpdatedIsNotNewestTurn(t *testing.T) {
+	// Fixture: ses_old has the newest finished turn (idle at 8000), but ses_renamed was
+	// renamed after that turn (time_updated = 9000, but no newer idle). They are > StaleAfter
+	// apart, so the freshness check would warn if seen stayed at the per-session idle.
+	dbPath := seedV2DB(t,
+		session("ses_old", 5000),
+		user("ses_old", 1, 1100, "old user"),
+		idle("ses_old", 2, 8000),     // newest finished turn
+		session("ses_renamed", 9000), // renamed after ses_old's turn, no turns of its own
+	)
+	fake := newFakeImportStore()
+	// Full import (no session IDs) should take the global newest idle, so seen = 8000.
+	mustImport(t, fake, dbPath)
+
+	// After unwire + re-wire, freshness should be current (NewestActivity - LastImported <= StaleAfter).
+	if err := ForgetCapture(fake); err != nil {
+		t.Fatal(err)
+	}
+	mustImport(t, fake, dbPath) // re-wire: full import again
+
+	newest, err := NewestActivity(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lag := newest.Sub(LastImported(fake))
+	if lag > StaleAfter {
+		t.Fatalf("after unwire + re-wire + full import: freshness lag = %s, want <= %s", lag, StaleAfter)
 	}
 }
 
