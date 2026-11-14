@@ -1,12 +1,9 @@
 package commands
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +12,6 @@ import (
 
 	"github.com/IngTian/witness/internal/platform/opencode"
 	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
-
-	_ "modernc.org/sqlite"
 )
 
 // helper: how many witness entries does event have, and is `other` preserved?
@@ -450,258 +445,56 @@ func TestOpenCodeConfigPathHonoursXDGConfigHome(t *testing.T) {
 	}
 }
 
-// wire opencode on v2 must refuse v1 by name and write nothing.
-func TestWireOpenCodeRefusesV1AndWritesNothing(t *testing.T) {
+// wireOpenCodeEnv sandboxes one `wire opencode`: HOME and OpenCode's config dir under a temp dir
+// that holds no DB yet, the version probe answering v and probeErr, and a shim target, so no test
+// copies the test binary.
+func wireOpenCodeEnv(t *testing.T, v opencode.Version, probeErr error) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("OPENCODE_CONFIG", "")
 	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
-	prevVer := openCodeVersion
-	prevTarget := openCodeInstallTarget
-	t.Cleanup(func() {
-		openCodeVersion = prevVer
-		openCodeInstallTarget = prevTarget
-	})
-	openCodeVersion = func(context.Context) (opencode.Version, error) {
-		return opencode.Version{Major: 1, Minor: 19, Patch: 5}, nil
-	}
-	openCodeInstallTarget = func() (string, error) {
-		return "/x/hooks/witness.sh", nil
-	}
-
-	_, err := cmdInstallOpenCode()
-	if !errors.Is(err, opencode.ErrOpenCodeV1) {
-		t.Fatalf("wire opencode on v1: err = %v, want ErrOpenCodeV1", err)
-	}
-	if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
-		t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
-	}
+	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(home, "opencode.db"))
+	stubOpenCodeVersion(t, v, probeErr)
+	prev := openCodeInstallTarget
+	openCodeInstallTarget = func() (string, error) { return "/x/hooks/witness.sh", nil }
+	t.Cleanup(func() { openCodeInstallTarget = prev })
 }
 
-// wire opencode on v2 must refuse a database it cannot read (v1-only or mid-migration), and write nothing.
-func TestWireOpenCodeRefusesADatabaseItCannotRead(t *testing.T) {
-	home := t.TempDir()
-	dbPath := filepath.Join(home, "opencode.db")
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("OPENCODE_CONFIG", "")
-	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
-	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
-	prevVer := openCodeVersion
-	prevTarget := openCodeInstallTarget
-	t.Cleanup(func() {
-		openCodeVersion = prevVer
-		openCodeInstallTarget = prevTarget
-	})
-	openCodeVersion = func(context.Context) (opencode.Version, error) {
-		return opencode.Version{Major: 2, Minor: 3, Patch: 0}, nil
+// wire opencode refuses, before anything is written, an OpenCode it cannot capture: v1 by name, and
+// a DB that is v1-only or mid-migration whatever the version probe said, since a failed probe says
+// nothing about the DB.
+func TestWireOpenCodeRefusesAndWritesNothing(t *testing.T) {
+	v230 := opencode.Version{Major: 2, Minor: 3, Patch: 0}
+	migrating := func(t *testing.T) string {
+		path := seedOpenCodeV2DB(t, 1000)
+		execOpenCodeDB(t, path, `CREATE TABLE session (id TEXT PRIMARY KEY);`,
+			`INSERT INTO kv (key, value, time_created, time_updated) VALUES ('migration.v1-v2', '{"phase":"running"}', 1000, 1000);`)
+		return path
 	}
-	openCodeInstallTarget = func() (string, error) {
-		return "/x/hooks/witness.sh", nil
-	}
-
-	// v1-only database
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE session (id TEXT PRIMARY KEY)`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	_, err = cmdInstallOpenCode()
-	if !errors.Is(err, opencode.ErrOpenCodeV1) {
-		t.Errorf("v1-only DB: err = %v, want ErrOpenCodeV1", err)
-	}
-	if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
-		t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
-	}
-
-	// mid-migration database
-	os.Remove(dbPath)
-	db, err = sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE session (id TEXT PRIMARY KEY);
-	                        CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, parent_id TEXT, fork_session_id TEXT, agent TEXT);
-	                        CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
-	                        INSERT INTO kv (key, value) VALUES ('migration.v1-v2', '{"phase":"running"}')`); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-
-	_, err = cmdInstallOpenCode()
-	if !errors.Is(err, opencode.ErrOpenCodeSchema) {
-		t.Errorf("mid-migration DB: err = %v, want ErrOpenCodeSchema", err)
-	}
-	if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
-		t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
-	}
-}
-
-// wire opencode on v2 writes the plugin atomically, says it is picked up live, and reports the version.
-func TestWireOpenCodeWritesThePluginAndSaysItIsPickedUpLive(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("OPENCODE_CONFIG", "")
-	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
-	prevVer := openCodeVersion
-	prevTarget := openCodeInstallTarget
-	t.Cleanup(func() {
-		openCodeVersion = prevVer
-		openCodeInstallTarget = prevTarget
-	})
-	openCodeVersion = func(context.Context) (opencode.Version, error) {
-		return opencode.Version{Major: 2, Minor: 3, Patch: 0}, nil
-	}
-	openCodeInstallTarget = func() (string, error) {
-		return "/x/hooks/witness.sh", nil
-	}
-
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	t.Cleanup(func() { os.Stdout = old })
-
-	outcome, err := cmdInstallOpenCode()
-	if err != nil {
-		t.Fatalf("wire opencode: %v", err)
-	}
-
-	w.Close()
-	buf := new(strings.Builder)
-	io.Copy(buf, r)
-	os.Stdout = old
-	output := buf.String()
-
-	// Plugin file must exist and equal Source(target)
-	pluginPath := filepath.Join(opencodeDir(), "plugins", openCodePluginName)
-	pluginContent, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("plugin file: %v", err)
-	}
-	wantPlugin := opencodeplugin.Source("/x/hooks/witness.sh")
-	if string(pluginContent) != wantPlugin {
-		t.Errorf("plugin content mismatch:\ngot  %q\nwant %q", pluginContent, wantPlugin)
-	}
-
-	// opencode.json must have mcp.witness entry
-	configPath := filepath.Join(opencodeDir(), "opencode.json")
-	configContent, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("opencode.json: %v", err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(configContent, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	mcp, ok := cfg["mcp"].(map[string]any)
-	if !ok || mcp["witness"] == nil {
-		t.Errorf("opencode.json missing mcp.witness: %s", configContent)
-	}
-
-	// Output must not say "restart OpenCode" and must name the version
-	if strings.Contains(output, "restart OpenCode") {
-		t.Errorf("output must not say 'restart OpenCode': %s", output)
-	}
-	if !strings.Contains(output, "2.3.0") {
-		t.Errorf("output missing version 2.3.0: %s", output)
-	}
-
-	// Result line must say it is picked up live
-	if !strings.Contains(outcome.line, "picks it up live") {
-		t.Errorf("result line missing 'picks it up live': %s", outcome.line)
-	}
-}
-
-// wire opencode warns when it cannot read OpenCode's version but still wires, and says "not found"
-// only when there is no `opencode` to run: the Windows desktop app has no CLI on PATH, and a probe
-// that times out is an OpenCode that is there.
-func TestWireOpenCodeSaysWhenItCannotFindOpenCode(t *testing.T) {
-	notFound := fmt.Errorf("opencode --version: %w", &exec.Error{Name: "opencode", Err: exec.ErrNotFound})
 	for _, tc := range []struct {
 		name     string
+		v        opencode.Version
 		probeErr error
-		want     []string
-		notWant  string
+		db       func(*testing.T) string // nil: no DB
+		want     error
 	}{
-		{"not on PATH", notFound, []string{"not found", "capture needs OpenCode 2.2.7+"}, "could not check"},
-		{"probe failed", errors.New("opencode --version: signal: killed"), []string{"version unknown", "could not check OpenCode's version: opencode --version: signal: killed"}, "not found"},
+		{"OpenCode v1", opencode.Version{Major: 1, Minor: 19, Patch: 5}, nil, nil, opencode.ErrOpenCodeV1},
+		{"v1-only DB", v230, nil, v1OnlyOpenCodeDB, opencode.ErrOpenCodeV1},
+		{"mid-migration DB", v230, nil, migrating, opencode.ErrOpenCodeSchema},
+		{"v1-only DB, opencode not on PATH", opencode.Version{}, &exec.Error{Name: "opencode", Err: exec.ErrNotFound}, v1OnlyOpenCodeDB, opencode.ErrOpenCodeV1},
+		{"v1-only DB, version probe failed", opencode.Version{}, errors.New("signal: killed"), v1OnlyOpenCodeDB, opencode.ErrOpenCodeV1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			t.Setenv("USERPROFILE", home)
-			t.Setenv("OPENCODE_CONFIG", "")
-			t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
-			prevVer := openCodeVersion
-			prevTarget := openCodeInstallTarget
-			t.Cleanup(func() {
-				openCodeVersion = prevVer
-				openCodeInstallTarget = prevTarget
-			})
-			openCodeVersion = func(context.Context) (opencode.Version, error) { return opencode.Version{}, tc.probeErr }
-			openCodeInstallTarget = func() (string, error) { return "/x/hooks/witness.sh", nil }
-
+			wireOpenCodeEnv(t, tc.v, tc.probeErr)
+			if tc.db != nil {
+				t.Setenv("WITNESS_OPENCODE_DB", tc.db(t))
+			}
 			var err error
-			output := captureStdout(t, func() { _, err = cmdInstallOpenCode() })
-			if err != nil {
-				t.Fatalf("wire opencode: %v", err)
-			}
-			// Wiring must still happen
-			if _, err := os.Stat(filepath.Join(opencodeDir(), "plugins", openCodePluginName)); err != nil {
-				t.Errorf("plugin not written when the version is unknown: %v", err)
-			}
-			for _, w := range tc.want {
-				if !strings.Contains(output, w) {
-					t.Errorf("output missing %q:\n%s", w, output)
-				}
-			}
-			if strings.Contains(output, tc.notWant) {
-				t.Errorf("output says %q:\n%s", tc.notWant, output)
-			}
-		})
-	}
-}
-
-// A failed version probe says nothing about the DB, so a v1-only DB still refuses before any write.
-func TestWireOpenCodeChecksTheDatabaseWhenTheVersionProbeFails(t *testing.T) {
-	for name, probeErr := range map[string]error{
-		"not on PATH":  &exec.Error{Name: "opencode", Err: exec.ErrNotFound},
-		"probe failed": errors.New("signal: killed"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			home := t.TempDir()
-			dbPath := filepath.Join(home, "opencode.db")
-			t.Setenv("HOME", home)
-			t.Setenv("USERPROFILE", home)
-			t.Setenv("OPENCODE_CONFIG", "")
-			t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
-			t.Setenv("WITNESS_OPENCODE_DB", dbPath)
-			prevVer := openCodeVersion
-			prevTarget := openCodeInstallTarget
-			t.Cleanup(func() {
-				openCodeVersion = prevVer
-				openCodeInstallTarget = prevTarget
-			})
-			openCodeVersion = func(context.Context) (opencode.Version, error) { return opencode.Version{}, probeErr }
-			openCodeInstallTarget = func() (string, error) { return "/x/hooks/witness.sh", nil }
-			db, err := sql.Open("sqlite", dbPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec(`CREATE TABLE session (id TEXT PRIMARY KEY)`); err != nil {
-				t.Fatal(err)
-			}
-			db.Close()
-
 			captureStdout(t, func() { _, err = cmdInstallOpenCode() })
-			if !errors.Is(err, opencode.ErrOpenCodeV1) {
-				t.Errorf("v1-only DB with a failed probe: err = %v, want ErrOpenCodeV1", err)
+			if !errors.Is(err, tc.want) {
+				t.Errorf("err = %v, want %v", err, tc.want)
 			}
 			if _, statErr := os.Stat(opencodeDir()); !os.IsNotExist(statErr) {
 				t.Errorf("a refused wire must not create %s (stat err = %v)", opencodeDir(), statErr)
@@ -710,54 +503,56 @@ func TestWireOpenCodeChecksTheDatabaseWhenTheVersionProbeFails(t *testing.T) {
 	}
 }
 
-// wire opencode warns when OpenCode is above the newest tested minor.
-func TestWireOpenCodeWarnsAboveTheNewestTestedMinor(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	t.Setenv("OPENCODE_CONFIG", "")
-	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(home, ".config", "opencode"))
-	prevVer := openCodeVersion
-	prevTarget := openCodeInstallTarget
-	t.Cleanup(func() {
-		openCodeVersion = prevVer
-		openCodeInstallTarget = prevTarget
-	})
-	openCodeVersion = func(context.Context) (opencode.Version, error) {
-		return opencode.Version{Major: 2, Minor: 4, Patch: 0}, nil
-	}
-	openCodeInstallTarget = func() (string, error) {
-		return "/x/hooks/witness.sh", nil
-	}
-
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	t.Cleanup(func() { os.Stdout = old })
-
-	_, err := cmdInstallOpenCode()
-	if err != nil {
-		t.Fatalf("wire opencode: %v", err)
-	}
-
-	w.Close()
-	buf := new(strings.Builder)
-	io.Copy(buf, r)
-	os.Stdout = old
-	output := buf.String()
-
-	// Wiring must still happen
-	pluginPath := filepath.Join(opencodeDir(), "plugins", openCodePluginName)
-	if _, err := os.Stat(pluginPath); err != nil {
-		t.Errorf("plugin not written: %v", err)
-	}
-
-	// Output must name both the found version and the tested version
-	if !strings.Contains(output, "2.4.0") {
-		t.Errorf("output missing 2.4.0: %s", output)
-	}
-	if !strings.Contains(output, "2.3") {
-		t.Errorf("output missing 2.3: %s", output)
+// wire opencode writes this build's plugin and the MCP entry, says OpenCode picks them up live, and
+// names what it found without refusing: the version; one above the newest tested minor; no
+// `opencode` to run; or a probe that failed, which is never "not found" (the Windows desktop app
+// has no CLI on PATH, and a probe that times out is an OpenCode that is there).
+func TestWireOpenCodeWiresAndSaysWhatItFound(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		v        opencode.Version
+		probeErr error
+		want     []string
+		notWant  string
+	}{
+		{"tested version", opencode.Version{Major: 2, Minor: 3, Patch: 0}, nil, []string{"2.3.0"}, ""},
+		{"above the newest tested minor", opencode.Version{Major: 2, Minor: 4, Patch: 0}, nil, []string{"2.4.0", "(2.3.x)"}, ""},
+		{"not on PATH", opencode.Version{}, fmt.Errorf("opencode --version: %w", &exec.Error{Name: "opencode", Err: exec.ErrNotFound}),
+			[]string{"not found", "capture needs OpenCode 2.2.7+"}, "could not check"},
+		{"probe failed", opencode.Version{}, errors.New("opencode --version: signal: killed"),
+			[]string{"version unknown", "could not check OpenCode's version: opencode --version: signal: killed"}, "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wireOpenCodeEnv(t, tc.v, tc.probeErr)
+			var outcome wireOutcome
+			var err error
+			output := captureStdout(t, func() { outcome, err = cmdInstallOpenCode() })
+			if err != nil {
+				t.Fatalf("wire opencode: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(opencodeDir(), "plugins", openCodePluginName)); err != nil || string(got) != opencodeplugin.Source("/x/hooks/witness.sh") {
+				t.Errorf("plugin file = %q (err %v), want this build's Source of the target", got, err)
+			}
+			var cfg map[string]any
+			configContent, err := os.ReadFile(filepath.Join(opencodeDir(), "opencode.json"))
+			if err == nil {
+				err = json.Unmarshal(configContent, &cfg)
+			}
+			if mcp, _ := cfg["mcp"].(map[string]any); err != nil || mcp["witness"] == nil {
+				t.Errorf("opencode.json missing mcp.witness (err %v): %s", err, configContent)
+			}
+			if !strings.Contains(outcome.line, "picks it up live") || strings.Contains(output, "restart OpenCode") {
+				t.Errorf("result line %q / output must say OpenCode picks it up live, never restart:\n%s", outcome.line, output)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(output, w) {
+					t.Errorf("output missing %q:\n%s", w, output)
+				}
+			}
+			if tc.notWant != "" && strings.Contains(output, tc.notWant) {
+				t.Errorf("output says %q:\n%s", tc.notWant, output)
+			}
+		})
 	}
 }
 
