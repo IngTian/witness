@@ -252,8 +252,9 @@ var errNativeSessionChanged = errors.New("opencode native session changed after 
 // session from the user's opencode.db with the importer's own reader and compares its digest with
 // the one the worker computed from L0; TestTranscriptDigestMatchesTheImportedL0 pins that the two
 // agree on an unchanged session. openSourceDB is the importer's read-only open (mode=ro, then the
-// schema probe), so this cannot write the user's DB — the `opencode export` it replaced
-// opened that DB read-WRITE. An empty digest (the worker always sets one) skips the check.
+// schema probe), so this cannot write the user's DB. The `opencode export` it replaced opens its
+// DB read-WRITE, so it needed a VACUUM INTO copy of the user's DB per check. An empty digest (the
+// worker always sets one) skips the check.
 func (n *nativeRuntime) checkDigest(ctx context.Context, w *platform.NativeSession) error {
 	if w.Digest == "" {
 		return nil

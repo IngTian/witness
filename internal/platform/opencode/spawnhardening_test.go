@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -64,7 +65,7 @@ func TestOpenCodeCommandUsesTheTestSeam(t *testing.T) {
 		return prev(ctx, "echo", "stubbed")
 	}
 
-	cmd := openCodeCommand(context.Background(), "", "serve", "--pure")
+	cmd := openCodeCommand(context.Background(), "", "sub", "--flag")
 	if cmd == nil {
 		t.Fatal("openCodeCommand returned nil")
 	}
@@ -77,7 +78,7 @@ func TestOpenCodeCommandUsesTheTestSeam(t *testing.T) {
 	if base := strings.ToLower(filepath.Base(gotName)); !strings.HasPrefix(base, "opencode") {
 		t.Errorf("resolved binary %q is not opencode", gotName)
 	}
-	if len(gotArgs) != 2 || gotArgs[0] != "serve" || gotArgs[1] != "--pure" {
+	if !slices.Equal(gotArgs, []string{"sub", "--flag"}) {
 		t.Errorf("args were not passed through verbatim: %q", gotArgs)
 	}
 }

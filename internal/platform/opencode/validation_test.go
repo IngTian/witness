@@ -53,7 +53,7 @@ func TestValidateModelsAgainstTheServesList(t *testing.T) {
 		}
 	}
 
-	// Unavailable opencode free model: should say "retired often" and "opencode models", NOT "API key"
+	// Unavailable opencode free model: should name `opencode models`, NOT "API key"
 	err = srv.validateModels(ctx, []string{"opencode/crouton-free"})
 	if err == nil {
 		t.Fatal("validateModels on unavailable opencode model = nil, want error")

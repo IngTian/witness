@@ -19,8 +19,8 @@ const openCodeBinEnv = "WITNESS_OPENCODE_BIN"
 // the desktop put a GUI launcher named `opencode` on PATH, and resolving to that meant the GUI
 // opened instead of the headless CLI running — which is how a machine with both installed
 // reported "native session isolation unavailable" while a perfectly good CLI sat later on PATH.
-// witness only ever runs non-interactive subcommands (`serve --stdio`, `models`, `export`,
-// `--version`), so a GUI is a failure.
+// witness only ever runs non-interactive commands (`serve --stdio`, `--version`), so a GUI is a
+// failure.
 //
 // More than one spelling is needed, from the Windows box's own reports: the npm-scoped package dir
 // is `@opencode-aidesktop`, while the app's own data lives under `ai.opencode.desktop` (its crash

@@ -152,7 +152,7 @@ embed model only while draining queued sessions, then exit.
 When `runner = opencode`, `triage_model` and `distill_model` should use OpenCode model names such
 as `openai/gpt-5.5`. An empty model is an error: the OpenCode runner never falls back to OpenCode's
 default (which may train on inputs). OpenCode model names are validated against the private serve's
-model list before distillation, and `witness doctor` reports the same check as `opencode models: OK`
+model list before distillation, and `witness doctor` reports the same check on its `models` row: OK,
 or an explicit unavailable-model error.
 
 Enabled lenses are managed for you (`witness lens enable/disable <name>`) and appear as simple

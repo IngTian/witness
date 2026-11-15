@@ -68,7 +68,7 @@ func cmdDoctor(asJSON bool) error {
 
 	// Resolve the runner once; doctor asks IT how it runs and whether its models are
 	// valid — no branching on the runner name. runnerCmd is the runner's own
-	// invocation hint (e.g. "claude -p" / "opencode serve"); modelStatus is the
+	// invocation hint (e.g. "claude -p" / "opencode serve --stdio"); modelStatus is the
 	// result of the runner's model check (Claude's is a no-op → "OK", nothing to
 	// validate and no cost; OpenCode validates on its private serve).
 	//

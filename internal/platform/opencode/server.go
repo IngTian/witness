@@ -147,7 +147,7 @@ var queueWaitBudget = 30 * time.Minute
 func requestLifetimeBudget() time.Duration { return queueWaitBudget + generateTimeout + time.Minute }
 
 // openCodeRequestTimeout bounds ONE HTTP request to the local serve process, and
-// openCodeProbeTimeout bounds ONE `opencode` CLI probe (`--version`, `models`).
+// openCodeProbeTimeout bounds ONE `opencode` CLI probe (`--version`, the only one left).
 //
 // Both are liveness backstops for the same hazard generateTimeout guards: the drain's ctx
 // is signal-cancellable but has no deadline, the shared http.Client has no Timeout, and
@@ -155,7 +155,7 @@ func requestLifetimeBudget() time.Duration { return queueWaitBudget + generateTi
 // `opencode` invocation blocked the worker indefinitely while holding the machine-WIDE
 // WorkerLock — which also stops `capture` from ever draining, so the whole tool goes quiet
 // with no error anywhere. Generous on purpose: these are all local operations (a loopback
-// request, a version print, a model list), so seconds-scale is already far beyond normal,
+// request, a version print), so seconds-scale is already far beyond normal,
 // and the values must never be tight enough to abort healthy work on a loaded machine.
 //
 // healthCheckBudget is the TOTAL wall clock waitReady (serve.go) will spend waiting for a freshly
@@ -297,7 +297,8 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 // runSessionWithMessage prompts an existing session with input under messageID and waits for the
 // turn. Run's sessions and native's retained scratch sessions both come through here, so the
 // generation cap covers both. On any failure it interrupts the turn, which aborts the upstream
-// request (runner.md (c)); the caller owns the session and deletes it.
+// request (runner.md (c)). The caller owns the session: Run deletes it, native keeps it for
+// finalize or the next attempt.
 func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, messageID, input string) (string, error) {
 	// ponytail: 8 is the verified bound (critic G4); raise when 16 parallel sessions are verified
 	select {
@@ -615,10 +616,10 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 
 // ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 2.2.7 up to, not
 // including, 3.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
-// pending for retry. runtimeRoot is unused now that the probe goes through ProbeVersion, which
-// needs no root (`--version` opens no DB, and wire and doctor have none to give); it stays because
-// the v2 runner port (PR 2) is written against this signature, and dropping it here would churn
-// both callers twice.
+// pending for retry. runtimeRoot is unused: the probe goes through ProbeVersion, which needs no
+// root (`--version` opens no DB, and wire and doctor have none to give). The parameter is the
+// plan's signature (PR 1 Task 1.1); no task through PR 3 reads it, so it can go with its one
+// caller (StartOpenCodeServerIn) when that signature is next touched.
 func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
 	v, err := ProbeVersion(ctx)
 	if err != nil {

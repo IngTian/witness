@@ -74,7 +74,7 @@ func (s *OpenCodeServer) validateModels(ctx context.Context, models []string) er
 }
 
 // unavailableModel returns an error for a model not in the serve's catalog. For opencode/*
-// models, the hint says free model ids are retired often and points to `opencode models`. For other
+// models, the hint points to `opencode models`, which lists the free ids available now. For other
 // providers, it names the three credential kinds the runner can use, plus this provider's env var
 // names when providerEnvVars returns any.
 func (s *OpenCodeServer) unavailableModel(ctx context.Context, model string, available []string) error {

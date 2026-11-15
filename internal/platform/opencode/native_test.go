@@ -34,7 +34,8 @@ func nativeSourceDB(t *testing.T) string {
 }
 
 // forbidCLI fails the test if anything spawns an opencode CLI: the native path talks to the serve
-// over HTTP and reads opencode.db itself. The `opencode export` it once ran wrote the user's DB.
+// over HTTP and reads opencode.db itself. The `opencode export` it once ran opened its DB read-write
+// (witness pointed it at a VACUUM INTO copy of the user's).
 func forbidCLI(t *testing.T) {
 	t.Helper()
 	prev := execCommandContext
