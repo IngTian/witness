@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -57,6 +58,11 @@ func TestRunnerOpenHonorsExternalProcessFuse(t *testing.T) {
 // serve: runnerSet keeps no runner whose Open failed, so nothing would ever Close it, and in the
 // MCP server it would live as long as the process.
 func TestOpenClosesItsServeWhenReconcileFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// ReadDir of a plain file reads as not-exist there, so reconcile has no portable way to fail;
+		// the Open error path under test is OS-independent and runs on the other OSes.
+		t.Skip("no portable reconcile failure on Windows")
+	}
 	t.Setenv(platform.DisableExternalRunnersEnv, "")
 	useFakeServe(t, "lease")
 	root := t.TempDir()
