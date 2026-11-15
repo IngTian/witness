@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,7 +79,16 @@ func TestContractWakeupOutlivesWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker-wakeup %d: %v", pids[0], err)
 	}
-	t.Cleanup(func() { _ = p.Kill() })
+	t.Cleanup(func() {
+		// Outside CI the snapshot diff says only "new": a same-named witness the owner started during
+		// the test is new too. So kill only a pid whose command line says worker-wakeup; on Windows
+		// (no command line from Toolhelp32) that is never, and the wakeup is left to sleep out.
+		if args := procArgs(t, pids[0]); os.Getenv("CI") != "true" && !strings.Contains(args, "worker-wakeup") {
+			t.Logf("not killing pid %d outside CI: its command line %q does not say worker-wakeup", pids[0], args)
+			return
+		}
+		_ = p.Kill()
+	})
 }
 
 // requireEmbedModel: the worker loads the embedding model before its first runner call, so without

@@ -33,3 +33,13 @@ func procList(t *testing.T) map[int]string {
 	}
 	return procs
 }
+
+// procArgs is pid's command line, or "" if ps cannot read it (most often: the pid is gone). Never
+// fatal: it runs in Cleanups, where it decides whether a kill is safe.
+func procArgs(t *testing.T, pid int) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+	return strings.TrimSpace(string(out))
+}

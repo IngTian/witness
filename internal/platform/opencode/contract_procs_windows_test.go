@@ -29,3 +29,10 @@ func procList(t *testing.T) map[int]string {
 	}
 	return procs
 }
+
+// procArgs is always "": a Toolhelp32 snapshot carries no command line, so a caller must treat
+// every pid as unidentified.
+func procArgs(t *testing.T, pid int) string {
+	t.Helper()
+	return ""
+}
