@@ -39,10 +39,11 @@ type Control interface {
 	// ContainChildren ties every child THIS process starts afterwards to its death.
 	// Windows: the process joins a kill-on-close Job Object, so they die however it
 	// dies — the only way a TerminateProcess'd worker takes its `claude -p` along.
-	// Unix: a no-op, and only TerminateGroup's group SIGTERM reaches them, so a worker
-	// SIGKILLed alone orphans its `claude -p` (BindToParent's Pdeathsig and the stdin
-	// lease cover only the `opencode serve`). Idempotent; the first call's error is
-	// returned every time.
+	// Unix: a no-op. A SIGTERM reaches them (TerminateGroup's group signal, or NotifyStop's
+	// ctx killing each exec.CommandContext child), but nothing covers a hard kill of the
+	// worker alone (SIGKILL, OOM): it orphans its `claude -p` (BindToParent's Pdeathsig and
+	// the stdin lease cover only the `opencode serve`). Idempotent; the first call's error
+	// is returned every time.
 	ContainChildren() error
 
 	// BindToParent configures cmd (before Start) so the OS kills the child when

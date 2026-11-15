@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -99,6 +100,36 @@ func TestDistillBackfillFailsWhenWorkRemains(t *testing.T) {
 				t.Errorf("the hint suggests %s, which `witness worker run` does not have", f)
 			}
 		}
+	}
+}
+
+// A Ctrl-C during the first pass of `worker run --wait-backoffs` ends the wait too, because the
+// wait's stop ctx exists before that pass. Created after it, the pass's own NotifyStop took the
+// signal, and once a backoff fell due the loop started a fresh worker that made real model calls.
+func TestWaitBackoffsStopsOnACtrlCDuringTheFirstPass(t *testing.T) {
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st := openTestStore(t)
+	if err := seedDefaultLens(st); err != nil {
+		t.Fatal(err)
+	}
+	var live []context.CancelFunc // every NotifyStop ctx created so far: a SIGINT reaches them all
+	prev, prevRun := procCtl, backfillRun
+	t.Cleanup(func() { procCtl, backfillRun = prev, prevRun })
+	procCtl = stopCtl{&proc.Fake{}, func(cancel context.CancelFunc) { live = append(live, cancel) }}
+	runs := 0
+	backfillRun = func(bool, sessionTimeRange, string, *causeTap) (bool, error) {
+		runs++
+		if runs == 1 { // the pass leaves a backoff due within the wait, then the Ctrl-C lands
+			_ = st.SetNextAttempt("s", store.LensDefault, time.Now().Add(2*time.Second))
+			for _, cancel := range live {
+				cancel()
+			}
+		}
+		return true, nil
+	}
+	_ = cmdDistillBackfill(true, "", "", true) // unfinished either way; only the pass count matters
+	if runs != 1 {
+		t.Fatalf("%d passes after a Ctrl-C in the first, want 1", runs)
 	}
 }
 

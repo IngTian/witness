@@ -54,6 +54,10 @@ func cmdDistillStartWith(quiet bool, sinceValue, untilValue string, spawn func(.
 	return nil
 }
 
+// backfillRun is one foreground worker pass of cmdDistillBackfill. A var only so a test can count
+// the passes.
+var backfillRun = runWorkerTapped
+
 // cmdDistillBackfill runs the whole pending backlog in the FOREGROUND (blocking),
 // as opposed to cmdDistillStart's detached spawn. This is the day-one "distill my
 // whole history" path: the embedder loads once for this process, the drain mines
@@ -121,9 +125,18 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 	}
 	// tap keeps the first runner/model error, so an unfinished drain can say why on the screen.
 	tap := &causeTap{}
+	// --wait-backoffs' stop ctx exists BEFORE the first pass, so a Ctrl-C during that pass ends the
+	// wait too. Created after it, only the pass's own NotifyStop saw the signal, and once a backoff
+	// fell due the loop started a fresh worker that made real model calls.
+	ctx := context.Background()
+	if waitBackoffs {
+		var stop context.CancelFunc
+		ctx, stop = procCtl.NotifyStop(ctx)
+		defer stop()
+	}
 	// A drain pass = one full foreground worker run (mine + review + re-check to empty).
 	// It reports ran=false only when another worker already holds the lock.
-	ran, err := runWorkerTapped(false, sessionTimeRange{}, progressWhere, tap)
+	ran, err := backfillRun(false, sessionTimeRange{}, progressWhere, tap)
 	if err != nil {
 		return err
 	}
@@ -138,12 +151,10 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 	}
 
 	if waitBackoffs {
-		// Ctrl-C during a between-passes sleep aborts the wait and falls through to the
-		// end-state check, which reports the honest (still-incomplete) state.
-		ctx, stop := procCtl.NotifyStop(context.Background())
-		defer stop()
+		// Ctrl-C during a pass or a between-passes sleep aborts the wait and falls through to
+		// the end-state check, which reports the honest (still-incomplete) state.
 		if err := backfillDrainWithRetry(ctx, backfillRetryDeps{
-			rerun:            func() error { _, e := runWorkerTapped(false, sessionTimeRange{}, progressWhere, tap); return e },
+			rerun:            func() error { _, e := backfillRun(false, sessionTimeRange{}, progressWhere, tap); return e },
 			waitForNextRetry: waitForNextBackfillRetry,
 			sleep:            interruptibleSleep,
 			maxWait:          backfillMaxWait,

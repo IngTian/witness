@@ -60,6 +60,10 @@ const (
 	workerModeAutoPending = "auto-pending" // spawned by the auto gate, lock not yet claimed
 )
 
+// workerEmbedder loads the worker's embedder. A var only so a test can build the miner without the
+// ~448MB model, which is what makes the drain → re-check loop reachable from runWorker in a test.
+var workerEmbedder = func() (distill.Embedder, error) { return embed.New() }
+
 // runWorker is the SILENT worker run: background wakeups, auto runs, and any caller that has not
 // asked for progress.
 func runWorker(auto bool) (bool, error) {
@@ -324,7 +328,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 			// the last line in the log.
 			slog.Info("worker startup: loading the embedding model", "assets", embed.AssetsDir())
 			t1 := time.Now()
-			emb, err := embed.New()
+			emb, err := workerEmbedder()
 			if err != nil {
 				slog.Error("embedder", "err", err, "assets", embed.AssetsDir()) // can't mine this run; review may still run
 				tap.note(fmt.Errorf("embedding model: %w", err))
