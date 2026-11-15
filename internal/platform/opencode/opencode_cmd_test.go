@@ -20,59 +20,27 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	orig := procCtl
 	procCtl = fake
 	t.Cleanup(func() { procCtl = orig })
-	t.Setenv("OPENCODE_DB", "/user/opencode.db")
-	t.Setenv("XDG_DATA_HOME", "/user/data")
+	// Spawn isolation (critic.md G1): every inherited OPENCODE_* var is dropped
+	// (case-insensitively, since Windows env names are case-insensitive), and witness's own
+	// data, cache, state dirs and DB are under the runtime root, never the user's. HOME stays
+	// (Bedrock credentials). API-key env vars stay (the runner copies no credentials).
+	for k, v := range map[string]string{"OPENCODE_DB": "/user/opencode.db", "XDG_DATA_HOME": "/user/data",
+		"OPENCODE_CONFIG": "/user/leak.json", "OPENCODE_CONFIG_CONTENT": `{"agent":{"leak":{}}}`,
+		"OPENCODE_SERVER_PASSWORD": "x", "OPENCODE_CONFIG_PROJECT_DISABLE": "0", "opencode_config_dir": "/user/cfg",
+		"WITNESS_OPENCODE_BIN": "/x/opencode", "HOME": "/home/u"} {
+		t.Setenv(k, v)
+	}
 
 	root := t.TempDir()
 	cmd := openCodeCommand(context.Background(), root, "--version")
-
 	if cmd.Dir != os.TempDir() {
 		t.Errorf("cwd = %q, want the neutral temp dir: OpenCode records the cwd's project", cmd.Dir)
-	}
-	env := map[string]string{}
-	for _, e := range cmd.Env {
-		k, v, _ := strings.Cut(e, "=")
-		if _, dup := env[k]; dup {
-			t.Fatalf("duplicate env key %q", k)
-		}
-		env[k] = v
-	}
-	if env["WITNESS_WORKER"] != "1" {
-		t.Error("WITNESS_WORKER=1 recursion guard missing")
-	}
-	if env["OPENCODE_DB"] != filepath.Join(root, "opencode-v2.db") || env["XDG_DATA_HOME"] != filepath.Join(root, "opencode-data") {
-		t.Errorf("not isolated to the runtime root: OPENCODE_DB=%q XDG_DATA_HOME=%q", env["OPENCODE_DB"], env["XDG_DATA_HOME"])
 	}
 	if !slices.Contains(fake.Bound, cmd) {
 		t.Error("child not bound to the parent's lifetime (BindToParent)")
 	}
-
-	// No runtime root: still isolated (relative to the temp-dir cwd), never the user's DB —
-	// the root-less default must fail safe, because several subcommands open it read-WRITE.
-	cmd = openCodeCommand(context.Background(), "", "--version")
-	if slices.Contains(cmd.Env, "OPENCODE_DB=/user/opencode.db") || slices.Contains(cmd.Env, "XDG_DATA_HOME=/user/data") {
-		t.Errorf("root-less command reaches the user's OpenCode data: env=%v", cmd.Env)
-	}
-	if !slices.Contains(cmd.Env, "OPENCODE_DB=opencode-v2.db") || !slices.Contains(cmd.Env, "WITNESS_WORKER=1") ||
-		cmd.Dir != os.TempDir() || !slices.Contains(fake.Bound, cmd) {
-		t.Errorf("root-less command lost a rule: dir=%q bound=%v env=%v", cmd.Dir, slices.Contains(fake.Bound, cmd), cmd.Env)
-	}
-
-	// Spawn isolation (critic.md G1): every inherited OPENCODE_* var is dropped
-	// (case-insensitively, since Windows env names are case-insensitive), and witness's own
-	// data, cache, state dirs and DB are under the runtime root. HOME stays (Bedrock
-	// credentials). API-key env vars stay (the runner copies no credentials).
-	for k, v := range map[string]string{"OPENCODE_CONFIG": "/user/leak.json", "OPENCODE_CONFIG_CONTENT": `{"agent":{"leak":{}}}`,
-		"OPENCODE_SERVER_PASSWORD": "x", "OPENCODE_CONFIG_PROJECT_DISABLE": "0", "opencode_config_dir": "/user/cfg"} {
-		t.Setenv(k, v)
-	}
-	t.Setenv("WITNESS_OPENCODE_BIN", "/x/opencode")
-	t.Setenv("HOME", "/home/u")
-	cmd = openCodeCommand(context.Background(), root, "--version")
-	env = map[string]string{}
-	for _, e := range cmd.Env {
-		k, v, _ := strings.Cut(e, "=")
-		env[k] = v
+	env := envMap(t, cmd.Env)
+	for k := range env {
 		if strings.HasPrefix(strings.ToUpper(k), "OPENCODE_") && k != "OPENCODE_DB" {
 			t.Errorf("inherited %s reached opencode (critic G1)", k)
 		}
@@ -86,10 +54,13 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 		}
 	}
 
-	// Root-less case keeps relative paths
+	// No runtime root: still isolated (relative to the temp-dir cwd), never the user's DB —
+	// the root-less default must fail safe, because several subcommands open it read-WRITE.
 	cmd = openCodeCommand(context.Background(), "", "--version")
-	if !slices.Contains(cmd.Env, "OPENCODE_DB=opencode-v2.db") {
-		t.Errorf("root-less command did not use relative DB path: env=%v", cmd.Env)
+	env = envMap(t, cmd.Env)
+	if env["OPENCODE_DB"] != "opencode-v2.db" || env["XDG_DATA_HOME"] != "opencode-data" || env["WITNESS_WORKER"] != "1" ||
+		cmd.Dir != os.TempDir() || !slices.Contains(fake.Bound, cmd) {
+		t.Errorf("root-less command lost a rule: dir=%q bound=%v env=%v", cmd.Dir, slices.Contains(fake.Bound, cmd), cmd.Env)
 	}
 }
 

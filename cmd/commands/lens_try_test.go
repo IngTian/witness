@@ -474,20 +474,10 @@ func TestApplyOverridesAndBuildRunnerCfgMintsTheRunnerAfterItsOverrides(t *testi
 	cfg := store.Config{Runner: "opencode", TriageModel: "opencode/default"}
 	ln := &lens.Lens{Name: "test", Runner: "opencode", ExtractModel: "prov/paid"}
 
-	// Apply --model opencode/x override
 	got := applyOverridesAndBuildRunnerCfg(cfg, ln, "opencode/x", "", false)
-
-	// Verify RunnerModels contains the override, not the configured model
-	if len(got.RunnerModels) != 1 {
-		t.Fatalf("RunnerModels len = %d, want 1: %v", len(got.RunnerModels), got.RunnerModels)
-	}
-	if got.RunnerModels[0] != "opencode/x" {
-		t.Errorf("RunnerModels[0] = %q, want \"opencode/x\" (the --model override); got %q means "+
-			"tryRunnerCfg ran before the override was applied (F7 bug)", got.RunnerModels[0], got.RunnerModels[0])
-	}
-	if got.RunnerModels[0] == "prov/paid" {
-		t.Errorf("RunnerModels contains the lens's configured model %q instead of the --model override "+
-			"\"opencode/x\"; this is the F7 bug (tryRunnerCfg before overrides)", got.RunnerModels[0])
+	if !slices.Equal(got.RunnerModels, []string{"opencode/x"}) {
+		t.Errorf("RunnerModels = %q, want [opencode/x], the --model override; [prov/paid] means "+
+			"RunnerModels were computed before the override was applied (F7 bug)", got.RunnerModels)
 	}
 }
 

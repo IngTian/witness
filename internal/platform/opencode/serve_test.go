@@ -425,22 +425,6 @@ func TestEmptyRuntimeRootIsRefused(t *testing.T) {
 	}
 }
 
-func TestAllowsFreeOnlyForANamedFreeModel(t *testing.T) {
-	for _, tc := range []struct {
-		models []string
-		want   bool
-	}{
-		{nil, false},
-		{[]string{"openai/x"}, false},
-		{[]string{"openai/x", "opencode/glm-5.3-flash-free"}, true},
-		{[]string{"opencode-go/x"}, false},
-	} {
-		if got := allowsFree(tc.models); got != tc.want {
-			t.Errorf("allowsFree(%q) = %v, want %v", tc.models, got, tc.want)
-		}
-	}
-}
-
 // A relative root (a relative WITNESS_HOME) must reach the serve as absolute paths: the serve runs
 // in os.TempDir(), so a relative OPENCODE_CONFIG_DIR named a config witness never wrote, no agent
 // ever loaded, and every Run failed after the 30 s agent wait.

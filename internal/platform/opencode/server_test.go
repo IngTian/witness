@@ -2,12 +2,10 @@ package opencode
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -86,16 +84,10 @@ func TestRunCreatesPromptsAndDeletesOneSessionPerJob(t *testing.T) {
 		t.Errorf("agent permissions = %v, want deny-all %v", agent["permissions"], wantDeny)
 	}
 	calls := fake.seen()
-	deletes := 0
-	for _, c := range calls {
-		if strings.HasPrefix(c, "DELETE ") {
-			deletes++
-		}
-		if strings.HasSuffix(c, "/interrupt") {
-			t.Errorf("a successful job was interrupted: %v", calls)
-		}
+	if fake.count(func(c string) bool { return strings.HasSuffix(c, "/interrupt") }) != 0 {
+		t.Errorf("a successful job was interrupted: %v", calls)
 	}
-	if deletes != 1 || calls[len(calls)-1] != "DELETE /api/session/ses_1" {
+	if fake.count(func(c string) bool { return strings.HasPrefix(c, "DELETE ") }) != 1 || calls[len(calls)-1] != "DELETE /api/session/ses_1" {
 		t.Errorf("calls = %v, want exactly one DELETE /api/session/ses_1, last", calls)
 	}
 }
@@ -325,18 +317,8 @@ func TestReplyForMessageHarvestsOnlyASucceededTurn(t *testing.T) {
 // privateConfigOverlay is the contract job's seam (PR 3 adds a mock provider through it): merged
 // beside witness's agents, and absent by default so the private serve gets no provider config.
 func TestPrivateConfigOverlayIsMerged(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "opencode.json")
-	read := func() map[string]any {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var cfg map[string]any
-		if err := json.Unmarshal(b, &cfg); err != nil {
-			t.Fatal(err)
-		}
-		return cfg
-	}
+	fake, _ := newFakeV2(t)
+	path, read := fake.configPath, fake.config
 	if err := writePrivateConfig(path, map[string]string{"w-a": "A"}); err != nil {
 		t.Fatal(err)
 	}

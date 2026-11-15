@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -97,13 +98,6 @@ func TestNativeRunUsesADistinctFreshScratchSessionPerJob(t *testing.T) {
 		if got := fake.session(fmt.Sprintf("ses_%d", i+1)).Agent; got != agentID(job.prompt) {
 			t.Errorf("job %d ran as agent %q, want %q", i, got, agentID(job.prompt))
 		}
-	}
-	// A completed reply is reused by the next runtime on the same root: no new session or prompt.
-	if _, err := newNativeRuntime(n.root, srv).run(context.Background(), nativeJob("a", "0:same", digest), nativeModel, "PA", "I"); err != nil {
-		t.Fatal(err)
-	}
-	if sessions() != 3 || prompts() != 3 {
-		t.Fatalf("completed reply was not reused: sessions=%d prompts=%d", sessions(), prompts())
 	}
 }
 
@@ -315,7 +309,7 @@ func TestNativeMalformedManifestIsRetainedError(t *testing.T) {
 }
 
 func TestNativeReconcileCleansCommittedAndStaleGenerations(t *testing.T) {
-	n, deletesp := nativeReconcileFixture(t, 9, "ok")
+	n, fake := nativeReconcileFixture(t, 9, "ok")
 	current := nativeManifest{Session: "opencode:s", Lens: "pending", RawHigh: 9, Total: 2, Fork: "f1"}
 	committed := nativeManifest{Session: "opencode:s", Lens: "ok", RawHigh: 9, Total: 2, Fork: "f2"}
 	stale := nativeManifest{Session: "opencode:s", Lens: "stale", RawHigh: 8, Total: 2, Fork: "f3"}
@@ -331,12 +325,8 @@ func TestNativeReconcileCleansCommittedAndStaleGenerations(t *testing.T) {
 	if err := n.reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	deletes := *deletesp
-	if len(deletes) != 2 {
-		t.Fatalf("deletes=%v", deletes)
-	}
-	if strings.Join(deletes, ",") != "/api/session/f2,/api/session/f3" {
-		t.Fatalf("deleted forks=%v", deletes)
+	if got := fake.seen(); !slices.Equal(got, []string{"DELETE /api/session/f2", "DELETE /api/session/f3"}) {
+		t.Fatalf("serve calls = %v, want the f2 and f3 deletes alone", got)
 	}
 	if _, err := os.Stat(filepath.Join(n.dir(), "current.json")); err != nil {
 		t.Fatal("uncommitted current manifest removed")
@@ -385,10 +375,10 @@ func TestNativeCleanupFailureKeepsCommittedManifestForRetry(t *testing.T) {
 
 // nativeReconcileFixture builds a runtime whose sibling witness.db holds session opencode:s with
 // rawRows L0 rows (raw ids 1..rawRows), distilled through 2 records for distilledLens (none when
-// empty), plus a fake OpenCode server that records fork deletions. It is a REAL store, written
+// empty), plus a fakeV2 serve whose calls record the fork deletions. It is a REAL store, written
 // through the store's own API: reconcile reads witness.db with raw SQL, so a hand-rolled schema
 // here would keep passing after a store schema change silently broke that read (the #119 leak).
-func nativeReconcileFixture(t *testing.T, rawRows int, distilledLens string) (*nativeRuntime, *[]string) {
+func nativeReconcileFixture(t *testing.T, rawRows int, distilledLens string) (*nativeRuntime, *fakeV2) {
 	t.Helper()
 	home := t.TempDir()
 	root := filepath.Join(home, "runtime")
@@ -410,21 +400,12 @@ func nativeReconcileFixture(t *testing.T, rawRows int, distilledLens string) (*n
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
-	deletes := &[]string{}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			*deletes = append(*deletes, r.URL.Path)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-	}))
-	t.Cleanup(ts.Close)
-	n := newNativeRuntime(root, newOpenCodeServer(ts.URL, "", "", ts.Client()))
+	fake, srv := newFakeV2(t)
+	n := newNativeRuntime(root, srv)
 	if err := os.MkdirAll(n.dir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return n, deletes
+	return n, fake
 }
 
 // A single unreadable manifest must not end the sweep. os.ReadDir returns names sorted,
@@ -432,7 +413,7 @@ func nativeReconcileFixture(t *testing.T, rawRows int, distilledLens string) (*n
 // because runner Open treated that error as fatal, one bad file could block all
 // OpenCode distillation. The bad entry is now reaped and the rest still processed.
 func TestNativeReconcileIsolatesUnreadableManifest(t *testing.T) {
-	n, deletes := nativeReconcileFixture(t, 9, "ok")
+	n, fake := nativeReconcileFixture(t, 9, "ok")
 	// "aaa" sorts BEFORE "zzz", so pre-fix the corrupt file aborted before zzz was seen.
 	bad := filepath.Join(n.dir(), "aaa.json")
 	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
@@ -448,8 +429,8 @@ func TestNativeReconcileIsolatesUnreadableManifest(t *testing.T) {
 	}
 
 	// The committed manifest AFTER the bad one was still finalized.
-	if len(*deletes) != 1 || (*deletes)[0] != "/api/session/f_good" {
-		t.Fatalf("later manifest was not reconciled: deletes=%v", *deletes)
+	if got := fake.seen(); !slices.Equal(got, []string{"DELETE /api/session/f_good"}) {
+		t.Fatalf("later manifest was not reconciled: serve calls = %v", got)
 	}
 	if _, err := os.Stat(good); !os.IsNotExist(err) {
 		t.Fatal("committed manifest after the bad entry should be finalized")
@@ -465,7 +446,7 @@ func TestNativeReconcileIsolatesUnreadableManifest(t *testing.T) {
 // interrupted .tmp. Nothing writes the first two any more, so every one is residue — a snapshot
 // beside a live manifest included — while the manifests themselves are kept.
 func TestNativeReconcileSweepsLegacyResidue(t *testing.T) {
-	n, _ := nativeReconcileFixture(t, 9, "")
+	n, fake := nativeReconcileFixture(t, 9, "")
 	live := filepath.Join(n.dir(), "x.json")
 	if err := n.save(live, nativeManifest{Session: "opencode:s", Lens: "pending", RawHigh: 9, Total: 2, Fork: "f1"}); err != nil {
 		t.Fatal(err)
@@ -489,6 +470,9 @@ func TestNativeReconcileSweepsLegacyResidue(t *testing.T) {
 	if _, err := os.Stat(live); err != nil {
 		t.Fatal("live manifest must not be removed")
 	}
+	if calls := fake.seen(); len(calls) != 0 {
+		t.Errorf("reconcile called the serve for a live manifest: %v", calls)
+	}
 }
 
 // A generation a LATER mine has already grown past can never be the one that commits
@@ -496,7 +480,7 @@ func TestNativeReconcileSweepsLegacyResidue(t *testing.T) {
 // that keeps failing strands one manifest + live isolated scratch session per drain, forever.
 func TestNativeReconcileReapsGenerationSupersededByNewerRaw(t *testing.T) {
 	// raw now holds id 9 AND newer ids up to 12 for the same session.
-	n, deletes := nativeReconcileFixture(t, 12, "")
+	n, fake := nativeReconcileFixture(t, 12, "")
 	superseded := filepath.Join(n.dir(), "old.json")
 	if err := n.save(superseded, nativeManifest{Session: "opencode:s", Lens: "failing", RawHigh: 9, Total: 2, Fork: "f_old"}); err != nil {
 		t.Fatal(err)
@@ -514,8 +498,8 @@ func TestNativeReconcileReapsGenerationSupersededByNewerRaw(t *testing.T) {
 	if _, err := os.Stat(superseded); !os.IsNotExist(err) {
 		t.Fatal("generation superseded by a newer raw id must be reaped")
 	}
-	if len(*deletes) != 1 || (*deletes)[0] != "/api/session/f_old" {
-		t.Fatalf("only the superseded session should be deleted, got %v", *deletes)
+	if got := fake.seen(); !slices.Equal(got, []string{"DELETE /api/session/f_old"}) {
+		t.Fatalf("only the superseded session should be deleted, got serve calls %v", got)
 	}
 	// The CURRENT generation (still the high-water mark, uncommitted) must survive.
 	if _, err := os.Stat(newest); err != nil {

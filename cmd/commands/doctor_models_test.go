@@ -82,8 +82,8 @@ func registerLens(t *testing.T, st *store.Store, name, runner string) {
 // never surfaced). A runtime that does not require one accepts it.
 func TestDoctorSurfacesUnnamedStageErrorOnModelRequirerRuntime(t *testing.T) {
 	useRecordingPlatforms()
+	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
 	st := openTestStore(t)
-	defer st.Close()
 	registerLens(t, st, "cross", "fakerequirer")
 	err := validateRuntimeModels(context.Background(), st, store.Config{Runner: "fakerec", TriageModel: "fakerec/m1"})
 	if err == nil || !strings.Contains(err.Error(), "unnamed model") {
@@ -95,7 +95,6 @@ func TestDoctorSurfacesUnnamedStageErrorOnModelRequirerRuntime(t *testing.T) {
 
 	useRecordingPlatforms()
 	st2 := openTestStore(t)
-	defer st2.Close()
 	registerLens(t, st2, "cross2", "fakerec")
 	if err := validateRuntimeModels(context.Background(), st2, store.Config{Runner: "claude", TriageModel: "claude/m1"}); err != nil {
 		t.Errorf("validateRuntimeModels = %v, want nil: a runtime that requires no model accepts \"\"", err)

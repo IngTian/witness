@@ -8,7 +8,8 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-func wakeupStore(t *testing.T) *store.Store {
+// openTestStore opens a fresh archive under a temp WITNESS_HOME, closed at cleanup.
+func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	st, err := store.Open()
@@ -31,7 +32,7 @@ func wakeupStore(t *testing.T) *store.Store {
 // session-start/-end or the OpenCode plugin's quiet-period kick. On a machine that just hit a
 // transient rate limit, automatic is precisely what was promised.
 func TestFailedWakeupSpawnDoesNotLatchTheStamp(t *testing.T) {
-	st := wakeupStore(t)
+	st := openTestStore(t)
 	next := time.Now().Add(30 * time.Minute)
 
 	failing := func(...string) bool { return false }
@@ -58,7 +59,7 @@ func TestFailedWakeupSpawnDoesNotLatchTheStamp(t *testing.T) {
 // The dedup guard must still work on the success path: an already-armed, earlier-or-equal
 // wakeup covers the work, so re-arming is suppressed. Losing this would busy-spawn.
 func TestSuccessfulWakeupStillDedupes(t *testing.T) {
-	st := wakeupStore(t)
+	st := openTestStore(t)
 	next := time.Now().Add(30 * time.Minute)
 	spawns := 0
 	ok := func(...string) bool { spawns++; return true }
@@ -82,7 +83,7 @@ func TestSuccessfulWakeupStillDedupes(t *testing.T) {
 
 // The two modes keep independent stamps: a failed auto arm must not disturb a live manual one.
 func TestWakeupModesAreIndependent(t *testing.T) {
-	st := wakeupStore(t)
+	st := openTestStore(t)
 	next := time.Now().Add(30 * time.Minute)
 	ok := func(...string) bool { return true }
 	failing := func(...string) bool { return false }
@@ -109,7 +110,7 @@ func TestSpawnDetachedOKReportsSuccessWhenSuppressedUnderTest(t *testing.T) {
 		t.Error("the under-test no-op must report success; reporting failure would make the " +
 			"suppression change behavior instead of being inert")
 	}
-	st := wakeupStore(t)
+	st := openTestStore(t)
 	scheduleWorkerWakeup(st, time.Now().Add(10*time.Minute), "auto")
 	if got := st.MetaString(workerWakeupKey("auto")); got == "" {
 		t.Error("scheduleWorkerWakeup through the real spawner must still stamp under test")

@@ -1,10 +1,10 @@
 package opencode
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,56 +65,18 @@ func TestParseTurnCountsRetryAsQueued(t *testing.T) {
 	}
 }
 
+// The retrying fixture's turn once its retry clears: the same assistant, with no retry field.
 func TestParseTurnStartsWhenRetryClears(t *testing.T) {
-	// Read the retrying fixture
-	data := readFixture(t, "v2_turn_retrying.json")
-
-	// First: verify the retrying fixture shows Started=false
+	data := []byte(`{"data":[
+		{"id":"msg_req","type":"user","time":{"created":1763046000000}},
+		{"id":"msg_asst","type":"assistant","time":{"created":1763046001000},
+		 "content":[{"type":"text","text":"reply after retry cleared"}]}]}`)
 	st, err := parseTurn(data, "msg_req")
 	if err != nil {
-		t.Fatalf("parseTurn with retry: %v", err)
+		t.Fatalf("parseTurn: %v", err)
 	}
-	if st.Started {
-		t.Error("Started = true when retry is present, want false")
-	}
-	if st.Retry == nil {
-		t.Error("Retry = nil when assistant has retry field")
-	}
-
-	// Second: clear retry and verify Started=true
-	var response struct {
-		Data []v2Message `json:"data"`
-	}
-	if err := json.Unmarshal(data, &response); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	// Find the assistant and clear its retry
-	for i := range response.Data {
-		if response.Data[i].Type == "assistant" {
-			response.Data[i].Retry = nil
-			// Add content so there's something to parse
-			response.Data[i].Content = []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			}{
-				{Type: "text", Text: "reply after retry cleared"},
-			}
-		}
-	}
-	clearedData, err := json.Marshal(response)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	st2, err := parseTurn(clearedData, "msg_req")
-	if err != nil {
-		t.Fatalf("parseTurn without retry: %v", err)
-	}
-	if !st2.Started {
-		t.Error("Started = false when retry is cleared, want true")
-	}
-	if st2.Retry != nil {
-		t.Errorf("Retry = %v when assistant has no retry, want nil", st2.Retry)
+	if !st.Started || st.Retry != nil {
+		t.Errorf("Started = %v, Retry = %v; want started, with no retry", st.Started, st.Retry)
 	}
 }
 
@@ -141,98 +103,51 @@ func TestFreeLimitBecomesQuotaExhausted(t *testing.T) {
 	}
 }
 
-func TestFreeLimitIsDetectedFromTheGatewayBody(t *testing.T) {
-	// Test that type "provider.rate-limit" but response.body contains "FreeUsageLimitError"
-	// becomes QuotaExhausted
-	e := v2Error{
-		Type:    "provider.rate-limit",
-		Message: "Rate limit exceeded",
-		Status:  429,
+// turnError's verdict on each failed-turn shape. The plain rate limit is checked on the idle and,
+// when the idle carries no error, on the last assistant (the idle→last fallback).
+func TestTurnErrorClassifiesFailedTurns(t *testing.T) {
+	noRoute, err := parseTurn(readFixture(t, "v2_turn_no_route.json"), "msg_req")
+	if err != nil {
+		t.Fatalf("parseTurn: %v", err)
 	}
-	e.Response = &struct {
-		Body string `json:"body"`
+	rateLimit := func(body string) *v2Error {
+		e := &v2Error{Type: "provider.rate-limit", Message: "Rate limit exceeded", Status: 429}
+		e.Response = &struct {
+			Body string `json:"body"`
+		}{body}
+		return e
+	}
+	gateway := rateLimit(`{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded"}}`)
+	plain := rateLimit(`{"type":"error","error":{"type":"RateLimitError","message":"Rate limit exceeded"}}`)
+	for _, tc := range []struct {
+		name       string
+		st         turnState
+		wantQuota  bool
+		wantIs     error
+		wantSubstr string
 	}{
-		Body: `{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded"}}`,
-	}
-	if !isFreeLimit(e) {
-		t.Error("isFreeLimit = false for gateway body with FreeUsageLimitError")
-	}
-
-	// Verify it produces QuotaExhaustedError
-	idle := v2Message{
-		Outcome: "failed",
-		Error:   &e,
-	}
-	idle.Time.Created = 1763046000000
-	st := turnState{
-		Idle: &idle,
-	}
-	var qe *platform.QuotaExhaustedError
-	err := turnError(st, time.Now())
-	if !errors.As(err, &qe) {
-		t.Errorf("turnError did not return QuotaExhaustedError for gateway body: %v", err)
-	}
-}
-
-func TestPlainRateLimitIsNotFreeLimit(t *testing.T) {
-	// A provider.rate-limit error (429) without FreeUsageLimitError in the body
-	// should NOT become QuotaExhaustedError
-	plainRateLimit := v2Error{
-		Type:    "provider.rate-limit",
-		Message: "Rate limit exceeded. Please try again later.",
-		Status:  429,
-	}
-	plainRateLimit.Response = &struct {
-		Body string `json:"body"`
-	}{
-		Body: `{"type":"error","error":{"type":"RateLimitError","message":"Rate limit exceeded"}}`,
-	}
-
-	// Test on idle error
-	idle := v2Message{
-		Outcome: "failed",
-		Error:   &plainRateLimit,
-	}
-	idle.Time.Created = 1763046000000
-	st := turnState{
-		Idle: &idle,
-	}
-
-	var qe *platform.QuotaExhaustedError
-	err := turnError(st, time.Now())
-	if err == nil {
-		t.Fatal("turnError returned nil for rate-limit error")
-	}
-	if errors.As(err, &qe) {
-		t.Errorf("turnError returned QuotaExhaustedError for plain rate-limit: %v", err)
-	}
-	if !containsString(err.Error(), "rate-limit") {
-		t.Errorf("error message does not contain 'rate-limit': %v", err)
-	}
-
-	// Test on assistant error (when idle has no error)
-	idle2 := v2Message{
-		Outcome: "failed",
-	}
-	idle2.Time.Created = 1763046000000
-	last := v2Message{
-		Error: &plainRateLimit,
-	}
-	last.Time.Created = 1763046000000
-	st2 := turnState{
-		Idle: &idle2,
-		Last: &last,
-	}
-
-	err2 := turnError(st2, time.Now())
-	if err2 == nil {
-		t.Fatal("turnError returned nil for rate-limit error on Last")
-	}
-	if errors.As(err2, &qe) {
-		t.Errorf("turnError returned QuotaExhaustedError for plain rate-limit on Last: %v", err2)
-	}
-	if !containsString(err2.Error(), "rate-limit") {
-		t.Errorf("error message does not contain 'rate-limit': %v", err2)
+		{"free limit in the gateway body", turnState{Idle: &v2Message{Outcome: "failed", Error: gateway}}, true, nil, ""},
+		{"plain rate limit on the idle", turnState{Idle: &v2Message{Outcome: "failed", Error: plain}}, false, nil, "rate-limit"},
+		{"plain rate limit on the last assistant", turnState{Idle: &v2Message{Outcome: "failed"}, Last: &v2Message{Error: plain}}, false, nil, "rate-limit"},
+		{"no route", noRoute, false, errOpenCodeModelUnavailable, "Model unavailable"},
+		{"interrupted", turnState{Idle: &v2Message{Outcome: "interrupted"}}, false, nil, "interrupted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := turnError(tc.st, time.Now())
+			if err == nil {
+				t.Fatal("turnError = nil, want an error")
+			}
+			var qe *platform.QuotaExhaustedError
+			if got := errors.As(err, &qe); got != tc.wantQuota {
+				t.Errorf("QuotaExhaustedError = %v, want %v: %v", got, tc.wantQuota, err)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("error is not %v: %v", tc.wantIs, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantSubstr) {
+				t.Errorf("error %q does not contain %q", err, tc.wantSubstr)
+			}
+		})
 	}
 }
 
@@ -282,39 +197,6 @@ func TestFreeLimitResetFallsBackToOneHour(t *testing.T) {
 	// Allow 1 second tolerance for test execution time
 	if reset.Sub(now.Add(2*time.Hour)).Abs() > time.Second {
 		t.Errorf("neither completed nor idle: got %v, want ~%v", reset, now.Add(2*time.Hour))
-	}
-}
-
-func TestNoRouteIsModelUnavailable(t *testing.T) {
-	data := readFixture(t, "v2_turn_no_route.json")
-	st, err := parseTurn(data, "msg_req")
-	if err != nil {
-		t.Fatalf("parseTurn: %v", err)
-	}
-
-	err = turnError(st, time.Now())
-	if !errors.Is(err, errOpenCodeModelUnavailable) {
-		t.Errorf("error is not errOpenCodeModelUnavailable: %v", err)
-	}
-	if err == nil || !containsString(err.Error(), "Model unavailable") {
-		t.Errorf("error message does not contain 'Model unavailable': %v", err)
-	}
-}
-
-func TestInterruptedTurnIsAnError(t *testing.T) {
-	idle := v2Message{
-		Outcome: "interrupted",
-	}
-	idle.Time.Created = time.Now().UnixMilli()
-	st := turnState{
-		Idle: &idle,
-	}
-	err := turnError(st, time.Now())
-	if err == nil {
-		t.Fatal("turnError returned nil for interrupted turn")
-	}
-	if !containsString(err.Error(), "interrupted") {
-		t.Errorf("error does not contain 'interrupted': %v", err)
 	}
 }
 
@@ -373,17 +255,4 @@ func readFixture(t *testing.T, name string) []byte {
 
 func ptr[T any](v T) *T {
 	return &v
-}
-
-func containsString(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || contains(s, substr)))
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

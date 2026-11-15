@@ -10,18 +10,6 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// openTestStore creates a fresh store in a temp dir for testing.
-func openTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return st
-}
-
 // A cross-runtime runner must not inherit the other runtime's model names.
 //
 // A model name is only valid on its own runtime, so handing an OpenCode runner the Claude-side
@@ -119,11 +107,9 @@ func TestRuntimeModelsCoversEveryStageOnItsRuntime(t *testing.T) {
 		t.Errorf("opencode models = %q, want [opencode/a opencode/b opencode/c opencode/d]", oc)
 	}
 
-	// runtimeModels(cfg, ls, "claude") == [""]
-	// (a cross-runtime lens with no per-lens model: an unnamed stage)
-	cl := runtimeModels(cfg, ls, "claude")
-	if len(cl) != 1 || cl[0] != "" {
-		t.Errorf("claude models = %v, want [\"\"] (unnamed stage on cross-runtime lens)", cl)
+	// A cross-runtime lens with no per-lens model: an unnamed stage.
+	if cl := runtimeModels(cfg, ls, "claude"); !slices.Equal(cl, []string{""}) {
+		t.Errorf("claude models = %q, want [\"\"] (unnamed stage on cross-runtime lens)", cl)
 	}
 }
 
@@ -132,8 +118,8 @@ func TestRunnerSetHandsEachRuntimeItsModels(t *testing.T) {
 	useRecordingPlatforms()
 	cfg := store.Config{Runner: "fakerec", TriageModel: "fake/m1"}
 	ls := []*lens.Lens{{Name: "a", ExtractModel: "fake/m2"}}
+	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
 	st := openTestStore(t)
-	defer st.Close()
 	rs, err := newRunnerSet(context.Background(), st, cfg, ls)
 	if err != nil {
 		t.Fatal(err)

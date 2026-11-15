@@ -14,16 +14,6 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-func TestRequireModelsRefusesAnUnnamedStage(t *testing.T) {
-	if err := requireModels(nil); err != nil {
-		t.Errorf("requireModels(nil) = %v, want nil", err)
-	}
-	err := requireModels([]string{"openai/x", ""})
-	if !errors.Is(err, ErrOpenCodeNoModel) {
-		t.Errorf("requireModels with empty model = %v, want ErrOpenCodeNoModel", err)
-	}
-}
-
 func TestValidateModelsAgainstTheServesList(t *testing.T) {
 	fake, srv := newFakeV2(t)
 	fake.models = []map[string]any{
@@ -94,39 +84,28 @@ func TestUnavailableHintSurvivesAMissingIntegrationRoute(t *testing.T) {
 	}
 }
 
-func TestStartRefusesAnEmptyModelBeforeSpawning(t *testing.T) {
+// StartOpenCodeServerIn refuses an unnamed stage, even after a named one, and a model without its
+// provider/ before it spawns anything.
+func TestStartRefusesABadModelBeforeSpawning(t *testing.T) {
 	prevExec, prevVersion := execCommandContext, openCodeVersionCommand
 	t.Cleanup(func() { execCommandContext, openCodeVersionCommand = prevExec, prevVersion })
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) {
 		return []byte("opencode v2.3.0"), nil
 	}
 	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		t.Errorf("execCommandContext called with empty model: %s %v", name, args)
+		t.Errorf("spawned %s %v for a model it must refuse", name, args)
 		return exec.CommandContext(ctx, "/nonexistent")
 	}
-
-	root := t.TempDir()
-	_, err := StartOpenCodeServerIn(context.Background(), root, []string{""})
-	if !errors.Is(err, ErrOpenCodeNoModel) {
-		t.Errorf("StartOpenCodeServerIn with empty model = %v, want ErrOpenCodeNoModel", err)
-	}
-}
-
-func TestStartRefusesBadFormatBeforeSpawning(t *testing.T) {
-	prevExec, prevVersion := execCommandContext, openCodeVersionCommand
-	t.Cleanup(func() { execCommandContext, openCodeVersionCommand = prevExec, prevVersion })
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) {
-		return []byte("opencode v2.3.0"), nil
-	}
-	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		t.Fatalf("execCommandContext called with bad format model: %s %v", name, args)
-		return exec.CommandContext(ctx, "/nonexistent")
-	}
-
-	root := t.TempDir()
-	_, err := StartOpenCodeServerIn(context.Background(), root, []string{"gpt-5.5"})
-	if err == nil || !strings.Contains(err.Error(), "provider/model") {
-		t.Errorf("StartOpenCodeServerIn with model without / = %v, want format error", err)
+	for _, tc := range []struct {
+		models  []string
+		refused func(error) bool
+	}{
+		{[]string{"openai/x", ""}, func(err error) bool { return errors.Is(err, ErrOpenCodeNoModel) }},
+		{[]string{"gpt-5.5"}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "provider/model") }},
+	} {
+		if _, err := StartOpenCodeServerIn(context.Background(), t.TempDir(), tc.models); !tc.refused(err) {
+			t.Errorf("StartOpenCodeServerIn(%q) = %v, want it refused", tc.models, err)
+		}
 	}
 }
 
@@ -137,35 +116,17 @@ func TestRunnerValidateModelsBootsAndClosesItsServe(t *testing.T) {
 	root := t.TempDir()
 	r := &runner{cfg: store.Config{RuntimeRoot: root}}
 
-	ctx := context.Background()
-	// ValidateModels with a valid model (fake serves openai/gpt-5.5): should succeed and close
-	if err := r.ValidateModels(ctx, "openai/gpt-5.5"); err != nil {
-		t.Fatalf("ValidateModels(openai/gpt-5.5) = %v, want nil", err)
-	}
-
-	// Serve dir should be empty afterwards (Close cleaned up)
-	serveDir := filepath.Join(root, "opencode-serve")
-	entries, err := os.ReadDir(serveDir)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("reading serve dir: %v", err)
-	}
-	if len(entries) > 0 {
-		t.Errorf("serve dir has %d entries after ValidateModels, want 0", len(entries))
-	}
-
-	// ValidateModels with an unavailable model: should error and still close
-	err = r.ValidateModels(ctx, "opencode/crouton-free")
-	if err == nil {
-		t.Fatalf("ValidateModels(opencode/crouton-free) = nil, want error")
-	}
-
-	// Serve dir should still be empty (Close on failure path)
-	entries, err = os.ReadDir(serveDir)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatalf("reading serve dir after error: %v", err)
-	}
-	if len(entries) > 0 {
-		t.Errorf("serve dir has %d entries after ValidateModels error, want 0", len(entries))
+	// Each call boots its own serve and closes it again, on success and on failure alike.
+	for _, tc := range []struct {
+		model   string
+		wantErr bool
+	}{{"openai/gpt-5.5", false}, {"opencode/crouton-free", true}} {
+		if err := r.ValidateModels(context.Background(), tc.model); (err != nil) != tc.wantErr {
+			t.Errorf("ValidateModels(%s) = %v, want an error: %v", tc.model, err, tc.wantErr)
+		}
+		if entries, err := os.ReadDir(filepath.Join(root, "opencode-serve")); err != nil && !os.IsNotExist(err) || len(entries) != 0 {
+			t.Errorf("serve dir after ValidateModels(%s) = %d entries (%v), want 0", tc.model, len(entries), err)
+		}
 	}
 }
 

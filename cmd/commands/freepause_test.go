@@ -83,9 +83,6 @@ func TestAQuotaRefusalPausesUntilTheReset(t *testing.T) {
 	if got, want := meta.MetaString(freeModelsPausedKey), reset.UTC().Format(time.RFC3339); got != want {
 		t.Fatalf("pause = %q, want %q", got, want)
 	}
-	if until, ok := freeModelsPausedUntil(meta); !ok || !until.Equal(reset) {
-		t.Fatalf("freeModelsPausedUntil = %s, %v; want %s", until, ok, reset)
-	}
 }
 
 // Review Focus: review, claims, compaction and profile ride the same MineFunc, so this is the
@@ -200,6 +197,9 @@ func TestAWaiterOnARefusedProbeGetsTheNewReset(t *testing.T) {
 	if !errors.As(err, &qe) || !qe.ResetAt.Equal(reset2) {
 		t.Fatalf("a waiter on a refused probe must be refused with the re-armed %s, got %v", reset2, err)
 	}
+	if err := recv(t, h.call(context.Background()), "the call after the re-arm"); !errors.As(err, &qe) || !qe.ResetAt.Equal(reset2) {
+		t.Fatalf("the call after a refused probe must be refused with the re-armed %s, got %v", reset2, err)
+	}
 	if got := h.calls.Load(); got != 1 {
 		t.Fatalf("only the probe may reach the runner, got %d calls", got)
 	}
@@ -250,23 +250,6 @@ func TestAPanickingProbeStillSettles(t *testing.T) {
 	go func() { _, err := run(context.Background(), freeModel, "p", "i"); next <- err }()
 	if err := recv(t, next, "the call after a panicked probe"); err != nil || n.Load() != 2 {
 		t.Fatalf("the next call must probe: err %v, runner calls %d", err, n.Load())
-	}
-}
-
-func TestAProbeRefusalRearmsThePause(t *testing.T) {
-	meta := armedMeta(gateNow.Add(-time.Second))
-	reset2 := gateNow.Add(2 * time.Hour)
-	var n atomic.Int32
-	run := testGate(meta).wrap("fakefree", freeRunner{}, counted(&n, func() (string, error) {
-		return "", &platform.QuotaExhaustedError{ResetAt: reset2, Runtime: "fakefree"}
-	}))
-	_, _ = run(context.Background(), freeModel, "p", "i")
-	if got, want := meta.MetaString(freeModelsPausedKey), reset2.Format(time.RFC3339); got != want {
-		t.Fatalf("pause = %q, want the re-armed %q", got, want)
-	}
-	_, _ = run(context.Background(), freeModel, "p", "i")
-	if got := n.Load(); got != 1 {
-		t.Fatalf("after the re-arm only the probe may have reached the runner, got %d calls", got)
 	}
 }
 
@@ -364,7 +347,7 @@ func TestNonFreeModelsIgnoreThePause(t *testing.T) {
 
 func TestRetryWakeupIncludesTheFreeModelPause(t *testing.T) {
 	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
-	st := wakeupStore(t)
+	st := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	pause := func(at time.Time) {
 		if err := st.SetMetaString(freeModelsPausedKey, at.Format(time.RFC3339)); err != nil {

@@ -14,7 +14,8 @@ import (
 )
 
 // The free-model pause keys on this capability, never on the runner's name: only OpenCode Zen's
-// own opencode/* models draw on the free allowance.
+// own opencode/* models draw on the free allowance. The serve allows free models when any of its
+// models is one (allowsFree, the same predicate); otherwise it never falls back to one.
 func TestOnFreeModelMatchesOnlyOpenCodeModels(t *testing.T) {
 	var fa platform.FreeAllowance = &runner{}
 	for model, want := range map[string]bool{
@@ -27,6 +28,12 @@ func TestOnFreeModelMatchesOnlyOpenCodeModels(t *testing.T) {
 		if got := fa.OnFreeModel(model); got != want {
 			t.Errorf("OnFreeModel(%q) = %v, want %v", model, got, want)
 		}
+		if got := allowsFree([]string{"openai/x", model}); got != want {
+			t.Errorf("allowsFree([openai/x %q]) = %v, want %v", model, got, want)
+		}
+	}
+	if allowsFree(nil) {
+		t.Error("allowsFree(nil) = true, want false")
 	}
 }
 
