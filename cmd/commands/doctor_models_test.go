@@ -102,4 +102,14 @@ func TestDoctorSurfacesUnnamedStageErrorOnModelRequirerRuntime(t *testing.T) {
 	if got := modelRec.validated["fakerec"]; !slices.Equal(got, []string{""}) {
 		t.Errorf("fakerec validated %q, want [\"\"]", got)
 	}
+
+	// The DEFAULT runtime's own models are validated too (no lenses: it is the only runtime), or
+	// doctor would say "models OK" for a bad mine_model the worker's Open then refuses.
+	useRecordingPlatforms()
+	if err := validateRuntimeModels(context.Background(), openTestStore(t), store.Config{Runner: "fakerec", TriageModel: "fakerec/m1"}); err != nil {
+		t.Errorf("validateRuntimeModels = %v, want nil", err)
+	}
+	if got := modelRec.validated["fakerec"]; !slices.Equal(got, []string{"fakerec/m1"}) {
+		t.Errorf("fakerec validated %q, want [fakerec/m1]: doctor skipped the default runtime", got)
+	}
 }

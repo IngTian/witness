@@ -696,14 +696,19 @@ func TestNewestActivityIgnoresATurnStillRunning(t *testing.T) {
 	}
 }
 
-// finishTurnBetweenReads makes the user finish a turn in OpenCode at the first betweenImportReads,
-// i.e. after a read that advances seen and before the read that imports.
-func finishTurnBetweenReads(t *testing.T, dbPath string, stmts ...string) {
+// finishTurnBetweenReads makes the user finish a turn in OpenCode right after whichever of the two
+// named reads Import does first, so the test fails if the order that keeps seen behind the import
+// is ever reversed.
+func finishTurnBetweenReads(t *testing.T, dbPath string, reads [2]string, stmts ...string) {
 	t.Helper()
 	var once sync.Once
 	prev := betweenImportReads
 	t.Cleanup(func() { betweenImportReads = prev })
-	betweenImportReads = func() { once.Do(func() { mutateV2DB(t, dbPath, stmts...) }) }
+	betweenImportReads = func(read string) {
+		if read == reads[0] || read == reads[1] {
+			once.Do(func() { mutateV2DB(t, dbPath, stmts...) })
+		}
+	}
 }
 
 // importedText reports whether any imported record of session carries text.
@@ -723,7 +728,7 @@ func importedText(fake *fakeImportStore, session, text string) bool {
 // import: the session's newest idle is read before its turns.
 func TestSeenNeverRunsAheadOfWhatWasImported(t *testing.T) {
 	dbPath := seedV2DB(t, session("ses_order", 5000), user("ses_order", 1, 1100, "user"), idle("ses_order", 2, 8000))
-	finishTurnBetweenReads(t, dbPath, user("ses_order", 3, 8500, "late"), idle("ses_order", 4, 9000))
+	finishTurnBetweenReads(t, dbPath, [2]string{"session idle", "turns"}, user("ses_order", 3, 8500, "late"), idle("ses_order", 4, 9000))
 	fake := newFakeImportStore()
 	mustImport(t, fake, dbPath, "ses_order")
 	if seen := LastImported(fake).UnixMilli(); seen >= 9000 && !importedText(fake, "ses_order", "late") {
@@ -735,7 +740,7 @@ func TestSeenNeverRunsAheadOfWhatWasImported(t *testing.T) {
 // first turn ends between the two reads is either in the list or not yet counted as seen.
 func TestSeenNeverRunsAheadOfAFullImport(t *testing.T) {
 	dbPath := seedV2DB(t, session("ses_old", 5000), user("ses_old", 1, 1100, "user"), idle("ses_old", 2, 8000))
-	finishTurnBetweenReads(t, dbPath, session("ses_new", 9000), user("ses_new", 1, 8500, "new"), idle("ses_new", 2, 9000))
+	finishTurnBetweenReads(t, dbPath, [2]string{"newest idle", "sessions"}, session("ses_new", 9000), user("ses_new", 1, 8500, "new"), idle("ses_new", 2, 9000))
 	fake := newFakeImportStore()
 	mustImport(t, fake, dbPath)
 	if seen := LastImported(fake).UnixMilli(); seen >= 9000 && !importedText(fake, "ses_new", "new") {

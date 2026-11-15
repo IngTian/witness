@@ -208,9 +208,10 @@ func ProbeSchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// betweenImportReads runs after each read that advances seen and before the read that imports
-// what it covers, so a test can finish a turn in that window (TestSeenNeverRunsAhead*).
-var betweenImportReads = func() {}
+// betweenImportReads runs after every read in Import, named by what it read, so a test can finish
+// a turn right after whichever of two reads comes first (TestSeenNeverRunsAhead*): seen must never
+// run ahead of what was imported, in either order.
+var betweenImportReads = func(read string) {}
 
 // Import imports the requested OpenCode sessions. With no session ids, it imports
 // sessions updated since the last full sync; the first full sync imports all
@@ -256,12 +257,13 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 		if err != nil {
 			return stats, err
 		}
-		betweenImportReads()
+		betweenImportReads("newest idle")
 	}
 	sessions, err := im.sessions(ctx, db, sessionIDs)
 	if err != nil {
 		return stats, err
 	}
+	betweenImportReads("sessions")
 	// The whole session list is read before the first import, so the total is exact.
 	progress := platform.ImportProgressFrom(ctx)
 	progress(0, len(sessions))
@@ -273,13 +275,14 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 			return stats, err
 		}
 		newestIdle = max(newestIdle, idle)
-		betweenImportReads()
+		betweenImportReads("session idle")
 
 		n, err := im.importSession(ctx, db, s)
 		progress(i+1, len(sessions))
 		if err != nil {
 			return stats, err
 		}
+		betweenImportReads("turns")
 		if n > 0 {
 			stats.Sessions++
 			stats.Records += n

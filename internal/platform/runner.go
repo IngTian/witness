@@ -200,7 +200,7 @@ type Runner interface {
 	// (feeds `witness doctor`). Claude is a no-op; OpenCode checks its model list.
 	ValidateModels(ctx context.Context, models ...string) error
 	// InvocationHint is a short human string naming how this engine runs, for
-	// doctor/diagnostics (e.g. "claude -p" / "opencode serve").
+	// doctor/diagnostics (e.g. "claude -p" / "opencode serve --stdio").
 	InvocationHint() string
 }
 
