@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-// procPIDs lists the live processes whose argv[0] basename is name (procName-normalized).
-// argv[0], not the kernel's comm: comm truncates (15 bytes on Linux), and `opencode-pty` and a
-// long witness binary name would fall to it.
-func procPIDs(t *testing.T, name string) []int {
+// procList maps every live pid to the procName of its argv[0] basename, from one `ps`. argv[0],
+// not the kernel's comm: comm truncates (15 bytes on Linux), and `opencode-pty` and a long witness
+// binary name would fall to it.
+func procList(t *testing.T) map[int]string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -23,16 +23,13 @@ func procPIDs(t *testing.T, name string) []int {
 	if err != nil {
 		t.Fatalf("ps: %v", err)
 	}
-	want := procName(name)
-	var pids []int
+	procs := map[int]string{}
 	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) < 2 || procName(filepath.Base(f[1])) != want {
-			continue
-		}
-		if pid, err := strconv.Atoi(f[0]); err == nil {
-			pids = append(pids, pid)
+		if f := strings.Fields(line); len(f) >= 2 {
+			if pid, err := strconv.Atoi(f[0]); err == nil {
+				procs[pid] = procName(filepath.Base(f[1]))
+			}
 		}
 	}
-	return pids
+	return procs
 }

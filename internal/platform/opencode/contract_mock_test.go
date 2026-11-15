@@ -9,7 +9,9 @@ package opencode
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -215,8 +217,11 @@ func installSystemProvider(t *testing.T, m *mockProvider) {
 		t.Skipf("the machine-wide OpenCode config on %s (/Library/Application Support/opencode) needs root", runtime.GOOS)
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, fs.ErrExist) {
+		t.Fatalf("%s already exists: most likely a stale mock from a contract run killed before its cleanup removed it. Check and delete it by hand; this test never overwrites it (it could be a real machine-wide config)", path)
+	}
 	if err != nil {
-		t.Fatalf("create %s: %v (the contract workflow's `sudo install -d -o \"$(id -u)\" /etc/opencode` step makes it writable; an existing file is never replaced)", path, err)
+		t.Fatalf("create %s: %v (the contract workflow's `sudo install -d -o \"$(id -u)\" /etc/opencode` step makes it writable)", path, err)
 	}
 	t.Cleanup(func() { _ = os.Remove(path) })
 	_, err = f.WriteString(m.ProviderConfig())

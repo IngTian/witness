@@ -72,7 +72,9 @@ func startRawServe(t *testing.T, bin string, s scratch, extraEnv ...string) *raw
 	}()
 	t.Cleanup(func() { _ = srv.Close() }) // its error is the test's to check; a test may have killed it
 
-	deadline := time.After(30 * time.Second)
+	// One 30 s budget for the address AND every /api/info probe, each probe bounded by what is left.
+	ready, readyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer readyCancel()
 	select {
 	case line := <-url:
 		var ready struct {
@@ -84,27 +86,33 @@ func startRawServe(t *testing.T, bin string, s scratch, extraEnv ...string) *raw
 		srv.URL = ready.URL
 	case <-srv.w.done:
 		t.Fatalf("serve exited before printing its address: %v (stderr: %s)", srv.w.err, srv.w.stderr.String())
-	case <-deadline:
+	case <-ready.Done():
 		t.Fatalf("serve printed no address in 30 s (stderr: %s)", srv.w.stderr.String())
 	}
 	for {
-		code, body := srv.Do(http.MethodGet, "/api/info", nil, true)
+		code, body := srv.do(ready, http.MethodGet, "/api/info", nil, true)
 		if code == http.StatusOK {
 			return srv
 		}
 		select {
 		case <-srv.w.done:
 			t.Fatalf("serve exited before it was ready: %v (stderr: %s)", srv.w.err, srv.w.stderr.String())
-		case <-deadline:
+		case <-ready.Done():
 			t.Fatalf("serve not ready in 30 s: GET /api/info = %d %.300s (stderr: %s)", code, body, srv.w.stderr.String())
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }
 
-// Do sends one request (basic auth user `opencode` when auth). A transport error is status 0 with
-// the error as the body, so the caller's status check reports it.
+// Do sends one request (basic auth user `opencode` when auth), bounded at 30 s. A transport error is
+// status 0 with the error as the body, so the caller's status check reports it.
 func (s *rawServe) Do(method, path string, body any, auth bool) (int, []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.do(ctx, method, path, body, auth)
+}
+
+func (s *rawServe) do(ctx context.Context, method, path string, body any, auth bool) (int, []byte) {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -113,8 +121,6 @@ func (s *rawServe) Do(method, path string, body any, auth bool) (int, []byte) {
 		}
 		r = bytes.NewReader(b)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, s.URL+path, r)
 	if err != nil {
 		return 0, []byte(err.Error())
@@ -154,10 +160,11 @@ func (s *rawServe) Prompt(t *testing.T, model, text string) string {
 	return created.Data.ID
 }
 
-// Messages returns the session's records oldest first (user, assistant, idle, …).
+// Messages returns the session's records oldest first (user, assistant, idle, …), through the
+// runner's own poll URL (order=asc, limit=turnPageSize=200), so the page matches production's.
 func (s *rawServe) Messages(t *testing.T, sid string) []map[string]any {
 	t.Helper()
-	code, b := s.Do(http.MethodGet, "/api/session/"+sid+"/message?order=asc", nil, true)
+	code, b := s.Do(http.MethodGet, messagesPath(sid), nil, true)
 	var r struct {
 		Data []map[string]any `json:"data"`
 	}
@@ -249,10 +256,19 @@ func startHolder(t *testing.T, bin string, s scratch, contain, sibling bool) (ho
 		case <-time.After(5 * time.Second):
 			t.Errorf("holder %d still running 5 s after a kill", holder.Process.Pid)
 		}
-		if h.SiblingPID > 0 && proc.Alive(h.SiblingPID) {
-			if p, err := os.FindProcess(h.SiblingPID); err == nil {
+		kill := func(pid int) {
+			if p, err := os.FindProcess(pid); err == nil {
 				_ = p.Kill()
 			}
+		}
+		if h.SiblingPID > 0 && proc.Alive(h.SiblingPID) {
+			kill(h.SiblingPID)
+		}
+		// The serve follows its holder on the lease (T1's 2 s). One still alive after that is a lease
+		// failure, reported here because killing it hides it from noLeaks.
+		if h.ServePID > 0 && !pidGone(h.ServePID, 2*time.Second) {
+			kill(h.ServePID)
+			t.Errorf("serve %d outlived its killed holder by 2 s; killed", h.ServePID)
 		}
 	})
 	select {

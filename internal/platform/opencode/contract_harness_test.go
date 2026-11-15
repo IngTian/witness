@@ -12,7 +12,12 @@ package opencode
 //   - every spawn is exec.CommandContext under a deadline, and noLeaks checks the process table
 //     returned to its baseline.
 //
-// The test binary doubles as a stub (init below): stubPath links it under another name, and
+// Cleanup order matters, and noLeaks fixes it for any call order: Cleanup is LIFO, and noLeaks must
+// run BEFORE the test's TempDir removal, or Windows' RemoveAll (which retries a dir a live process
+// still holds for only 2 s) fails the test before noLeaks' 5 s grace even starts. So the order is
+// always: the test's serves close, noLeaks waits out and kills any leftover, then the TempDir goes.
+//
+// The test binary doubles as a stub (init below): stubPath copies it under another name, and
 // WITNESS_CONTRACT_STUB picks what it does, so tests need no second helper binary.
 
 import (
@@ -206,9 +211,10 @@ func runWitness(t *testing.T, s scratch, extraEnv []string, args ...string) stri
 	return stdout.String()
 }
 
-// stubPath links the test binary as name (a `claude` or MCP-server stand-in that init above turns
-// into a stub). A hard link, not a copy: macOS kills a copied binary (its ad-hoc signature breaks);
-// the copy is only the fallback for a link across volumes.
+// stubPath copies the test binary as name (a `claude` or MCP-server stand-in that init above turns
+// into a stub). On macOS a hard link instead: a copied binary's ad-hoc signature breaks and the
+// copy dies with SIGKILL (AGENTS.md). Elsewhere a copy, which leaves no open question about
+// removing a link to a running image (NTFS) at TempDir cleanup.
 func stubPath(t *testing.T, name string) string {
 	t.Helper()
 	exe, err := os.Executable()
@@ -219,14 +225,16 @@ func stubPath(t *testing.T, name string) string {
 		name += ".exe"
 	}
 	dst := filepath.Join(t.TempDir(), name)
-	if os.Link(exe, dst) != nil {
-		b, err := os.ReadFile(exe)
-		if err == nil {
+	if runtime.GOOS == "darwin" {
+		err = os.Link(exe, dst)
+	} else {
+		var b []byte
+		if b, err = os.ReadFile(exe); err == nil {
 			err = os.WriteFile(dst, b, 0o755)
 		}
-		if err != nil {
-			t.Fatalf("stub %s: %v", name, err)
-		}
+	}
+	if err != nil {
+		t.Fatalf("stub %s: %v", name, err)
 	}
 	return dst
 }
@@ -234,6 +242,20 @@ func stubPath(t *testing.T, name string) string {
 // procName normalizes a process name for comparison: Windows names are case-insensitive and
 // carry .exe.
 func procName(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".exe") }
+
+// procPIDs lists the live processes named name (procName-normalized), from one procList.
+func procPIDs(t *testing.T, name string) []int {
+	t.Helper()
+	want := procName(name)
+	var pids []int
+	for pid, n := range procList(t) {
+		if n == want {
+			pids = append(pids, pid)
+		}
+	}
+	slices.Sort(pids)
+	return pids
+}
 
 // noLeaks snapshots every process a contract test could leave behind, and at Cleanup fails listing
 // any new one still alive after 5 s. `witness` is the copy `wire opencode` installs on Windows
@@ -243,26 +265,29 @@ func procName(name string) string { return strings.TrimSuffix(strings.ToLower(na
 // may be the developer's own session, started during the test.
 func noLeaks(t *testing.T) {
 	t.Helper()
-	names := []string{"opencode", "opencode-pty", "opencode-cli", "wstub", "claude", "witness"}
+	// The test's ONE TempDir RemoveAll is registered at its first TempDir call; making that call
+	// here, before our Cleanup, puts our wait ahead of the removal whatever order the test calls in.
+	_ = t.TempDir()
+	watched := map[string]bool{"opencode": true, "opencode-pty": true, "opencode-cli": true, "wstub": true, "claude": true, "witness": true}
 	if bin := os.Getenv("WITNESS_CONTRACT_WITNESS_BIN"); bin != "" {
-		names = append(names, procName(filepath.Base(bin)))
+		watched[procName(filepath.Base(bin))] = true
 	}
-	slices.Sort(names)
-	names = slices.Compact(names)
-	baseline := map[int]bool{}
-	for _, n := range names {
-		for _, pid := range procPIDs(t, n) {
-			baseline[pid] = true
+	snapshot := func() map[int]string { // one listing per poll
+		out := map[int]string{}
+		for pid, n := range procList(t) {
+			if watched[n] {
+				out[pid] = n
+			}
 		}
+		return out
 	}
+	baseline := snapshot()
 	t.Cleanup(func() {
 		extras := func() map[int]string {
 			out := map[int]string{}
-			for _, n := range names {
-				for _, pid := range procPIDs(t, n) {
-					if !baseline[pid] {
-						out[pid] = n
-					}
+			for pid, n := range snapshot() {
+				if baseline[pid] != n { // a reused pid under another name is new too
+					out[pid] = n
 				}
 			}
 			return out
