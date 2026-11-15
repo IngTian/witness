@@ -185,7 +185,8 @@ func spawnDetachedOK(args ...string) bool {
 	cmd.Stderr = nil
 	// Put the worker in its own session/process group so a SessionEnd-on-tab-close
 	// doesn't kill it mid-distillation. proc.Detach is GOOS-split behind the port
-	// (setsid on Unix; DETACHED_PROCESS|NEW_PROCESS_GROUP on Windows).
+	// (setsid on Unix; DETACHED_PROCESS|NEW_PROCESS_GROUP on Windows, + CREATE_BREAKAWAY_FROM_JOB
+	// once the worker contained itself, so a wakeup outlives it).
 	procCtl.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		slog.Error("could not spawn detached child", "args", args, "err", err)

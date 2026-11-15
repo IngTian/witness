@@ -105,6 +105,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		return false, nil // a consumer already holds the lock; our jobs are on disk for it
 	}
 	defer unlock()
+	// Contain our children before the first one exists: on Windows, a kill-on-close job, so the
+	// TerminateProcess of `worker stop` (which runs no defers and does not cascade) still takes
+	// every `claude -p` and the `opencode serve` along (#218). Only now: a trigger that lost the
+	// lock exits without one. Best-effort — a refused job costs the stop its reach, not the drain.
+	if err := procCtl.ContainChildren(); err != nil {
+		slog.Warn("worker: could not contain children in a job; a Windows `worker stop` may orphan them", "err", err)
+	}
 	if auto && st.MetaString(metaWorkerStopRequested) == "1" {
 		_ = st.SetMetaString(metaWorkerMode, "")
 		return true, nil
@@ -156,9 +163,9 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// Without this, stopping the parent left up to `conc` orphaned children running with
 	// no bound at all — their 20-min timeout is a context THIS process enforces, so it
 	// dies with it (issue #22 audit; on Windows the stop is a TerminateProcess this never
-	// sees, which is #216). runner.Close still runs (deferred)
-	// to sweep any OpenCode distill sessions. proc.NotifyStop is the port's
-	// signal-aware ctx (SIGINT+SIGTERM).
+	// sees, so the kill-on-close job ContainChildren put us in takes them, #218). runner.Close
+	// still runs (deferred) to sweep any OpenCode distill sessions. proc.NotifyStop is the
+	// port's signal-aware ctx (SIGINT+SIGTERM).
 	ctx, stopSignals := procCtl.NotifyStop(context.Background())
 	defer stopSignals()
 
