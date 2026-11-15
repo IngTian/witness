@@ -277,6 +277,12 @@ func sweepStaleServeDirs(runtimeRoot string, olderThan time.Duration) {
 // opencode.json ever goes here (spec 7.6).
 var privateConfigOverlay map[string]any
 
+// denyAll is witness's whole tool policy. It goes on the agent AND on every session: OpenCode's
+// bundled browser plugin appends {skill, browser, deny} to every agent after config, and
+// Tool.snapshot keys on the last rule per action, so the agent's deny alone left `skill` offered.
+// Session rules merge after the agent's (opencode session/context.ts:146).
+var denyAll = []map[string]string{{"action": "*", "resource": "*", "effect": "deny"}}
+
 // writePrivateConfig writes the serve's whole config: one deny-all agent per id (prompts never
 // travel in env vars, which Windows caps at 32,767 chars). Nothing is copied from the user's
 // opencode.json (spec 7.6). Atomic, because a running serve re-reads it when agents are added.
@@ -286,7 +292,7 @@ func writePrivateConfig(path string, agents map[string]string) error {
 		defs[id] = map[string]any{
 			"description": "witness distillation (no tools)",
 			"system":      prompt,
-			"permissions": []map[string]string{{"action": "*", "resource": "*", "effect": "deny"}},
+			"permissions": denyAll,
 		}
 	}
 	cfg := map[string]any{}

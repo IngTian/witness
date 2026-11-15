@@ -539,7 +539,7 @@ func (s *OpenCodeServer) createSession(ctx context.Context, model, agent string)
 	if err != nil {
 		return "", err
 	}
-	data, err := s.doJSON(ctx, http.MethodPost, "/api/session", map[string]any{"title": "witness", "agent": agent, "model": ref}, http.StatusOK)
+	data, err := s.doJSON(ctx, http.MethodPost, "/api/session", map[string]any{"title": "witness", "agent": agent, "model": ref, "permissions": denyAll}, http.StatusOK)
 	if err != nil {
 		return "", err
 	}

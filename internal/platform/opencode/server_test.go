@@ -66,7 +66,7 @@ func TestRunCreatesPromptsAndDeletesOneSessionPerJob(t *testing.T) {
 	}
 	s := fake.session("ses_1")
 	wantCreate := map[string]any{"title": "witness", "agent": agentID("EXTRACT"),
-		"model": map[string]any{"providerID": "openai", "id": "gpt-5.5"}}
+		"model": map[string]any{"providerID": "openai", "id": "gpt-5.5"}, "permissions": []any{map[string]any{"action": "*", "resource": "*", "effect": "deny"}}}
 	if !reflect.DeepEqual(s.Create, wantCreate) {
 		t.Errorf("POST /api/session body = %v, want %v", s.Create, wantCreate)
 	}
