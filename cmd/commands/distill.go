@@ -392,6 +392,10 @@ func cmdDistillStatus(asJSON bool) error {
 	}
 	lastRaw := st.LastRawTS()
 	lastDistilled := st.LastDistilledRawTS()
+	// The free-model pause holds every free-model call for hours, so a stalled queue needs its
+	// reason somewhere outside the worker log. A fact only: no warning, ranking or advice.
+	pausedUntil, paused := freeModelsPausedUntil(st)
+	paused = paused && pausedUntil.After(time.Now())
 	if asJSON {
 		out := distillStatusJSON{
 			Worker: distillWorkerJSON{
@@ -413,6 +417,9 @@ func cmdDistillStatus(asJSON bool) error {
 			},
 			RawThrough:       valueOrNever(lastRaw),
 			DistilledThrough: valueOrNever(lastDistilled),
+		}
+		if paused {
+			out.FreeModelsPausedUntil = pausedUntil.UTC().Format(time.RFC3339)
 		}
 		return emitJSON(out)
 	}
@@ -449,6 +456,9 @@ func cmdDistillStatus(asJSON bool) error {
 		queueLine = yellow(queueLine)
 	}
 	fmt.Println("  " + kvRow("queue", queueLine, ""))
+	if paused {
+		fmt.Println("  " + kvRow("free models", "paused until "+pausedUntil.Local().Format("2006-01-02 15:04"), "the free allowance resets then"))
+	}
 	fmt.Println("  " + kvRow("fresh", "raw "+timeOrNever(lastRaw)+" · distilled "+timeOrNever(lastDistilled), behind(lastRaw, lastDistilled)))
 	fmt.Println()
 	for _, n := range compactionNudges(st) { // manual by design; this only points at it
@@ -517,6 +527,8 @@ type distillStatusJSON struct {
 	Queue            distillQueueJSON   `json:"queue"`
 	RawThrough       string             `json:"raw_through"`
 	DistilledThrough string             `json:"distilled_through"`
+	// Set only while the free-model pause is armed and in the future (RFC3339 UTC).
+	FreeModelsPausedUntil string `json:"free_models_paused_until,omitempty"`
 }
 
 type distillWorkerJSON struct {
