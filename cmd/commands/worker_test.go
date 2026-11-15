@@ -188,6 +188,32 @@ func TestRunDistillLoopHonorsStopRequest(t *testing.T) {
 	}
 }
 
+// A Ctrl-C cancels the drain ctx without setting the stop flag, and Drain then stops dispatching,
+// so the sessions it never reached stay unattempted. The loop must still end: the worker's stop
+// predicate counts the cancelled ctx, or the loop spins under the lock on instant no-op drains.
+func TestRunDistillLoopEndsOnACancelledCtx(t *testing.T) {
+	st := openTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	drains := 0
+	runDistillLoop(distillLoopDeps{
+		stopRequested:  func() bool { return workerStopped(ctx, st) },
+		pending:        func() []string { return []string{"a", "b"} },
+		drainAll:       func() { drains++; cancel() }, // Ctrl-C during the first drain; "b" is never attempted
+		reviewDue:      func() bool { return false },
+		runReview:      func() {},
+		ensureMiner:    func() bool { return true },
+		hasUnattempted: func([]string) bool { return drains < 100 }, // the cap turns a spin into a failure
+	})
+	if drains != 1 {
+		t.Fatalf("the loop drained %d times after the ctx was cancelled, want 1", drains)
+	}
+	_ = st.SetMetaString(metaWorkerStopRequested, "1")
+	if !workerStopped(context.Background(), st) {
+		t.Fatal("the stop flag alone must stop the worker")
+	}
+}
+
 func TestParseSessionTimeRangeAcceptsRelativeAgeAndDate(t *testing.T) {
 	now := time.Date(2026, 7, 12, 15, 0, 0, 0, time.UTC)
 	r, err := parseSessionTimeRange("7d", "2026-07-12", now)

@@ -172,7 +172,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// next real trigger. Deferred after stopSignals so it runs first: stopSignals cancels ctx too.
 	if timeRange.empty() {
 		defer func() {
-			if ctx.Err() == nil && st.MetaString(metaWorkerStopRequested) != "1" {
+			if !workerStopped(ctx, st) {
 				scheduleRetryWakeup(st)
 			}
 		}()
@@ -258,8 +258,10 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// SHARED `attempted` set across iterations makes this safe: a session that stays
 	// pending without backing off (a commit/read error, not a mining timeout) is
 	// tried once total, so a persistent failure can't spin the loop or re-mine
-	// forever. We only loop again while a pass makes progress (commits > 0).
-	stopRequested := func() bool { return st.MetaString(metaWorkerStopRequested) == "1" }
+	// forever. We only loop again while a pass makes progress (commits > 0). A cancelled ctx
+	// counts as a stop: Drain stops dispatching on one, so the sessions it never reached stay
+	// unattempted, and a flag-only check would spin this loop on instant no-op drains (Ctrl-C).
+	stopRequested := func() bool { return workerStopped(ctx, st) }
 
 	// Lazily build the parallel-mining worker the first time there is mining to do;
 	// the embedder loads once and is shared across drain passes (its parsed weights
@@ -619,4 +621,11 @@ func importAtDrainStart(ctx context.Context, st *store.Store) {
 // - ctx.Err(): if context is cancelled, skip (worker is shutting down)
 func selfHealAllowed(reviewRan bool, stopRequested func() bool, ctx context.Context) bool {
 	return !reviewRan && !stopRequested() && ctx.Err() == nil
+}
+
+// workerStopped reports whether this run was stopped: worker_stop_requested is set (`worker stop`
+// sets it BEFORE its SIGTERM, and it stands alone when the signal missed), or the drain ctx was
+// cancelled (that SIGTERM, a Ctrl-C).
+func workerStopped(ctx context.Context, st store.MetaKV) bool {
+	return ctx.Err() != nil || st.MetaString(metaWorkerStopRequested) == "1"
 }

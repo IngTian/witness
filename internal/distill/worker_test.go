@@ -203,7 +203,7 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	capture(t, s, sess, "assistant", "original two")
 
 	// MAP: mine the original generation (captures RawHighID at read time).
-	mining, err := w.MineSession(ctx, sess)
+	mining, err := w.MineSession(ctx, sess, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestCommitDoesNotWriteMinedObsWhenRawReplacedMidMine(t *testing.T) {
 	capture(t, s, sess, "assistant", "original two")
 
 	// MAP: mine the original generation (obs hash the old text; RawHighID captured).
-	mining, err := w.MineSession(ctx, sess)
+	mining, err := w.MineSession(ctx, sess, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestCommitAdvancesWatermarkOnAppendOnlyPath(t *testing.T) {
 	capture(t, s, sess, "user", "one")
 	capture(t, s, sess, "assistant", "two")
 
-	mining, err := w.MineSession(ctx, sess)
+	mining, err := w.MineSession(ctx, sess, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +511,7 @@ func TestEmbedFailureIsLoggedForActiveAndMinedObs(t *testing.T) {
 		t.Fatal(err)
 	}
 	capture(t, s, "s", "user", "alpha")
-	if _, err := w.MineSession(context.Background(), "s"); err != nil {
+	if _, err := w.MineSession(context.Background(), "s", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Count(buf.String(), "tokenizer panic"); got != 2 {
