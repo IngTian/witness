@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,7 +72,7 @@ func TestUnavailableHintSurvivesAMissingIntegrationRoute(t *testing.T) {
 	fake.models = []map[string]any{
 		{"providerID": "unknown", "id": "some-model"},
 	}
-	// No envNames entry for "other", so GET /api/integration/other returns empty
+	// No envNames entry for "other", so GET /api/integration/other is a 404
 
 	ctx := context.Background()
 	err := srv.validateModels(ctx, []string{"other/missing"})
@@ -85,9 +86,11 @@ func TestUnavailableHintSurvivesAMissingIntegrationRoute(t *testing.T) {
 			t.Errorf("error missing %q: %s", want, msg)
 		}
 	}
-	// Should NOT include "for anthropic:" when providerEnvVars is empty
-	if strings.Contains(msg, "for ") && strings.Contains(msg, ":") {
-		t.Errorf("error should NOT include provider-specific env var hint when providerEnvVars is empty: %s", msg)
+	if strings.Contains(msg, "(for ") {
+		t.Errorf("error should NOT include a provider-specific env var hint when the route fails: %s", msg)
+	}
+	if !slices.Contains(fake.seen(), "GET /api/integration/other") {
+		t.Errorf("the integration route was never asked: %v", fake.seen())
 	}
 }
 

@@ -207,7 +207,11 @@ func (f *fakeV2) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/model":
 		reply(map[string]any{"location": "fake", "data": f.models})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/integration/"):
-		names := f.envNames[strings.TrimPrefix(r.URL.Path, "/api/integration/")]
+		names, ok := f.envNames[strings.TrimPrefix(r.URL.Path, "/api/integration/")]
+		if !ok { // a provider with no integration
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		reply(map[string]any{"data": map[string]any{"methods": []map[string]any{{"type": "env", "names": names}}}})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/session":
 		body := decode()
@@ -215,7 +219,7 @@ func (f *fakeV2) serve(w http.ResponseWriter, r *http.Request) {
 		s := &fakeSession{ID: fmt.Sprintf("ses_%d", len(f.order)+1), Agent: agent, Create: body}
 		f.sessions[s.ID], f.order = s, append(f.order, s.ID)
 		reply(map[string]any{"data": map[string]any{"id": s.ID}})
-	case s == nil || s.deleted:
+	case (s == nil || s.deleted) && strings.HasPrefix(r.URL.Path, "/api/session/"):
 		w.WriteHeader(http.StatusNotFound)
 		reply(map[string]any{"_tag": "SessionNotFoundError", "sessionID": id})
 	case r.Method == http.MethodPost && action == "prompt" && f.promptStatus != 0:

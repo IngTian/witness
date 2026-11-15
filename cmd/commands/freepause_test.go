@@ -217,6 +217,10 @@ func TestAWaiterHonoursItsContext(t *testing.T) {
 	if got := h.calls.Load(); got != 1 {
 		t.Fatalf("a cancelled waiter must not reach the runner, got %d calls", got)
 	}
+	// Settle the probe here, not at Cleanup: its late "allowance is back" line would land in the
+	// next test's log buffer under -shuffle.
+	h.release()
+	recv(t, h.probe, "the probe")
 }
 
 // The drain recovers a miner's panic, so a probe that panics must still settle: otherwise every

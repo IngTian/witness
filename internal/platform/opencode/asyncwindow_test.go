@@ -197,7 +197,9 @@ func TestQueueTimeIsNotChargedAsGeneration(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, errs[i] = srv.Run(context.Background(), "openai/gpt-5.5", "P", fmt.Sprint(i))
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // a stuck slot fails, not hangs
+			defer cancel()
+			_, errs[i] = srv.Run(ctx, "openai/gpt-5.5", "P", fmt.Sprint(i))
 		}()
 	}
 	wg.Wait()

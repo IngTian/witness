@@ -9,6 +9,17 @@ import (
 	"testing"
 )
 
+// resolveEnv gives ResolveExe only the test's own PATH, USERPROFILE and LOCALAPPDATA. It clears
+// WITNESS_OPENCODE_BIN: a run inside an OpenCode session inherits it from the plugin, and it wins
+// over every rung these tests exercise.
+func resolveEnv(t *testing.T, path, userProfile, localAppData string) {
+	t.Helper()
+	t.Setenv(openCodeBinEnv, "")
+	t.Setenv("PATH", path)
+	t.Setenv("USERPROFILE", userProfile)
+	t.Setenv("LOCALAPPDATA", localAppData)
+}
+
 // TestResolveExeResolvesAnNpmCmdShimToTheRealExe verifies that when witness finds an npm
 // `opencode.cmd` shim, it parses the shim's body to extract the real exe path and returns
 // that exe instead of the shim itself.
@@ -22,9 +33,7 @@ func TestResolveExeResolvesAnNpmCmdShimToTheRealExe(t *testing.T) {
 	shimBody := "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nCALL :find_dp0\r\n\"%dp0%\\node_modules\\@opencode\\cli\\bin\\opencode.exe\"   %*\r\n"
 	os.WriteFile(shim, []byte(shimBody), 0o644)
 
-	t.Setenv("PATH", dir)
-	t.Setenv("USERPROFILE", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
+	resolveEnv(t, dir, t.TempDir(), t.TempDir())
 
 	got, err := ResolveExe()
 	if err != nil {
@@ -40,8 +49,6 @@ func TestResolveExeResolvesAnNpmCmdShimToTheRealExe(t *testing.T) {
 func TestResolveExeResolvesAPnpmStyleShim(t *testing.T) {
 	dir := t.TempDir()
 	shim := filepath.Join(dir, "opencode.cmd")
-	target := filepath.Join(dir, "..", "pnpm", "opencode.exe")
-	os.MkdirAll(filepath.Dir(filepath.Join(dir, target)), 0o755)
 	targetAbs := filepath.Clean(filepath.Join(dir, "..", "pnpm", "opencode.exe"))
 	os.MkdirAll(filepath.Dir(targetAbs), 0o755)
 	os.WriteFile(targetAbs, nil, 0o644)
@@ -49,9 +56,7 @@ func TestResolveExeResolvesAPnpmStyleShim(t *testing.T) {
 	shimBody := "@ECHO off\r\n\"%~dp0\\..\\pnpm\\opencode.exe\" %*\r\n"
 	os.WriteFile(shim, []byte(shimBody), 0o644)
 
-	t.Setenv("PATH", dir)
-	t.Setenv("USERPROFILE", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
+	resolveEnv(t, dir, t.TempDir(), t.TempDir())
 
 	got, err := ResolveExe()
 	if err != nil {
@@ -74,9 +79,7 @@ func TestResolveExeFallsBackToTheNpmPackageLayout(t *testing.T) {
 	shimBody := "@ECHO off\r\nSOME RANDOM TEXT\r\n"
 	os.WriteFile(shim, []byte(shimBody), 0o644)
 
-	t.Setenv("PATH", dir)
-	t.Setenv("USERPROFILE", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
+	resolveEnv(t, dir, t.TempDir(), t.TempDir())
 
 	got, err := ResolveExe()
 	if err != nil {
@@ -97,9 +100,7 @@ func TestResolveExeKeepsAnUnresolvableShim(t *testing.T) {
 	shimBody := "@ECHO off\r\nSOME RANDOM TEXT\r\n"
 	os.WriteFile(shim, []byte(shimBody), 0o644)
 
-	t.Setenv("PATH", dir)
-	t.Setenv("USERPROFILE", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
+	resolveEnv(t, dir, t.TempDir(), t.TempDir())
 
 	got, err := ResolveExe()
 	if err != nil {
@@ -119,9 +120,7 @@ func TestResolveExeFindsTheCurlInstallOffPath(t *testing.T) {
 	os.MkdirAll(filepath.Dir(curlBin), 0o755)
 	os.WriteFile(curlBin, nil, 0o644)
 
-	t.Setenv("PATH", "")
-	t.Setenv("USERPROFILE", userProfile)
-	t.Setenv("LOCALAPPDATA", t.TempDir())
+	resolveEnv(t, "", userProfile, t.TempDir())
 
 	got, err := ResolveExe()
 	if err != nil {
@@ -141,9 +140,7 @@ func TestResolveExeFindsTheDesktopCLI(t *testing.T) {
 	os.MkdirAll(filepath.Dir(desktopCLI), 0o755)
 	os.WriteFile(desktopCLI, nil, 0o644)
 
-	t.Setenv("PATH", "")
-	t.Setenv("USERPROFILE", t.TempDir())
-	t.Setenv("LOCALAPPDATA", localAppData)
+	resolveEnv(t, "", t.TempDir(), localAppData)
 
 	got, err := ResolveExe()
 	if err != nil {
@@ -167,9 +164,7 @@ func TestResolveExeSkipsDesktopDirsOnPath(t *testing.T) {
 	os.WriteFile(cliExe, nil, 0o644)
 
 	// desktop dir first, cli dir second
-	t.Setenv("PATH", desktopDir+string(filepath.ListSeparator)+cliDir)
-	t.Setenv("USERPROFILE", t.TempDir())
-	t.Setenv("LOCALAPPDATA", t.TempDir())
+	resolveEnv(t, desktopDir+string(filepath.ListSeparator)+cliDir, t.TempDir(), t.TempDir())
 
 	got, err := ResolveExe()
 	if err != nil {
