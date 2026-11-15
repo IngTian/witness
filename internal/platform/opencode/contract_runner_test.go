@@ -2,13 +2,8 @@
 
 package opencode
 
-// The runner against a REAL OpenCode v2 binary and two local mock providers (no model calls):
-//   - WITNESS_CONTRACT_MOCK_PORT: run/critic/scripts/mock.py (models ok, slow; it echoes the
-//     system-prompt marks it saw as "MOCK-REPLY <marks>");
-//   - WITNESS_CONTRACT_FREE_MOCK_PORT: run/freetier/scripts/mock.py (model free answers the
-//     gateway's 429 FreeUsageLimitError).
-// Opt-in by build tag, so `make test` never compiles it. PR 3 replaces this plumbing with its
-// harness and runs it in CI.
+// The runner against a REAL OpenCode v2 binary and the harness's in-process mock provider. Opt-in
+// by build tag, so `make test` never compiles it.
 
 import (
 	"context"
@@ -16,9 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,80 +21,165 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
+// newContractRunner creates a runner on a scratch env with the mock provider, opens it and
+// registers cleanup. before runs after the scratch env exists and before Open (nil = nothing).
+func newContractRunner(t *testing.T, before func(scratch)) (platform.Runner, *mockProvider, context.Context, store.Config) {
+	requireContract(t)
+	noLeaks(t)
+	s := scratchEnv(t)
+	s.setProcessEnv(t)
+	m := startMock(t)
+	prev := privateConfigOverlay
+	t.Cleanup(func() { privateConfigOverlay = prev })
+	privateConfigOverlay = mustUnmarshal(t, m.ProviderConfig()) // PR 2's seam: in-process, so this also runs on darwin, no /etc write
+	if before != nil {
+		before(s)
+	}
+	cfg := store.Config{Runner: "opencode", RuntimeRoot: filepath.Join(s.Root, "runtime"), TriageModel: "mock/ok", DistillModel: "mock/ok", RunnerModels: []string{"mock/ok"}}
+	r := Platform{}.NewRunner(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
+	if err := r.Open(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return r, m, ctx, cfg
+}
+
 func TestContractRunnerRoundTrip(t *testing.T) {
-	bin, port, freePort := os.Getenv("WITNESS_CONTRACT_OPENCODE_BIN"), os.Getenv("WITNESS_CONTRACT_MOCK_PORT"), os.Getenv("WITNESS_CONTRACT_FREE_MOCK_PORT")
-	if bin == "" || port == "" || freePort == "" {
-		t.Fatal("set WITNESS_CONTRACT_OPENCODE_BIN, WITNESS_CONTRACT_MOCK_PORT and WITNESS_CONTRACT_FREE_MOCK_PORT (the tag is opt-in)")
-	}
-	if v := os.Getenv(platform.DisableExternalRunnersEnv); v != "" {
-		t.Fatalf("%s=%q: Open would refuse, so this test could only fail or pass vacuously", platform.DisableExternalRunnersEnv, v)
-	}
-	tmp := t.TempDir()
-	for k, sub := range map[string]string{"HOME": "home", "XDG_DATA_HOME": "data", "XDG_CONFIG_HOME": "config", "XDG_STATE_HOME": "state", "XDG_CACHE_HOME": "cache"} {
-		dir := filepath.Join(tmp, sub)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
+	t.Run("isolation", func(t *testing.T) {
+		r, m, ctx, _ := newContractRunner(t, func(s scratch) {
+			// The two leaks the brief forbids: user-global AGENTS.md and OPENCODE_CONFIG instructions.
+			agentsPath := filepath.Join(s.ConfigDir, "opencode", "AGENTS.md")
+			if err := os.MkdirAll(filepath.Dir(agentsPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(agentsPath, []byte("GLOBAL-AGENTS-MD-MARKER"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			leak := filepath.Join(s.Root, "leak.md")
+			if err := os.WriteFile(leak, []byte("OPENCODE-CONFIG-LEAK-MARKER"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("OPENCODE_CONFIG", fmt.Sprintf(`{"instructions":[%q]}`, leak))
+		})
+		out, err := r.Run(ctx, "mock/ok", "LENS-SYSTEM-MARKER instructions", "CONTRACT-INPUT")
+		if err != nil || !strings.Contains(out, "MOCK-REPLY") {
+			t.Fatalf("Run: %q %v", out, err)
 		}
-		t.Setenv(k, dir)
-	}
-	t.Setenv("HTTP_PROXY", "http://127.0.0.1:9") // anything non-local fails: no real model call
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9")
-	t.Setenv("NO_PROXY", "127.0.0.1,localhost")
-	t.Setenv(openCodeBinEnv, bin)
-
-	provider := func(name, port string, models map[string]any) map[string]any {
-		return map[string]any{"npm": "@ai-sdk/openai-compatible", "name": name, "models": models,
-			"options": map[string]any{"baseURL": "http://127.0.0.1:" + port + "/v1", "apiKey": "mock-key"}}
-	}
-	privateConfigOverlay = map[string]any{"provider": map[string]any{
-		// Neither mock lists variants, so #high is declared here (the legacy shape v2 migrates).
-		"mock":     provider("Mock", port, map[string]any{"ok": map[string]any{"name": "ok", "variants": map[string]any{"high": map[string]any{}}}, "slow": map[string]any{"name": "slow"}}),
-		"mockfree": provider("MockFree", freePort, map[string]any{"free": map[string]any{"name": "free"}}),
-	}}
-	prevMax := maxConcurrentGenerations
-	maxConcurrentGenerations = 16 // read at construction; item 3 measures 16 on one serve
-	t.Cleanup(func() { privateConfigOverlay, maxConcurrentGenerations = nil, prevMax })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	root := filepath.Join(tmp, "runtime")
-	open := func() *runner {
-		r := &runner{cfg: store.Config{RuntimeRoot: root, RunnerModels: []string{"mock/ok"}}}
-		if err := r.Open(ctx); err != nil {
-			t.Fatalf("Open: %v", err)
+		calls := m.Calls("ok")
+		if len(calls) != 1 {
+			t.Fatalf("%d provider calls, want 1 (a title request would double free-allowance use)", len(calls))
 		}
-		t.Cleanup(func() { _ = r.Close() })
-		return r
-	}
-	r := open()
-	v, _ := ProbeVersion(ctx)
-	t.Logf("opencode %s (%s): serve up at %s", v, bin, r.server.baseURL)
-
-	// 1, 2: each prompt is its own agent; the second is hot-added to the running serve. The mock
-	// echoes exactly the marks it saw in the system messages, so equality proves the right prompt
-	// and nothing else (no user-global AGENTS.md) reached the provider.
-	for i, mark := range []string{"SYS-A-MARKER", "SYS-B-MARKER"} {
-		reply, err := r.Run(ctx, "mock/ok", mark+" lens instructions", "DATA")
-		if want := "MOCK-REPLY " + mark; err != nil || reply != want {
-			t.Fatalf("item %d: Run = %q, %v; want %q", i+1, reply, err, want)
+		c := calls[0]
+		if !strings.Contains(c.System, "LENS-SYSTEM-MARKER") || !strings.Contains(c.User, "CONTRACT-INPUT") {
+			t.Fatalf("missing lens prompt or input in %+v", c)
 		}
-		t.Logf("item %d: PASS %q", i+1, reply)
-	}
+		for _, leak := range []string{"GLOBAL-AGENTS-MD-MARKER", "OPENCODE-CONFIG-LEAK-MARKER"} {
+			if strings.Contains(c.System, leak) {
+				t.Errorf("%s reached the lens prompt", leak)
+			}
+		}
+	})
 
-	// #variant: fail only when v2 lists the declared variant and the Run still fails (witness's ref
-	// is then wrong); a variant v2 dropped is logged for the report.
-	listed := r.server.validateModels(ctx, []string{"mock/ok#high"})
-	reply, err := r.Run(ctx, "mock/ok#high", "SYS-A-MARKER lens instructions", "DATA")
-	switch {
-	case err == nil && reply == "MOCK-REPLY SYS-A-MARKER":
-		t.Logf("item #high: PASS %q (listed: %v)", reply, listed)
-	case listed == nil:
-		t.Fatalf("item #high: v2 lists mock/ok#high but Run = %q, %v", reply, err)
-	default:
-		t.Logf("item #high: NOTE v2 does not list the declared variant (%v); Run = %q, %v", listed, reply, err)
-	}
+	t.Run("variant", func(t *testing.T) {
+		r, _, ctx, _ := newContractRunner(t, nil)
+		rr, ok := r.(*runner)
+		if !ok {
+			t.Fatalf("NewRunner returned %T, want *runner", r)
+		}
+		// Fail only when v2 lists the declared variant and the Run still fails (witness's ref
+		// is then wrong); a variant v2 dropped is logged for the report.
+		listed := rr.server.validateModels(ctx, []string{"mock/ok#high"})
+		reply, err := r.Run(ctx, "mock/ok#high", "LENS-SYSTEM-MARKER instructions", "DATA")
+		switch {
+		case err == nil && reply == "MOCK-REPLY ok":
+			t.Logf("PASS %q (listed: %v)", reply, listed)
+		case listed == nil:
+			t.Fatalf("v2 lists mock/ok#high but Run = %q, %v", reply, err)
+		default:
+			t.Logf("NOTE v2 does not list the declared variant (%v); Run = %q, %v", listed, reply, err)
+		}
+	})
 
-	// 3: 16 at once on one serve. Recorded, not asserted: production stays at 8 until this holds.
+	t.Run("validate-models", func(t *testing.T) {
+		r, _, ctx, _ := newContractRunner(t, nil)
+		rr, ok := r.(*runner)
+		if !ok {
+			t.Fatalf("NewRunner returned %T, want *runner", r)
+		}
+		// The unavailable-model hint names the provider's env var, read from /api/integration.
+		err := rr.ValidateModels(ctx, "anthropic/nope")
+		switch {
+		case err == nil:
+			t.Fatal("ValidateModels(anthropic/nope) = nil")
+		case strings.Contains(err.Error(), "ANTHROPIC_API_KEY"):
+			t.Logf("PASS %v", err)
+		default:
+			body, gerr := rr.server.doJSON(ctx, http.MethodGet, "/api/integration/anthropic", nil, http.StatusOK)
+			t.Logf("NOTE integration route shape differs from source: %v; GET /api/integration/anthropic = %.400s, %v", err, body, gerr)
+		}
+	})
+
+	t.Run("second-runner", func(t *testing.T) {
+		r1, _, ctx, cfg := newContractRunner(t, nil)
+		// A second runner on the same root (two serves, one private DB), both answering at once.
+		r2 := Platform{}.NewRunner(cfg)
+		if err := r2.Open(ctx); err != nil {
+			t.Fatalf("Open second runner: %v", err)
+		}
+		defer func() {
+			if err := r2.Close(); err != nil {
+				t.Errorf("Close second runner: %v", err)
+			}
+		}()
+		var replies [2]string
+		var runErrs [2]error
+		var wg sync.WaitGroup
+		for i, rr := range []platform.Runner{r1, r2} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				replies[i], runErrs[i] = rr.Run(ctx, "mock/ok", "LENS-SYSTEM-MARKER instructions", "DATA")
+			}()
+		}
+		wg.Wait()
+		for i := range replies {
+			if runErrs[i] != nil || replies[i] != "MOCK-REPLY ok" {
+				t.Fatalf("runner %d Run = %q, %v", i+1, replies[i], runErrs[i])
+			}
+		}
+		t.Logf("PASS two serves on %s both round-trip", cfg.RuntimeRoot)
+	})
+}
+
+func TestContractRunnerQuotaExhausted(t *testing.T) {
+	r, m, ctx, _ := newContractRunner(t, nil)
+	start := time.Now()
+	_, err := r.Run(ctx, "mock/free", "sys", "in")
+	end := time.Now()
+	var q *platform.QuotaExhaustedError
+	if !errors.As(err, &q) || q.Runtime != "opencode" {
+		t.Fatalf("err = %v, want *QuotaExhaustedError{Runtime: opencode}", err)
+	}
+	if q.ResetAt.Before(start.Add(time.Hour-5*time.Second)) || q.ResetAt.After(end.Add(time.Hour+5*time.Second)) {
+		t.Fatalf("ResetAt %v, want completion + retryAfterMs (1h)", q.ResetAt)
+	}
+	if n := len(m.Calls("free")); n != 1 || end.Sub(start) > 30*time.Second {
+		t.Fatalf("%d calls in %s: a refusal must stop at the first try", n, end.Sub(start))
+	}
+}
+
+func TestContractRunnerSixteenParallel(t *testing.T) {
+	prev := maxConcurrentGenerations
+	maxConcurrentGenerations = 16
+	t.Cleanup(func() { maxConcurrentGenerations = prev })
+	// spec 7.5 "verify 16": the production cap stays 8 (PR 2) until this is green on both OSes and versions
+	r, m, ctx, _ := newContractRunner(t, nil)
 	start := time.Now()
 	var wg sync.WaitGroup
 	errs := make([]error, 16)
@@ -109,98 +187,45 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if reply, err := r.Run(ctx, "mock/slow", "SYS-C-MARKER lens instructions", fmt.Sprint("DATA ", i)); err != nil {
+			reply, err := r.Run(ctx, "mock/slow", fmt.Sprintf("PAR-%02d", i), "in")
+			if err != nil {
 				errs[i] = err
-			} else if reply != "MOCK-REPLY SYS-C-MARKER" {
+			} else if reply != "MOCK-REPLY slow" {
 				errs[i] = fmt.Errorf("reply %q", reply)
 			}
 		}()
 	}
 	wg.Wait()
-	failed := 0
+	wall := time.Since(start)
 	for i, err := range errs {
 		if err != nil {
-			failed++
-			t.Logf("item 3: run %d: %v", i, err)
+			t.Fatalf("run %d: %v", i, err)
 		}
 	}
-	t.Logf("item 3: %d/16 succeeded in %s wall (one mock/slow call takes ~3 s; 8-way would need >= 6 s)", 16-failed, time.Since(start).Round(10*time.Millisecond))
-
-	// 4: the gateway's free-limit 429 is a QuotaExhaustedError, whatever the provider.
-	_, err = r.Run(ctx, "mockfree/free", "SYS-A-MARKER lens instructions", "DATA")
-	var quota *platform.QuotaExhaustedError
-	if !errors.As(err, &quota) {
-		t.Fatalf("item 4: Run(mockfree/free) = %v; want *platform.QuotaExhaustedError", err)
+	calls := m.Calls("slow")
+	if len(calls) != 16 {
+		t.Fatalf("%d provider calls, want 16", len(calls))
 	}
-	t.Logf("item 4: PASS reset in %s (runtime %s)", time.Until(quota.ResetAt).Round(time.Second), quota.Runtime)
-
-	// 5: the unavailable-model hint names the provider's env var, read from /api/integration.
-	err = r.ValidateModels(ctx, "anthropic/nope")
-	switch {
-	case err == nil:
-		t.Fatal("item 5: ValidateModels(anthropic/nope) = nil")
-	case strings.Contains(err.Error(), "ANTHROPIC_API_KEY"):
-		t.Logf("item 5: PASS %v", err)
-	default:
-		body, gerr := r.server.doJSON(ctx, http.MethodGet, "/api/integration/anthropic", nil, http.StatusOK)
-		t.Logf("item 5: NOTE integration route shape differs from source: %v; GET /api/integration/anthropic = %.400s, %v", err, body, gerr)
-	}
-
-	// 6: a second runner on the same root (two serves, one private DB), both answering at once.
-	r2 := open()
-	var replies [2]string
-	var runErrs [2]error
-	for i, rr := range []*runner{r, r2} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			replies[i], runErrs[i] = rr.Run(ctx, "mock/ok", "SYS-B-MARKER lens instructions", "DATA")
-		}()
-	}
-	wg.Wait()
-	for i := range replies {
-		if runErrs[i] != nil || replies[i] != "MOCK-REPLY SYS-B-MARKER" {
-			t.Fatalf("item 6: runner %d Run = %q, %v", i+1, replies[i], runErrs[i])
+	// Each PAR-xx must appear in exactly one call's System.
+	seen := make(map[string]int)
+	for _, c := range calls {
+		for i := 0; i < 16; i++ {
+			mark := fmt.Sprintf("PAR-%02d", i)
+			if strings.Contains(c.System, mark) {
+				seen[mark]++
+			}
 		}
 	}
-	t.Logf("item 6: PASS two serves on %s both round-trip", root)
-
-	// 7: Close leaves nothing behind. Every serve and its children inherit OPENCODE_DB=<root>/…, so
-	// the scan matches environments, and it must see the live serves first or it proves nothing.
-	if runtime.GOOS != "darwin" {
-		t.Log("item 7: SKIP the environment scan is macOS-only here (PR 3 replaces it)")
-		return
-	}
-	live := procsUnder(t, root)
-	if len(live) < 2 {
-		t.Fatalf("item 7: the scan sees %d processes before Close, want both serves: %q", len(live), live)
-	}
-	for _, rr := range []*runner{r, r2} {
-		if err := rr.Close(); err != nil {
-			t.Errorf("item 7: Close: %v", err)
+	for i := 0; i < 16; i++ {
+		mark := fmt.Sprintf("PAR-%02d", i)
+		if seen[mark] != 1 {
+			t.Errorf("%s appeared in %d calls, want 1", mark, seen[mark])
 		}
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for left := procsUnder(t, root); len(left) > 0; left = procsUnder(t, root) {
-		if time.Now().After(deadline) {
-			t.Fatalf("item 7: %d processes under %s survived Close: %q", len(left), root, left)
-		}
-		time.Sleep(100 * time.Millisecond)
+	peak := m.PeakInFlight()
+	if peak != 16 {
+		t.Errorf("peak in-flight %d, want 16 (wall %s; one mock/slow call takes ~2 s, so 16-way should be ~2 s, 8-way ~4 s)", peak, wall.Round(10*time.Millisecond))
+	} else {
+		t.Logf("PASS 16 generations in parallel (peak %d, wall %s)", peak, wall.Round(10*time.Millisecond))
 	}
-	t.Logf("item 7: PASS %d processes named the runtime root before Close, none after", len(live))
-}
-
-// procsUnder lists the live processes whose argv or environment contains root (`ps -E`, macOS).
-func procsUnder(t *testing.T, root string) []string {
-	out, err := exec.Command("ps", "-axEww", "-o", "pid=,command=").Output()
-	if err != nil {
-		t.Fatalf("ps: %v", err)
-	}
-	var hits []string
-	for _, l := range strings.Split(string(out), "\n") {
-		if strings.Contains(l, root) {
-			hits = append(hits, l[:min(len(l), 120)])
-		}
-	}
-	return hits
 }
