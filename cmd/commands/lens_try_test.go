@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,12 +32,24 @@ func (limitedPreviewRunner) InvocationHint() string                          { r
 
 // writeLensDir writes a candidate lens DIRECTORY (issue #75: lens.json + extract.md +
 // review.md) and returns its path. name/extract/review empty are simply omitted, so a
-// test can build a lens missing any piece.
-func writeLensDir(t *testing.T, name, extract, review string) string {
+// test can build a lens missing any piece. fields are more lens.json key/value pairs
+// (store.LensKeyRunner, store.LensKeyExtractModel, …).
+func writeLensDir(t *testing.T, name, extract, review string, fields ...string) string {
 	t.Helper()
 	dir := t.TempDir()
+	cfg := map[string]string{}
 	if name != "" {
-		if err := os.WriteFile(filepath.Join(dir, "lens.json"), []byte(`{"name":"`+name+`"}`), 0o644); err != nil {
+		cfg[store.LensKeyName] = name
+	}
+	for i := 0; i+1 < len(fields); i += 2 {
+		cfg[fields[i]] = fields[i+1]
+	}
+	if len(cfg) > 0 {
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, store.LensConfigFile), b, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -433,5 +446,53 @@ func TestLensTryPreviewsOnTheLensRunnerNotTheEnvFallback(t *testing.T) {
 	}
 	if strings.Contains(got, "opencode") || !strings.Contains(got, "claude runner disabled") {
 		t.Fatalf("a claude lens must preview on claude -p, not the WITNESS_RUNNER fallback:\n%s", got)
+	}
+}
+
+// tryRunnerModels names only the stages that will actually run, extract alone or extract +
+// review, so the runner validates exactly what lens try will use. The override ordering (F7) is
+// guarded through applyOverridesAndBuildRunnerCfg below.
+func TestTryRunnerModelsNamesOnlyTheStagesThatRun(t *testing.T) {
+	cross := &lens.Lens{Name: "x", Runner: "claude", ExtractModel: "cl/ex", ReviewModel: "cl/rev"}
+	cfg := tryRunnerCfg(store.Config{Runner: "opencode", TriageModel: "oc/m1", DistillModel: "oc/m2"}, cross)
+	if got := tryRunnerModels(cfg, cross, false); !slices.Equal(got, []string{"cl/ex"}) {
+		t.Errorf("extract-only: RunnerModels = %q, want [cl/ex]", got)
+	}
+	if got := tryRunnerModels(cfg, cross, true); !slices.Equal(got, []string{"cl/ex", "cl/rev"}) {
+		t.Errorf("extract+review: RunnerModels = %q, want [cl/ex cl/rev]", got)
+	}
+}
+
+// F7 guard through the real ordering: applyOverridesAndBuildRunnerCfg must apply overrides
+// BEFORE calling tryRunnerCfg, so RunnerModels contains the --model value, not the lens's
+// configured model. If the order is wrong (tryRunnerCfg before overrides), the runner would
+// be minted with the old model in RunnerModels, potentially validating the wrong model and
+// setting OPENCODE_DISABLE_FREE_MODELS incorrectly.
+func TestApplyOverridesAndBuildRunnerCfgMintsTheRunnerAfterItsOverrides(t *testing.T) {
+	// A lens configured with prov/paid, but user passes --model opencode/x (a free model).
+	// The runner must be minted with opencode/x in RunnerModels, not prov/paid.
+	cfg := store.Config{Runner: "opencode", TriageModel: "opencode/default"}
+	ln := &lens.Lens{Name: "test", Runner: "opencode", ExtractModel: "prov/paid"}
+
+	got := applyOverridesAndBuildRunnerCfg(cfg, ln, "opencode/x", "", false)
+	if !slices.Equal(got.RunnerModels, []string{"opencode/x"}) {
+		t.Errorf("RunnerModels = %q, want [opencode/x], the --model override; [prov/paid] means "+
+			"RunnerModels were computed before the override was applied (F7 bug)", got.RunnerModels)
+	}
+}
+
+// `--model X --review` with no review model previews review on X too (ModelFor's review falls
+// back to TriageModel). On a cross-runtime lens the route clears the default runtime's models, so
+// a --model written into cfg before the route was cleared with them: review then resolved to ""
+// (OpenCode refuses it at Open; Claude would run on its ambient interactive model).
+func TestLensTryModelCoversReviewOnACrossRuntimeLens(t *testing.T) {
+	cfg := store.Config{Runner: "claude", TriageModel: "claude-sonnet"}
+	ln := &lens.Lens{Name: "cr", Runner: "opencode", Review: "synth"}
+	got := applyOverridesAndBuildRunnerCfg(cfg, ln, "opencode/x", "", true)
+	if m := distill.ModelFor(got, ln, distill.PhaseReview); m != "opencode/x" {
+		t.Errorf("review model = %q, want the --model value opencode/x", m)
+	}
+	if !slices.Equal(got.RunnerModels, []string{"opencode/x"}) {
+		t.Errorf("RunnerModels = %q, want [opencode/x]", got.RunnerModels)
 	}
 }

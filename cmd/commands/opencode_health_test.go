@@ -228,10 +228,24 @@ func TestOpenCodeHealthPluginMCPAndDatabaseRows(t *testing.T) {
 func TestOpenCodeHealthSkipsThePluginRowForNpmUsers(t *testing.T) {
 	openCodeHealthEnv(t, time.Now().UnixMilli())
 	markOpenCodeSeen(t, time.Now().Add(-time.Hour)) // imported, and no plugin file
-	for _, c := range openCodeChecks(t, false) {
+	checks := openCodeChecks(t, false)
+	for _, c := range checks {
 		if c.key == "plugin" || c.key == "MCP entry" {
 			t.Errorf("found %q check when plugin is not present (npm user)", c.key)
 		}
+	}
+	// An npm user (no plugin file, but LastImported is set) still gets: version, database, freshness.
+	version := healthRow(t, checks, "version")
+	if version.level != checkOK {
+		t.Errorf("version level = %d, want checkOK (%d)", version.level, checkOK)
+	}
+	db := healthRow(t, checks, "database")
+	if db.level != checkOK {
+		t.Errorf("database level = %d, want checkOK (%d)", db.level, checkOK)
+	}
+	freshness := healthRow(t, checks, "freshness")
+	if freshness.level != checkWarn {
+		t.Errorf("freshness level = %d, want checkWarn (%d) (1h behind)", freshness.level, checkWarn)
 	}
 }
 

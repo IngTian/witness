@@ -34,8 +34,8 @@ func (sys) TerminateGroup(pid int) error {
 }
 
 // Alive reports whether pid names a live process. Callers ask "is the OWNER of this record
-// still running" — the opencode serve reaper before a kill, the model download lock before
-// stealing it — so a false "alive" is the safe direction for both: it declines.
+// still running" — the model download lock before stealing it — so a false "alive" is the
+// safe direction: it declines.
 //
 // Unix: signal 0 is the portable liveness probe — it performs the permission and existence
 // checks without delivering anything. EPERM means the process EXISTS but belongs to another

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/IngTian/witness/internal/store"
 )
@@ -69,6 +70,23 @@ func TranscriptDigest(entries []TranscriptEntry) string {
 	b, _ := json.Marshal(entries)
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
+
+// QuotaExhaustedError is returned when a runtime's free usage limit is reached and will reset
+// at a known time. The distill drain recognises this via errors.As and pauses free-model calls
+// until ResetAt, without incrementing per-session backoff.
+type QuotaExhaustedError struct {
+	ResetAt time.Time
+	Runtime string
+}
+
+func (e *QuotaExhaustedError) Error() string {
+	return fmt.Sprintf("%s free usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
+}
+
+// FreeAllowance is the Runner capability "this model draws on a shared free allowance", which is
+// what a QuotaExhaustedError refusal exhausts. cmd's free-model gate asks it per call so it can
+// pause exactly those calls without naming a runtime; a runner without it has no free allowance.
+type FreeAllowance interface{ OnFreeModel(model string) bool }
 
 // NativeSessionSupport is implemented only by runners that understand the retained
 // scratch-context protocol (create once, prompt, resume on retry, delete after L1 is durable).
@@ -182,7 +200,7 @@ type Runner interface {
 	// (feeds `witness doctor`). Claude is a no-op; OpenCode checks its model list.
 	ValidateModels(ctx context.Context, models ...string) error
 	// InvocationHint is a short human string naming how this engine runs, for
-	// doctor/diagnostics (e.g. "claude -p" / "opencode serve").
+	// doctor/diagnostics (e.g. "claude -p" / "opencode serve --stdio").
 	InvocationHint() string
 }
 
@@ -199,8 +217,8 @@ type RunnerProvider interface {
 
 // (SweepsOnCloser used to live here: "does Close sweep shared state a live worker needs?", so
 // `witness lens try` could take WorkerLock only then. True in #72, when OpenCode's Close swept the
-// SHARED database; v0.7.0's private database deleted that sweep, and the Open-path reapers are
-// orphan-only. A sweeping runner would need three lines of locking at the call site.)
+// SHARED database; v0.7.0's private database deleted that sweep, and the Open path now sweeps only
+// week-old OpenCode serve dirs. A sweeping runner would need three lines of locking at the call site.)
 
 // RunnerForName mints the Runner for an explicit runner NAME: empty means the default
 // platform, and an unknown name fails closed so a typo surfaces instead of silently

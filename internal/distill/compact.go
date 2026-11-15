@@ -90,9 +90,9 @@ const (
 	// largest cluster there (self-worth, 41.3k, which a 40k cap refused). Over the cap the union is
 	// not folded and its round-1 groups are written as before, rather than burning twenty minutes
 	// on a call expected to fail before falling back.
-	// ponytail: a fixed size standing in for claudeRunTimeout's 20-minute wall (one var shared by
-	// every claude -p call); give compaction writes their own budget, or measure a 60k write, if a
-	// union this size starts timing out.
+	// ponytail: a fixed size standing in for both runners' 20-minute walls (claudeRunTimeout, one
+	// var shared by every claude -p call, and OpenCode's generateTimeout); give compaction writes
+	// their own budget, or measure a 60k write, if a union this size starts timing out.
 	compactUnionMaxChars = 60_000
 )
 

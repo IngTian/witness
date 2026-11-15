@@ -68,9 +68,9 @@ func cmdDoctor(asJSON bool) error {
 
 	// Resolve the runner once; doctor asks IT how it runs and whether its models are
 	// valid — no branching on the runner name. runnerCmd is the runner's own
-	// invocation hint (e.g. "claude -p" / "opencode serve"); modelStatus is the
+	// invocation hint (e.g. "claude -p" / "opencode serve --stdio"); modelStatus is the
 	// result of the runner's model check (Claude's is a no-op → "OK", nothing to
-	// validate and no cost; OpenCode shells to `opencode models`).
+	// validate and no cost; OpenCode validates on its private serve).
 	//
 	// Don't short-circuit on a bad model: the embedder check below is doctor's core
 	// purpose and must run even when distillation is misconfigured. Remember the
@@ -537,49 +537,29 @@ type doctorEmbedderJSON struct {
 }
 
 // validateRuntimeModels validates every runtime's models against ITS OWN runner (#75
-// slice 2). It partitions the models by the runtime that will actually use them — the
-// default stage models on the default runner, each per-lens model on the runtime its lens
-// routes to — then mints each runtime's runner and calls its ValidateModels with that
-// runtime's set. This is why a per-lens OpenCode model gets checked by `opencode models`
-// and not the default (Claude) runner. Returns the first runtime's validation error (with
-// the runtime named) so doctor's single model line stays meaningful.
+// slice 2). It computes the union of models each runtime will use (via runtimeModels,
+// which includes "" for an unnamed stage), then mints each runtime's runner and calls its
+// ValidateModels with that runtime's models. This is why a per-lens OpenCode model gets
+// checked by the OpenCode runner, not the default (Claude) runner. Returns the first
+// runtime's validation error (with the runtime named) so doctor's single model line stays
+// meaningful.
 func validateRuntimeModels(ctx context.Context, st *store.Store, cfg store.Config) error {
-	// runtime name → deduped non-empty models to validate on it.
-	perRuntime := map[string]map[string]bool{}
-	add := func(runtime, m string) {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			return
-		}
-		if perRuntime[runtime] == nil {
-			perRuntime[runtime] = map[string]bool{}
-		}
-		perRuntime[runtime][m] = true
-	}
+	lenses := activeLenses(st)
+	runtimes := map[string]bool{}
+
+	// Collect all runtimes (default + every lens's declared runtime).
 	defaultRunner := strings.TrimSpace(cfg.Runner)
-	// Default stage models belong to the default runner.
-	add(defaultRunner, cfg.TriageModel)
-	add(defaultRunner, cfg.DistillModel)
-	// Each lens's per-lens models belong to the runtime the lens routes to.
-	for _, l := range activeLenses(st) {
-		rt := distill.RunnerFor(cfg, l)
-		add(rt, l.ExtractModel)
-		add(rt, l.ReviewModel)
+	runtimes[defaultRunner] = true
+	for _, l := range lenses {
+		runtimes[distill.RunnerFor(cfg, l)] = true
 	}
-	// Ensure the default runner is validated even with no models (it mints + is the report's
-	// InvocationHint source; an unknown default-runner name is a real config error).
-	if _, ok := perRuntime[defaultRunner]; !ok {
-		perRuntime[defaultRunner] = map[string]bool{}
-	}
-	for runtime, set := range perRuntime {
+
+	for runtime := range runtimes {
 		runner, err := platform.RunnerForName(runtime, cfg)
 		if err != nil {
 			return fmt.Errorf("runner %q: %w", runtime, err)
 		}
-		models := make([]string, 0, len(set))
-		for m := range set {
-			models = append(models, m)
-		}
+		models := runtimeModels(cfg, lenses, runtime)
 		if err := runner.ValidateModels(ctx, models...); err != nil {
 			return fmt.Errorf("runner %q: %w", runtime, err)
 		}

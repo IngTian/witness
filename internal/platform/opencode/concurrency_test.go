@@ -2,106 +2,59 @@ package opencode
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// OpenCode model generations may overlap. This uses only a fake HTTP server, so
-// concurrency is verified without loading models or launching subprocesses.
-func TestOpenCodeServerRunsModelsConcurrently(t *testing.T) {
-	const n = 4
-	var maxInFlight int32
-	var inFlight int32
-	var messageIDs sync.Map
-
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Each Run creates its own session id from the request; echo a per-session id
-		// so the isolated-session assumption holds. We key off a session counter.
-		switch r.Method {
-		case http.MethodPost:
-			if r.URL.Path == "/session" {
-				// unique id per created session
-				id := fmt.Sprintf("ses_%d", atomic.AddInt32(&sessionSeq, 1))
-				_, _ = fmt.Fprintf(w, `{"id":%q}`, id)
-				return
-			}
-			// prompt_async
-			var body struct {
-				MessageID string `json:"messageID"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			messageIDs.Store(r.URL.Path, body.MessageID)
-			w.WriteHeader(http.StatusNoContent)
-		case http.MethodGet:
-			// The reply poll is where model generation concurrency is observable.
-			cur := atomic.AddInt32(&inFlight, 1)
-			defer atomic.AddInt32(&inFlight, -1)
-			for {
-				old := atomic.LoadInt32(&maxInFlight)
-				if cur <= old || atomic.CompareAndSwapInt32(&maxInFlight, old, cur) {
-					break
-				}
-			}
-			time.Sleep(10 * time.Millisecond)
-			promptPath := strings.TrimSuffix(r.URL.Path, "/message") + "/prompt_async"
-			requestID, _ := messageIDs.Load(promptPath)
-			// reply keyed to whatever message id was requested
-			_, _ = fmt.Fprintf(w, `[
-				{"info":{"id":%q,"role":"user"},"parts":[{"id":"u","type":"text","text":"DATA"}]},
-				{"info":{"id":"msg_reply","role":"assistant"},"parts":[{"id":"a","type":"text","text":"RESULT"}]}
-			]`, requestID)
-		case http.MethodDelete:
-			_, _ = w.Write([]byte(`{}`))
+// Generations on one serve run in parallel, up to maxConcurrentGenerations (8 verified on one
+// serve, critic G4; witness allows 16 miners). The cap is read when the server is built, so a test
+// (and PR 3's 16-way check) sets it first. maxInFlight == the cap proves both halves: never above
+// it, and not collapsed to one.
+func TestRunCapsConcurrentGenerations(t *testing.T) {
+	prev := maxConcurrentGenerations
+	maxConcurrentGenerations = 2
+	t.Cleanup(func() { maxConcurrentGenerations = prev })
+	fake, srv := newFakeV2(t)
+	fake.turn = func(s *fakeSession) []map[string]any {
+		if time.Since(s.Prompted) < 100*time.Millisecond {
+			return []map[string]any{s.user(), assistantRec("", nil)}
 		}
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
+		return okTurn("RESULT")(s)
+	}
 	var wg sync.WaitGroup
-	errs := make([]error, n)
-	for i := 0; i < n; i++ {
+	errs := make([]error, 6)
+	for i := range errs {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // a stuck slot fails, not hangs
 			defer cancel()
-			_, errs[i] = srv.Run(ctx, "", "EXTRACT", "DATA")
-		}(i)
+			_, errs[i] = srv.Run(ctx, "openai/gpt-5.5", "P", fmt.Sprint(i))
+		}()
 	}
 	wg.Wait()
-
 	for i, err := range errs {
 		if err != nil {
-			t.Fatalf("Run %d failed: %v", i, err)
+			t.Errorf("Run %d: %v", i, err)
 		}
 	}
-	if got := atomic.LoadInt32(&maxInFlight); got < 2 {
-		t.Fatalf("max concurrent OpenCode model runs = %d, want at least 2", got)
+	if got := fake.peak(); got != 2 {
+		t.Errorf("max generations in flight = %d, want exactly the cap (2)", got)
 	}
 }
 
-// sessionSeq gives each created fake session a unique id across the concurrency
-// test's goroutines.
-var sessionSeq int32
-
-// TestOpenCodeServerRunRejectsAfterClose keeps the closed-check honest after the
-// narrowing: a Run started once the server is marked closed still errors fast.
+// The closed check still holds with the narrow lock: a Run after Close errors before any request.
 func TestOpenCodeServerRunRejectsAfterClose(t *testing.T) {
-	srv := &OpenCodeServer{baseURL: "http://127.0.0.1:0", authHeader: "Basic test", client: http.DefaultClient}
-	srv.mu.Lock()
-	srv.closed = true
-	srv.mu.Unlock()
-	if _, err := srv.Run(context.Background(), "", "EXTRACT", "DATA"); err == nil {
+	fake, srv := newFakeV2(t)
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "EXTRACT", "DATA"); err == nil {
 		t.Fatal("Run on a closed server should error")
+	}
+	if calls := fake.seen(); len(calls) != 0 {
+		t.Errorf("a closed server sent %v", calls)
 	}
 }

@@ -18,13 +18,3 @@ func TestSystemBindToParentSetsPdeathsig(t *testing.T) {
 		t.Fatalf("BindToParent did not set Pdeathsig=SIGKILL: %+v", cmd.SysProcAttr)
 	}
 }
-
-// ReapOrphans is a no-op on Linux (Pdeathsig already reaps). It must not panic and
-// must not invoke the predicate — there is nothing to scan.
-func TestSystemReapOrphansNoopOnLinux(t *testing.T) {
-	called := false
-	System().ReapOrphans(func(string) bool { called = true; return true })
-	if called {
-		t.Fatal("ReapOrphans on Linux must not scan or invoke the predicate")
-	}
-}

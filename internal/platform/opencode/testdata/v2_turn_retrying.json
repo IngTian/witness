@@ -1,0 +1,27 @@
+{
+  "_source": "runner.md (c)(3) - assistant with retry, attempt 2",
+  "data": [
+    {
+      "id": "msg_req",
+      "type": "user",
+      "time": {"created": 1763046000000},
+      "content": [{"type": "text", "text": "test"}]
+    },
+    {
+      "id": "msg_asst",
+      "type": "assistant",
+      "time": {"created": 1763046001000},
+      "retry": {
+        "attempt": 2,
+        "at": 1763046003000,
+        "error": {
+          "type": "provider.rate-limit",
+          "message": "Rate limit exceeded",
+          "status": 429,
+          "retryAfterMs": 2000
+        }
+      },
+      "content": []
+    }
+  ]
+}

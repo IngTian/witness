@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -125,5 +126,60 @@ func TestRunnerSetClosesOpenedRunnersWhenDefaultFails(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&leakFakeCloses); got != 1 {
 		t.Fatalf("the successfully-opened non-default runner must be Closed exactly once on the fatal path, got %d Close() calls", got)
+	}
+}
+
+var (
+	registerFreeFake sync.Once
+	freeFakeRuns     atomic.Int32
+)
+
+// freeFakePlatform mints a runner with the FreeAllowance capability (freeRunner, freepause_test.go).
+type freeFakePlatform struct{}
+
+func (freeFakePlatform) Name() string                           { return "fakefree" }
+func (freeFakePlatform) SessionPrefix() string                  { return "fakefree:" }
+func (freeFakePlatform) NewRunner(store.Config) platform.Runner { return freeFakeRunner{} }
+
+type freeFakeRunner struct{ freeRunner }
+
+func (freeFakeRunner) Open(context.Context) error { return nil }
+func (freeFakeRunner) Run(context.Context, string, string, string) (string, error) {
+	freeFakeRuns.Add(1)
+	return "[]", nil
+}
+
+// Every model call opens through the runnerSet, so its MineFuncs must carry the free-model gate:
+// with the pause armed, neither a lens's runner nor the default one (review, compaction, profile
+// ride RunFor(nil)) reaches a free model.
+func TestRunnerSetGatesFreeModelCalls(t *testing.T) {
+	registerFreeFake.Do(func() { platform.Register(freeFakePlatform{}) })
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetMetaString(freeModelsPausedKey, time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	lenses := []*lens.Lens{{Name: "default"}}
+	rs, err := newRunnerSet(context.Background(), st, store.Config{Runner: "fakefree"}, lenses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rs.Close()
+	freeFakeRuns.Store(0)
+	for _, run := range []func(context.Context, string, string, string) (string, error){rs.RunFor(lenses[0]), rs.RunFor(nil)} {
+		var qe *platform.QuotaExhaustedError
+		if _, err := run(context.Background(), freeModel, "p", "i"); !errors.As(err, &qe) || qe.Runtime != "fakefree" {
+			t.Fatalf("want the gate's QuotaExhausted for runtime fakefree, got %v", err)
+		}
+	}
+	if got := freeFakeRuns.Load(); got != 0 {
+		t.Fatalf("%d paused free-model call(s) reached the runner", got)
+	}
+	if _, err := rs.RunFor(nil)(context.Background(), "openai/x", "p", "i"); err != nil || freeFakeRuns.Load() != 1 {
+		t.Fatalf("a paid model on the same runtime must go through: err %v, runs %d", err, freeFakeRuns.Load())
 	}
 }

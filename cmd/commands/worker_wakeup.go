@@ -71,11 +71,22 @@ func cmdWorkerWakeup(args []string) error {
 }
 
 func scheduleRetryWakeup(st *store.Store) {
-	next, ok := st.NextBackoffAttempt(activeLensNames(st), time.Now())
+	next, ok := retryWakeupAt(st, time.Now())
 	if !ok {
 		return
 	}
 	scheduleWorkerWakeup(st, next, workerWakeMode(st))
+}
+
+// retryWakeupAt is the earliest deferred need: a backed-off session's retry, or the end of the
+// free-model pause. A paused lens sets no backoff (freepause.go), so without the pause end a box
+// with no other kicker (Windows, no live trigger) would never resume its free-model lenses.
+func retryWakeupAt(st *store.Store, now time.Time) (time.Time, bool) {
+	next, ok := st.NextBackoffAttempt(activeLensNames(st), now)
+	if until, paused := freeModelsPausedUntil(st); paused && until.After(now) && (!ok || until.Before(next)) {
+		return until, true
+	}
+	return next, ok
 }
 
 func scheduleWorkerWakeup(st *store.Store, next time.Time, mode string) {

@@ -1,0 +1,22 @@
+{
+  "_source": "freetier.md §6 and runner.md - model unavailable (no assistant created)",
+  "data": [
+    {
+      "id": "msg_req",
+      "type": "user",
+      "time": {"created": 1763046000000},
+      "content": [{"type": "text", "text": "test"}]
+    },
+    {
+      "id": "msg_idle",
+      "type": "idle",
+      "outcome": "failed",
+      "time": {"created": 1763046001000},
+      "error": {
+        "type": "provider.no-route",
+        "message": "Model unavailable: mock/nonexistent",
+        "status": 404
+      }
+    }
+  ]
+}

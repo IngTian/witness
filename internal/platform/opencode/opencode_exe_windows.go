@@ -6,18 +6,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
 // desktopMarkers identify directories belonging to the OpenCode DESKTOP app rather than the
 // headless CLI. A match means "skip this PATH entry".
 //
-// Installing the desktop app puts a launcher named `opencode` on PATH. That launcher starts the
-// GUI; it is not the headless CLI. witness only ever runs non-interactive subcommands
-// (`serve --pure`, `models`, `export`, `--version`), so resolving to the desktop launcher means the GUI
-// opens (or the process exits with output witness cannot parse) instead of the command running —
-// which is how a machine with both installed reported "native session isolation unavailable"
-// while a perfectly good CLI sat later on the same PATH.
+// v2 desktop installs put nothing on PATH, so the markers change no outcome under v2. Under v1
+// the desktop put a GUI launcher named `opencode` on PATH, and resolving to that meant the GUI
+// opened instead of the headless CLI running — which is how a machine with both installed
+// reported "native session isolation unavailable" while a perfectly good CLI sat later on PATH.
+// witness only ever runs non-interactive commands (`serve --stdio`, `--version`), so a GUI is a
+// failure.
 //
 // More than one spelling is needed, from the Windows box's own reports: the npm-scoped package dir
 // is `@opencode-aidesktop`, while the app's own data lives under `ai.opencode.desktop` (its crash
@@ -36,16 +37,63 @@ func isDesktopDir(dir string) bool {
 	return false
 }
 
-// openCodeExe resolves the `opencode` CLI to an absolute path, preferring the headless CLI
+var shimTargetRe = regexp.MustCompile(`(?i)"%~?dp0%?\\([^"]+?\.exe)"`)
+
+// cmdShimTarget attempts to resolve a `.cmd` or `.bat` shim (how npm/pnpm/yarn install CLIs
+// on Windows) to the real exe it wraps. It first tries to parse the shim body for a line
+// like `"%dp0%\node_modules\@opencode\cli\bin\opencode.exe"` (npm) or
+// `"%~dp0\..\pnpm\opencode.exe"` (pnpm), joining the extracted relative path to the shim's
+// directory. If that fails, it falls back to the standard npm package layout:
+// `<dir>\node_modules\@opencode\cli\bin\opencode.exe`. Either result must exist as a file.
+//
+// If neither approach yields an existing file, it returns ("", false), and the caller returns
+// the shim itself rather than failing, so that spawn errors remain visible.
+func cmdShimTarget(shim string) (string, bool) {
+	body, err := os.ReadFile(shim)
+	if err != nil {
+		return "", false
+	}
+	dir := filepath.Dir(shim)
+	// Try parsing the shim body for the target path
+	if m := shimTargetRe.FindSubmatch(body); m != nil {
+		rel := string(m[1])
+		target := filepath.Clean(filepath.Join(dir, rel))
+		if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			return target, true
+		}
+	}
+	// Fall back to the npm package layout
+	fallback := filepath.Join(dir, "node_modules", "@opencode", "cli", "bin", "opencode.exe")
+	if info, err := os.Stat(fallback); err == nil && !info.IsDir() {
+		return fallback, true
+	}
+	return "", false
+}
+
+// ResolveExe resolves the `opencode` CLI to an absolute path, preferring the headless CLI
 // over the desktop app's GUI launcher.
 //
-// It walks PATH in order (the same precedence the OS would use), skipping desktop-launcher
-// directories, and honours PATHEXT so a `.cmd`/`.bat` wrapper — how npm-installed CLIs
-// usually land on Windows — is found, not just a bare `.exe`. If nothing matches it falls
-// back to exec.LookPath, which restores the default behaviour rather than inventing a
-// failure: that matters when the ONLY install is the desktop one, where running its launcher
-// and reporting whatever it says beats refusing to try.
-func openCodeExe() (string, error) {
+// The plugin-supplied binary is checked first, because the plugin knows where OpenCode actually
+// runs from, which beats a stale PATH entry. Then it walks PATH in order (the same precedence
+// the OS would use), skipping desktop-launcher directories, and honours PATHEXT so a `.cmd`/`.bat`
+// wrapper — how npm-installed CLIs usually land on Windows — is found, not just a bare `.exe`.
+// When a `.cmd` or `.bat` shim is found, it attempts to resolve it to the real exe (npm/pnpm/yarn
+// all use shims with parseable targets). If PATH yields nothing, it checks the curl installer's
+// canonical path (%USERPROFILE%\.opencode\bin\opencode.exe) and the desktop app's bundled CLI.
+// Finally it falls back to exec.LookPath, which restores the default behaviour rather than
+// inventing a failure.
+//
+// Note: `bun install -g @opencode/cli` (per docs) puts a launcher named `opencode.exe` on PATH,
+// plus an `opencode.bunx` file. That launcher is unverified and is returned as-is. The lease
+// passes through a launcher that holds only the read end of stdin, so the serve cannot be
+// orphaned, and the plugin's binary wins anyway.
+func ResolveExe() (string, error) {
+	// 1. Plugin-supplied binary
+	if path, ok := pluginExe(); ok {
+		return path, nil
+	}
+
+	// 2. PATH walk, skipping desktop dirs, resolving shims
 	exts := pathExtensions()
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
@@ -61,18 +109,35 @@ func openCodeExe() (string, error) {
 			if err != nil || info.IsDir() {
 				continue
 			}
-			// Windows os.Stat is CASE-INSENSITIVE, so this candidate can match a desktop
-			// `OpenCode.exe` sitting in a directory whose name carries no desktop marker. Check the
-			// name the filesystem actually reports: the headless CLI is lowercase `opencode`, the
-			// desktop build ships `OpenCode.exe`. Skipping on that difference is what stops witness
-			// spawning a GUI that can never serve — the failure that produced `context deadline
-			// exceeded` on every distillation until the exe was pinned.
-			if actual := info.Name(); actual != "" && !strings.HasPrefix(actual, "opencode") {
-				continue
+			// If it's a .cmd or .bat shim, try to resolve it to the real exe
+			if strings.EqualFold(ext, ".cmd") || strings.EqualFold(ext, ".bat") {
+				if target, ok := cmdShimTarget(candidate); ok {
+					return target, nil
+				}
+				// Unresolvable shim: return it anyway, so spawn errors are visible
+				return candidate, nil
 			}
 			return candidate, nil
 		}
 	}
+
+	// 3. curl installer's canonical path
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		curlExe := filepath.Join(homeDir, ".opencode", "bin", "opencode.exe")
+		if info, err := os.Stat(curlExe); err == nil && !info.IsDir() {
+			return curlExe, nil
+		}
+	}
+
+	// 4. Desktop app's bundled CLI
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		desktopCLI := filepath.Join(localAppData, "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe")
+		if info, err := os.Stat(desktopCLI); err == nil && !info.IsDir() {
+			return desktopCLI, nil
+		}
+	}
+
+	// 5. Fall back to exec.LookPath
 	return exec.LookPath("opencode")
 }
 

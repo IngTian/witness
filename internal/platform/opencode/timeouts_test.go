@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -29,96 +28,29 @@ func withShortTimeouts(t *testing.T, d time.Duration) {
 	})
 }
 
-// waitHealthy must honor its OWN budget even when a probe never answers.
-//
-// It runs during Open — i.e. FIRST, before doJSON is ever reached — and calls s.client.Do
-// directly, so the per-request bound in doJSON does NOT cover it. Its loop condition
-// (`for time.Now().Before(deadline)`) is only evaluated BETWEEN iterations, so one Do() that
-// never returns was unbounded: measured before this fix, still blocked past 40s despite the
-// documented 30s gate. The caller holds the machine-WIDE WorkerLock at that point, so
-// `distill start` (and `doctor`, via validateRuntimeModels) hangs and `capture` never drains —
-// the whole tool goes silent with no error anywhere.
-func TestWaitHealthyBoundsAWedgedProbe(t *testing.T) {
-	withShortTimeouts(t, 400*time.Millisecond)
+// (waitReady's own-budget bound and its accept/refuse cases live in serve_test.go.)
 
-	release := make(chan struct{})
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-release // accept the connection, then never respond
-	}))
-	defer ts.Close()
-	defer close(release)
-
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: make(chan struct{}),
-		logs:     &safeBuffer{},
-	}
-
-	done := make(chan error, 1)
-	start := time.Now()
-	go func() { done <- srv.waitHealthy(context.Background()) }()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("a server that never answered reported healthy")
-		}
-		// It must give up at ITS OWN budget, not at some larger per-request timeout.
-		if elapsed := time.Since(start); elapsed > 5*time.Second {
-			t.Errorf("waitHealthy took %s against a 400ms budget — the bound is not derived "+
-				"from its own deadline", elapsed.Truncate(time.Millisecond))
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("waitHealthy never returned: a wedged serve pins the machine-wide WorkerLock, " +
-			"and capture stops draining with no error anywhere")
-	}
-}
-
-// A healthy server must still be accepted promptly — the bound is a backstop, not a race.
-func TestWaitHealthyAcceptsAHealthyServer(t *testing.T) {
-	withShortTimeouts(t, 5*time.Second)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer ts.Close()
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: make(chan struct{}),
-		logs:     &safeBuffer{},
-	}
-	if err := srv.waitHealthy(context.Background()); err != nil {
-		t.Fatalf("a healthy server was rejected: %v", err)
-	}
-}
-
-// A serve process that DIES during the wait must be reported as such, not as a timeout —
-// that distinction is what surfaces a real crash cause instead of burying it.
-func TestWaitHealthyReportsAnExitedServe(t *testing.T) {
+// A serve that DIES during the wait must be reported as such, not as a timeout — that distinction
+// is what surfaces a real crash cause instead of burying it.
+func TestWaitReadyReportsAnExitedServe(t *testing.T) {
 	withShortTimeouts(t, 5*time.Second)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer ts.Close()
-	waitDone := make(chan struct{})
-	close(waitDone) // the child already exited
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: waitDone,
-		logs:     &safeBuffer{},
-	}
-	err := srv.waitHealthy(context.Background())
+	s, url := readyServe(ts.URL)
+	close(s.waitDone) // the child already exited
+	err := s.waitReady(context.Background(), url)
 	if err == nil {
-		t.Fatal("an exited serve reported healthy")
+		t.Fatal("an exited serve reported ready")
 	}
-	if !strings.Contains(err.Error(), "exited before health check") {
+	if !strings.Contains(err.Error(), "exited before") {
 		t.Errorf("want the exit reported explicitly, got %v", err)
 	}
 }
 
 // The caller's cancellation must still abort the wait promptly (a `distill stop` during Open).
-func TestWaitHealthyHonorsCallerCancellation(t *testing.T) {
+func TestWaitReadyHonorsCallerCancellation(t *testing.T) {
 	withShortTimeouts(t, 30*time.Second) // long, so only the cancel can end this
 	release := make(chan struct{})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,24 +58,19 @@ func TestWaitHealthyHonorsCallerCancellation(t *testing.T) {
 	}))
 	defer ts.Close()
 	defer close(release)
-	srv := &OpenCodeServer{
-		baseURL:  ts.URL,
-		client:   ts.Client(),
-		waitDone: make(chan struct{}),
-		logs:     &safeBuffer{},
-	}
+	s, url := readyServe(ts.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- srv.waitHealthy(ctx) }()
+	go func() { done <- s.waitReady(ctx, url) }()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("a cancelled wait reported healthy")
+			t.Fatal("a cancelled wait reported ready")
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("caller cancellation no longer aborts waitHealthy")
+		t.Fatal("caller cancellation no longer aborts waitReady")
 	}
 }
 
@@ -158,11 +85,11 @@ func TestDoJSONBoundsAWedgedRequest(t *testing.T) {
 	defer ts.Close()
 	defer close(release)
 
-	srv := &OpenCodeServer{baseURL: ts.URL, client: ts.Client()}
+	srv := newOpenCodeServer(ts.URL, "", "", ts.Client())
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := srv.doJSON(context.Background(), http.MethodGet, "/session/x/message", nil, http.StatusOK)
+		_, err := srv.doJSON(context.Background(), http.MethodGet, "/api/session/x/message", nil, http.StatusOK)
 		done <- err
 	}()
 	select {
@@ -192,11 +119,11 @@ func TestDoJSONStillHonorsCallerCancellation(t *testing.T) {
 	defer ts.Close()
 	defer close(release)
 
-	srv := &OpenCodeServer{baseURL: ts.URL, client: ts.Client()}
+	srv := newOpenCodeServer(ts.URL, "", "", ts.Client())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := srv.doJSON(ctx, http.MethodGet, "/session/x/message", nil, http.StatusOK)
+		_, err := srv.doJSON(ctx, http.MethodGet, "/api/session/x/message", nil, http.StatusOK)
 		done <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -222,8 +149,8 @@ func TestDoJSONDoesNotAbortAHealthyRequest(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	srv := &OpenCodeServer{baseURL: ts.URL, client: ts.Client()}
-	data, err := srv.doJSON(context.Background(), http.MethodGet, "/session/x/message", nil, http.StatusOK)
+	srv := newOpenCodeServer(ts.URL, "", "", ts.Client())
+	data, err := srv.doJSON(context.Background(), http.MethodGet, "/api/session/x/message", nil, http.StatusOK)
 	if err != nil {
 		t.Fatalf("a healthy slow request was aborted: %v", err)
 	}
@@ -264,7 +191,7 @@ func TestValidateOpenCodeCapabilityBoundsAHungVersionProbe(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- ValidateOpenCodeCapability(context.Background(), "") }()
+	go func() { done <- ValidateOpenCodeCapability(context.Background()) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -291,7 +218,7 @@ func TestProbeDeadlineDerivesFromTheCallerContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already dead
 	done := make(chan error, 1)
-	go func() { done <- ValidateOpenCodeCapability(ctx, "") }()
+	go func() { done <- ValidateOpenCodeCapability(ctx) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -311,12 +238,12 @@ func TestValidateOpenCodeCapabilityStillJudgesVersionsOnTheirMerits(t *testing.T
 	defer func() { openCodeVersionCommand = old }()
 
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.7\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
+	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
 		t.Errorf("2.2.7 must be accepted, got %v", err)
 	}
 
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.6\n"), nil }
-	err := ValidateOpenCodeCapability(context.Background(), "")
+	err := ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeTooOld) {
 		t.Fatalf("2.2.6 error = %v, want ErrOpenCodeTooOld", err)
 	}
@@ -325,68 +252,8 @@ func TestValidateOpenCodeCapabilityStillJudgesVersionsOnTheirMerits(t *testing.T
 	}
 
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.19.5\n"), nil }
-	err = ValidateOpenCodeCapability(context.Background(), "")
+	err = ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeV1) {
 		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
-	}
-}
-
-// loadOpenCodeModels bounds its probe too. It is exercised through ValidateOpenCodeModelsIn
-// with a cached provider so no `opencode` process is ever spawned — the point is that the
-// cache short-circuit still works and the deadline plumbing did not break the happy path.
-func TestLoadOpenCodeModelsUsesTheCacheWithoutSpawning(t *testing.T) {
-	withShortTimeouts(t, 5*time.Second)
-	old := openCodeVersionCommand
-	defer func() { openCodeVersionCommand = old }()
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("opencode v2.2.7\n"), nil }
-
-	// Seed the cache for a provider name no real install would have, and remove it after so
-	// the sync.Map does not leak into other tests in this package.
-	const provider = "witness-test-provider"
-	openCodeModelsCache.Store(provider, openCodeModelList{
-		set: map[string]bool{provider + "/m1": true}, list: []string{provider + "/m1"},
-	})
-	t.Cleanup(func() { openCodeModelsCache.Delete(provider) })
-
-	if err := ValidateOpenCodeModelsIn(context.Background(), t.TempDir(), provider+"/m1"); err != nil {
-		t.Errorf("a cached model must validate without spawning `opencode models`: %v", err)
-	}
-	err := ValidateOpenCodeModelsIn(context.Background(), t.TempDir(), provider+"/absent")
-	if err == nil {
-		t.Fatal("a model absent from the cached list must be rejected")
-	}
-	if strings.Contains(err.Error(), "deadline") {
-		t.Errorf("rejected by timeout rather than by availability: %v", err)
-	}
-}
-
-// The probe deadline must derive from the caller's ctx. (That every `opencode` spawn goes through
-// the context-bound openCodeCommand is TestEveryOpenCodeSpawnGoesThroughTheOneHelper's scan.)
-func TestEveryOpenCodeSpawnIsContextBound(t *testing.T) {
-	src, err := os.ReadFile("server.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// LF-normalize: a CRLF checkout (git's Windows default) makes the "\n}\n" scan below
-	// miss, and the slice that follows then panics on a negative bound. Seen on a real
-	// Windows run. .gitattributes pins *.go to LF too; this keeps the test honest regardless.
-	src = []byte(normalizeOpenCodeNewlines(string(src)))
-	// loadOpenCodeModels must apply the probe bound (it builds its command inline).
-	i := strings.Index(string(src), "func loadOpenCodeModels(")
-	if i < 0 {
-		t.Fatal("loadOpenCodeModels not found")
-	}
-	end := strings.Index(string(src)[i:], "\n}\n")
-	if end < 0 {
-		t.Fatal("could not delimit loadOpenCodeModels; the scan would slice out of range")
-	}
-	fn := string(src)[i : i+end]
-	if !strings.Contains(fn, "openCodeProbeTimeout") {
-		t.Error("loadOpenCodeModels must bound its `opencode models` probe: a hung one blocks " +
-			"Open/doctor while holding the machine-wide WorkerLock")
-	}
-	if !strings.Contains(fn, "context.WithTimeout(ctx") {
-		t.Error("loadOpenCodeModels's deadline must derive from the CALLER's ctx, so a " +
-			"cancelled drain aborts it promptly")
 	}
 }

@@ -174,32 +174,8 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	}
 
 	cfg := st.ResolvedConfig()
-	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
-	// (a single candidate = one runner) and clear the wrong-runtime default models. See
-	// tryRunnerCfg.
-	cfg = tryRunnerCfg(cfg, ln)
-	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
-	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
-	// override would silently not reach the server. --model overrides EXTRACT (triage);
-	// --review-model overrides REVIEW (distill) — the two engine stages use two models.
-	//
-	// Apply the override onto BOTH cfg (so OpenCode prewarms the right model) AND the
-	// lens's own per-lens model fields (#75): distill.ModelFor prefers a lens's
-	// ExtractModel/ReviewModel over the default, so overriding only cfg would let a
-	// registered lens's own per-lens model shadow the explicit --model the user asked to
-	// preview ON. Explicit --model is the user's stated preview intent and must win.
-	if opts.model != "" {
-		cfg.TriageModel = opts.model
-		ln.ExtractModel = opts.model
-	}
-	// Only apply --review-model when review actually runs. Otherwise, on an OpenCode
-	// runner, Open validates cfg.DistillModel up front and a bad --review-model would
-	// abort an extract-only preview on a model that is never used (on Claude it'd be
-	// silently ignored) — a confusing runner-dependent side effect for a review-only knob.
-	if opts.review && opts.reviewModel != "" {
-		cfg.DistillModel = opts.reviewModel
-		ln.ReviewModel = opts.reviewModel
-	}
+	// Apply overrides, then build the runner cfg with tryRunnerCfg in the correct order (F7).
+	cfg = applyOverridesAndBuildRunnerCfg(cfg, ln, opts.model, opts.reviewModel, opts.review)
 
 	// Resolve the session set (validation happens BEFORE any runner work, so a bad file/
 	// session never spawns a server or takes a lock).
@@ -217,10 +193,10 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// No WorkerLock here, deliberately. This used to take it when the runner reported
 	// SweepsOnClose() — a capability that existed because OpenCode's Close once swept the SHARED
 	// OpenCode database and could delete a live worker's in-flight distill session (#72). That sweep
-	// was deleted when #119 gave distillation its own private database, and the sweeps that remain on
-	// the Open path (reapPriorServe, procCtl.ReapOrphans) are ORPHAN-ONLY: they require the owning
-	// witness process to be gone (or ppid==1), so they cannot reach a running worker. The capability's
-	// only implementation therefore answered false and this branch was unreachable.
+	// was deleted when #119 gave distillation its own private database, and the Open path now sweeps
+	// nothing a live process owns: each runner gets its own lease serve and serve dir (an orphaned
+	// serve ends on its stdin lease), and only serve dirs older than a week are removed. The
+	// capability's only implementation therefore answered false and this branch was unreachable.
 	//
 	// Keeping `lens try` lock-free is the better behaviour anyway: it is a read-only preview, and
 	// blocking it behind a multi-minute backfill was the reason the guard was conditional rather than
@@ -229,7 +205,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 		return err
 	}
 	defer runner.Close()
-	runFn := distill.RunnerMine(runner)
+	// The same free-model gate a drain gets (freepause.go): a preview on a paused free model sends
+	// nothing, and a refusal here pauses the drain's free-model calls too.
+	runFn := newFreeGate(st).wrap(cfg.Runner, runner, distill.RunnerMine(runner))
 
 	// Preview all sessions in parallel (bounded by the engine's concurrency policy), then
 	// render in sample order. Concurrency is clamped to the sample size (so to 1 for a
@@ -445,6 +423,64 @@ func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
 		cfg.Runner = r
 	}
 	clearCrossRuntimeModels(&cfg, cfg.Runner, defaultRunner)
+	return cfg
+}
+
+// tryRunnerModels is a preview's RunnerModels: the models of the stages that will run, extract
+// alone or extract + review, so the runner validates exactly what lens try will use. Sorted, so a
+// runner that names the first bad model names the same one on every run.
+func tryRunnerModels(cfg store.Config, ln *lens.Lens, review bool) []string {
+	models := []string{distill.ModelFor(cfg, ln, distill.PhaseExtract)}
+	if review {
+		models = append(models, distill.ModelFor(cfg, ln, distill.PhaseReview))
+	}
+	slices.Sort(models)
+	return slices.Compact(models)
+}
+
+// applyOverridesAndBuildRunnerCfg applies --model and --review-model, routes the preview to the
+// lens's runner, and computes RunnerModels last, so they contain the overridden values (F7).
+// Extracted from cmdLensTry so the ordering is testable. Returns the final cfg ready to mint a
+// runner; ln is mutated in place per the cmdLensTry contract.
+//
+// The cfg half of an override is written AFTER the route: tryRunnerCfg clears a cross-runtime
+// lens's default models, and a --model written before it was cleared with them, so review lost its
+// fallback to --model (ModelFor: DistillModel, then TriageModel) on exactly such a lens.
+func applyOverridesAndBuildRunnerCfg(cfg store.Config, ln *lens.Lens, modelOverride, reviewModelOverride string, review bool) store.Config {
+	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
+	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
+	// override would silently not reach the server. --model overrides EXTRACT (triage);
+	// --review-model overrides REVIEW (distill) — the two engine stages use two models.
+	//
+	// Apply the override onto BOTH cfg (so OpenCode prewarms the right model) AND the
+	// lens's own per-lens model fields (#75): distill.ModelFor prefers a lens's
+	// ExtractModel/ReviewModel over the default, so overriding only cfg would let a
+	// registered lens's own per-lens model shadow the explicit --model the user asked to
+	// preview ON. Explicit --model is the user's stated preview intent and must win.
+	//
+	// Only apply --review-model when review actually runs. Otherwise, on an OpenCode
+	// runner, Open validates cfg.DistillModel up front and a bad --review-model would
+	// abort an extract-only preview on a model that is never used (on Claude it'd be
+	// silently ignored) — a confusing runner-dependent side effect for a review-only knob.
+	if !review {
+		reviewModelOverride = ""
+	}
+	if modelOverride != "" {
+		ln.ExtractModel = modelOverride
+	}
+	if reviewModelOverride != "" {
+		ln.ReviewModel = reviewModelOverride
+	}
+	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
+	// (a single candidate = one runner) and clear the wrong-runtime default models.
+	cfg = tryRunnerCfg(cfg, ln)
+	if modelOverride != "" {
+		cfg.TriageModel = modelOverride
+	}
+	if reviewModelOverride != "" {
+		cfg.DistillModel = reviewModelOverride
+	}
+	cfg.RunnerModels = tryRunnerModels(cfg, ln, review)
 	return cfg
 }
 

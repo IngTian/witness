@@ -1,0 +1,17 @@
+{
+  "_source": "runner.md (c)(3) last bullet - dead turn with no finish/error and no idle",
+  "data": [
+    {
+      "id": "msg_req",
+      "type": "user",
+      "time": {"created": 1763046000000},
+      "content": [{"type": "text", "text": "test"}]
+    },
+    {
+      "id": "msg_asst",
+      "type": "assistant",
+      "time": {"created": 1763046001000},
+      "content": []
+    }
+  ]
+}

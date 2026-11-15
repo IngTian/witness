@@ -107,9 +107,3 @@ func ProbeVersion(ctx context.Context) (Version, error) {
 	}
 	return ParseOpenCodeVersion(string(out))
 }
-
-// ErrOpenCodeRunnerPending marks the unfinished v2 runner port. The capture side supports v2,
-// but the runner does not yet (PR 2). An intermediate main must never drive the v1 serve
-// protocol against v2 (the routes return 404 and fail silently).
-var ErrOpenCodeRunnerPending = errors.New("distilling through OpenCode v2 is not built yet (#218); " +
-	"capture works — route these lenses to another runner for now")

@@ -1,0 +1,27 @@
+{
+  "_source": "freetier.md §4(a) and runner.md (c)(3) - successful turn with reasoning dropped",
+  "data": [
+    {
+      "id": "msg_req",
+      "type": "user",
+      "time": {"created": 1763046000000},
+      "content": [{"type": "text", "text": "Reply with exactly: [{\"observation\":\"ok\"}]"}]
+    },
+    {
+      "id": "msg_asst",
+      "type": "assistant",
+      "time": {"created": 1763046001000, "completed": 1763046002000},
+      "retry": null,
+      "content": [
+        {"type": "thinking", "text": "This is reasoning that should be dropped"},
+        {"type": "text", "text": "[]"}
+      ]
+    },
+    {
+      "id": "msg_idle",
+      "type": "idle",
+      "outcome": "succeeded",
+      "time": {"created": 1763046002100}
+    }
+  ]
+}

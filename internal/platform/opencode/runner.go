@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
@@ -28,16 +29,20 @@ func (r *runner) Open(ctx context.Context) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	if r.cfg.RuntimeRoot == "" {
-		return fmt.Errorf("opencode isolated runtime root is unavailable")
-	}
-	// Check the version before prepareAuth copies credentials: an intermediate main must never
-	// drive the v1 serve protocol against v2 (the routes return 404 and fail silently). PR 2
-	// ports the runner; until then, refuse v2.
-	if err := ValidateOpenCodeCapability(ctx, r.cfg.RuntimeRoot); err != nil {
+	// <root>/xdg/opencode/auth.json was a stale secret witness copied; plus a v1 DB and pid file
+	// nothing reads. An empty root removes nothing, and StartOpenCodeServerIn refuses it.
+	removeV1Runtime(r.cfg.RuntimeRoot)
+	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, r.cfg.RunnerModels)
+	if err != nil {
 		return err
 	}
-	return ErrOpenCodeRunnerPending
+	r.native = newNativeRuntime(r.cfg.RuntimeRoot, srv)
+	if err := r.native.reconcile(); err != nil {
+		_ = srv.Close() // runnerSet keeps no runner whose Open failed, so no Close would ever end it
+		return err
+	}
+	r.server = srv
+	return nil
 }
 
 func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
@@ -66,19 +71,29 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	// Check the version before any models probe: PR 2 ports the runner; until then, refuse v2.
-	if err := ValidateOpenCodeCapability(ctx, r.cfg.RuntimeRoot); err != nil {
+	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, models)
+	if err != nil {
 		return err
 	}
-	return ErrOpenCodeRunnerPending
+	return srv.Close()
 }
 
-// Discovered by type assertion like the platform capabilities; pinned the same way.
-var _ platform.NativeSessionSupport = (*runner)(nil)
+// isFreeModel: only OpenCode Zen's own opencode/* models are free, and their allowance is counted
+// per network (evidence freetier §4). opencode-go/* is the paid subscription, a different provider.
+func isFreeModel(model string) bool { return strings.HasPrefix(strings.TrimSpace(model), "opencode/") }
 
-func (*runner) InvocationHint() string      { return "opencode serve" }
+func (*runner) OnFreeModel(model string) bool { return isFreeModel(model) }
+
+// Discovered by type assertion like the platform capabilities; pinned the same way.
+var (
+	_ platform.NativeSessionSupport = (*runner)(nil)
+	_ platform.FreeAllowance        = (*runner)(nil)
+)
+
+func (*runner) InvocationHint() string      { return "opencode serve --stdio" }
 func (*runner) SupportsNativeSession() bool { return true }
 
 // (SweepsOnClose() false used to be here. The capability is gone from the port — see
 // platform.Runner — because this was its only implementation and the shared-DB sweep it reported on
-// was deleted with #119's private database. The sweeps still on the Open path are orphan-only.)
+// was deleted with #119's private database. Open sweeps only week-old serve dirs; each serve ends on
+// its own stdin lease.)

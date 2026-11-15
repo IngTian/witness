@@ -2,56 +2,17 @@ package opencode
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/IngTian/witness/internal/proc"
 )
-
-func TestBuildOpenCodeServeCmdIsolation(t *testing.T) {
-	cmd := buildOpenCodeServeCmdIn(context.Background(), t.TempDir(), 12345, "secret")
-	for _, want := range []string{"serve", "--pure", "--hostname", "127.0.0.1", "--port", "12345"} {
-		if !slices.Contains(cmd.Args, want) {
-			t.Fatalf("missing %q in args: %v", want, cmd.Args)
-		}
-	}
-	joinedEnv := strings.Join(cmd.Env, "\n")
-	for _, want := range []string{"WITNESS_WORKER=1", "OPENCODE_DISABLE_CLAUDE_CODE=1", "OPENCODE_SERVER_PASSWORD=secret", "OPENCODE_CONFIG_CONTENT="} {
-		if !strings.Contains(joinedEnv, want) {
-			t.Fatalf("missing %q in env: %s", want, joinedEnv)
-		}
-	}
-	if !strings.Contains(joinedEnv, `"permission":{"*":"deny"}`) {
-		t.Fatalf("agent permission config should deny tools: %s", joinedEnv)
-	}
-}
-
-func TestBuildOpenCodeServeCmdUsesPrivateRuntimeEnv(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", "/user/data")
-	t.Setenv("OPENCODE_DB", "/user/opencode.db")
-	cmd := buildOpenCodeServeCmdIn(context.Background(), root, 12345, "secret")
-	got := map[string]string{}
-	for _, e := range cmd.Env {
-		k, v, _ := strings.Cut(e, "=")
-		if _, exists := got[k]; exists {
-			t.Fatalf("duplicate env key %q", k)
-		}
-		got[k] = v
-	}
-	if got["XDG_DATA_HOME"] != filepath.Join(root, "xdg") || got["OPENCODE_DB"] != filepath.Join(root, "opencode.db") {
-		t.Fatalf("serve used user runtime: %#v", got)
-	}
-}
 
 func TestValidateOpenCodeCapability(t *testing.T) {
 	old := openCodeVersionCommand
@@ -59,13 +20,13 @@ func TestValidateOpenCodeCapability(t *testing.T) {
 
 	// Supported version passes
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.7\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
+	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
 		t.Fatalf("2.2.7 must be accepted, got %v", err)
 	}
 
 	// Below MinVersion is refused
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.6\n"), nil }
-	err := ValidateOpenCodeCapability(context.Background(), "")
+	err := ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeTooOld) {
 		t.Fatalf("2.2.6 error = %v, want ErrOpenCodeTooOld", err)
 	}
@@ -75,261 +36,9 @@ func TestValidateOpenCodeCapability(t *testing.T) {
 
 	// v1 is refused by name
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.19.5\n"), nil }
-	err = ValidateOpenCodeCapability(context.Background(), "")
+	err = ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeV1) {
 		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
-	}
-}
-
-// TestIsStrayServeLine locks the reap fingerprint (issue #54 I2): it must match a
-// witness-launched `opencode serve` regardless of how the executable path is
-// printed, and must NOT match a user's own `opencode serve`, any other opencode
-// subcommand, or an unrelated process. This is one half of the safety gate; the
-// other (orphan-only) is enforced in TestStrayServePIDs.
-func TestIsStrayServeLine(t *testing.T) {
-	cases := []struct {
-		name string
-		line string
-		want bool
-	}{
-		{"witness serve absolute path", "/Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR", true},
-		{"witness serve bare basename", "opencode serve --pure --hostname 127.0.0.1 --port 40001", true},
-		{"user serve without --pure", "/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 4096", false},
-		{"user serve on a public hostname", "opencode serve --pure --hostname 0.0.0.0 --port 4096", false},
-		{"other opencode subcommand", "opencode models --pure openai", false},
-		{"not opencode at all", "claude -p --model haiku", false},
-		{"empty line", "", false},
-		{"opencode substring in another binary is fine (still needs serve+flags)", "/opt/my-opencode-helper/tool run", false},
-		// Windows quotes an argv[0] containing a space (syscall.makeCmdLine), so a profile such as
-		// `C:\Users\John Smith` puts the executable inside quotes. Splitting on whitespace alone made
-		// the executable `"C:\Users\John`, and the reaper matched nothing for that user.
-		{"windows quoted executable with a space", `"C:\Users\John Smith\.opencode\bin\opencode.exe" serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR`, true},
-		{"windows quoted executable that is not opencode", `"C:\Program Files\nodejs\node.exe" opencode serve --pure --hostname 127.0.0.1`, false},
-		{"unterminated quote", `"C:\Users\John Smith\opencode.exe serve --pure --hostname 127.0.0.1`, false},
-		{"unterminated quote around a bare opencode", `"opencode serve --pure --hostname 127.0.0.1`, false},
-		// The closing quote is the FIRST one: node running the npm script quotes two paths, and
-		// only the first is the executable.
-		{"node running the npm opencode script", `"C:\Program Files\nodejs\node.exe" "C:\Users\x\npm\node_modules\opencode-ai\bin\opencode" serve --pure --hostname 127.0.0.1`, false},
-		{"opencode in a directory, not the executable", "/Users/x/.opencode/bin/node serve --pure --hostname 127.0.0.1", false},
-		{"another opencode subcommand with the serve flags", "opencode web --pure --hostname 127.0.0.1", false},
-		// Go quotes argv[0] only for an ASCII space or tab, so a profile name with a full-width
-		// (U+3000) or no-break (U+00A0) space arrives UNQUOTED. Splitting on every Unicode space
-		// cut the path there, and the reaper never recognised that user's own serve.
-		{"unquoted path with a full-width space", "C:\\Users\\山田\u3000太郎\\.opencode\\bin\\opencode.exe serve --pure --hostname 127.0.0.1 --port 5321", true},
-		{"unquoted path with a no-break space", "/Users/a\u00a0b/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isStrayServeLine(tc.line); got != tc.want {
-				t.Fatalf("isStrayServeLine(%q) = %v, want %v", tc.line, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestStrayServeFingerprintGatesOrphanReap composes the opencode fingerprint with
-// the port's orphan-gate primitive (proc.OrphanPIDs) — the same combination
-// StartOpenCodeServer drives via procCtl.ReapOrphans(isStrayServeLine). Only an
-// ORPHANED witness serve (ppid==1, matching fingerprint) may be selected. A live
-// sibling serve (ppid != 1 — still owned by its worker), a user's own serve, a
-// non-serve process, the scanner's own pid, and init itself must all be skipped.
-// (The ppid/self gate itself is exhaustively covered by proc.TestOrphanPIDs; this
-// guards that our fingerprint is the predicate feeding it.)
-func TestStrayServeFingerprintGatesOrphanReap(t *testing.T) {
-	const self = 700
-	psOut := strings.Join([]string{
-		"  4321     1 /Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5321 --log-level ERROR", // orphan → reap
-		"  4400  4399 /Users/x/.opencode/bin/opencode serve --pure --hostname 127.0.0.1 --port 5322 --log-level ERROR", // LIVE sibling (ppid!=1) → skip
-		"  4500     1 /usr/local/bin/opencode serve --hostname 127.0.0.1 --port 6000",                                  // user's own serve (no --pure) → skip
-		"  4600     1 opencode models --pure openai",                                                                   // other subcommand → skip
-		"   700     1 opencode serve --pure --hostname 127.0.0.1 --port 9999",                                          // self → skip
-		"     1     0 /sbin/launchd",         // init → skip
-		"  garbage line that does not parse", // skip
-	}, "\n")
-
-	got := proc.OrphanPIDs(psOut, self, isStrayServeLine)
-	want := []int{4321}
-	if !slices.Equal(got, want) {
-		t.Fatalf("orphan reap selection = %v, want %v", got, want)
-	}
-}
-
-// TestBuildOpenCodeServeCmdDrivesPort proves buildOpenCodeServeCmd binds the serve
-// child's lifetime to the worker through the port (proc.BindToParent) rather than
-// touching syscall.SysProcAttr directly — verified with a proc.Fake, no real
-// process spawned. The GOOS-specific effect of BindToParent (Pdeathsig on Linux,
-// no-op elsewhere) is covered in the proc package's own adapter tests.
-func TestBuildOpenCodeServeCmdDrivesPort(t *testing.T) {
-	prev := procCtl
-	fake := &proc.Fake{}
-	procCtl = fake
-	defer func() { procCtl = prev }()
-
-	cmd := buildOpenCodeServeCmdIn(context.Background(), t.TempDir(), 12345, "secret")
-	if len(fake.Bound) != 1 || fake.Bound[0] != cmd {
-		t.Fatalf("buildOpenCodeServeCmd did not call BindToParent on the serve cmd: %+v", fake.Bound)
-	}
-}
-
-func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
-	var created, prompted, deleted bool
-	var requestMessageID string
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Basic test" {
-			t.Fatalf("auth header = %q", got)
-		}
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/session":
-			created = true
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if body["title"] != "witness" || body["agent"] != "witness" {
-				t.Fatalf("bad session body: %#v", body)
-			}
-			model := body["model"].(map[string]any)
-			if model["providerID"] != "openai" || model["id"] != "gpt-5.5" {
-				t.Fatalf("bad session model: %#v", model)
-			}
-			_, _ = w.Write([]byte(`{"id":"ses_test"}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_test/prompt_async":
-			prompted = true
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if !strings.HasPrefix(body["messageID"].(string), "msg_") {
-				t.Fatalf("messageID not generated: %#v", body["messageID"])
-			}
-			requestMessageID = body["messageID"].(string)
-			if body["agent"] != "witness" {
-				t.Fatalf("bad agent: %#v", body["agent"])
-			}
-			// The trusted/untrusted split: instructions on `system`, corpus as the text part, each
-			// VERBATIM — distill.RunnerMine has already fenced both, so the runner must not again.
-			if system := body["system"].(string); system != "EXTRACT" {
-				t.Fatalf("system prompt not passed verbatim: %q", system)
-			}
-			parts := body["parts"].([]any)
-			part := parts[0].(map[string]any)
-			if part["type"] != "text" || part["text"] != "DATA" {
-				t.Fatalf("bad parts: %#v", body["parts"])
-			}
-			model := body["model"].(map[string]any)
-			if model["providerID"] != "openai" || model["modelID"] != "gpt-5.5" {
-				t.Fatalf("bad message model: %#v", model)
-			}
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_test/message":
-			_, _ = fmt.Fprintf(w, `[
-				{"info":{"id":%q,"role":"user"},"parts":[{"id":"prt_u","type":"text","text":"DATA"}]},
-				{"info":{"id":"msg_reply","role":"assistant"},"parts":[{"id":"prt_1","type":"text","text":"RESULT"}]}
-			]`, requestMessageID)
-		case r.Method == http.MethodDelete && r.URL.Path == "/session/ses_test":
-			deleted = true
-			_, _ = w.Write([]byte(`{}`))
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
-	got, err := srv.Run(context.Background(), "openai/gpt-5.5", "EXTRACT", "DATA")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "RESULT" {
-		t.Fatalf("got %q", got)
-	}
-	if !created || !prompted || !deleted {
-		t.Fatalf("created=%v prompted=%v deleted=%v", created, prompted, deleted)
-	}
-}
-
-func TestOpenCodeServerRunAbortsOnAsyncTimeout(t *testing.T) {
-	// Deterministic timeout: a large poll interval means the ticker never races
-	// ctx.Done(), and the caller's context is cancelled from INSIDE the first
-	// /message poll (below) — so the deadline can only fire once the poll loop is
-	// genuinely reached. The old version used a 5ms wall-clock deadline that raced
-	// createSession/prompt_async: if it fired during setup, Run bailed before the
-	// poll loop and abort/delete never ran, flaking CI as aborted=false.
-	oldPoll := openCodeAsyncPollInterval
-	openCodeAsyncPollInterval = time.Hour
-	defer func() { openCodeAsyncPollInterval = oldPoll }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var aborted, deleted bool
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/session":
-			_, _ = w.Write([]byte(`{"id":"ses_timeout"}`))
-		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_timeout/prompt_async":
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_timeout/message":
-			// The reply never arrives; cancel the caller's context so waitForAsyncReply
-			// hits ctx.Done() on the very next select. abort/delete use their own
-			// background contexts, so this cancellation cannot suppress them.
-			_, _ = w.Write([]byte(`[]`))
-			cancel()
-		case r.Method == http.MethodPost && r.URL.Path == "/session/ses_timeout/abort":
-			aborted = true
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodDelete && r.URL.Path == "/session/ses_timeout":
-			deleted = true
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-	})
-	ts := httptest.NewServer(h)
-	defer ts.Close()
-	srv := &OpenCodeServer{baseURL: ts.URL, authHeader: "Basic test", client: ts.Client()}
-
-	if _, err := srv.Run(ctx, "", "EXTRACT", "DATA"); err == nil {
-		t.Fatal("Run should time out")
-	}
-	if !aborted || !deleted {
-		t.Fatalf("aborted=%v deleted=%v", aborted, deleted)
-	}
-}
-
-func TestParseOpenCodeMessageResponse(t *testing.T) {
-	data := []byte(`{"parts":[{"id":"p1","type":"text","text":"first"},{"id":"p2","type":"reasoning","text":"hidden"},{"id":"p2","type":"text","text":"second"}]}`)
-	if got := parseOpenCodeMessageResponse(data); got != "first\n\nsecond" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-func TestParseOpenCodeAsyncReplySkipsRequestMessage(t *testing.T) {
-	data := []byte(`[
-		{"info":{"id":"msg_old","role":"assistant"},"parts":[{"id":"p0","type":"text","text":"historical"}]},
-		{"info":{"id":"msg_request","role":"user"},"parts":[{"id":"p1","type":"text","text":"input"}]},
-		{"info":{"id":"msg_reply","role":"assistant"},"parts":[{"id":"p2","type":"text","text":"output"}]}
-	]`)
-	if got := parseOpenCodeAsyncReply(data, "msg_request"); got != "output" {
-		t.Fatalf("got %q", got)
-	}
-	if got := parseOpenCodeAsyncReply(data, "msg_missing"); got != "" {
-		t.Fatalf("historical reply leaked into unmatched request: %q", got)
-	}
-}
-
-func TestParseOpenCodeModels(t *testing.T) {
-	out := strings.Join([]string{
-		"openai/gpt-5.5",
-		"openai/gpt-5.5-fast",
-		"openai/gpt-5.5",
-		"metadata without model",
-	}, "\n")
-	got := parseOpenCodeModels(out)
-	want := []string{"openai/gpt-5.5", "openai/gpt-5.5-fast"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
 
@@ -342,63 +51,290 @@ func TestModelHint(t *testing.T) {
 	}
 }
 
-// A generation that FAILED at the provider is not an empty response: OpenCode marks the
-// assistant message completed, attaches info.error, and emits ZERO text parts. Without
-// checking info.error that is indistinguishable from "still generating", so the poll used
-// to spin for the full 10-minute generateTimeout and then blame a timeout — burying the
-// real, actionable cause.
-//
-// testdata/async_provider_error.json is a VERBATIM capture from real OpenCode 1.18.3
-// (an unfunded account: APIError / 401 / "Insufficient balance"), workspace id redacted.
-func TestAsyncProviderErrorIsSurfacedNotPolled(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "async_provider_error.json"))
+// One job = one fresh session: create it with witness's agent and the model, prompt it with the
+// corpus alone, read the reply, delete it. The system prompt travels ONLY as the agent's `system` in
+// the private config (critic C1): v2's create/prompt routes have no system field, and an env var is
+// capped at 32,767 chars on Windows while the lens prompts total ~36 KB.
+func TestRunCreatesPromptsAndDeletesOneSessionPerJob(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	got, err := srv.Run(context.Background(), "openai/gpt-5.5", "EXTRACT", "DATA")
 	if err != nil {
 		t.Fatal(err)
 	}
-	const requestID = "msg_wreq1785880955"
+	if got != "RESULT" {
+		t.Fatalf("reply = %q, want RESULT", got)
+	}
+	s := fake.session("ses_1")
+	wantCreate := map[string]any{"title": "witness", "agent": agentID("EXTRACT"),
+		"model": map[string]any{"providerID": "openai", "id": "gpt-5.5"}}
+	if !reflect.DeepEqual(s.Create, wantCreate) {
+		t.Errorf("POST /api/session body = %v, want %v", s.Create, wantCreate)
+	}
+	if id, _ := s.Prompt["id"].(string); !strings.HasPrefix(id, "msg_") || !reflect.DeepEqual(s.Prompt, map[string]any{"id": id, "text": "DATA"}) {
+		t.Errorf("prompt body = %v, want {id: msg_…, text: DATA} and nothing else", s.Prompt)
+	}
+	// The agent: the prompt verbatim (distill.RunnerMine already fenced it) and deny-all.
+	agents, _ := fake.config()["agents"].(map[string]any)
+	agent, _ := agents[agentID("EXTRACT")].(map[string]any)
+	if agent["system"] != "EXTRACT" {
+		t.Errorf("agents[%s].system = %v, want EXTRACT (config agents: %v)", agentID("EXTRACT"), agent["system"], agents)
+	}
+	wantDeny := []any{map[string]any{"action": "*", "resource": "*", "effect": "deny"}}
+	if !reflect.DeepEqual(agent["permissions"], wantDeny) {
+		t.Errorf("agent permissions = %v, want deny-all %v", agent["permissions"], wantDeny)
+	}
+	calls := fake.seen()
+	if fake.count(func(c string) bool { return strings.HasSuffix(c, "/interrupt") }) != 0 {
+		t.Errorf("a successful job was interrupted: %v", calls)
+	}
+	if fake.count(func(c string) bool { return strings.HasPrefix(c, "DELETE ") }) != 1 || calls[len(calls)-1] != "DELETE /api/session/ses_1" {
+		t.Errorf("calls = %v, want exactly one DELETE /api/session/ses_1, last", calls)
+	}
+}
 
-	// The reply parser still (correctly) sees no text — that is why the error check exists.
-	if reply := parseOpenCodeAsyncReply(data, requestID); reply != "" {
-		t.Fatalf("no text parts exist, so the reply must be empty, got %q", reply)
+func TestModelRefKeepsVariantAndSlashes(t *testing.T) {
+	for model, want := range map[string]map[string]string{
+		"openai/gpt-5.5#high": {"providerID": "openai", "id": "gpt-5.5", "variant": "high"},
+		"openrouter/a/b":      {"providerID": "openrouter", "id": "a/b"},
+		" openai/gpt-5.5 ":    {"providerID": "openai", "id": "gpt-5.5"},
+	} {
+		got, err := splitOpenCodeModel(model)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("splitOpenCodeModel(%q) = %v, %v; want %v", model, got, err, want)
+		}
 	}
-	// The error parser must extract the provider's own message.
-	got := parseOpenCodeAsyncError(data, requestID)
-	if got == "" {
-		t.Fatal("a completed-with-error assistant message must surface an error, got none")
+	if _, err := splitOpenCodeModel(""); !errors.Is(err, ErrOpenCodeNoModel) {
+		t.Errorf(`splitOpenCodeModel("") = %v, want ErrOpenCodeNoModel`, err)
 	}
-	for _, want := range []string{"APIError", "401", "Insufficient balance"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("error %q should mention %q so the user can act on it", got, want)
+	for _, bad := range []string{"nomodel", "/x", "openai/", "openai/x#"} {
+		if _, err := splitOpenCodeModel(bad); err == nil || errors.Is(err, ErrOpenCodeNoModel) {
+			t.Errorf("splitOpenCodeModel(%q) = %v, want a provider/model format error", bad, err)
 		}
 	}
 }
 
-// The error must be attributed to THIS request only. A native fork carries the source
-// conversation, so a failure already present in that history must never be reported as
-// this run's outcome — and nothing at all until our own request appears in the window.
-func TestAsyncProviderErrorIgnoresHistoryAndPreRequest(t *testing.T) {
-	errMsg := `{"info":{"id":"msg_old","role":"assistant","time":{"completed":1},` +
-		`"error":{"name":"APIError","data":{"message":"an OLD failure from the forked history","statusCode":500}}},"parts":[]}`
-	req := `{"info":{"id":"msg_ours","role":"user"},"parts":[{"type":"text","text":"go"}]}`
+// Witness never falls back to OpenCode's default model (opencode/big-pickle may train on inputs),
+// so an unnamed stage fails before any request reaches the serve, with the keys that fix it.
+func TestRunRefusesAnEmptyModelBeforeAnyRequest(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	_, err := srv.Run(context.Background(), "", "P", "D")
+	if !errors.Is(err, ErrOpenCodeNoModel) {
+		t.Fatalf("err = %v, want ErrOpenCodeNoModel", err)
+	}
+	for _, want := range []string{"witness config set mine_model", "opencode models"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %q", err, want)
+		}
+	}
+	if calls := fake.seen(); len(calls) != 0 {
+		t.Errorf("requests sent for an unnamed model: %v", calls)
+	}
+}
 
-	// Error BEFORE our request → not ours.
-	if got := parseOpenCodeAsyncError([]byte("["+errMsg+","+req+"]"), "msg_ours"); got != "" {
-		t.Errorf("a failure preceding our request must be ignored, got %q", got)
+// A config agent shows up in a running serve ~0.25 s after the write, so the session is created
+// only once /api/agent lists it; before that a prompt fails with "Agent not found".
+func TestRunWaitsForANewAgentToLoad(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	fake.agentDelay = 3
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D"); err != nil {
+		t.Fatal(err)
 	}
-	// Our request absent entirely → nothing is attributable yet.
-	if got := parseOpenCodeAsyncError([]byte("["+errMsg+"]"), "msg_ours"); got != "" {
-		t.Errorf("with our request absent nothing is ours, got %q", got)
+	calls := fake.seen()
+	create := slices.Index(calls, "POST /api/session")
+	if create < 0 || strings.Count(strings.Join(calls[:create], "\n"), "GET /api/agent") != fake.agentDelay+1 {
+		t.Errorf("calls = %v; want POST /api/session right after the first /api/agent poll that lists the agent (poll %d)", calls, fake.agentDelay+1)
 	}
-	// Error AFTER our request → ours.
-	after := `{"info":{"id":"msg_new","role":"assistant","time":{"completed":2},` +
-		`"error":{"name":"APIError","data":{"message":"our failure","statusCode":429}}},"parts":[]}`
-	got := parseOpenCodeAsyncError([]byte("["+req+","+after+"]"), "msg_ours")
-	if !strings.Contains(got, "our failure") || !strings.Contains(got, "429") {
-		t.Errorf("a failure after our request must be surfaced with its status, got %q", got)
+}
+
+func TestRunReusesTheAgentForTheSamePrompt(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	agentPolls := func() int { return strings.Count(strings.Join(fake.seen(), "\n"), "GET /api/agent") }
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D1"); err != nil {
+		t.Fatal(err)
 	}
-	// A clean completed reply must report NO error (no false positives).
-	ok := `{"info":{"id":"msg_ok","role":"assistant","time":{"completed":3}},"parts":[{"type":"text","text":"[]"}]}`
-	if got := parseOpenCodeAsyncError([]byte("["+req+","+ok+"]"), "msg_ours"); got != "" {
-		t.Errorf("a successful generation must report no error, got %q", got)
+	after1 := agentPolls()
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := agentPolls(); got != after1 {
+		t.Errorf("/api/agent polls %d after the second Run, %d after the first: a known agent was re-loaded", got, after1)
+	}
+	if agents, _ := fake.config()["agents"].(map[string]any); len(agents) != 1 {
+		t.Errorf("config agents = %v, want exactly one for one distinct prompt", agents)
+	}
+}
+
+func TestRunFailsWhenTheAgentNeverLoads(t *testing.T) {
+	prev := healthCheckBudget
+	healthCheckBudget = 200 * time.Millisecond
+	t.Cleanup(func() { healthCheckBudget = prev })
+	fake, srv := newFakeV2(t)
+	fake.agentDelay = math.MaxInt
+	_, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D")
+	if err == nil || !strings.Contains(err.Error(), "did not load") {
+		t.Fatalf("err = %v, want the agent named as not loaded", err)
+	}
+	if slices.Contains(fake.seen(), "POST /api/session") {
+		t.Errorf("a session was created for an agent the serve never listed: %v", fake.seen())
+	}
+	// The serve keeps its verdict: every later Run of that prompt fails at once instead of paying
+	// the wait again, serially under the WorkerLock, once per pending (session, lens).
+	polls := fake.count(func(c string) bool { return c == "GET /api/agent" })
+	start := time.Now()
+	if _, again := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D2"); again == nil || again.Error() != err.Error() {
+		t.Errorf("second Run = %v, want the remembered %v", again, err)
+	}
+	if got := fake.count(func(c string) bool { return c == "GET /api/agent" }); got != polls || time.Since(start) > healthCheckBudget/2 {
+		t.Errorf("second Run polled /api/agent %d more times and took %s: the failed load was not remembered", got-polls, time.Since(start))
+	}
+}
+
+// A failing /api/agent is not "the agent did not load": a serve that died after readiness, or a
+// 500, must be named, or the timeout sends the user hunting for a config problem.
+func TestAgentLoadTimeoutNamesThePollError(t *testing.T) {
+	prev := healthCheckBudget
+	healthCheckBudget = 300 * time.Millisecond
+	t.Cleanup(func() { healthCheckBudget = prev })
+	for name, tc := range map[string]struct {
+		dead bool
+		want string
+	}{
+		"500":  {false, "500 Internal Server Error"},
+		"dead": {true, "dial tcp"}, // connection refused (connectex on Windows)
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", http.StatusInternalServerError)
+			}))
+			defer ts.Close()
+			srv := newOpenCodeServer(ts.URL, "Basic test", filepath.Join(t.TempDir(), "opencode.json"), ts.Client())
+			if tc.dead {
+				ts.Close()
+			}
+			_, err := srv.ensureAgent(context.Background(), "P")
+			if err == nil || !strings.Contains(err.Error(), "did not load") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want the load timeout naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A caller that gives up (worker stop, Ctrl-C, its own deadline) gets its own error back, not a
+// claim that the agent failed to load within the budget.
+func TestAgentLoadHonoursTheCallersContext(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		"cancelled": {func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(50*time.Millisecond, cancel)
+			return ctx, cancel
+		}, context.Canceled},
+		"deadline": {func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 50*time.Millisecond)
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, srv := newFakeV2(t)
+			fake.agentDelay = math.MaxInt // never listed, so only the caller can end the wait
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			start := time.Now()
+			_, err := srv.ensureAgent(ctx, "P")
+			if !errors.Is(err, tc.want) || strings.Contains(err.Error(), "within") {
+				t.Errorf("err = %v, want one wrapping %v that claims no load timeout", err, tc.want)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("took %s; the caller's ctx must end the wait at once", d)
+			}
+		})
+	}
+}
+
+// Every failure ends the turn upstream (interrupt) before the session goes (delete).
+func TestRunInterruptsThenDeletesOnAProviderError(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	fail := map[string]any{"type": "provider.internal", "message": "mock internal error", "status": 500}
+	fake.turn = func(s *fakeSession) []map[string]any {
+		a := assistantRec("", nil)
+		a["error"] = fail
+		return []map[string]any{s.user(), a, idleRec("failed", fail)}
+	}
+	_, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D")
+	if err == nil || !strings.Contains(err.Error(), "provider.internal") {
+		t.Fatalf("err = %v, want the provider error named", err)
+	}
+	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
+}
+
+// assertInterruptedThenDeleted checks a failed job's last two requests.
+func assertInterruptedThenDeleted(t *testing.T, calls []string, id string) {
+	t.Helper()
+	want := []string{"POST /api/session/" + id + "/interrupt", "DELETE /api/session/" + id}
+	if tail := calls[max(len(calls)-3, 0):]; len(calls) < 2 || !slices.Equal(calls[len(calls)-2:], want) {
+		t.Errorf("calls end with %v (of %d), want %v", tail, len(calls), want)
+	}
+}
+
+// replyForMessage is the native resume's harvest: a reply counts only once its turn is idle
+// `succeeded`. A dead turn (a SIGKILLed serve leaves [user, assistant] with no idle) or a failed
+// one yields "", so the caller re-prompts instead of committing a partial or empty reply.
+func TestReplyForMessageHarvestsOnlyASucceededTurn(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	agent, err := srv.ensureAgent(context.Background(), "P")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := srv.createSession(context.Background(), "openai/gpt-5.5", agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.doJSON(context.Background(), http.MethodPost, "/api/session/"+id+"/prompt",
+		map[string]string{"id": "msg_r", "text": "D"}, http.StatusOK); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		turn func(*fakeSession) []map[string]any
+		want string
+	}{
+		{"succeeded", okTurn("[1]"), "[1]"},
+		{"dead", func(s *fakeSession) []map[string]any { return []map[string]any{s.user(), assistantRec("partial", nil)} }, ""},
+		{"failed", func(s *fakeSession) []map[string]any {
+			return []map[string]any{s.user(), assistantRec("partial", nil), idleRec("failed", nil)}
+		}, ""},
+	} {
+		fake.mu.Lock()
+		fake.turn = tc.turn
+		fake.mu.Unlock()
+		if got, err := srv.replyForMessage(context.Background(), id, "msg_r"); err != nil || got != tc.want {
+			t.Errorf("%s: replyForMessage = %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+// privateConfigOverlay is the contract job's seam (PR 3 adds a mock provider through it): merged
+// beside witness's agents, and absent by default so the private serve gets no provider config.
+func TestPrivateConfigOverlayIsMerged(t *testing.T) {
+	fake, _ := newFakeV2(t)
+	path, read := fake.configPath, fake.config
+	if err := writePrivateConfig(path, map[string]string{"w-a": "A"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := read(); len(cfg) != 2 || cfg["$schema"] != "https://opencode.ai/config.json" {
+		t.Errorf("config = %v, want only $schema and agents with no overlay", cfg)
+	}
+	privateConfigOverlay = map[string]any{"provider": map[string]any{"mock": map[string]any{}}}
+	t.Cleanup(func() { privateConfigOverlay = nil })
+	if err := writePrivateConfig(path, map[string]string{"w-a": "A"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := read()
+	if p, _ := cfg["provider"].(map[string]any); p["mock"] == nil {
+		t.Errorf("config = %v, want provider.mock from the overlay", cfg)
+	}
+	if a, _ := cfg["agents"].(map[string]any); a["w-a"] == nil {
+		t.Errorf("config = %v, want the agents beside the overlay", cfg)
 	}
 }

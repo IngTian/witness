@@ -39,7 +39,7 @@ func TestRunnerInvocationHint(t *testing.T) {
 		t.Fatalf("claude hint = %q", cc.InvocationHint())
 	}
 	oc, _ := platform.RunnerForName("opencode", store.Config{})
-	if oc.InvocationHint() != "opencode serve" {
+	if oc.InvocationHint() != "opencode serve --stdio" {
 		t.Fatalf("opencode hint = %q", oc.InvocationHint())
 	}
 }

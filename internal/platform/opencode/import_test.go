@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -612,6 +613,25 @@ func TestATurnEndWithNoNewStepDoesNotReadAsStale(t *testing.T) {
 	}
 }
 
+// ImportAtDrainStart returns true when a plugin file exists, even when no import has run.
+func TestImportAtDrainStartReturnsTrueWhenPluginFileExists(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+	// Write the plugin file (create plugins dir first)
+	pluginPath := PluginPath()
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pluginPath, []byte("// test plugin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeImportStore()
+	// No import has run, but the plugin file exists
+	if !(Platform{}).ImportAtDrainStart(fake) {
+		t.Fatal("with plugin file present: ImportAtDrainStart = false, want true")
+	}
+}
+
 // Unwire clears only the seen watermark: drain-start capture stops, and a re-wire still resumes
 // from the full-sync watermark instead of re-reading every session.
 func TestForgetCaptureStopsTheDrainStartImportAndKeepsTheSyncWatermark(t *testing.T) {
@@ -676,6 +696,92 @@ func TestNewestActivityIgnoresATurnStillRunning(t *testing.T) {
 	}
 }
 
+// finishTurnBetweenReads makes the user finish a turn in OpenCode right after whichever of the two
+// named reads Import does first, so the test fails if the order that keeps seen behind the import
+// is ever reversed.
+func finishTurnBetweenReads(t *testing.T, dbPath string, reads [2]string, stmts ...string) {
+	t.Helper()
+	var once sync.Once
+	prev := betweenImportReads
+	t.Cleanup(func() { betweenImportReads = prev })
+	betweenImportReads = func(read string) {
+		if read == reads[0] || read == reads[1] {
+			once.Do(func() { mutateV2DB(t, dbPath, stmts...) })
+		}
+	}
+}
+
+// importedText reports whether any imported record of session carries text.
+func importedText(fake *fakeImportStore, session, text string) bool {
+	for _, c := range fake.imports {
+		for _, r := range c.records {
+			if r.Session == SessionPrefix+session && r.Text == text {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Seen must never run ahead of what was imported: a turn that finishes between the read that
+// advances seen and the import must leave seen below it until an import brings it in. Targeted
+// import: the session's newest idle is read before its turns.
+func TestSeenNeverRunsAheadOfWhatWasImported(t *testing.T) {
+	dbPath := seedV2DB(t, session("ses_order", 5000), user("ses_order", 1, 1100, "user"), idle("ses_order", 2, 8000))
+	finishTurnBetweenReads(t, dbPath, [2]string{"session idle", "turns"}, user("ses_order", 3, 8500, "late"), idle("ses_order", 4, 9000))
+	fake := newFakeImportStore()
+	mustImport(t, fake, dbPath, "ses_order")
+	if seen := LastImported(fake).UnixMilli(); seen >= 9000 && !importedText(fake, "ses_order", "late") {
+		t.Fatalf("seen = %d covers the turn that ended at 9000, which was not imported", seen)
+	}
+}
+
+// The full-import case: the global newest idle is read before the session list, so a session whose
+// first turn ends between the two reads is either in the list or not yet counted as seen.
+func TestSeenNeverRunsAheadOfAFullImport(t *testing.T) {
+	dbPath := seedV2DB(t, session("ses_old", 5000), user("ses_old", 1, 1100, "user"), idle("ses_old", 2, 8000))
+	finishTurnBetweenReads(t, dbPath, [2]string{"newest idle", "sessions"}, session("ses_new", 9000), user("ses_new", 1, 8500, "new"), idle("ses_new", 2, 9000))
+	fake := newFakeImportStore()
+	mustImport(t, fake, dbPath)
+	if seen := LastImported(fake).UnixMilli(); seen >= 9000 && !importedText(fake, "ses_new", "new") {
+		t.Fatalf("seen = %d covers ses_new's turn, but ses_new was not imported", seen)
+	}
+}
+
+// A full import must leave freshness "current" when every finished turn has been imported,
+// even when the session with the newest time_updated is not the session with the newest
+// finished turn. This is the unwire → re-wire case: after unwire, ForgetCapture clears
+// seen; a re-wire + full import should clear the freshness warning.
+func TestFullImportClearsFreshnessEvenWhenNewestUpdatedIsNotNewestTurn(t *testing.T) {
+	// Fixture: ses_old has the newest finished turn (idle at 8000), but ses_renamed was
+	// renamed after that turn (time_updated = 9000, but no newer idle). They are > StaleAfter
+	// apart, so the freshness check would warn if seen stayed at the per-session idle.
+	dbPath := seedV2DB(t,
+		session("ses_old", 5000),
+		user("ses_old", 1, 1100, "old user"),
+		idle("ses_old", 2, 8000),     // newest finished turn
+		session("ses_renamed", 9000), // renamed after ses_old's turn, no turns of its own
+	)
+	fake := newFakeImportStore()
+	// Full import (no session IDs) should take the global newest idle, so seen = 8000.
+	mustImport(t, fake, dbPath)
+
+	// After unwire + re-wire, freshness should be current (NewestActivity - LastImported <= StaleAfter).
+	if err := ForgetCapture(fake); err != nil {
+		t.Fatal(err)
+	}
+	mustImport(t, fake, dbPath) // re-wire: full import again
+
+	newest, err := NewestActivity(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lag := newest.Sub(LastImported(fake))
+	if lag > StaleAfter {
+		t.Fatalf("after unwire + re-wire + full import: freshness lag = %s, want <= %s", lag, StaleAfter)
+	}
+}
+
 func TestReadersNeverWriteTheSourceDB(t *testing.T) {
 	dbPath := seedV2DB(t, session("ses_test", 5000), user("ses_test", 1, 1100, "user"), "PRAGMA journal_mode=WAL;")
 	sum := func() [32]byte {
@@ -698,6 +804,12 @@ func TestReadersNeverWriteTheSourceDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close() // before hashing: a writer would checkpoint on the last close
+	// The native runner's drift check reads the same DB.
+	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
+	w := &platform.NativeSession{Session: SessionPrefix + "ses_test", Digest: "captured earlier"}
+	if err := newNativeRuntime(t.TempDir(), nil).checkDigest(context.Background(), w); !errors.Is(err, errNativeSessionChanged) {
+		t.Fatalf("checkDigest = %v, want errNativeSessionChanged", err)
+	}
 
 	if after := sum(); before != after {
 		t.Fatalf("opencode.db was modified: before=%x after=%x", before, after)
