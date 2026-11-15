@@ -143,9 +143,6 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		_ = st.SetMetaString(metaWorkerCurrent, "")
 		_ = st.SetMetaString(metaWorkerHeartbeat, time.Now().UTC().Format(time.RFC3339))
 	}()
-	if timeRange.empty() {
-		defer scheduleRetryWakeup(st)
-	}
 
 	lenses := activeLenses(st)
 	// The pending query cross-joins sessions against the ACTIVE lens set (#55). Use
@@ -168,6 +165,18 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// port's signal-aware ctx (SIGINT+SIGTERM).
 	ctx, stopSignals := procCtl.NotifyStop(context.Background())
 	defer stopSignals()
+	// On exit, arm the one future wakeup a deferred need (a backoff, the free-model pause) asks
+	// for — unless the run ended on a stop: its ctx fired, or worker_stop_requested is set (a stop
+	// whose signal missed). `worker stop` clears every wakeup before its SIGTERM, and re-arming one
+	// here resumed the stopped drain 5 min later (G2, reproduced). A stopped worker waits for the
+	// next real trigger. Deferred after stopSignals so it runs first: stopSignals cancels ctx too.
+	if timeRange.empty() {
+		defer func() {
+			if ctx.Err() == nil && st.MetaString(metaWorkerStopRequested) != "1" {
+				scheduleRetryWakeup(st)
+			}
+		}()
+	}
 
 	// Run drain-start import for any wired sources that can go stale without a live
 	// trigger (OpenCode's plugin can be silently rejected by the editor with only a log

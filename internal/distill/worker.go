@@ -282,7 +282,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			continue
 		}
 		lm := LensMining{Lens: ln.Name}
-		quota := false // a free-allowance refusal: skip this lens without a backoff
+		skip := false // a free-allowance refusal or an interrupted drain: skip this lens without a backoff
 		if total > done {
 			anyDelta = true
 			// Track drift across ALL of this lens's inputs (a session may render to
@@ -338,13 +338,24 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 					lm.Native = append(lm.Native, native)
 				}
 				if err != nil {
+					// The drain itself was cancelled (`worker stop`'s SIGTERM or a Ctrl-C reached
+					// NotifyStop): interrupted, not failed, so it skips like a refusal below. A backoff
+					// here charged every in-flight session a retry and armed the wakeup that resumed
+					// the stopped drain. Decided on OUR ctx, never on err: a per-call timeout cancels
+					// only the runner's child ctx and stays a failure (and backpressure), and a child
+					// the stop's group SIGTERM killed reports "signal: terminated", not ctx's error.
+					if ctx.Err() != nil {
+						slog.Info("mine interrupted; stays pending", "session", session, "lens", ln.Name, "err", err)
+						skip = true
+						break
+					}
 					// The free allowance is used up: cmd's gate now holds every free-model call
 					// until the reset, so this is not this session's failure. Skip the lens
 					// entirely (below) — no IncRetry/next_attempt, watermark kept — and it mines
 					// once the pause lifts. A backoff here would add hours per session on top.
 					var qe *platform.QuotaExhaustedError
 					if errors.As(err, &qe) {
-						quota = true
+						skip = true
 						break
 					}
 					if errors.Is(err, errNoArray) {
@@ -379,7 +390,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			}
 			lm.Drifted = sawDrift && !producedObs
 		}
-		if quota {
+		if skip {
 			// CommitMining advances and backs off only lenses in m.Lenses, so leaving it out
 			// keeps the watermark and next_attempt untouched (the same skip as a backed-off lens).
 			continue
