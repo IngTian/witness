@@ -8,6 +8,7 @@ package opencode
 // the gateway's and OpenAI's own (freetier.md §5).
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,8 @@ import (
 type mockCall struct {
 	Model, System, User string
 	Tools               int
+	ToolNames           []string
+	RawTools            string // raw JSON of tools array, for debugging non-zero tool offers
 	Stream              bool
 }
 
@@ -85,6 +88,21 @@ func (m *mockProvider) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	call := mockCall{Model: req.Model, Tools: len(req.Tools), Stream: req.Stream}
+	if len(req.Tools) > 0 {
+		if b, err := json.Marshal(req.Tools); err == nil {
+			call.RawTools = string(b)
+		}
+	}
+	for _, raw := range req.Tools {
+		var tl struct {
+			Name     string `json:"name"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		_ = json.Unmarshal(raw, &tl)
+		call.ToolNames = append(call.ToolNames, cmp.Or(tl.Function.Name, tl.Name))
+	}
 	var system, user []string
 	for _, msg := range req.Messages {
 		switch msg.Role {

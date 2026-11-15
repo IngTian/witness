@@ -7,6 +7,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -65,7 +66,12 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 			if err := os.WriteFile(leak, []byte("OPENCODE-CONFIG-LEAK-MARKER"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("OPENCODE_CONFIG", fmt.Sprintf(`{"instructions":[%q]}`, leak))
+			cfg := filepath.Join(s.Root, "leak-config.json")
+			b, _ := json.Marshal(map[string][]string{"instructions": {leak}})
+			if err := os.WriteFile(cfg, b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("OPENCODE_CONFIG", cfg)
 		})
 		out, err := r.Run(ctx, "mock/ok", "LENS-SYSTEM-MARKER instructions", "CONTRACT-INPUT")
 		if err != nil || !strings.Contains(out, "MOCK-REPLY") {
@@ -79,12 +85,8 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 		if !strings.Contains(c.System, "LENS-SYSTEM-MARKER") || !strings.Contains(c.User, "CONTRACT-INPUT") {
 			t.Fatalf("missing lens prompt or input in %+v", c)
 		}
-		// OpenCode v2 always offers `session_move` (opencode.ts:145 `pinned: true`), which means it
-		// appears in the model request's selectedListings (catalog.ts:77) regardless of agent config.
-		// Witness's deny-all permission (`action: "*", resource: "*", effect: "deny"` in serve.go:289)
-		// blocks execution if the model calls it, but cannot remove it from the offered tools.
-		if c.Tools != 1 {
-			t.Errorf("Tools = %d, want 1 (session_move, pinned in both v2.2.7 and v2.3.0)", c.Tools)
+		if c.Tools != 0 {
+			t.Errorf("deny-all agent was offered %d tools: %v (raw: %s)", c.Tools, c.ToolNames, c.RawTools)
 		}
 		for _, leak := range []string{"GLOBAL-AGENTS-MD-MARKER", "OPENCODE-CONFIG-LEAK-MARKER"} {
 			if strings.Contains(c.System, leak) {
@@ -134,6 +136,10 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 
 	t.Run("second-runner", func(t *testing.T) {
 		r1, _, ctx, cfg := newContractRunner(t, nil)
+		rr1, ok := r1.(*runner)
+		if !ok {
+			t.Fatalf("NewRunner returned %T, want *runner", r1)
+		}
 		// A second runner on the same root (two serves, one private DB), both answering at once.
 		r2 := Platform{}.NewRunner(cfg)
 		if err := r2.Open(ctx); err != nil {
@@ -144,6 +150,13 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 				t.Errorf("Close second runner: %v", err)
 			}
 		}()
+		rr2, ok := r2.(*runner)
+		if !ok {
+			t.Fatalf("NewRunner returned %T, want *runner", r2)
+		}
+		if rr1.server.baseURL == rr2.server.baseURL {
+			t.Fatalf("both runners share one serve at %s, want two distinct serves", rr1.server.baseURL)
+		}
 		var replies [2]string
 		var runErrs [2]error
 		var wg sync.WaitGroup
