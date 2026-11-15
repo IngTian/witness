@@ -79,6 +79,13 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 		if !strings.Contains(c.System, "LENS-SYSTEM-MARKER") || !strings.Contains(c.User, "CONTRACT-INPUT") {
 			t.Fatalf("missing lens prompt or input in %+v", c)
 		}
+		// OpenCode v2 always offers `session_move` (opencode.ts:145 `pinned: true`), which means it
+		// appears in the model request's selectedListings (catalog.ts:77) regardless of agent config.
+		// Witness's deny-all permission (`action: "*", resource: "*", effect: "deny"` in serve.go:289)
+		// blocks execution if the model calls it, but cannot remove it from the offered tools.
+		if c.Tools != 1 {
+			t.Errorf("Tools = %d, want 1 (session_move, pinned in both v2.2.7 and v2.3.0)", c.Tools)
+		}
 		for _, leak := range []string{"GLOBAL-AGENTS-MD-MARKER", "OPENCODE-CONFIG-LEAK-MARKER"} {
 			if strings.Contains(c.System, leak) {
 				t.Errorf("%s reached the lens prompt", leak)
@@ -178,7 +185,9 @@ func TestContractRunnerSixteenParallel(t *testing.T) {
 	prev := maxConcurrentGenerations
 	maxConcurrentGenerations = 16
 	t.Cleanup(func() { maxConcurrentGenerations = prev })
-	// spec 7.5 "verify 16": the production cap stays 8 (PR 2) until this is green on both OSes and versions
+	// spec 7.5 "verify 16": the production cap stays 8 (PR 2) until this is green on both OSes and versions.
+	// Distinct system prompts load agents serially by design (OpenCodeServer.ensureAgent holds agentMu),
+	// and that is not a generation cap. This test uses one shared system prompt (one agent).
 	r, m, ctx, _ := newContractRunner(t, nil)
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -187,7 +196,7 @@ func TestContractRunnerSixteenParallel(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reply, err := r.Run(ctx, "mock/slow", fmt.Sprintf("PAR-%02d", i), "in")
+			reply, err := r.Run(ctx, "mock/slow", "shared system prompt", fmt.Sprintf("PAR-%02d", i))
 			if err != nil {
 				errs[i] = err
 			} else if reply != "MOCK-REPLY slow" {
@@ -206,12 +215,12 @@ func TestContractRunnerSixteenParallel(t *testing.T) {
 	if len(calls) != 16 {
 		t.Fatalf("%d provider calls, want 16", len(calls))
 	}
-	// Each PAR-xx must appear in exactly one call's System.
+	// Each PAR-xx must appear in exactly one call's User.
 	seen := make(map[string]int)
 	for _, c := range calls {
 		for i := 0; i < 16; i++ {
 			mark := fmt.Sprintf("PAR-%02d", i)
-			if strings.Contains(c.System, mark) {
+			if strings.Contains(c.User, mark) {
 				seen[mark]++
 			}
 		}
