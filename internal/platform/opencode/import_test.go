@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -695,26 +696,50 @@ func TestNewestActivityIgnoresATurnStillRunning(t *testing.T) {
 	}
 }
 
-// Seen must advance only to an idle that existed BEFORE the turn read, so it never runs ahead
-// of what was imported. The ordering is one reorder in the Import loop: take the session's
-// newest idle before importing its turns.
+// finishTurnBetweenReads makes the user finish a turn in OpenCode at the first betweenImportReads,
+// i.e. after a read that advances seen and before the read that imports.
+func finishTurnBetweenReads(t *testing.T, dbPath string, stmts ...string) {
+	t.Helper()
+	var once sync.Once
+	prev := betweenImportReads
+	t.Cleanup(func() { betweenImportReads = prev })
+	betweenImportReads = func() { once.Do(func() { mutateV2DB(t, dbPath, stmts...) }) }
+}
+
+// importedText reports whether any imported record of session carries text.
+func importedText(fake *fakeImportStore, session, text string) bool {
+	for _, c := range fake.imports {
+		for _, r := range c.records {
+			if r.Session == SessionPrefix+session && r.Text == text {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Seen must never run ahead of what was imported: a turn that finishes between the read that
+// advances seen and the import must leave seen below it until an import brings it in. Targeted
+// import: the session's newest idle is read before its turns.
 func TestSeenNeverRunsAheadOfWhatWasImported(t *testing.T) {
-	// Fixture: one session with an idle at 8000 ms.
-	dbPath := seedV2DB(t,
-		session("ses_order", 5000),
-		user("ses_order", 1, 1100, "user"),
-		idle("ses_order", 2, 8000),
-	)
+	dbPath := seedV2DB(t, session("ses_order", 5000), user("ses_order", 1, 1100, "user"), idle("ses_order", 2, 8000))
+	finishTurnBetweenReads(t, dbPath, user("ses_order", 3, 8500, "late"), idle("ses_order", 4, 9000))
 	fake := newFakeImportStore()
 	mustImport(t, fake, dbPath, "ses_order")
+	if seen := LastImported(fake).UnixMilli(); seen >= 9000 && !importedText(fake, "ses_order", "late") {
+		t.Fatalf("seen = %d covers the turn that ended at 9000, which was not imported", seen)
+	}
+}
 
-	// The seen watermark should be 8000 (the idle that existed before the read).
-	// If the code took the idle AFTER importing turns, and a turn arrived between the
-	// import and the idle query, seen would run ahead. This test locks the ordering:
-	// the seen value must be the pre-import idle, not a newer one.
-	seen := LastImported(fake).UnixMilli()
-	if seen != 8000 {
-		t.Fatalf("after import: seen = %d, want 8000 (the pre-import idle)", seen)
+// The full-import case: the global newest idle is read before the session list, so a session whose
+// first turn ends between the two reads is either in the list or not yet counted as seen.
+func TestSeenNeverRunsAheadOfAFullImport(t *testing.T) {
+	dbPath := seedV2DB(t, session("ses_old", 5000), user("ses_old", 1, 1100, "user"), idle("ses_old", 2, 8000))
+	finishTurnBetweenReads(t, dbPath, session("ses_new", 9000), user("ses_new", 1, 8500, "new"), idle("ses_new", 2, 9000))
+	fake := newFakeImportStore()
+	mustImport(t, fake, dbPath)
+	if seen := LastImported(fake).UnixMilli(); seen >= 9000 && !importedText(fake, "ses_new", "new") {
+		t.Fatalf("seen = %d covers ses_new's turn, but ses_new was not imported", seen)
 	}
 }
 

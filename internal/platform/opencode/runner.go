@@ -29,19 +29,20 @@ func (r *runner) Open(ctx context.Context) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	if r.cfg.RuntimeRoot == "" {
-		return fmt.Errorf("opencode isolated runtime root is unavailable")
-	}
 	// <root>/xdg/opencode/auth.json was a stale secret witness copied; plus a v1 DB and pid file
-	// nothing reads.
+	// nothing reads. An empty root removes nothing, and StartOpenCodeServerIn refuses it.
 	removeV1Runtime(r.cfg.RuntimeRoot)
 	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, r.cfg.RunnerModels)
 	if err != nil {
 		return err
 	}
-	r.server = srv
 	r.native = newNativeRuntime(r.cfg.RuntimeRoot, srv)
-	return r.native.reconcile()
+	if err := r.native.reconcile(); err != nil {
+		_ = srv.Close() // runnerSet keeps no runner whose Open failed, so no Close would ever end it
+		return err
+	}
+	r.server = srv
+	return nil
 }
 
 func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {

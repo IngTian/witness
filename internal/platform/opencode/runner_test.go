@@ -3,7 +3,9 @@ package opencode
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,9 +46,33 @@ func TestRunnerOpenHonorsExternalProcessFuse(t *testing.T) {
 	}
 }
 
-// The runner must refuse v1 by name with no spawn (a v2 check never leaks the user's API keys to
-// an isolated subtree). Both Open and ValidateModels must gate identically.
-func TestRunnerRefusesV2UntilThePortLands(t *testing.T) {
+// An Open that fails after the serve started (reconcile cannot read the native dir) must end that
+// serve: runnerSet keeps no runner whose Open failed, so nothing would ever Close it, and in the
+// MCP server it would live as long as the process.
+func TestOpenClosesItsServeWhenReconcileFails(t *testing.T) {
+	t.Setenv(platform.DisableExternalRunnersEnv, "")
+	useFakeServe(t, "lease")
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "opencode-native"), nil, 0o600); err != nil { // a file: ReadDir fails
+		t.Fatal(err)
+	}
+	r := &runner{cfg: store.Config{RuntimeRoot: root}}
+	t.Cleanup(func() { _ = r.Close() })
+	if err := r.Open(context.Background()); err == nil {
+		t.Fatal("Open succeeded with an unreadable native dir")
+	}
+	if r.server != nil {
+		t.Error("a failed Open kept its server")
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "opencode-serve")); err != nil || len(entries) != 0 {
+		t.Errorf("serve dirs after the failed Open = %d (%v), want 0: the serve was not closed", len(entries), err)
+	}
+}
+
+// The runner refuses v1 by name before any serve spawns; Open and ValidateModels gate identically.
+// Open first removes the v1-era runtime: the auth.json copy of the user's credentials that witness
+// once made, the v1 DB and the pid file. It keeps the v2 DB.
+func TestRunnerRefusesV1ByName(t *testing.T) {
 	t.Setenv(platform.DisableExternalRunnersEnv, "")
 
 	prevCmd, prevExec := openCodeVersionCommand, execCommandContext
@@ -59,6 +85,8 @@ func TestRunnerRefusesV2UntilThePortLands(t *testing.T) {
 	}
 
 	root := t.TempDir()
+	v1 := []string{"xdg/opencode/auth.json", "opencode.db", "opencode.db-wal", "opencode.db-shm", ".witness-serve.pid"}
+	seedFiles(t, root, append(v1, "opencode-v2.db")...)
 	r := &runner{cfg: store.Config{RuntimeRoot: root}}
 
 	// v1: both return ErrOpenCodeV1
@@ -68,6 +96,14 @@ func TestRunnerRefusesV2UntilThePortLands(t *testing.T) {
 	err := r.Open(context.Background())
 	if !errors.Is(err, ErrOpenCodeV1) {
 		t.Errorf("runner.Open() with v1 = %v, want ErrOpenCodeV1", err)
+	}
+	for _, p := range append(v1, "xdg") {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); !os.IsNotExist(err) {
+			t.Errorf("%s survived Open (stat err %v)", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "opencode-v2.db")); err != nil {
+		t.Errorf("Open removed the v2 DB: %v", err)
 	}
 	err = r.ValidateModels(context.Background(), "opencode/x")
 	if !errors.Is(err, ErrOpenCodeV1) {

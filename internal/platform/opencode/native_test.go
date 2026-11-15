@@ -206,6 +206,34 @@ func TestNativeResumeSurvivesAMissingSession(t *testing.T) {
 	}
 }
 
+// A ctx cancelled during the harvest GET says nothing about the retained turn: the reply may be
+// finished and merely unread. Deleting the session then would make the next attempt regenerate it
+// (spending free allowance), so the session and its manifest stay for the next attempt.
+func TestNativeResumeKeepsTheSessionWhenCancelledDuringTheHarvest(t *testing.T) {
+	forbidCLI(t)
+	fake, srv := newFakeV2(t)
+	fake.leftover("ses_old", userRec("msg_old"), assistantRec("", nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake.onCall = func(c string) {
+		if c == "GET /api/session/ses_old/message" {
+			cancel()
+		}
+	}
+	n := newNativeRuntime(t.TempDir(), srv)
+	w := nativeJob("l", "0:chunk", "")
+	p := retain(t, n, w, "P", "ses_old", "msg_old")
+	if _, err := n.run(ctx, w, nativeModel, "P", "I"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run = %v, want context.Canceled", err)
+	}
+	if got := fake.count(func(c string) bool { return strings.HasPrefix(c, "DELETE ") }); got != 0 {
+		t.Errorf("a cancelled harvest deleted the retained session: %v", fake.seen())
+	}
+	if m, err := n.load(p); err != nil || m.Fork != "ses_old" || m.MessageID != "msg_old" {
+		t.Errorf("manifest = %+v, %v; want it to still name ses_old/msg_old", m, err)
+	}
+}
+
 // Spec 7.5: on any error, interrupt (it aborts the upstream request). A prompt POST that fails
 // may still have reached the serve, and a native session is retained rather than deleted.
 func TestNativeRunInterruptsItsSessionWhenThePromptFails(t *testing.T) {

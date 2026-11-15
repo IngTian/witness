@@ -45,6 +45,7 @@ type OpenCodeServer struct {
 
 	agentMu sync.Mutex
 	agents  map[string]string // agentID -> system prompt: every agent written into configPath
+	loaded  sync.Map          // agentID -> error: nil once the serve listed it, else its load failure
 
 	mu     sync.Mutex
 	closed bool
@@ -66,13 +67,16 @@ func newOpenCodeServer(baseURL, authHeader, configPath string, client *http.Clie
 //
 // There is no runtimeRoot-less variant: the empty root once meant "use the AMBIENT OpenCode
 // database", i.e. opt out of the private per-witness database that #119 made the isolation
-// boundary, so callers pass the root explicitly and an empty one is refused.
+// boundary, so callers pass the root explicitly and an empty one is refused, before any spawn.
 func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models []string) (*OpenCodeServer, error) {
+	if runtimeRoot == "" {
+		return nil, errors.New("opencode isolated runtime root is unavailable")
+	}
 	if err := requireModels(models); err != nil {
 		return nil, err
 	}
 	if err := ValidateOpenCodeCapability(ctx, runtimeRoot); err != nil {
-		return nil, err // also refuses an empty runtimeRoot
+		return nil, err
 	}
 	serve, err := startPrivateServe(ctx, runtimeRoot, allowsFree(models))
 	if err != nil {
@@ -225,15 +229,25 @@ func agentID(systemPrompt string) string {
 // after the atomic write, without a restart; until /api/agent lists it, a prompt fails with "Agent
 // not found", so this waits for the listing.
 //
-// agentMu is held across the wait, so a concurrent caller never sees an agent in s.agents before
-// the serve has it. An agent that does not load is forgotten, so the next call writes and waits
-// again instead of trusting it.
+// agentMu is held across the wait, so a concurrent caller never sees an agent before the serve has
+// it; s.loaded is read before the lock, so a known agent never queues behind another one's wait.
+// An agent that did not load within the budget keeps that error for this serve: a v2 release that
+// stops loading the `agents` key would otherwise cost every pending (session, lens) another 30 s,
+// one after another under the WorkerLock. The next Open's fresh serve tries again.
 func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (string, error) {
 	id := agentID(systemPrompt)
+	known := func() (bool, error) {
+		v, ok := s.loaded.Load(id)
+		err, _ := v.(error)
+		return ok, err
+	}
+	if ok, err := known(); ok {
+		return id, err
+	}
 	s.agentMu.Lock()
 	defer s.agentMu.Unlock()
-	if _, ok := s.agents[id]; ok {
-		return id, nil
+	if ok, err := known(); ok {
+		return id, err
 	}
 	s.agents[id] = systemPrompt
 	if err := writePrivateConfig(s.configPath, s.agents); err != nil {
@@ -257,6 +271,7 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 			if err = json.Unmarshal(data, &list); err == nil {
 				for _, a := range list.Data {
 					if a.ID == id {
+						s.loaded.Store(id, nil)
 						return id, nil
 					}
 				}
@@ -271,7 +286,9 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 			if parent.Err() != nil { // the caller gave up (worker stop, Ctrl-C): not a load failure
 				return "", fmt.Errorf("stopped waiting for opencode to load witness's agent %s: %w", id, parent.Err())
 			}
-			return "", fmt.Errorf("opencode did not load witness's agent %s within %s%s", id, healthCheckBudget, lastPollNote(lastErr))
+			err := fmt.Errorf("opencode did not load witness's agent %s within %s%s", id, healthCheckBudget, lastPollNote(lastErr))
+			s.loaded.Store(id, err)
+			return "", err
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

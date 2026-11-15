@@ -166,31 +166,30 @@ func TestRunnerValidateModelsBootsAndClosesItsServe(t *testing.T) {
 	}
 }
 
-func TestOpenRemovesTheV1RuntimeCredentialCopy(t *testing.T) {
-	root := t.TempDir()
-
-	// Create v1 artifacts
-	xdgDir := filepath.Join(root, "xdg", "opencode")
-	os.MkdirAll(xdgDir, 0755)
-	os.WriteFile(filepath.Join(xdgDir, "auth.json"), []byte("{}"), 0600)
-	os.WriteFile(filepath.Join(root, "opencode.db"), []byte("db"), 0600)
-	os.WriteFile(filepath.Join(root, "opencode.db-wal"), []byte("wal"), 0600)
-	os.WriteFile(filepath.Join(root, ".witness-serve.pid"), []byte("123"), 0600)
-	// v2 DB should be kept
-	os.WriteFile(filepath.Join(root, "opencode-v2.db"), []byte("v2db"), 0600)
-
-	removeV1Runtime(root)
-
-	// First four should be gone
-	for _, name := range []string{"xdg/opencode/auth.json", "opencode.db", "opencode.db-wal", ".witness-serve.pid"} {
-		path := filepath.Join(root, name)
-		if _, err := os.Stat(path); err == nil {
-			t.Errorf("%s still exists after removeV1Runtime", name)
+// seedFiles creates each path under root (parents included) with a little content.
+func seedFiles(t *testing.T, root string, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		p = filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
+}
 
-	// v2 DB should be kept
-	if _, err := os.Stat(filepath.Join(root, "opencode-v2.db")); err != nil {
-		t.Errorf("opencode-v2.db removed, should be kept: %v", err)
+// An empty root must remove nothing: relative to "", the v1 paths are the CWD's, and the worker's
+// cwd is a user repo. Open refuses an empty root first today; this keeps the deleter safe alone.
+func TestRemoveV1RuntimeNeedsARoot(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	seedFiles(t, cwd, "xdg/opencode/auth.json", "opencode.db")
+	removeV1Runtime("")
+	for _, p := range []string{"xdg/opencode/auth.json", "opencode.db"} {
+		if _, err := os.Stat(filepath.Join(cwd, filepath.FromSlash(p))); err != nil {
+			t.Errorf("removeV1Runtime(\"\") removed the cwd's %s: %v", p, err)
+		}
 	}
 }

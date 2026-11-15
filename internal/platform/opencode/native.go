@@ -157,6 +157,11 @@ func (n *nativeRuntime) run(ctx context.Context, w *platform.NativeSession, mode
 		// such a manifest with no MessageID (an empty id matches no record).
 		unlock()
 		reply, err := n.server.replyForMessage(ctx, m.Fork, m.MessageID)
+		if ctx.Err() != nil {
+			// The caller gave up mid-harvest: that says nothing about the turn, which may hold a
+			// finished reply. Keep the session for the next attempt rather than pay to regenerate it.
+			return "", ctx.Err()
+		}
 		harvested := err == nil && reply != ""
 		// No createSession line names a harvested session's model and agent, so this one does.
 		slog.Info("opencode native: resuming a retained session", "session", m.Fork, "message", m.MessageID,

@@ -126,8 +126,12 @@ func (s *OpenCodeServer) providerEnvVars(ctx context.Context, provider string) [
 
 // removeV1Runtime removes the v1 artifacts from <root>: a stale secret witness copied
 // (xdg/opencode/auth.json), plus a v1 DB and pid file nothing reads (opencode.db, opencode.db-wal,
-// opencode.db-shm, .witness-serve.pid). It keeps opencode-v2.db and everything else.
+// opencode.db-shm, .witness-serve.pid). It keeps opencode-v2.db and everything else. An empty root
+// removes nothing: joined to "", those paths are the cwd's, and the worker's cwd is a user repo.
 func removeV1Runtime(runtimeRoot string) {
+	if runtimeRoot == "" {
+		return
+	}
 	_ = os.RemoveAll(filepath.Join(runtimeRoot, "xdg"))
 	_ = os.Remove(filepath.Join(runtimeRoot, "opencode.db"))
 	_ = os.Remove(filepath.Join(runtimeRoot, "opencode.db-wal"))

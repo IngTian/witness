@@ -67,6 +67,13 @@ func startPrivateServe(ctx context.Context, runtimeRoot string, allowFree bool) 
 	if runtimeRoot == "" {
 		return nil, errors.New("opencode isolated runtime root is unavailable")
 	}
+	// Absolute, because the serve runs in os.TempDir() (openCodeCommand): a relative WITNESS_HOME
+	// made its OPENCODE_CONFIG_DIR name a dir witness never wrote, so no agent ever loaded. After
+	// the empty check: Abs("") is the cwd.
+	runtimeRoot, err := filepath.Abs(runtimeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("opencode runtime root: %w", err)
+	}
 	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir opencode runtime: %w", err)
 	}
@@ -183,7 +190,7 @@ func (s *privateServe) waitReady(ctx context.Context, url <-chan string) error {
 		URL string `json:"url"`
 	}
 	if json.Unmarshal([]byte(line), &ready) != nil || !strings.HasPrefix(ready.URL, "http://127.0.0.1:") {
-		return fmt.Errorf("opencode serve printed %q instead of its address; witness needs OpenCode v2.2.7 or newer", line)
+		return fmt.Errorf("opencode serve printed %.200q instead of its address; witness needs OpenCode v2.2.7 or newer", line)
 	}
 	s.URL = ready.URL
 	var lastErr error

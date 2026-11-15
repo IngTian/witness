@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/IngTian/witness/internal/platform"
 )
 
 // TestPrivateServeHelperProcess is the fake `opencode` every serve test spawns: this test binary,
@@ -396,12 +398,16 @@ func TestStaleServeDirsAreSwept(t *testing.T) {
 }
 
 // An empty root used to mean the AMBIENT OpenCode database (#152's trap): serve ran against the
-// USER's opencode.db. StartOpenCodeServerIn refuses it before spawning; the stub fails loudly if
-// anything is spawned at all.
+// USER's opencode.db. StartOpenCodeServerIn (so Open and doctor's ValidateModels too) refuses it
+// before spawning anything, the `--version` probe included; the stubs fail loudly on any spawn.
 func TestEmptyRuntimeRootIsRefused(t *testing.T) {
+	t.Setenv(platform.DisableExternalRunnersEnv, "")
 	prevVersion, prevExec := openCodeVersionCommand, execCommandContext
 	t.Cleanup(func() { openCodeVersionCommand, execCommandContext = prevVersion, prevExec })
-	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("opencode v2.2.7\n"), nil }
+	openCodeVersionCommand = func(context.Context, string) ([]byte, error) {
+		t.Error("probed `opencode --version` with no runtime root")
+		return []byte("opencode v2.2.7\n"), nil
+	}
 	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		t.Errorf("spawned %s %v with no runtime root", name, args)
 		return exec.CommandContext(ctx, os.Args[0], "-test.run=XXX_NONE")
@@ -413,6 +419,9 @@ func TestEmptyRuntimeRootIsRefused(t *testing.T) {
 	}
 	if _, err := StartOpenCodeServerIn(context.Background(), "", []string{"openai/x"}); err == nil {
 		t.Error("StartOpenCodeServerIn accepted an empty runtime root")
+	}
+	if err := (&runner{}).ValidateModels(context.Background(), "openai/x"); err == nil {
+		t.Error("ValidateModels accepted an empty runtime root")
 	}
 }
 
@@ -428,6 +437,27 @@ func TestAllowsFreeOnlyForANamedFreeModel(t *testing.T) {
 	} {
 		if got := allowsFree(tc.models); got != tc.want {
 			t.Errorf("allowsFree(%q) = %v, want %v", tc.models, got, tc.want)
+		}
+	}
+}
+
+// A relative root (a relative WITNESS_HOME) must reach the serve as absolute paths: the serve runs
+// in os.TempDir(), so a relative OPENCODE_CONFIG_DIR named a config witness never wrote, no agent
+// ever loaded, and every Run failed after the 30 s agent wait.
+func TestARelativeRootGivesTheServeAbsolutePaths(t *testing.T) {
+	useFakeServe(t, "lease")
+	var cmd *exec.Cmd
+	spawn := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd = spawn(ctx, name, args...)
+		return cmd
+	}
+	t.Chdir(t.TempDir())
+	startFake(t, "rel")
+	env := envMap(t, cmd.Env)
+	for _, k := range []string{"OPENCODE_CONFIG_DIR", "XDG_STATE_HOME", "OPENCODE_DB", "XDG_DATA_HOME"} {
+		if !filepath.IsAbs(env[k]) {
+			t.Errorf("%s = %q, want an absolute path", k, env[k])
 		}
 	}
 }

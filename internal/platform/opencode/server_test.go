@@ -185,6 +185,16 @@ func TestRunFailsWhenTheAgentNeverLoads(t *testing.T) {
 	if slices.Contains(fake.seen(), "POST /api/session") {
 		t.Errorf("a session was created for an agent the serve never listed: %v", fake.seen())
 	}
+	// The serve keeps its verdict: every later Run of that prompt fails at once instead of paying
+	// the wait again, serially under the WorkerLock, once per pending (session, lens).
+	polls := fake.count(func(c string) bool { return c == "GET /api/agent" })
+	start := time.Now()
+	if _, again := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D2"); again == nil || again.Error() != err.Error() {
+		t.Errorf("second Run = %v, want the remembered %v", again, err)
+	}
+	if got := fake.count(func(c string) bool { return c == "GET /api/agent" }); got != polls || time.Since(start) > healthCheckBudget/2 {
+		t.Errorf("second Run polled /api/agent %d more times and took %s: the failed load was not remembered", got-polls, time.Since(start))
+	}
 }
 
 // A failing /api/agent is not "the agent did not load": a serve that died after readiness, or a

@@ -208,6 +208,10 @@ func ProbeSchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// betweenImportReads runs after each read that advances seen and before the read that imports
+// what it covers, so a test can finish a turn in that window (TestSeenNeverRunsAhead*).
+var betweenImportReads = func() {}
+
 // Import imports the requested OpenCode sessions. With no session ids, it imports
 // sessions updated since the last full sync; the first full sync imports all
 // existing OpenCode sessions.
@@ -230,20 +234,17 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 	}
 	defer db.Close()
 
-	sessions, err := im.sessions(ctx, db, sessionIDs)
-	if err != nil {
-		return stats, err
-	}
-	// The whole session list is read before the first import, so the total is exact.
-	progress := platform.ImportProgressFrom(ctx)
-	progress(0, len(sessions))
 	var maxUpdated int64 // the incremental-sync watermark
 	var newestIdle int64 // the seen watermark, on NewestActivity's clock
 	// A full import reads every importable session, so take the global newest idle (on the same
-	// handle, before the loop, per fix (a)'s ordering) so a full import leaves freshness current
-	// when every finished turn has been imported — even when the newest time_updated is not the
-	// newest finished turn (e.g. a rename after the last turn). A targeted import advances seen
-	// only from the sessions it reads.
+	// handle) so a full import leaves freshness current when every finished turn has been
+	// imported — even when the newest time_updated is not the newest finished turn (e.g. a rename
+	// after the last turn). A targeted import advances seen only from the sessions it reads.
+	//
+	// It is read BEFORE the session list, for the rule the loop below follows too: seen must
+	// never run ahead of what was imported. Read after, a session whose first turn ended between
+	// the two reads counted toward seen but was not in the list, and freshness read "current"
+	// until the next import.
 	if len(sessionIDs) == 0 {
 		err := db.QueryRowContext(ctx, `
 			SELECT COALESCE(MAX(m.time_created),0)
@@ -255,7 +256,15 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 		if err != nil {
 			return stats, err
 		}
+		betweenImportReads()
 	}
+	sessions, err := im.sessions(ctx, db, sessionIDs)
+	if err != nil {
+		return stats, err
+	}
+	// The whole session list is read before the first import, so the total is exact.
+	progress := platform.ImportProgressFrom(ctx)
+	progress(0, len(sessions))
 	for i, s := range sessions {
 		// Take the idle BEFORE importing turns: seen must never run ahead of what was imported.
 		// A turn that ends between the two reads would be marked seen but not imported.
@@ -264,6 +273,7 @@ func (im *Importer) Import(ctx context.Context, sessionIDs []string) (platform.I
 			return stats, err
 		}
 		newestIdle = max(newestIdle, idle)
+		betweenImportReads()
 
 		n, err := im.importSession(ctx, db, s)
 		progress(i+1, len(sessions))
