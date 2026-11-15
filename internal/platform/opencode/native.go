@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/store"
 )
 
 type nativeRuntime struct {
@@ -418,31 +419,19 @@ func (n *nativeRuntime) sweepResidue(entries []os.DirEntry) {
 // session's high-water mark. The `id > RawHigh` clause is what bounds accumulation: a
 // mine always reads the session's present max(raw.id), so once a later turn arrives the
 // older generation can never be the one that commits — without this, a lens that keeps
-// failing (or one later disabled) strands one manifest + full-session snapshot + live
-// isolated scratch session per drain, forever.
+// failing (or one later disabled) strands one manifest + live isolated scratch session
+// per drain, forever.
 func (n *nativeRuntime) generationStatus(m nativeManifest) (current, committed bool, err error) {
 	db, err := sql.Open("sqlite", readOnlyURI(filepath.Join(filepath.Dir(n.root), "witness.db")))
 	if err != nil {
 		return false, false, err
 	}
 	defer db.Close()
-	var currentValue, committedValue int
-	err = db.QueryRow(`SELECT
-		CASE WHEN (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
-		       OR (EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)
-		           AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ? AND id > ?)) THEN 1 ELSE 0 END,
-		CASE WHEN COALESCE((SELECT distilled >= ? FROM progress WHERE session = ? AND lens = ?), 0)
-		     THEN 1 ELSE 0 END`,
-		m.RawHigh, m.Session, m.Session, m.RawHigh, m.Session, m.RawHigh, m.Total, m.Session, m.Lens,
-	).Scan(&currentValue, &committedValue)
-	if err != nil {
-		return false, false, err
-	}
-	return currentValue != 0, committedValue != 0, nil
+	return store.GenerationStatus(db, m.Session, m.Lens, m.RawHigh, m.Total)
 }
 
 // readOnlyURI is the SQLite `file:` URI witness uses to read a database WITHOUT being able to
-// write it — the guarantee that keeps distillation off the user's own opencode.db. Composed by
+// write it — here, opening witness.db read-only for generation checks. Composed by
 // platform.SQLiteFileURI, never url.URL (issue #10 — see there).
 func readOnlyURI(path string) string {
 	return platform.SQLiteFileURI(path, "mode=ro")
