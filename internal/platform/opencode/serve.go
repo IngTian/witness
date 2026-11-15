@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -303,11 +304,4 @@ func writePrivateConfig(path string, agents map[string]string) error {
 
 // allowsFree reports whether a configured model is a free `opencode/*` one. Otherwise the serve
 // gets OPENCODE_DISABLE_FREE_MODELS=1, so it never falls back to a free model witness did not name.
-func allowsFree(models []string) bool {
-	for _, m := range models {
-		if strings.HasPrefix(strings.TrimSpace(m), "opencode/") {
-			return true
-		}
-	}
-	return false
-}
+func allowsFree(models []string) bool { return slices.ContainsFunc(models, isFreeModel) }

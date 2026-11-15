@@ -44,20 +44,17 @@ func (s *OpenCodeServer) validateModels(ctx context.Context, models []string) er
 		return fmt.Errorf("opencode /api/model decode: %w", err)
 	}
 
-	// Build available set: provider/id, plus provider/id#variant for every variant
+	// The available set (provider/id, plus provider/id#variant for every variant), and each
+	// provider's ids for the hint.
 	available := map[string]bool{}
+	byProvider := map[string][]string{}
 	for _, m := range result.Data {
 		full := m.ProviderID + "/" + m.ID
 		available[full] = true
+		byProvider[m.ProviderID] = append(byProvider[m.ProviderID], full)
 		for _, v := range m.Variants {
 			available[full+"#"+v.ID] = true
 		}
-	}
-
-	// Check each model; group by provider for hints
-	byProvider := map[string][]string{}
-	for _, data := range result.Data {
-		byProvider[data.ProviderID] = append(byProvider[data.ProviderID], data.ProviderID+"/"+data.ID)
 	}
 
 	for _, model := range models {
@@ -83,14 +80,14 @@ func (s *OpenCodeServer) unavailableModel(ctx context.Context, model string, ava
 	if provider == "opencode" {
 		hint = "`opencode models` lists the free ids available now"
 	} else {
-		envVars := s.providerEnvVars(ctx, provider)
-		parts := []string{"the runner can use free opencode/* models, API keys exported as environment variables"}
-		if len(envVars) > 0 {
-			parts[0] += fmt.Sprintf(" (for %s: %s)", provider, strings.Join(envVars, ", "))
+		var forProvider string
+		if envVars := s.providerEnvVars(ctx, provider); len(envVars) > 0 {
+			forProvider = fmt.Sprintf(" (for %s: %s)", provider, strings.Join(envVars, ", "))
 		}
-		parts = append(parts, ", and ambient cloud credentials such as AWS_PROFILE/AWS_REGION for Amazon Bedrock;")
-		parts = append(parts, " it never uses logins saved with `opencode auth login`, ChatGPT or other OAuth sign-ins, or providers defined in your opencode.json")
-		hint = strings.Join(parts, "")
+		hint = fmt.Sprintf("the runner can use free opencode/* models, API keys exported as environment variables%s, "+
+			"and ambient cloud credentials such as AWS_PROFILE/AWS_REGION for Amazon Bedrock; it never uses logins "+
+			"saved with `opencode auth login`, ChatGPT or other OAuth sign-ins, or providers defined in your opencode.json",
+			forProvider)
 	}
 	return fmt.Errorf("opencode model %q is not available%s", model, modelHint(available)+"; "+hint)
 }

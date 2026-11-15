@@ -78,11 +78,11 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 	return srv.Close()
 }
 
-// OnFreeModel: only OpenCode Zen's own opencode/* models are free, and their allowance is counted
+// isFreeModel: only OpenCode Zen's own opencode/* models are free, and their allowance is counted
 // per network (evidence freetier §4). opencode-go/* is the paid subscription, a different provider.
-func (*runner) OnFreeModel(model string) bool {
-	return strings.HasPrefix(strings.TrimSpace(model), "opencode/")
-}
+func isFreeModel(model string) bool { return strings.HasPrefix(strings.TrimSpace(model), "opencode/") }
+
+func (*runner) OnFreeModel(model string) bool { return isFreeModel(model) }
 
 // Discovered by type assertion like the platform capabilities; pinned the same way.
 var (

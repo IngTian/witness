@@ -191,7 +191,7 @@ func TestValidateOpenCodeCapabilityBoundsAHungVersionProbe(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- ValidateOpenCodeCapability(context.Background(), "") }()
+	go func() { done <- ValidateOpenCodeCapability(context.Background()) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -218,7 +218,7 @@ func TestProbeDeadlineDerivesFromTheCallerContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already dead
 	done := make(chan error, 1)
-	go func() { done <- ValidateOpenCodeCapability(ctx, "") }()
+	go func() { done <- ValidateOpenCodeCapability(ctx) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -238,12 +238,12 @@ func TestValidateOpenCodeCapabilityStillJudgesVersionsOnTheirMerits(t *testing.T
 	defer func() { openCodeVersionCommand = old }()
 
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.7\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
+	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
 		t.Errorf("2.2.7 must be accepted, got %v", err)
 	}
 
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.6\n"), nil }
-	err := ValidateOpenCodeCapability(context.Background(), "")
+	err := ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeTooOld) {
 		t.Fatalf("2.2.6 error = %v, want ErrOpenCodeTooOld", err)
 	}
@@ -252,7 +252,7 @@ func TestValidateOpenCodeCapabilityStillJudgesVersionsOnTheirMerits(t *testing.T
 	}
 
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.19.5\n"), nil }
-	err = ValidateOpenCodeCapability(context.Background(), "")
+	err = ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeV1) {
 		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
 	}

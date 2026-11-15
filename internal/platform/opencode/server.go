@@ -75,7 +75,7 @@ func StartOpenCodeServerIn(ctx context.Context, runtimeRoot string, models []str
 	if err := requireModels(models); err != nil {
 		return nil, err
 	}
-	if err := ValidateOpenCodeCapability(ctx, runtimeRoot); err != nil {
+	if err := ValidateOpenCodeCapability(ctx); err != nil {
 		return nil, err
 	}
 	serve, err := startPrivateServe(ctx, runtimeRoot, allowsFree(models))
@@ -616,11 +616,8 @@ func (s *OpenCodeServer) doJSON(ctx context.Context, method, path string, body a
 
 // ValidateOpenCodeCapability gates the private-serve protocol (OpenCode 2.2.7 up to, not
 // including, 3.0). Do not fall back to a shared user DB: an unavailable capability leaves L0
-// pending for retry. runtimeRoot is unused: the probe goes through ProbeVersion, which needs no
-// root (`--version` opens no DB, and wire and doctor have none to give). The parameter is the
-// plan's signature (PR 1 Task 1.1); no task through PR 3 reads it, so it can go with its one
-// caller (StartOpenCodeServerIn) when that signature is next touched.
-func ValidateOpenCodeCapability(ctx context.Context, runtimeRoot string) error {
+// pending for retry. It takes no runtime root: ProbeVersion needs none (`--version` opens no DB).
+func ValidateOpenCodeCapability(ctx context.Context) error {
 	v, err := ProbeVersion(ctx)
 	if err != nil {
 		return err

@@ -53,3 +53,19 @@ func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd
 	procCtl.BindToParent(cmd)
 	return cmd
 }
+
+const openCodeBinEnv = "WITNESS_OPENCODE_BIN"
+
+// pluginExe returns the plugin-supplied binary when WITNESS_OPENCODE_BIN names an existing
+// regular file. A missing path or a directory returns ("", false), so resolution falls through.
+func pluginExe() (string, bool) {
+	path := os.Getenv(openCodeBinEnv)
+	if path == "" {
+		return "", false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return path, true
+}

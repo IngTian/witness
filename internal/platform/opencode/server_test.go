@@ -22,13 +22,13 @@ func TestValidateOpenCodeCapability(t *testing.T) {
 
 	// Supported version passes
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.7\n"), nil }
-	if err := ValidateOpenCodeCapability(context.Background(), ""); err != nil {
+	if err := ValidateOpenCodeCapability(context.Background()); err != nil {
 		t.Fatalf("2.2.7 must be accepted, got %v", err)
 	}
 
 	// Below MinVersion is refused
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("2.2.6\n"), nil }
-	err := ValidateOpenCodeCapability(context.Background(), "")
+	err := ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeTooOld) {
 		t.Fatalf("2.2.6 error = %v, want ErrOpenCodeTooOld", err)
 	}
@@ -38,7 +38,7 @@ func TestValidateOpenCodeCapability(t *testing.T) {
 
 	// v1 is refused by name
 	openCodeVersionCommand = func(context.Context, string) ([]byte, error) { return []byte("1.19.5\n"), nil }
-	err = ValidateOpenCodeCapability(context.Background(), "")
+	err = ValidateOpenCodeCapability(context.Background())
 	if !errors.Is(err, ErrOpenCodeV1) {
 		t.Fatalf("1.19.5 error = %v, want ErrOpenCodeV1", err)
 	}

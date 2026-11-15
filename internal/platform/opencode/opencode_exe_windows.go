@@ -10,8 +10,6 @@ import (
 	"strings"
 )
 
-const openCodeBinEnv = "WITNESS_OPENCODE_BIN"
-
 // desktopMarkers identify directories belonging to the OpenCode DESKTOP app rather than the
 // headless CLI. A match means "skip this PATH entry".
 //
@@ -37,20 +35,6 @@ func isDesktopDir(dir string) bool {
 		}
 	}
 	return false
-}
-
-// pluginExe returns the plugin-supplied binary when WITNESS_OPENCODE_BIN names an existing
-// regular file. A missing path or a directory returns ("", false), so resolution falls through.
-func pluginExe() (string, bool) {
-	path := os.Getenv(openCodeBinEnv)
-	if path == "" {
-		return "", false
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return "", false
-	}
-	return path, true
 }
 
 var shimTargetRe = regexp.MustCompile(`(?i)"%~?dp0%?\\([^"]+?\.exe)"`)
