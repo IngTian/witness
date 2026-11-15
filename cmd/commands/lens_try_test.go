@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,12 +32,24 @@ func (limitedPreviewRunner) InvocationHint() string                          { r
 
 // writeLensDir writes a candidate lens DIRECTORY (issue #75: lens.json + extract.md +
 // review.md) and returns its path. name/extract/review empty are simply omitted, so a
-// test can build a lens missing any piece.
-func writeLensDir(t *testing.T, name, extract, review string) string {
+// test can build a lens missing any piece. fields are more lens.json key/value pairs
+// (store.LensKeyRunner, store.LensKeyExtractModel, …).
+func writeLensDir(t *testing.T, name, extract, review string, fields ...string) string {
 	t.Helper()
 	dir := t.TempDir()
+	cfg := map[string]string{}
 	if name != "" {
-		if err := os.WriteFile(filepath.Join(dir, "lens.json"), []byte(`{"name":"`+name+`"}`), 0o644); err != nil {
+		cfg[store.LensKeyName] = name
+	}
+	for i := 0; i+1 < len(fields); i += 2 {
+		cfg[fields[i]] = fields[i+1]
+	}
+	if len(cfg) > 0 {
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, store.LensConfigFile), b, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -377,7 +390,7 @@ func TestTryRunnerCfgClearsCrossRuntimeDefaults(t *testing.T) {
 	// default=claude with a claude triage/distill model set; lens routes to opencode.
 	cfg := store.Config{Runner: "claude", TriageModel: "claude-sonnet", DistillModel: "claude-opus"}
 	cross := &lens.Lens{Name: "cr", Runner: "opencode"}
-	got := tryRunnerCfg(cfg, cross, false)
+	got := tryRunnerCfg(cfg, cross)
 	if got.Runner != "opencode" {
 		t.Fatalf("cross-runtime lens must preview on its own runner, got %q", got.Runner)
 	}
@@ -391,7 +404,7 @@ func TestTryRunnerCfgClearsCrossRuntimeDefaults(t *testing.T) {
 
 	// A lens on the SAME runner as the default keeps the defaults (no clearing).
 	same := &lens.Lens{Name: "s"} // no runner → default
-	got2 := tryRunnerCfg(cfg, same, false)
+	got2 := tryRunnerCfg(cfg, same)
 	if got2.Runner != "claude" || got2.TriageModel != "claude-sonnet" {
 		t.Fatalf("same-runtime lens must keep the default runner+models, got runner=%q triage=%q", got2.Runner, got2.TriageModel)
 	}
@@ -399,7 +412,7 @@ func TestTryRunnerCfgClearsCrossRuntimeDefaults(t *testing.T) {
 	// A cross-runtime lens WITH its own per-lens model keeps that model (defaults still cleared,
 	// but ModelFor uses the per-lens one).
 	tuned := &lens.Lens{Name: "t", Runner: "opencode", ExtractModel: "opencode/free"}
-	got3 := tryRunnerCfg(cfg, tuned, false)
+	got3 := tryRunnerCfg(cfg, tuned)
 	if m := distill.ModelFor(got3, tuned, distill.PhaseExtract); m != "opencode/free" {
 		t.Fatalf("cross-runtime lens with a per-lens model must use it, got %q", m)
 	}
@@ -436,47 +449,17 @@ func TestLensTryPreviewsOnTheLensRunnerNotTheEnvFallback(t *testing.T) {
 	}
 }
 
-// tryRunnerCfg must populate RunnerModels with only the stages that will actually run:
-// extract alone or extract + review. This ensures the runner validates exactly what
-// lens try will use. It must run AFTER model overrides so --model values appear in
-// RunnerModels (F7).
-func TestTryRunnerCfgNamesOnlyTheStagesThatRun(t *testing.T) {
-	cfg := store.Config{Runner: "opencode", TriageModel: "oc/m1", DistillModel: "oc/m2"}
+// tryRunnerModels names only the stages that will actually run, extract alone or extract +
+// review, so the runner validates exactly what lens try will use. The override ordering (F7) is
+// guarded through applyOverridesAndBuildRunnerCfg below.
+func TestTryRunnerModelsNamesOnlyTheStagesThatRun(t *testing.T) {
 	cross := &lens.Lens{Name: "x", Runner: "claude", ExtractModel: "cl/ex", ReviewModel: "cl/rev"}
-
-	// Extract only: RunnerModels = [extract]
-	got := tryRunnerCfg(cfg, cross, false)
-	if len(got.RunnerModels) != 1 || got.RunnerModels[0] != "cl/ex" {
-		t.Errorf("extract-only: RunnerModels = %v, want [\"cl/ex\"]", got.RunnerModels)
+	cfg := tryRunnerCfg(store.Config{Runner: "opencode", TriageModel: "oc/m1", DistillModel: "oc/m2"}, cross)
+	if got := tryRunnerModels(cfg, cross, false); !slices.Equal(got, []string{"cl/ex"}) {
+		t.Errorf("extract-only: RunnerModels = %q, want [cl/ex]", got)
 	}
-
-	// Extract + review: RunnerModels = [extract, review]
-	got2 := tryRunnerCfg(cfg, cross, true)
-	want := map[string]bool{"cl/ex": true, "cl/rev": true}
-	if len(got2.RunnerModels) != 2 {
-		t.Errorf("extract+review: RunnerModels len = %d, want 2: %v", len(got2.RunnerModels), got2.RunnerModels)
-	}
-	for _, m := range got2.RunnerModels {
-		if !want[m] {
-			t.Errorf("extract+review: RunnerModels has unexpected %q", m)
-		}
-	}
-
-	// F7 assertion: tryRunnerCfg must run AFTER --model overrides. If it runs before,
-	// RunnerModels will contain the old lens.ExtractModel value, not the override.
-	// Simulate: lens configured with "opencode/old", but user passes --model opencode/new.
-	// cmdLensTry sets BOTH cfg.TriageModel and ln.ExtractModel to the override BEFORE
-	// calling tryRunnerCfg, so tryRunnerCfg must see the new value.
-	cfg3 := store.Config{Runner: "opencode", TriageModel: "opencode/old"}
-	ln3 := &lens.Lens{Name: "y", Runner: "opencode", ExtractModel: "opencode/old"}
-	// Now simulate the --model override (sets both, as cmdLensTry does at :192-194)
-	cfg3.TriageModel = "opencode/new"
-	ln3.ExtractModel = "opencode/new"
-	// Call tryRunnerCfg AFTER the override
-	got3 := tryRunnerCfg(cfg3, ln3, false)
-	if len(got3.RunnerModels) != 1 || got3.RunnerModels[0] != "opencode/new" {
-		t.Errorf("--model override: RunnerModels = %v, want [\"opencode/new\"]; if it contains "+
-			"\"opencode/old\", tryRunnerCfg ran before the override (F7 bug)", got3.RunnerModels)
+	if got := tryRunnerModels(cfg, cross, true); !slices.Equal(got, []string{"cl/ex", "cl/rev"}) {
+		t.Errorf("extract+review: RunnerModels = %q, want [cl/ex cl/rev]", got)
 	}
 }
 
@@ -505,5 +488,21 @@ func TestApplyOverridesAndBuildRunnerCfgMintsTheRunnerAfterItsOverrides(t *testi
 	if got.RunnerModels[0] == "prov/paid" {
 		t.Errorf("RunnerModels contains the lens's configured model %q instead of the --model override "+
 			"\"opencode/x\"; this is the F7 bug (tryRunnerCfg before overrides)", got.RunnerModels[0])
+	}
+}
+
+// `--model X --review` with no review model previews review on X too (ModelFor's review falls
+// back to TriageModel). On a cross-runtime lens the route clears the default runtime's models, so
+// a --model written into cfg before the route was cleared with them: review then resolved to ""
+// (OpenCode refuses it at Open; Claude would run on its ambient interactive model).
+func TestLensTryModelCoversReviewOnACrossRuntimeLens(t *testing.T) {
+	cfg := store.Config{Runner: "claude", TriageModel: "claude-sonnet"}
+	ln := &lens.Lens{Name: "cr", Runner: "opencode", Review: "synth"}
+	got := applyOverridesAndBuildRunnerCfg(cfg, ln, "opencode/x", "", true)
+	if m := distill.ModelFor(got, ln, distill.PhaseReview); m != "opencode/x" {
+		t.Errorf("review model = %q, want the --model value opencode/x", m)
+	}
+	if !slices.Equal(got.RunnerModels, []string{"opencode/x"}) {
+		t.Errorf("RunnerModels = %q, want [opencode/x]", got.RunnerModels)
 	}
 }

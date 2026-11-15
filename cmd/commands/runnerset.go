@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -201,7 +203,8 @@ func clearCrossRuntimeModels(rcfg *store.Config, name, defaultRunner string) {
 // its lenses will ask it for, across both stages (extract/review). On the default runtime
 // it also includes the cross-lens unified summary's review model. Empty models ("") are
 // kept (they represent an unnamed stage on a cross-runtime lens with no per-lens model)
-// and the list is deduped.
+// and the list is deduped and sorted: a runner names the first bad model it meets, so map order
+// would make doctor name a different one of two bad models on each run.
 func runtimeModels(cfg store.Config, lenses []*lens.Lens, runtime string) []string {
 	seen := map[string]bool{}
 	defaultRunner := strings.TrimSpace(cfg.Runner)
@@ -221,9 +224,5 @@ func runtimeModels(cfg store.Config, lenses []*lens.Lens, runtime string) []stri
 		seen[distill.ModelFor(cfg, nil, distill.PhaseReview)] = true
 	}
 
-	out := make([]string, 0, len(seen))
-	for m := range seen {
-		out = append(out, m)
-	}
-	return out
+	return slices.Sorted(maps.Keys(seen))
 }

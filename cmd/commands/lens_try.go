@@ -417,35 +417,35 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // mint it by name (RunnerForName), never through the store's precedence ladder again, which
 // would let an unbound store's WITNESS_RUNNER override the lens (F030). Pure (returns a
 // modified copy) so it is unit-testable.
-//
-// It also populates RunnerModels with the stages that will actually run: extract alone or
-// extract + review, so the runner validates exactly what lens try will use.
-func tryRunnerCfg(cfg store.Config, ln *lens.Lens, review bool) store.Config {
+func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
 	defaultRunner := cfg.Runner
 	if r := distill.RunnerFor(cfg, ln); r != "" {
 		cfg.Runner = r
 	}
 	clearCrossRuntimeModels(&cfg, cfg.Runner, defaultRunner)
-
-	// Populate RunnerModels with the stages that will run.
-	seen := map[string]bool{}
-	seen[distill.ModelFor(cfg, ln, distill.PhaseExtract)] = true
-	if review {
-		seen[distill.ModelFor(cfg, ln, distill.PhaseReview)] = true
-	}
-	cfg.RunnerModels = make([]string, 0, len(seen))
-	for m := range seen {
-		cfg.RunnerModels = append(cfg.RunnerModels, m)
-	}
-
 	return cfg
 }
 
-// applyOverridesAndBuildRunnerCfg is the F7-ordered sequence: apply --model and --review-model
-// overrides to both cfg and ln, THEN call tryRunnerCfg so RunnerModels contains the overridden
-// values. Extracted from cmdLensTry so the ordering is testable (the F7 guard). Returns the
-// final cfg ready to mint a runner. Pure (returns a modified copy; ln is mutated in place per
-// the cmdLensTry contract).
+// tryRunnerModels is a preview's RunnerModels: the models of the stages that will run, extract
+// alone or extract + review, so the runner validates exactly what lens try will use. Sorted, so a
+// runner that names the first bad model names the same one on every run.
+func tryRunnerModels(cfg store.Config, ln *lens.Lens, review bool) []string {
+	models := []string{distill.ModelFor(cfg, ln, distill.PhaseExtract)}
+	if review {
+		models = append(models, distill.ModelFor(cfg, ln, distill.PhaseReview))
+	}
+	slices.Sort(models)
+	return slices.Compact(models)
+}
+
+// applyOverridesAndBuildRunnerCfg applies --model and --review-model, routes the preview to the
+// lens's runner, and computes RunnerModels last, so they contain the overridden values (F7).
+// Extracted from cmdLensTry so the ordering is testable. Returns the final cfg ready to mint a
+// runner; ln is mutated in place per the cmdLensTry contract.
+//
+// The cfg half of an override is written AFTER the route: tryRunnerCfg clears a cross-runtime
+// lens's default models, and a --model written before it was cleared with them, so review lost its
+// fallback to --model (ModelFor: DistillModel, then TriageModel) on exactly such a lens.
 func applyOverridesAndBuildRunnerCfg(cfg store.Config, ln *lens.Lens, modelOverride, reviewModelOverride string, review bool) store.Config {
 	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
 	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
@@ -457,24 +457,31 @@ func applyOverridesAndBuildRunnerCfg(cfg store.Config, ln *lens.Lens, modelOverr
 	// ExtractModel/ReviewModel over the default, so overriding only cfg would let a
 	// registered lens's own per-lens model shadow the explicit --model the user asked to
 	// preview ON. Explicit --model is the user's stated preview intent and must win.
-	if modelOverride != "" {
-		cfg.TriageModel = modelOverride
-		ln.ExtractModel = modelOverride
-	}
+	//
 	// Only apply --review-model when review actually runs. Otherwise, on an OpenCode
 	// runner, Open validates cfg.DistillModel up front and a bad --review-model would
 	// abort an extract-only preview on a model that is never used (on Claude it'd be
 	// silently ignored) — a confusing runner-dependent side effect for a review-only knob.
-	if review && reviewModelOverride != "" {
-		cfg.DistillModel = reviewModelOverride
+	if !review {
+		reviewModelOverride = ""
+	}
+	if modelOverride != "" {
+		ln.ExtractModel = modelOverride
+	}
+	if reviewModelOverride != "" {
 		ln.ReviewModel = reviewModelOverride
 	}
-
 	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
-	// (a single candidate = one runner) and clear the wrong-runtime default models. This
-	// must run AFTER the --model / --review-model overrides so RunnerModels contains the
-	// overridden values (F7).
-	return tryRunnerCfg(cfg, ln, review)
+	// (a single candidate = one runner) and clear the wrong-runtime default models.
+	cfg = tryRunnerCfg(cfg, ln)
+	if modelOverride != "" {
+		cfg.TriageModel = modelOverride
+	}
+	if reviewModelOverride != "" {
+		cfg.DistillModel = reviewModelOverride
+	}
+	cfg.RunnerModels = tryRunnerModels(cfg, ln, review)
+	return cfg
 }
 
 // modelLabel renders a model name for display ("runner default" when unset, so the
