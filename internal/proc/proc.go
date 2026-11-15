@@ -12,6 +12,7 @@
 //
 // GOOS split (each method is defined exactly once per platform):
 //   - Detach / TerminateGroup: proc_unix.go (!windows) + proc_windows.go
+//   - ContainChildren: proc_unix.go (no-op) + proc_windows.go
 //   - BindToParent: proc_linux.go + proc_other.go (!linux)
 //   - NotifyStop: here (portable)
 package proc
@@ -30,8 +31,17 @@ import (
 type Control interface {
 	// Detach configures cmd (before Start) to run in its own session / process
 	// group so closing the launching terminal doesn't signal it mid-work. Unix:
-	// Setsid. Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP.
+	// Setsid. Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, plus
+	// CREATE_BREAKAWAY_FROM_JOB once this process is contained, so the child outlives
+	// the worker's job.
 	Detach(cmd *exec.Cmd)
+
+	// ContainChildren makes every child THIS process starts afterwards die with it,
+	// however it dies. Windows: the process joins a kill-on-close Job Object, the
+	// only way a TerminateProcess'd worker takes its `claude -p` children along.
+	// Unix: a no-op (TerminateGroup's group signal does it). Idempotent; the first
+	// call's error is returned every time.
+	ContainChildren() error
 
 	// BindToParent configures cmd (before Start) so the OS kills the child when
 	// THIS process dies — including an unclean death (SIGKILL/OOM) that no Go
@@ -43,8 +53,8 @@ type Control interface {
 	// TerminateGroup stops the process identified by pid. Unix: SIGTERM to the
 	// process GROUP (-pid) first — the worker leads its own group via Detach — then
 	// the bare pid as a fallback, so a `claude -p` child dies with it. Windows has
-	// no process-group signal, so it opens the process and terminates it; children
-	// are NOT cascaded there (the open Job Object gap — see proc_windows.go).
+	// no process-group signal, so it opens the process and terminates it; its
+	// children die with the worker's kill-on-close job (ContainChildren).
 	TerminateGroup(pid int) error
 
 	// NotifyStop returns a context cancelled on the first SIGINT/SIGTERM, plus a

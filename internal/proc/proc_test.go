@@ -1,9 +1,19 @@
 package proc
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
+
+// The worker's containment call goes through the port, so a cmd test can assert it happened (and
+// that a failure is handed back) without putting the test binary in a job.
+func TestFakeContainChildrenRecords(t *testing.T) {
+	f := &Fake{ContainErr: errors.New("x")}
+	if err := f.ContainChildren(); err == nil || f.Contained != 1 {
+		t.Fatalf("err=%v Contained=%d", err, f.Contained)
+	}
+}
 
 // Alive must be right about BOTH answers, since each error direction is a distinct bug:
 // a false "dead" lets a second downloader steal a live lock, and a false "alive" makes it decline a

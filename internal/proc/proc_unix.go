@@ -33,6 +33,10 @@ func (sys) TerminateGroup(pid int) error {
 	return nil
 }
 
+// ContainChildren is a no-op on Unix: TerminateGroup's group signal already reaches the
+// worker's children, and a hard kill is covered by Pdeathsig (Linux) or the serve's stdin lease.
+func (sys) ContainChildren() error { return nil }
+
 // Alive reports whether pid names a live process. Callers ask "is the OWNER of this record
 // still running" — the model download lock before stealing it — so a false "alive" is the
 // safe direction: it declines.

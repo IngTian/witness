@@ -3,21 +3,133 @@
 package proc
 
 import (
+	"errors"
 	"os/exec"
+	"slices"
 	"testing"
+	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// On Windows there's no session/pgid to probe (no Getpgid), so we assert the detach
-// flags directly: the worker must be created DETACHED_PROCESS (no console to receive
-// a close event) and in a NEW_PROCESS_GROUP (isolated from the parent's
-// Ctrl-C/Ctrl-Break) — the Windows analogue of setsid.
-func TestSystemDetachFlags(t *testing.T) {
-	cmd := exec.Command("cmd", "/c", "exit")
-	System().Detach(cmd)
-	want := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
-	if cmd.SysProcAttr == nil || cmd.SysProcAttr.CreationFlags != want {
-		t.Errorf("Detach CreationFlags = %#x, want %#x", cmd.SysProcAttr.CreationFlags, want)
+// The flags must be EXACTLY kill-on-close + breakaway-ok. SILENT_BREAKAWAY_OK would let every
+// child (claude -p, the serve) leave the job without asking, so closing it would kill nothing.
+func TestWorkerJobLimits(t *testing.T) {
+	job, err := newWorkerJob()
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer windows.CloseHandle(job)
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	if err := windows.QueryInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil); err != nil {
+		t.Fatal(err)
+	}
+	want := uint32(windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+	if got := info.BasicLimitInformation.LimitFlags; got != want {
+		t.Fatalf("LimitFlags = %#x, want exactly %#x (SILENT_BREAKAWAY_OK would let claude -p escape)", got, want)
+	}
+}
+
+// Closing the last handle IS the kill: that is what the OS does for us when the worker dies.
+func TestWorkerJobKillsMembersOnClose(t *testing.T) {
+	job, err := newWorkerJob()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, exited := startPing(t, false)
+	h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	if err == nil {
+		err = windows.AssignProcessToJobObject(job, h)
+		windows.CloseHandle(h)
+	}
+	select { // a ping that already died on its own would make the check below vacuous
+	case <-exited:
+		err = errors.New("ping exited before the job closed; the test would prove nothing")
+	default:
+	}
+	windows.CloseHandle(job) // the last handle: KILL_ON_JOB_CLOSE fires
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closing the job did not kill its member")
+	}
+}
+
+// Breakaway only once contained: an uncontained spawner may sit in someone else's job that
+// forbids breakaway, where the flag makes CreateProcess fail. Saves and restores `contained`, so
+// it holds in any order relative to TestContainChildrenBreakawayEscapesJob.
+func TestDetachBreaksAwayOnlyWhenContained(t *testing.T) {
+	base := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	prev := contained.Load()
+	t.Cleanup(func() { contained.Store(prev) })
+	for _, c := range []struct {
+		in   bool
+		want uint32
+	}{{false, base}, {true, base | windows.CREATE_BREAKAWAY_FROM_JOB}} {
+		contained.Store(c.in)
+		cmd := exec.Command("cmd")
+		System().Detach(cmd)
+		if cmd.SysProcAttr.CreationFlags != c.want {
+			t.Errorf("contained=%v: flags %#x, want %#x", c.in, cmd.SysProcAttr.CreationFlags, c.want)
+		}
+	}
+}
+
+// Irreversible for this test binary (it stays in the job until it exits) — which only means its
+// own children die with it.
+func TestContainChildrenBreakawayEscapesJob(t *testing.T) {
+	for i := 0; i < 2; i++ { // twice: a backfill re-runs the worker in-process
+		if err := System().ContainChildren(); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	inside, _ := startPing(t, false)
+	// Nested jobs judge breakaway by the IMMEDIATE job (ours, BREAKAWAY_OK), so starting the
+	// Detach'd child must not fail even inside an outer job that forbids breakaway.
+	away, _ := startPing(t, true)
+	pids := jobPIDs(t, workerJob)
+	if !slices.Contains(pids, uintptr(inside.Process.Pid)) {
+		t.Errorf("a plain child (pid %d) is not in the worker's job %v", inside.Process.Pid, pids)
+	}
+	if slices.Contains(pids, uintptr(away.Process.Pid)) {
+		t.Errorf("a Detach'd child (pid %d) stayed in the job: the wakeup would die with the worker", away.Process.Pid)
+	}
+}
+
+// startPing starts a system binary bounded at ~30 s (Detach'd if asked) and kills it on every
+// test exit path. One goroutine owns Wait; exited closes when the process is gone.
+func startPing(t *testing.T, detach bool) (*exec.Cmd, <-chan struct{}) {
+	t.Helper()
+	cmd := exec.Command("ping", "-n", "30", "127.0.0.1")
+	if detach {
+		System().Detach(cmd)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start ping (detach=%v): %v", detach, err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
+	return cmd, exited
+}
+
+// jobPIDs lists the job's processes (and its child jobs'). x/sys has no type for it, so this is
+// JOBOBJECT_BASIC_PROCESS_ID_LIST as documented (DWORD, DWORD, ULONG_PTR[]):
+// https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_process_id_list
+func jobPIDs(t *testing.T, job windows.Handle) []uintptr {
+	t.Helper()
+	var list struct {
+		Assigned, InList uint32
+		PIDs             [64]uintptr
+	}
+	if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicProcessIdList,
+		uintptr(unsafe.Pointer(&list)), uint32(unsafe.Sizeof(list)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return list.PIDs[:list.InList]
 }
