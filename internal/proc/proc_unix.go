@@ -33,8 +33,10 @@ func (sys) TerminateGroup(pid int) error {
 	return nil
 }
 
-// ContainChildren is a no-op on Unix: TerminateGroup's group signal already reaches the
-// worker's children, and a hard kill is covered by Pdeathsig (Linux) or the serve's stdin lease.
+// ContainChildren is a no-op on Unix: TerminateGroup's group SIGTERM reaches the worker's
+// children. Nothing covers a hard kill of the worker alone (SIGKILL, OOM) for `claude -p`, a plain
+// exec.CommandContext child, so it is orphaned; only the `opencode serve` has Pdeathsig (Linux,
+// BindToParent) and its stdin lease.
 func (sys) ContainChildren() error { return nil }
 
 // Alive reports whether pid names a live process. Callers ask "is the OWNER of this record

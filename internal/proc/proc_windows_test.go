@@ -44,10 +44,12 @@ func TestWorkerJobKillsMembersOnClose(t *testing.T) {
 		err = windows.AssignProcessToJobObject(job, h)
 		windows.CloseHandle(h)
 	}
-	select { // a ping that already died on its own would make the check below vacuous
-	case <-exited:
-		err = errors.New("ping exited before the job closed; the test would prove nothing")
-	default:
+	if err == nil { // else a failed open/assign is the error, and may itself be why ping is gone
+		select { // a ping that already died on its own would make the check below vacuous
+		case <-exited:
+			err = errors.New("ping exited before the job closed; the test would prove nothing")
+		default:
+		}
 	}
 	windows.CloseHandle(job) // the last handle: KILL_ON_JOB_CLOSE fires
 	if err != nil {
@@ -83,9 +85,15 @@ func TestDetachBreaksAwayOnlyWhenContained(t *testing.T) {
 // Irreversible for this test binary (it stays in the job until it exits) — which only means its
 // own children die with it.
 func TestContainChildrenBreakawayEscapesJob(t *testing.T) {
+	var first windows.Handle
 	for i := 0; i < 2; i++ { // twice: a backfill re-runs the worker in-process
 		if err := System().ContainChildren(); err != nil {
 			t.Fatalf("call %d: %v", i, err)
+		}
+		if i == 0 {
+			first = workerJob
+		} else if workerJob != first {
+			t.Fatalf("the second call made a new job (%#x, was %#x): the Once does not hold", workerJob, first)
 		}
 	}
 	inside, _ := startPing(t, false)

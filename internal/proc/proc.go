@@ -36,11 +36,13 @@ type Control interface {
 	// the worker's job.
 	Detach(cmd *exec.Cmd)
 
-	// ContainChildren makes every child THIS process starts afterwards die with it,
-	// however it dies. Windows: the process joins a kill-on-close Job Object, the
-	// only way a TerminateProcess'd worker takes its `claude -p` children along.
-	// Unix: a no-op (TerminateGroup's group signal does it). Idempotent; the first
-	// call's error is returned every time.
+	// ContainChildren ties every child THIS process starts afterwards to its death.
+	// Windows: the process joins a kill-on-close Job Object, so they die however it
+	// dies — the only way a TerminateProcess'd worker takes its `claude -p` along.
+	// Unix: a no-op, and only TerminateGroup's group SIGTERM reaches them, so a worker
+	// SIGKILLed alone orphans its `claude -p` (BindToParent's Pdeathsig and the stdin
+	// lease cover only the `opencode serve`). Idempotent; the first call's error is
+	// returned every time.
 	ContainChildren() error
 
 	// BindToParent configures cmd (before Start) so the OS kills the child when
