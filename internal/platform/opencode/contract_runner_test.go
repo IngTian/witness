@@ -101,17 +101,17 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 		if !ok {
 			t.Fatalf("NewRunner returned %T, want *runner", r)
 		}
-		// Fail only when v2 lists the declared variant and the Run still fails (witness's ref
-		// is then wrong); a variant v2 dropped is logged for the report.
-		listed := rr.server.validateModels(ctx, []string{"mock/ok#high"})
+		// Fail when v2 lists the declared variant and the Run still fails (witness's ref is then
+		// wrong); a variant v2 dropped fails in CI too (settled).
+		listErr := rr.server.validateModels(ctx, []string{"mock/ok#high"})
 		reply, err := r.Run(ctx, "mock/ok#high", "LENS-SYSTEM-MARKER instructions", "DATA")
 		switch {
 		case err == nil && reply == "MOCK-REPLY ok":
-			t.Logf("PASS %q (listed: %v)", reply, listed)
-		case listed == nil:
+			t.Logf("PASS %q (list error: %v)", reply, listErr)
+		case listErr == nil:
 			t.Fatalf("v2 lists mock/ok#high but Run = %q, %v", reply, err)
 		default:
-			t.Logf("NOTE v2 does not list the declared variant (%v); Run = %q, %v", listed, reply, err)
+			settled(t, "v2 does not list the declared variant (%v); Run = %q, %v", listErr, reply, err)
 		}
 	})
 
@@ -130,7 +130,7 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 			t.Logf("PASS %v", err)
 		default:
 			body, gerr := rr.server.doJSON(ctx, http.MethodGet, "/api/integration/anthropic", nil, http.StatusOK)
-			t.Logf("NOTE integration route shape differs from source: %v; GET /api/integration/anthropic = %.400s, %v", err, body, gerr)
+			settled(t, "integration route shape differs from source: %v; GET /api/integration/anthropic = %.400s, %v", err, body, gerr)
 		}
 	})
 
@@ -175,6 +175,16 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 		}
 		t.Logf("PASS two serves on %s both round-trip", cfg.RuntimeRoot)
 	})
+}
+
+// settled reports a broken premise the contract runs have settled: a NOTE on a developer's machine,
+// a failure in CI (WITNESS_CONTRACT_CHANNEL is set), where it means v2 changed.
+func settled(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("WITNESS_CONTRACT_CHANNEL") != "" {
+		t.Fatalf(format, args...)
+	}
+	t.Logf("NOTE "+format, args...)
 }
 
 func TestContractRunnerQuotaExhausted(t *testing.T) {

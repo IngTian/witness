@@ -10,7 +10,7 @@ package opencode
 //     away (T5), so this is evidence for the npm channel, not a production path.
 //   - T5: resolution per install channel (npm, curl, desktop).
 //   - T6: a decoy named OpenCode.exe first on PATH never hangs a probe.
-//   - T8: 2.3.0's pty daemon, and the shell it runs, inside witness's kill-on-close job.
+//   - T8: 2.3.0's pty daemon (and so its console's processes) inside witness's kill-on-close job.
 //   - T9: an MCP server's process tree under that job.
 //
 // Process trees are compared by pid AND name against a snapshot (fresh, survivors): a pid Windows
@@ -23,7 +23,6 @@ import (
 	"errors"
 	"maps"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,6 +146,8 @@ func TestContractWindowsResolve(t *testing.T) { // T5
 		if !strings.EqualFold(got, want) {
 			t.Fatalf("ResolveExe = %s, want the curl installer's %s", got, want)
 		}
+		requireContract(t) // the same rung, then the binary runs and is the pinned --version
+
 	case "desktop":
 		cli := filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "ai.opencode.desktop", "resources", "opencode-cli.exe")
 		if fi, err := os.Stat(cli); err != nil || fi.IsDir() {
@@ -282,11 +283,12 @@ func TestContractWindowsDaemonInJob(t *testing.T) { // T8
 		}
 		// Control: with the serve alone gone and the job still open, the handed-off daemon and its
 		// ping must live on. Otherwise owner loss still kills them, and this subtest cannot tell the
-		// job's kill from the daemon's own stop.
+		// job's kill from the daemon's own stop. 5 s, well past the ~1.2 s an unhanded daemon took to
+		// follow its serve; the handoff keeps it up to 120 s, so this costs only time.
 		if p, err := os.FindProcess(h.ServePID); err == nil {
 			_ = p.Kill()
 		}
-		time.Sleep(time.Second)
+		time.Sleep(5 * time.Second)
 		rest := map[int]string{}
 		for pid, n := range tree {
 			if n != "opencode" {
@@ -378,13 +380,6 @@ func TestContractWindowsMCPChildNoOrphan(t *testing.T) { // T9
 			}
 		}
 	})
-}
-
-// atWork is path for the scratch Work location. v2 reads the location from `location[directory]`
-// or the x-opencode-directory header, else uses the serve's cwd (server/src/location.ts:75-80);
-// a bare `directory` query is ignored.
-func atWork(path string, s scratch) string {
-	return path + "?" + url.Values{"location[directory]": {s.Work}}.Encode()
 }
 
 // servePID is the pid the serve reports, the opencode.exe actually serving.

@@ -21,4 +21,12 @@ func TestGenerationStatus(t *testing.T) {
 	if _, com, _ := GenerationStatus(s.db, "sess", "lens", high, 3); !com {
 		t.Fatal("distilled >= total must read as committed")
 	}
+	// The high row gone with no later one left: the generation is gone too, not current (else its
+	// manifest is never reaped). Only the `id = rawHigh` clause decides this case.
+	if _, err := s.db.Exec(`DELETE FROM raw WHERE session = ? AND id = ?`, "sess", high); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _, _ := GenerationStatus(s.db, "sess", "lens", high, 3); cur {
+		t.Fatal("a generation whose high-water row was deleted must not be current")
+	}
 }

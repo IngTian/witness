@@ -12,6 +12,9 @@ package opencode
 //   - every spawn is exec.CommandContext under a deadline, and noLeaks checks the process table
 //     returned to its baseline.
 //
+// On Windows the suite is CI-only: `wire` edits HKCU\Environment (the user PATH), and outside CI
+// the worker-wakeup T7 leaves is never killed, so noLeaks reports it.
+//
 // Cleanup order matters, and noLeaks fixes it for any call order: Cleanup is LIFO, and noLeaks must
 // run BEFORE the test's TempDir removal, or Windows' RemoveAll (which retries a dir a live process
 // still holds for only 2 s) fails the test before noLeaks' 5 s grace even starts. So the order is
@@ -24,6 +27,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -318,6 +322,13 @@ func noLeaks(t *testing.T) {
 		}
 		t.Errorf("processes left behind 5 s after the test (pid: name; killed=%v): %v", killed, left)
 	})
+}
+
+// atWork is path for the scratch Work location. v2 reads the location from `location[directory]`
+// or the x-opencode-directory header, else uses the serve's cwd (server/src/location.ts:75-80);
+// a bare `directory` query is ignored.
+func atWork(path string, s scratch) string {
+	return path + "?" + url.Values{"location[directory]": {s.Work}}.Encode()
 }
 
 // pidGone polls until pid is no longer alive, up to d.

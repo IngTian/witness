@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,9 +48,8 @@ func TestContractPluginCapture(t *testing.T) {
 		ID    string
 		State struct{ Status, Error string }
 	}
-	q := "/api/plugin?directory=" + url.QueryEscape(srv.Work) // plugins load on the first location request
 	waitFor(t, 20*time.Second, "witness plugin active", func() bool {
-		_, plugins = srv.Do(http.MethodGet, q, nil, true)
+		_, plugins = srv.Do(http.MethodGet, atWork("/api/plugin", s), nil, true)
 		var r struct{ Data []plugin }
 		_ = json.Unmarshal(plugins, &r)
 		return slices.ContainsFunc(r.Data, func(p plugin) bool { return p.ID == "witness" && p.State.Status == "active" })
@@ -63,7 +61,7 @@ func TestContractPluginCapture(t *testing.T) {
 		Status struct{ Status string }
 	}
 	waitFor(t, 30*time.Second, "mcp.witness connected", func() bool {
-		_, mcp = srv.Do(http.MethodGet, "/api/mcp?directory="+url.QueryEscape(s.Work), nil, true)
+		_, mcp = srv.Do(http.MethodGet, atWork("/api/mcp", s), nil, true)
 		var r struct{ Data []mcpServer }
 		_ = json.Unmarshal(mcp, &r)
 		return slices.ContainsFunc(r.Data, func(m mcpServer) bool { return m.Name == "witness" && m.Status.Status == "connected" })

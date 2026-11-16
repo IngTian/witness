@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"cmp"
+	"go/build/constraint"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,7 +14,8 @@ import (
 )
 
 // No build tag: this runs in make test. A contract test missing the tag would spawn real OpenCode
-// in make test.
+// in make test. The constraint is evaluated, not prefix-matched: `opencodecontract || windows`
+// starts the same and still compiles without the tag.
 func TestContractFilesAreBuildTagged(t *testing.T) {
 	files, _ := filepath.Glob("contract_*_test.go")
 	if len(files) == 0 {
@@ -21,8 +23,16 @@ func TestContractFilesAreBuildTagged(t *testing.T) {
 	}
 	for _, f := range files {
 		b, _ := os.ReadFile(f)
-		if first, _, _ := strings.Cut(string(b), "\n"); !strings.HasPrefix(first, "//go:build opencodecontract") {
-			t.Errorf("%s: first line %q, want //go:build opencodecontract…", f, first)
+		first, _, _ := strings.Cut(string(b), "\n")
+		expr, err := constraint.Parse(first)
+		if err != nil {
+			t.Errorf("%s: first line %q is not a build constraint (%v), want //go:build opencodecontract…", f, first, err)
+			continue
+		}
+		for _, others := range []bool{true, false} { // every other tag set, then none
+			if expr.Eval(func(tag string) bool { return tag != "opencodecontract" && others }) {
+				t.Errorf("%s: %q holds without opencodecontract (other tags %v): make test would compile it", f, first, others)
+			}
 		}
 	}
 }

@@ -97,10 +97,18 @@ func TestContainChildrenBreakawayEscapesJob(t *testing.T) {
 		}
 	}
 	inside, _ := startPing(t, false)
-	// Nested jobs judge breakaway by the IMMEDIATE job (ours, BREAKAWAY_OK), so starting the
-	// Detach'd child must not fail even inside an outer job that forbids breakaway.
-	away, _ := startPing(t, true)
+	// Nested jobs judge breakaway by the IMMEDIATE job (ours, BREAKAWAY_OK), so by Microsoft's docs
+	// the Detach'd start also succeeds inside an outer job that forbids breakaway. That case is
+	// untested: no run builds such an outer job.
+	away, awayExited := startPing(t, true)
 	pids := jobPIDs(t, workerJob)
+	// Read after the listing, so it covers the listing itself: a child already gone is in no job,
+	// and would read as broken away.
+	select {
+	case <-awayExited:
+		t.Fatalf("the Detach'd child (pid %d) exited before the job was read: its absence proves nothing", away.Process.Pid)
+	default:
+	}
 	if !slices.Contains(pids, uintptr(inside.Process.Pid)) {
 		t.Errorf("a plain child (pid %d) is not in the worker's job %v", inside.Process.Pid, pids)
 	}

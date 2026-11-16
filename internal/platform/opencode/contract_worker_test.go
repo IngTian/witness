@@ -4,8 +4,8 @@ package opencode
 
 // T7: what the real witness binary's detached worker leaves behind, started the production way, by
 // `ingest` (the path #216 was about):
-//   - TestContractWorkerStopTakesChildren: `worker stop` takes the worker's `claude -p`, its private
-//     OpenCode serve and that serve's pty daemon along. Linux: the stop's group SIGTERM. Windows:
+//   - TestContractWorkerStopTakesChildren: `worker stop` takes the worker's `claude -p` and its
+//     private OpenCode serve along (the pty daemon is T8's). Linux: the stop's group SIGTERM. Windows:
 //     the kill-on-close job the worker puts itself in (Tasks 3.1/3.2), since TerminateProcess
 //     neither cascades nor runs the worker's defers.
 //   - TestContractWakeupOutlivesWorker: the retry worker-wakeup a failed mine arms outlives the
@@ -21,11 +21,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -40,12 +42,22 @@ func TestContractWorkerStopTakesChildren(t *testing.T) {
 	installSystemProvider(t, m) // skips on darwin
 	// sleep: a `claude -p` that never answers, so the stop finds it running.
 	env := startT7Worker(t, s, "sleep", `{"dimensions":["speed"],"runner":"opencode","extract_model":"mock/ok","review_model":"mock/ok"}`)
+	var claude []int
 	waitFor(t, 3*time.Minute, "the claude stub and the worker's private serve running (no serve at all: the machine-wide mock "+
 		"provider config may not have loaded into the worker's private serve, so its Open refused mock/ok; witness.log is logged below)", func() bool {
-		return len(spawned(t, before, "claude")) == 1 && len(spawned(t, before, "opencode")) >= 1
+		claude = spawned(t, before, "claude")
+		return len(claude) == 1 && len(spawned(t, before, "opencode")) >= 1
 	})
+	// The stub must still be running when the stop lands: one that died early (a quarantined copy, a
+	// mistyped stub mode) would read as taken.
+	if !proc.Alive(claude[0]) {
+		t.Fatalf("the claude stub %d died before `worker stop`", claude[0])
+	}
 	runWitness(t, s, env, "worker", "stop")
-	waitFor(t, 10*time.Second, "no claude stub, serve, pty daemon or witness left after `worker stop`", func() bool {
+	if !pidGone(claude[0], 10*time.Second) {
+		t.Fatalf("the claude stub %d outlived `worker stop` by 10 s", claude[0])
+	}
+	waitFor(t, 10*time.Second, "no claude stub, serve or witness left after `worker stop`", func() bool {
 		return len(spawned(t, before, "claude", "opencode", "opencode-pty", witnessName())) == 0
 	})
 }
@@ -60,20 +72,28 @@ func TestContractWakeupOutlivesWorker(t *testing.T) {
 	// The default lens alone, on the claude runner: its `claude -p` fails, a real failure (no stop
 	// was asked for), so the session backs off and the worker arms the retry wakeup on exit.
 	startT7Worker(t, s, "fail", "")
+	worker := 0 // its stamped pid, read while it runs (its graceful exit clears it)
 	waitFor(t, 3*time.Minute, "the worker exited with a retry wakeup armed", func() bool {
 		st, err := store.Open()
 		if err != nil {
 			return false
 		}
 		defer st.Close()
+		if pid, err := strconv.Atoi(st.MetaString("worker_pid")); err == nil {
+			worker = pid
+		}
 		// The stamp first: WorkerActive briefly holds the worker lock, and probing it before the
 		// worker has taken it could make that worker lose the lock and no-op.
 		return st.MetaString("worker_manual_wakeup_at") != "" && !st.WorkerActive()
 	})
-	time.Sleep(3 * time.Second) // past the worker's exit, which on Windows closes its job
+	// Past the worker's exit, which on Windows closes its job: a worker still tearing down (the
+	// embedder unloading) would count as a second process below.
+	if worker == 0 || !pidGone(worker, 30*time.Second) {
+		t.Fatalf("worker pid %d: never seen stamped, or still alive 30 s after it released its lock", worker)
+	}
 	pids := spawned(t, before, witnessName())
 	if len(pids) != 1 {
-		t.Fatalf("%d new witness processes %v 3 s after the worker exited, want exactly the sleeping worker-wakeup", len(pids), pids)
+		t.Fatalf("%d new witness processes %v after the worker %d exited, want exactly the sleeping worker-wakeup", len(pids), pids, worker)
 	}
 	p, err := os.FindProcess(pids[0])
 	if err != nil {
