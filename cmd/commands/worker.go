@@ -113,10 +113,9 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// TerminateProcess of `worker stop` (which runs no defers and does not cascade) still takes
 	// every `claude -p` and the `opencode serve` along (#218). Only now: a trigger that lost the
 	// lock exits without one. Best-effort — a refused job costs the stop its reach, not the drain.
-	// REVERT CHECK (temporary, reverted by the next commit): containment disabled so CI shows T7 failing without it.
-	// if err := procCtl.ContainChildren(); err != nil {
-	// 	slog.Warn("worker: could not contain children in a job; a Windows `worker stop` may orphan them", "err", err)
-	// }
+	if err := procCtl.ContainChildren(); err != nil {
+		slog.Warn("worker: could not contain children in a job; a Windows `worker stop` may orphan them", "err", err)
+	}
 	if auto && st.MetaString(metaWorkerStopRequested) == "1" {
 		_ = st.SetMetaString(metaWorkerMode, "")
 		return true, nil
