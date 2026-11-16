@@ -390,8 +390,8 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 
 	for i, id := range s.IDs {
 		key := s.Keys[i]
-		id = strings.TrimSpace(id)
-		if id == "" {
+		// recordKey keys on the verbatim id, so the lookup must too.
+		if strings.TrimSpace(id) == "" {
 			// No stable id: dedup on the CONTENT KEY instead.
 			//
 			// This used to append unconditionally ("hash-only keys never match by id"), so
@@ -504,7 +504,7 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	for _, upd := range updates {
 		inRange := upd.oldIdx < len(mergedRecs) && upd.oldIdx < len(mergedKeys)
 		identityOK := inRange && recordKey(
-			strings.TrimSpace(s.IDs[upd.newRecIdx]), mergedRecs[upd.oldIdx].Text) == upd.oldKey
+			s.IDs[upd.newRecIdx], mergedRecs[upd.oldIdx].Text) == upd.oldKey
 		if inRange && identityOK {
 			// Preserve the original seq for the updated record (keep its position).
 			newRec := s.Records[upd.newRecIdx]

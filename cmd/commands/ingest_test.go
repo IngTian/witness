@@ -296,3 +296,42 @@ func TestIngestIsIdempotentForColonBearingIDs(t *testing.T) {
 		t.Fatalf("the edited body must be stored, got %+v", recs)
 	}
 }
+
+// A record id with surrounding whitespace must match by its verbatim id (recordKey keys on
+// the raw id), so a re-ingest or an edit is idempotent. It used to trim the id before the
+// oldKeyByID lookup, so an id like " doc-1 " was appended again on every ingest.
+func TestIngestMatchesAnIDWithSurroundingWhitespace(t *testing.T) {
+	ingestHome(t)
+	rec := `{"text":"body one","id":" doc-1 ","session":"docs"}` + "\n"
+	for pass := 1; pass <= 3; pass++ {
+		n, _, err := cmdIngest(strings.NewReader(rec), true)
+		if err != nil {
+			t.Errorf("pass %d: ingest error: %v", pass, err)
+		}
+		want := 1
+		if pass > 1 {
+			want = 0
+		}
+		if n != want {
+			t.Errorf("pass %d: ingested %d records, want %d", pass, n, want)
+		}
+		rows := rawRows(t, "file:docs")
+		if len(rows) != 1 {
+			t.Errorf("pass %d: %d raw rows, want 1", pass, len(rows))
+		}
+	}
+	n, _, err := cmdIngest(strings.NewReader(`{"text":"body one, revised","id":" doc-1 ","session":"docs"}`+"\n"), true)
+	if err != nil {
+		t.Errorf("edit: ingest error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("edit: ingested %d records, want 1", n)
+	}
+	rows := rawRows(t, "file:docs")
+	if len(rows) != 1 {
+		t.Errorf("edit: %d raw rows, want 1", len(rows))
+	}
+	if len(rows) == 1 && rows[0].Text != "body one, revised" {
+		t.Errorf("edit: text = %q, want %q", rows[0].Text, "body one, revised")
+	}
+}
