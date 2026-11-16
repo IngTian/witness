@@ -75,6 +75,22 @@ func TestLensRegistry(t *testing.T) {
 	}
 }
 
+// The lens loader's json.Unmarshal reads a key in any case, so a differently-cased known key
+// must not be reported as ignored; a truly unknown key still is.
+func TestUnknownLensKeysIgnoresCase(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("math", writeLensSrcDir(t, "math", "mine", "")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `{"Name":"math","Extract_Model":"a","REVIEW_MODEL":"b","mine_model":"c"}`
+	if err := os.WriteFile(filepath.Join(s.LensesDir(), "math", LensConfigFile), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.UnknownLensKeys("math"); !slices.Equal(got, []string{"mine_model"}) {
+		t.Errorf("UnknownLensKeys = %q, want only [mine_model]", got)
+	}
+}
+
 // register rejects a source that is a single FILE (the old format) rather than a
 // directory, with a message pointing at the new layout.
 func TestRegisterLensRejectsSingleFile(t *testing.T) {

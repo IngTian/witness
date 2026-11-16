@@ -141,7 +141,8 @@ func ResolveLensName(dir, fallback string) (string, error) {
 }
 
 // UnknownLensKeys returns the lens.json keys witness does not read, sorted. A missing or
-// unparseable file returns nil.
+// unparseable file returns nil. Case-insensitive, as the loader is: encoding/json matches a key
+// to a struct field ignoring case, so "Extract_Model" is read and must not be called ignored.
 func (r *lensReg) UnknownLensKeys(name string) []string {
 	dir := filepath.Join(r.LensesDir(), sanitize(name))
 	data, err := os.ReadFile(filepath.Join(dir, LensConfigFile))
@@ -154,7 +155,7 @@ func (r *lensReg) UnknownLensKeys(name string) []string {
 	}
 	var unknown []string
 	for k := range m {
-		if !slices.Contains(LensKeys, k) {
+		if !slices.ContainsFunc(LensKeys, func(known string) bool { return strings.EqualFold(k, known) }) {
 			unknown = append(unknown, k)
 		}
 	}
