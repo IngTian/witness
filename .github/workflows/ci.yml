@@ -76,6 +76,16 @@ jobs:
       - name: vet
         run: make vet
 
+      # The OpenCode contract tests (//go:build opencodecontract) never compile in make test, and
+      # only opencode-contract.yml runs them. Vetting them here, for both OSes they run on, makes a
+      # refactor that breaks one fail this required check. CGO_ENABLED=0 as make vet sets it inline.
+      - name: vet (OpenCode contract tests, linux + windows)
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOOS=linux go vet -tags opencodecontract ./internal/platform/opencode/
+          GOOS=windows go vet -tags opencodecontract ./internal/platform/opencode/
+
       # -race needs cgo on Linux, so this one step turns it on; the shipped binary stays
       # CGO_ENABLED=0 (build-all below). Targeted at the two packages with concurrent passes,
       # whose tests ask for -race and can't fail without it: TestProgressLineIsSafeForConcurrentUse

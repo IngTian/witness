@@ -141,6 +141,8 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - New behavior needs a test. The CC capture path and the hook name-contract are
   guarded (`internal/platform/claude/capture_test.go`,
   `cmd/commands/hookcontract_test.go`) — keep them passing.
+- Real OpenCode runs only in `contract_*_test.go` (`//go:build opencodecontract`),
+  driven by `.github/workflows/opencode-contract.yml`; never in `make test`.
 - A `schemaVersion` bump adds that version's schema dump:
   `WITNESS_DUMP_SCHEMA=1 go test -run TestUpgradedSchemaMatchesFresh ./internal/store/`
   writes `internal/store/testdata/schema/v<N>.sql`; commit it. Every dump there is
