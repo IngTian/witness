@@ -17,6 +17,7 @@ package opencode
 // reuses for another image counts as gone, and a developer's own opencode is never counted.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -131,12 +132,16 @@ func TestContractWindowsResolve(t *testing.T) { // T5
 			t.Fatal(npmPrefixMissing)
 		}
 		want := filepath.Join(prefix, "node_modules", "@opencode", "cli", "bin", "opencode.exe")
-		if strings.EqualFold(filepath.Ext(got), ".cmd") || !strings.EqualFold(filepath.Clean(got), want) {
-			t.Fatalf("ResolveExe = %s, want the real exe %s, not the npm shim %s", got, want, filepath.Join(prefix, "opencode.cmd"))
+		// SameFile, not a string compare: an 8.3 short name or another spelling of the prefix is
+		// the same file.
+		gi, gerr := os.Stat(got)
+		wi, werr := os.Stat(want)
+		if strings.EqualFold(filepath.Ext(got), ".cmd") || gerr != nil || werr != nil || !os.SameFile(gi, wi) {
+			t.Fatalf("ResolveExe = %s (%v), want the real exe %s (%v), not the npm shim %s", got, gerr, want, werr, filepath.Join(prefix, "opencode.cmd"))
 		}
 	case "curl":
 		if p, err := exec.LookPath("opencode"); err == nil {
-			t.Fatalf("exec.LookPath found %s: the curl leg must leave opencode off the Windows PATH (its installer edits only Git Bash's rc files), or this case proves nothing", p)
+			t.Fatalf("exec.LookPath found %s: the curl installer appends ~/.opencode/bin to $GITHUB_PATH whenever GITHUB_ACTIONS=true, even with --no-modify-path (install:470-473); run it with GITHUB_ACTIONS unset, or this case proves nothing", p)
 		}
 		want := filepath.Join(os.Getenv("USERPROFILE"), ".opencode", "bin", "opencode.exe")
 		if !strings.EqualFold(got, want) {
@@ -157,6 +162,9 @@ func TestContractWindowsResolve(t *testing.T) { // T5
 		b, err := os.ReadFile(beforeFile)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if bytes.HasPrefix(b, []byte{0xff, 0xfe}) {
+			t.Fatalf("%s is UTF-16; write it as UTF-8 (pwsh 7, or -Encoding utf8)", beforeFile)
 		}
 		was := strings.TrimSpace(strings.TrimPrefix(string(b), "\ufeff"))
 		raw, expanded := userPath(t)
@@ -222,10 +230,18 @@ func TestContractWindowsDaemonInJob(t *testing.T) { // T8
 		t.Helper()
 		before := procList(t)
 		holder, h := startHolder(t, oc.Bin, s, true, false)
-		if code, body := h.Client(s).Do(http.MethodPost, atWork("/api/shell", s), map[string]string{"command": "ping -n 60 127.0.0.1"}, true); code != http.StatusOK {
+		code, body := h.Client(s).Do(http.MethodPost, atWork("/api/shell", s), map[string]string{"command": "ping -n 60 127.0.0.1"}, true)
+		if code != http.StatusOK {
 			t.Fatalf("POST /api/shell: %d %.500s", code, body)
 		}
+		t.Logf("POST /api/shell: %.300s", body) // its shell and pid, for a run that finds no daemon
 		var tree map[int]string
+		// ping without opencode-pty reads as OpenCode's spawn-it-itself fallback, not a job failure.
+		t.Cleanup(func() {
+			if t.Failed() {
+				t.Logf("tree at failure: %v", tree)
+			}
+		})
 		waitFor(t, 20*time.Second, "opencode-pty and ping running (no opencode-pty: the daemon never started, e.g. its spawn was refused inside the job)", func() bool {
 			tree = fresh(t, before, "opencode", "opencode-pty", "ping")
 			return hasName(tree, "opencode-pty") && hasName(tree, "ping")
@@ -263,6 +279,25 @@ func TestContractWindowsDaemonInJob(t *testing.T) { // T8
 		var r struct{ Handoff *struct{ Ticket string } }
 		if code != http.StatusOK || json.Unmarshal(body, &r) != nil || r.Handoff == nil || r.Handoff.Ticket == "" {
 			t.Fatalf("POST /api/experimental/persistent-pty/handoff: %d %.500s, want a ticket", code, body)
+		}
+		// Control: with the serve alone gone and the job still open, the handed-off daemon and its
+		// ping must live on. Otherwise owner loss still kills them, and this subtest cannot tell the
+		// job's kill from the daemon's own stop.
+		if p, err := os.FindProcess(h.ServePID); err == nil {
+			_ = p.Kill()
+		}
+		time.Sleep(time.Second)
+		rest := map[int]string{}
+		for pid, n := range tree {
+			if n != "opencode" {
+				rest[pid] = n
+			}
+		}
+		alive := survivors(t, rest, 0)
+		for pid, n := range rest {
+			if alive[pid] == "" {
+				t.Fatalf("control: %s %d died with its serve despite the handoff, so this subtest cannot isolate the job (not a containment finding)", n, pid)
+			}
 		}
 		_ = holder.Process.Kill()
 		if left := survivors(t, tree, 2*time.Second); len(left) > 0 {
@@ -310,6 +345,9 @@ func TestContractWindowsMCPChildNoOrphan(t *testing.T) { // T9
 		}
 	}
 
+	// bareLeft is what outlived the uncontained serve; nil if bare-kill did not finish. It runs
+	// first (t.Run is sequential), so the contained case can say what its pass proves.
+	var bareLeft map[int]string
 	t.Run("bare-kill", func(t *testing.T) { // observed, not asserted: Bun's behaviour, not witness's (G13)
 		before := procList(t)
 		srv := startRawServe(t, oc.Bin, s, "OPENCODE_CONFIG_CONTENT="+string(cfg))
@@ -318,6 +356,7 @@ func TestContractWindowsMCPChildNoOrphan(t *testing.T) { // T9
 		left := survivors(t, procs, 5*time.Second)
 		t.Logf("T9 bare kill of an uncontained serve: of %v, %v outlived it by 5 s (if any, an upstream note, not a witness defect: windows.md §E.9)", procs, left)
 		kill(left)
+		bareLeft = left
 	})
 
 	t.Run("contained-holder-killed", func(t *testing.T) { // what witness relies on: the worker's job takes the tree
@@ -327,6 +366,9 @@ func TestContractWindowsMCPChildNoOrphan(t *testing.T) { // T9
 		_ = holder.Process.Kill()
 		left := survivors(t, procs, 5*time.Second)
 		kill(left)
+		if bareLeft != nil && !hasName(left, "wgrand") && !hasName(bareLeft, "wgrand") {
+			t.Log("T9: wgrand also died with an uncontained serve, so libuv's job held it; this pass does not show witness's job holds Bun's grandchildren")
+		}
 		for pid, n := range left {
 			switch n {
 			case "wstub":
