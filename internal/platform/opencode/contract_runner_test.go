@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +26,7 @@ import (
 
 // newContractRunner creates a runner on a scratch env with the mock provider, opens it and
 // registers cleanup. before runs after the scratch env exists and before Open (nil = nothing).
-func newContractRunner(t *testing.T, before func(scratch)) (platform.Runner, *mockProvider, context.Context, store.Config) {
+func newContractRunner(t *testing.T, before func(scratch)) (*runner, *mockProvider, context.Context, store.Config) {
 	requireContract(t)
 	noLeaks(t)
 	s := scratchEnv(t)
@@ -32,23 +34,31 @@ func newContractRunner(t *testing.T, before func(scratch)) (platform.Runner, *mo
 	m := startMock(t)
 	prev := privateConfigOverlay
 	t.Cleanup(func() { privateConfigOverlay = prev })
-	privateConfigOverlay = mustUnmarshal(t, m.ProviderConfig()) // PR 2's seam: in-process, so this also runs on darwin, no /etc write
+	var overlay map[string]any
+	if err := json.Unmarshal([]byte(m.ProviderConfig()), &overlay); err != nil {
+		t.Fatalf("unmarshal provider config: %v", err)
+	}
+	privateConfigOverlay = overlay // PR 2's seam: in-process, so this also runs on darwin, no /etc write
 	if before != nil {
 		before(s)
 	}
 	cfg := store.Config{Runner: "opencode", RuntimeRoot: filepath.Join(s.Root, "runtime"), TriageModel: "mock/ok", DistillModel: "mock/ok", RunnerModels: []string{"mock/ok"}}
 	r := Platform{}.NewRunner(cfg)
+	rr, ok := r.(*runner)
+	if !ok {
+		t.Fatalf("NewRunner returned %T, want *runner", r)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	if err := r.Open(ctx); err != nil {
+	if err := rr.Open(ctx); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := r.Close(); err != nil {
+		if err := rr.Close(); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})
-	return r, m, ctx, cfg
+	return rr, m, ctx, cfg
 }
 
 func TestContractRunnerRoundTrip(t *testing.T) {
@@ -97,13 +107,9 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 
 	t.Run("variant", func(t *testing.T) {
 		r, _, ctx, _ := newContractRunner(t, nil)
-		rr, ok := r.(*runner)
-		if !ok {
-			t.Fatalf("NewRunner returned %T, want *runner", r)
-		}
 		// Fail when v2 lists the declared variant and the Run still fails (witness's ref is then
 		// wrong); a variant v2 dropped fails in CI too (settled).
-		listErr := rr.server.validateModels(ctx, []string{"mock/ok#high"})
+		listErr := r.server.validateModels(ctx, []string{"mock/ok#high"})
 		reply, err := r.Run(ctx, "mock/ok#high", "LENS-SYSTEM-MARKER instructions", "DATA")
 		switch {
 		case err == nil && reply == "MOCK-REPLY ok":
@@ -117,31 +123,23 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 
 	t.Run("validate-models", func(t *testing.T) {
 		r, _, ctx, _ := newContractRunner(t, nil)
-		rr, ok := r.(*runner)
-		if !ok {
-			t.Fatalf("NewRunner returned %T, want *runner", r)
-		}
 		// The unavailable-model hint names the provider's env var, read from /api/integration.
-		err := rr.ValidateModels(ctx, "anthropic/nope")
+		err := r.ValidateModels(ctx, "anthropic/nope")
 		switch {
 		case err == nil:
 			t.Fatal("ValidateModels(anthropic/nope) = nil")
 		case strings.Contains(err.Error(), "ANTHROPIC_API_KEY"):
 			t.Logf("PASS %v", err)
 		default:
-			body, gerr := rr.server.doJSON(ctx, http.MethodGet, "/api/integration/anthropic", nil, http.StatusOK)
+			body, gerr := r.server.doJSON(ctx, http.MethodGet, "/api/integration/anthropic", nil, http.StatusOK)
 			settled(t, "integration route shape differs from source: %v; GET /api/integration/anthropic = %.400s, %v", err, body, gerr)
 		}
 	})
 
 	t.Run("second-runner", func(t *testing.T) {
 		r1, _, ctx, cfg := newContractRunner(t, nil)
-		rr1, ok := r1.(*runner)
-		if !ok {
-			t.Fatalf("NewRunner returned %T, want *runner", r1)
-		}
 		// A second runner on the same root (two serves, one private DB), both answering at once.
-		r2 := Platform{}.NewRunner(cfg)
+		r2 := Platform{}.NewRunner(cfg).(*runner)
 		if err := r2.Open(ctx); err != nil {
 			t.Fatalf("Open second runner: %v", err)
 		}
@@ -150,12 +148,8 @@ func TestContractRunnerRoundTrip(t *testing.T) {
 				t.Errorf("Close second runner: %v", err)
 			}
 		}()
-		rr2, ok := r2.(*runner)
-		if !ok {
-			t.Fatalf("NewRunner returned %T, want *runner", r2)
-		}
-		if rr1.server.baseURL == rr2.server.baseURL {
-			t.Fatalf("both runners share one serve at %s, want two distinct serves", rr1.server.baseURL)
+		if r1.server.baseURL == r2.server.baseURL {
+			t.Fatalf("both runners share one serve at %s, want two distinct serves", r1.server.baseURL)
 		}
 		var replies [2]string
 		var runErrs [2]error
@@ -240,19 +234,19 @@ func TestContractRunnerSixteenParallel(t *testing.T) {
 		t.Fatalf("%d provider calls, want 16", len(calls))
 	}
 	// Each PAR-xx must appear in exactly one call's User.
+	re := regexp.MustCompile(`PAR-\d\d`)
 	seen := make(map[string]int)
 	for _, c := range calls {
-		for i := 0; i < 16; i++ {
-			mark := fmt.Sprintf("PAR-%02d", i)
-			if strings.Contains(c.User, mark) {
-				seen[mark]++
-			}
+		if mark := re.FindString(c.User); mark != "" {
+			seen[mark]++
 		}
 	}
-	for i := 0; i < 16; i++ {
-		mark := fmt.Sprintf("PAR-%02d", i)
-		if seen[mark] != 1 {
-			t.Errorf("%s appeared in %d calls, want 1", mark, seen[mark])
+	if len(seen) != 16 {
+		t.Errorf("found %d distinct PAR-xx markers, want 16: %v", len(seen), maps.Keys(seen))
+	}
+	for mark, count := range seen {
+		if count != 1 {
+			t.Errorf("%s appeared in %d calls, want 1", mark, count)
 		}
 	}
 	peak := m.PeakInFlight()

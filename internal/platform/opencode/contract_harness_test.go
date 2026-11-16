@@ -25,8 +25,8 @@ package opencode
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -181,15 +181,6 @@ func (s scratch) procEnv(extra []string) []string {
 	return append(env, extra...)
 }
 
-func mustUnmarshal(t *testing.T, js string) map[string]any {
-	t.Helper()
-	var m map[string]any
-	if err := json.Unmarshal([]byte(js), &m); err != nil {
-		t.Fatalf("unmarshal %.200q: %v", js, err)
-	}
-	return m
-}
-
 // disableAutoDistill stops the plugin's auto-gate from starting a stray worker. `config set` knows
 // only runner/mine_model/review_model, and a missing config.toml means defaults, so a one-line
 // file is read as written.
@@ -256,18 +247,24 @@ func stubPath(t *testing.T, name string) string {
 // carry .exe.
 func procName(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".exe") }
 
-// procPIDs lists the live processes named name (procName-normalized), from one procList.
-func procPIDs(t *testing.T, name string) []int {
+// fresh returns live processes with these names that are not in the snapshot (a reused pid under
+// another name counts as new).
+func fresh(t *testing.T, before map[int]string, names ...string) map[int]string {
 	t.Helper()
-	want := procName(name)
-	var pids []int
+	out := map[int]string{}
 	for pid, n := range procList(t) {
-		if n == want {
-			pids = append(pids, pid)
+		if before[pid] != n && slices.Contains(names, n) {
+			out[pid] = n
 		}
 	}
-	slices.Sort(pids)
-	return pids
+	return out
+}
+
+// killPID kills the process with the given pid (best-effort, no error reported).
+func killPID(pid int) {
+	if p, err := os.FindProcess(pid); err == nil {
+		_ = p.Kill()
+	}
 }
 
 // noLeaks snapshots every process a contract test could leave behind, and at Cleanup fails listing
@@ -295,18 +292,10 @@ func noLeaks(t *testing.T) {
 		return out
 	}
 	baseline := snapshot()
+	watchedNames := slices.Collect(maps.Keys(watched))
 	t.Cleanup(func() {
-		extras := func() map[int]string {
-			out := map[int]string{}
-			for pid, n := range snapshot() {
-				if baseline[pid] != n { // a reused pid under another name is new too
-					out[pid] = n
-				}
-			}
-			return out
-		}
-		left := extras()
-		for deadline := time.Now().Add(5 * time.Second); len(left) > 0 && time.Now().Before(deadline); left = extras() {
+		left := fresh(t, baseline, watchedNames...)
+		for deadline := time.Now().Add(5 * time.Second); len(left) > 0 && time.Now().Before(deadline); left = fresh(t, baseline, watchedNames...) {
 			time.Sleep(100 * time.Millisecond)
 		}
 		if len(left) == 0 {
@@ -315,9 +304,7 @@ func noLeaks(t *testing.T) {
 		killed := os.Getenv("CI") == "true"
 		if killed {
 			for pid := range left {
-				if p, err := os.FindProcess(pid); err == nil {
-					_ = p.Kill()
-				}
+				killPID(pid)
 			}
 		}
 		t.Errorf("processes left behind 5 s after the test (pid: name; killed=%v): %v", killed, left)

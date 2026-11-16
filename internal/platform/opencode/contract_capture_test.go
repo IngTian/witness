@@ -72,9 +72,9 @@ func TestContractPluginCapture(t *testing.T) {
 	for i := range 2 {
 		marker := "CONTRACT-USER-" + strconv.Itoa(i) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 		sid := srv.Prompt(t, "ok", marker)
-		if msgs := srv.WaitIdle(t, sid, 30*time.Second); !slices.ContainsFunc(msgs, func(m map[string]any) bool { return m["outcome"] == "succeeded" }) {
-			b, _ := json.Marshal(msgs)
-			t.Fatalf("mock turn %d did not succeed: %.2000s", i, b)
+		st, page := waitTurn(t, srv, sid, 30*time.Second, "idle", func(st turnState) bool { return st.Idle != nil })
+		if st.Idle.Outcome != "succeeded" {
+			t.Fatalf("mock turn %d did not succeed: %.2000s", i, page)
 		}
 		waitFor(t, 30*time.Second, "turn "+strconv.Itoa(i)+" in L0", func() bool {
 			st, err := store.Open()

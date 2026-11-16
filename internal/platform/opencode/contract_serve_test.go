@@ -23,7 +23,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -162,35 +161,6 @@ func (s *rawServe) Prompt(t *testing.T, model, text string) string {
 		t.Fatalf("POST /api/session/%s/prompt: %d %.500s", created.Data.ID, code, b)
 	}
 	return created.Data.ID
-}
-
-// Messages returns the session's records oldest first (user, assistant, idle, …), through the
-// runner's own poll URL (order=asc, limit=turnPageSize=200), so the page matches production's.
-func (s *rawServe) Messages(t *testing.T, sid string) []map[string]any {
-	t.Helper()
-	code, b := s.Do(http.MethodGet, messagesPath(sid), nil, true)
-	var r struct {
-		Data []map[string]any `json:"data"`
-	}
-	if code != http.StatusOK || json.Unmarshal(b, &r) != nil {
-		t.Fatalf("GET /api/session/%s/message: %d %.500s", sid, code, b)
-	}
-	return r.Data
-}
-
-// WaitIdle polls Messages until an idle record (the turn's end, whatever its outcome) appears.
-func (s *rawServe) WaitIdle(t *testing.T, sid string, d time.Duration) []map[string]any {
-	t.Helper()
-	for deadline := time.Now().Add(d); ; time.Sleep(250 * time.Millisecond) {
-		msgs := s.Messages(t, sid)
-		if slices.ContainsFunc(msgs, func(m map[string]any) bool { return m["type"] == "idle" }) {
-			return msgs
-		}
-		if time.Now().After(deadline) {
-			b, _ := json.Marshal(msgs)
-			t.Fatalf("session %s not idle after %s; messages: %.2000s", sid, d, b)
-		}
-	}
 }
 
 // Close ends the lease: close stdin, wait up to 5 s, else kill. It returns the serve's exit error
