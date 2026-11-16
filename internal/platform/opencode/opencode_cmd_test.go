@@ -27,7 +27,6 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	for k, v := range map[string]string{"OPENCODE_DB": "/user/opencode.db", "XDG_DATA_HOME": "/user/data",
 		"OPENCODE_CONFIG": "/user/leak.json", "OPENCODE_CONFIG_CONTENT": `{"agent":{"leak":{}}}`,
 		"OPENCODE_SERVER_PASSWORD": "x", "OPENCODE_CONFIG_PROJECT_DISABLE": "0", "opencode_config_dir": "/user/cfg",
-		"OPENCODE_API_KEY": "sk-zen-test", "opencode_api_key": "sk-zen-lower",
 		"WITNESS_OPENCODE_BIN": "/x/opencode", "HOME": "/home/u"} {
 		t.Setenv(k, v)
 	}
@@ -49,12 +48,29 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	}
 	want := map[string]string{"OPENCODE_DB": filepath.Join(root, "opencode-v2.db"), "XDG_DATA_HOME": filepath.Join(root, "opencode-data"),
 		"XDG_CACHE_HOME": filepath.Join(root, "opencode-cache"), "XDG_STATE_HOME": filepath.Join(root, "opencode-state"),
-		"OPENCODE_API_KEY": "sk-zen-test", "opencode_api_key": "sk-zen-lower",
 		"HOME": "/home/u", "WITNESS_OPENCODE_BIN": "/x/opencode", "WITNESS_WORKER": "1"}
 	for k, v := range want {
 		if env[k] != v {
 			t.Errorf("%s = %q, want %q", k, env[k], v)
 		}
+	}
+	// OPENCODE_API_KEY passes in either spelling (spec §7.6: env-var keys). One spelling per
+	// subtest: on Windows the two are ONE variable, so the entry keeps whichever name the OS
+	// holds and is matched case-insensitively there.
+	for _, name := range []string{"OPENCODE_API_KEY", "opencode_api_key"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "sk-zen-"+name)
+			var got []string
+			for _, e := range openCodeCommand(context.Background(), root, "--version").Env {
+				k, v, _ := strings.Cut(e, "=")
+				if k == name || runtime.GOOS == "windows" && strings.EqualFold(k, name) {
+					got = append(got, v)
+				}
+			}
+			if len(got) != 1 || got[0] != "sk-zen-"+name {
+				t.Errorf("%s reached opencode as %q, want exactly [sk-zen-%s]", name, got, name)
+			}
+		})
 	}
 
 	// No runtime root: still isolated (relative to the temp-dir cwd), never the user's DB —
