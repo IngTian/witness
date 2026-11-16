@@ -115,7 +115,7 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	if len(failed) > 0 {
 		if ctx.Err() == nil { // stopped/cancelled is interrupted, not failed (mining's rule)
 			n := r.Store.IncReviewRetry()
-			at := now.Add(backoffDelay(n))
+			at := time.Now().Add(backoffDelay(n))
 			_ = r.Store.SetReviewRetryAfter(at)
 			slog.Warn("review: failed; automatic reviews back off (`worker review` still runs)", "attempt", n, "retry_after", at.UTC().Format(time.RFC3339))
 		}

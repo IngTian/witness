@@ -351,12 +351,15 @@ func TestReviewerFailureBacksOffTheAutomaticGates(t *testing.T) {
 	due := store.Config{ReviewEvery: 999, ReviewPoignancy: 1}
 
 	for i, want := range []time.Duration{5 * time.Minute, 10 * time.Minute} { // backoffDelay(1), backoffDelay(2)
+		before := time.Now()
 		if err := r.Run(context.Background(), now); err == nil {
 			t.Fatalf("run %d: the failure must surface", i+1)
 		}
 		got, _ := time.Parse(time.RFC3339, s.MetaString("review_retry_after"))
-		if !got.Equal(now.Add(want).Truncate(time.Second)) {
-			t.Fatalf("run %d: review_retry_after = %v, want now+%v", i+1, got, want)
+		earliest := before.Add(want).Truncate(time.Second)
+		latest := time.Now().Add(want)
+		if got.Before(earliest) || got.After(latest) {
+			t.Fatalf("run %d: review_retry_after = %v, want between %v and %v", i+1, got, earliest, latest)
 		}
 		if s.ReviewDue(due) {
 			t.Fatalf("run %d: the automatic gate still sees the review due inside its backoff", i+1)
@@ -377,6 +380,30 @@ func TestReviewerFailureBacksOffTheAutomaticGates(t *testing.T) {
 	}
 	if v := s.MetaString("review_retries"); v != "" {
 		t.Errorf("a successful review must reset the failure count, left %q", v)
+	}
+}
+
+func TestReviewerBackoffAnchorsAtFailureNotStart(t *testing.T) {
+	// A timeout review runs for 20 minutes before failing. backoffDelay(1) is 5 minutes,
+	// so if the backoff anchors at the review's start (the old bug), review_retry_after
+	// is already past when the review fails, and the next hook re-folds immediately.
+	s := newStore(t)
+	stageObsForReview(t, s, "default")
+	runner := func(_ context.Context, _, _, _ string) (string, error) {
+		return "", errors.New("simulated timeout")
+	}
+	r := &Reviewer{Store: s, Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW-default"}}, Runner: runner}
+	// Simulate a review that started 10 minutes ago (longer than backoffDelay(1)).
+	reviewStarted := time.Now().Add(-10 * time.Minute)
+	before := time.Now()
+	if err := r.Run(context.Background(), reviewStarted); err == nil {
+		t.Fatal("the failure must surface")
+	}
+	got, _ := time.Parse(time.RFC3339, s.MetaString("review_retry_after"))
+	// The backoff must be at least before+backoffDelay(1), anchored at the failure.
+	earliest := before.Add(5 * time.Minute).Truncate(time.Second)
+	if got.Before(earliest) {
+		t.Fatalf("review_retry_after = %v, want >= %v (failure time + backoffDelay(1))", got, earliest)
 	}
 }
 
