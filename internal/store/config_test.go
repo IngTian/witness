@@ -170,6 +170,21 @@ func TestConfigTemplateDoesNotPinDefaults(t *testing.T) {
 	}
 }
 
+// The template must make no false claims about runtime behavior. The OpenCode runner is
+// `opencode serve` (refuses an empty model), and #199 removed the concurrency clamp to 1.
+func TestConfigTemplateMakesNoFalseRuntimeClaims(t *testing.T) {
+	s := tempStore(t)
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"opencode run", "can't run concurrently"} {
+		if strings.Contains(string(data), stale) {
+			t.Errorf("template still says %q: the OpenCode runner is `opencode serve` and refuses an empty model, and #199 removed the clamp to 1", stale)
+		}
+	}
+}
+
 // TestOpenPreservesExistingConfig is the forward-compatibility guarantee: a user
 // who already has a hand-edited config.toml (from an older CLI, or their own
 // edits) must not have it overwritten, reformatted, or appended to by any command

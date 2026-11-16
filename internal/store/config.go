@@ -73,7 +73,7 @@ type Config struct {
 
 // DefaultMineConcurrency is the default cap on sessions mined in parallel per
 // drain when mine_concurrency is unset. The embedder is loaded once and shared;
-// runner generation may proceed concurrently when the runner declares it safe.
+// every runner's Run is safe to call concurrently (platform.Runner), so generation runs in parallel too.
 const DefaultMineConcurrency = 4
 
 // DefaultReviewMaxChars is the default review-fold window budget (issue #123): the max
@@ -511,10 +511,10 @@ func (c *configFile) EnsureConfigFile() error {
 #   triage_model  — MINING: L0 turns -> L1 observations, once per session (frequent).
 #   distill_model — REVIEW: L1 observations -> L2 facets + L4 profile (batched).
 # Empty distill_model falls back to triage_model, so setting just triage_model gives
-# the whole pipeline one model. Empty triage_model uses the runner's own default
-# (` + "`claude -p`" + ` / ` + "`opencode run`" + `) — but note that for claude that is your
+# the whole pipeline one model. Empty triage_model uses ` + "`claude -p`" + `'s own default — your
 # ambient interactive model, which may be heavy; set triage_model to pin a light one.
-# With runner = opencode, use OpenCode model names such as "openai/gpt-5.5".
+# The ` + "`opencode serve`" + ` runner has no default and refuses an empty model: with runner = opencode,
+# set triage_model to an OpenCode model name such as "openai/gpt-5.5".
 # (A lens may override these per-lens via its lens.json extract_model / review_model.)
 # triage_model  = ` + strconv.Quote(d.TriageModel) + `
 # distill_model = ` + strconv.Quote(d.DistillModel) + `
@@ -533,8 +533,8 @@ func (c *configFile) EnsureConfigFile() error {
 # auto_distill = ` + strconv.FormatBool(d.AutoDistill) + `
 
 # Sessions mined in parallel per drain (backfill speed). The embedder loads once
-# and is shared; each concurrent distillation call adds ~0.35GB. Clamped to the
-# CPU count and to 1 for a runner that can't run concurrently. <=0 = default.
+# and is shared; each concurrent distillation call adds ~0.35GB. The engine clamps
+# this to the CPU count and a memory-safe ceiling. <=0 = default.
 # mine_concurrency = ` + strconv.Itoa(d.MineConcurrency) + `
 
 # Per-input character budget for mining. 0 (default) = mine each session WHOLE — the

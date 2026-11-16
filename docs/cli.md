@@ -123,7 +123,7 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
 
 ```toml
 runner           = "claude"   # "claude" (default) or "opencode"
-triage_model     = ""         # MINING (L0 -> L1), once per session; "" = the runner's default
+triage_model     = ""         # MINING (L0 -> L1), once per session; "" = claude -p's default (opencode needs one)
 distill_model    = ""         # REVIEW (L1 -> L2/L4), batched; "" falls back to triage_model
 review_every     = 5          # run the reviewer every N distilled sessions...
 review_poignancy = 30         # ...or sooner once accumulated salience crosses this (0 = off)
