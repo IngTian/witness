@@ -34,10 +34,10 @@ on:
 permissions:
   contents: read
 
-# A PR's newer push cancels its older run. The event is in the group, so a manual dispatch never
-# cancels the daily run.
+# A PR's newer push cancels its older run. The event and mode are in the group, so a manual dispatch
+# never cancels the daily run, nor a `pinned` dispatch a `latest` one (mode is empty off dispatch).
 concurrency:
-  group: opencode-contract-${{ github.event_name }}-${{ github.ref }}
+  group: opencode-contract-${{ github.event_name }}-${{ inputs.mode }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -84,13 +84,23 @@ jobs:
           echo "WITNESS_CONTRACT_WITNESS_BIN=$dir/$bin" >> "$GITHUB_ENV"
           echo "WITNESS_ASSETS=$RUNNER_TEMP/assets" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@v4
+      # restore + save, not actions/cache: its post-job save is skipped on a red job, so a leg that
+      # fails would download the ~470 MB model again next time. The save runs right after the fetch,
+      # before any test can fail. Keyed on fetch.go, which pins the model's revision and hashes.
+      - uses: actions/cache/restore@v4
+        id: model-cache
         with:
           path: ${{ runner.temp }}/assets
-          key: e5-${{ hashFiles('internal/model/*.go') }}
+          key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       - name: embedding model
         run: '"$WITNESS_CONTRACT_WITNESS_BIN" model fetch'
+
+      - uses: actions/cache/save@v4
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/assets
+          key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       # fetch.sh never runs the binary, so T11 below is its first run.
       - name: fetch OpenCode ${{ matrix.opencode }}
@@ -148,15 +158,22 @@ jobs:
           echo "WITNESS_CONTRACT_WITNESS_BIN=$dir/$bin" >> "$GITHUB_ENV"
           echo "WITNESS_ASSETS=$RUNNER_TEMP/assets" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         if: matrix.channel == 'npm'
+        id: model-cache
         with:
           path: ${{ runner.temp }}/assets
-          key: e5-${{ hashFiles('internal/model/*.go') }}
+          key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       - name: embedding model
         if: matrix.channel == 'npm'
         run: '"$WITNESS_CONTRACT_WITNESS_BIN" model fetch'
+
+      - uses: actions/cache/save@v4
+        if: matrix.channel == 'npm' && steps.model-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/assets
+          key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       - uses: actions/setup-node@v4
         if: matrix.channel == 'npm'
@@ -200,7 +217,8 @@ jobs:
           $before = Join-Path $env:RUNNER_TEMP 'user-path-before.txt'
           [Environment]::GetEnvironmentVariable('Path', 'User') | Out-File -FilePath $before -Encoding utf8NoBOM
           "WITNESS_CONTRACT_PATH_BEFORE=$before" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8NoBOM
-          Start-Process -Wait -FilePath (Join-Path $env:RUNNER_TEMP 'desktop\opencode-desktop-win-x64.exe') -ArgumentList '/S'
+          $p = Start-Process -Wait -PassThru -FilePath (Join-Path $env:RUNNER_TEMP 'desktop\opencode-desktop-win-x64.exe') -ArgumentList '/S'
+          if ($p.ExitCode -ne 0) { throw "desktop installer exited $($p.ExitCode)" }
           Stop-Process -Name OpenCode, opencode-cli -ErrorAction SilentlyContinue
 
       - name: make /etc/opencode writable
@@ -249,13 +267,20 @@ jobs:
           echo "WITNESS_CONTRACT_WITNESS_BIN=$dir/$bin" >> "$GITHUB_ENV"
           echo "WITNESS_ASSETS=$RUNNER_TEMP/assets" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: model-cache
         with:
           path: ${{ runner.temp }}/assets
-          key: e5-${{ hashFiles('internal/model/*.go') }}
+          key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       - name: embedding model
         run: '"$WITNESS_CONTRACT_WITNESS_BIN" model fetch'
+
+      - uses: actions/cache/save@v4
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/assets
+          key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       # The newest @opencode/cli on npm, unpinned (its sha is logged). requireContract then checks
       # the binary on PATH is that version.

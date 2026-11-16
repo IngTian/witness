@@ -53,6 +53,9 @@ func TestContractWorkflowMatchesSupportRange(t *testing.T) {
 			}
 			versions, pinned[f[0]] = append(versions, v), map[string]bool{}
 		}
+		if pinned[f[0]][f[1]] { // fetch.sh would take the first, whichever sha that is
+			t.Fatalf("pins.txt pins %s %s twice", f[0], f[1])
+		}
 		pinned[f[0]][f[1]] = true
 	}
 	if len(versions) == 0 {
@@ -98,12 +101,49 @@ func TestContractWorkflowMatchesSupportRange(t *testing.T) {
 	if want := `OPENCODE_NEWEST: "` + hi.String() + `"`; !strings.Contains(wf, want) {
 		t.Errorf("workflow lacks %s", want)
 	}
-	// The trigger paths: everything a contract test checks. worker.go and cli.go hold the worker's
+	// The trigger paths, read from on.pull_request.paths only (a path in a comment or a step triggers
+	// nothing): everything a contract test checks. worker.go and cli.go hold the worker's
 	// containment and Detach, which only T7 exercises.
+	var paths []string
+	if _, rest, ok := strings.Cut(wf, "\n  pull_request:"); ok {
+		if _, rest, ok = strings.Cut(rest, "\n    paths:\n"); ok {
+			for _, l := range strings.Split(rest, "\n") {
+				if l = strings.TrimSpace(l); strings.HasPrefix(l, "#") {
+					continue
+				}
+				p, ok := strings.CutPrefix(l, "- ")
+				if !ok {
+					break
+				}
+				paths = append(paths, strings.Trim(p, `"`))
+			}
+		}
+	}
 	for _, p := range []string{"internal/platform/opencode/**", "npm/opencode/**", "internal/proc/**",
 		"cmd/commands/worker.go", "cmd/commands/cli.go", "scripts/opencode-contract/**", ".github/workflows/opencode-contract.yml"} {
-		if !strings.Contains(wf, `- "`+p+`"`) {
-			t.Errorf("workflow paths lack %q", p)
+		if !slices.Contains(paths, p) {
+			t.Errorf("workflow on.pull_request.paths %q lacks %q", paths, p)
+		}
+	}
+	// Every exact ^…$ test target (the curl and desktop legs' -run, T11's step and -skip) must name a
+	// contract test: a -run that matches nothing passes, so a renamed test would leave its leg
+	// green while it tests nothing.
+	files, _ := filepath.Glob("contract_*_test.go")
+	var src strings.Builder
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Write(b)
+	}
+	targets := regexp.MustCompile(`\^(TestContract\w+)\$`).FindAllStringSubmatch(wf, -1)
+	if len(targets) == 0 {
+		t.Error("workflow has no ^TestContract…$ target: this check or the workflow drifted")
+	}
+	for _, m := range targets {
+		if !strings.Contains(src.String(), "func "+m[1]+"(") {
+			t.Errorf("workflow runs ^%s$, but no contract_*_test.go defines func %s(", m[1], m[1])
 		}
 	}
 	// Under it the runner refuses and every contract test fails (requireContract).

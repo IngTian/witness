@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # fetch.sh <version|latest> <asset> <dest>: download one OpenCode release asset from opencode.ai into
-# dest, check it against pins.txt, unpack it, and print the version (only that) on stdout.
+# dest, check it against pins.txt, unpack it, check the binary is there, and print the version (only
+# that) on stdout.
 #
 # A pinned version must have a pin (none → exit 1), so CI only ever runs a binary someone hashed.
 # `latest` is the newest @opencode/cli on npm: there is nothing to check it against, so its sha is
@@ -22,15 +23,18 @@ fi
 # tar may misread (a backslash escape, a host:file remote).
 mkdir -p "$dest"
 cd "$dest"
-curl -fsSL --retry 3 -o "$asset" "https://opencode.ai/files/bin/$version/$asset"
+curl -fsSL --retry 3 --retry-all-errors -o "$asset" "https://opencode.ai/files/bin/$version/$asset"
 if [ -n "$want" ]; then
   echo "$want  $asset" | sha256sum -c - >&2
 else
   echo "fetch.sh: unpinned $version $asset sha256: $(sha256sum "$asset" | cut -d' ' -f1)" >&2
 fi
+# The binary must sit at the archive's root, where the workflow's PATH entry points: a release that
+# moves it fails here, not as a "not on PATH" deep in the tests.
+missing() { echo "fetch.sh: $asset unpacked no $1 at its root (in $dest): the release layout changed" >&2; exit 1; }
 case $asset in
-  *.tar.gz) tar -xzf "$asset" ;;
-  *.zip) 7z x -y "$asset" >&2 ;;
+  *.tar.gz) tar -xzf "$asset"; [ -x opencode ] || missing opencode ;;
+  *.zip) 7z x -y "$asset" >&2; [ -f opencode.exe ] || missing opencode.exe ;;
   *.exe) ;; # an installer: the caller runs it
   *) echo "fetch.sh: unknown asset type $asset" >&2; exit 1 ;;
 esac
