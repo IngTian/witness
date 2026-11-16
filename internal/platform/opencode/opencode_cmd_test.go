@@ -27,6 +27,7 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	for k, v := range map[string]string{"OPENCODE_DB": "/user/opencode.db", "XDG_DATA_HOME": "/user/data",
 		"OPENCODE_CONFIG": "/user/leak.json", "OPENCODE_CONFIG_CONTENT": `{"agent":{"leak":{}}}`,
 		"OPENCODE_SERVER_PASSWORD": "x", "OPENCODE_CONFIG_PROJECT_DISABLE": "0", "opencode_config_dir": "/user/cfg",
+		"OPENCODE_API_KEY": "sk-zen-test", "opencode_api_key": "sk-zen-lower",
 		"WITNESS_OPENCODE_BIN": "/x/opencode", "HOME": "/home/u"} {
 		t.Setenv(k, v)
 	}
@@ -41,12 +42,14 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	}
 	env := envMap(t, cmd.Env)
 	for k := range env {
-		if strings.HasPrefix(strings.ToUpper(k), "OPENCODE_") && k != "OPENCODE_DB" {
+		up := strings.ToUpper(k)
+		if strings.HasPrefix(up, "OPENCODE_") && up != "OPENCODE_DB" && up != "OPENCODE_API_KEY" {
 			t.Errorf("inherited %s reached opencode (critic G1)", k)
 		}
 	}
 	want := map[string]string{"OPENCODE_DB": filepath.Join(root, "opencode-v2.db"), "XDG_DATA_HOME": filepath.Join(root, "opencode-data"),
 		"XDG_CACHE_HOME": filepath.Join(root, "opencode-cache"), "XDG_STATE_HOME": filepath.Join(root, "opencode-state"),
+		"OPENCODE_API_KEY": "sk-zen-test", "opencode_api_key": "sk-zen-lower",
 		"HOME": "/home/u", "WITNESS_OPENCODE_BIN": "/x/opencode", "WITNESS_WORKER": "1"}
 	for k, v := range want {
 		if env[k] != v {

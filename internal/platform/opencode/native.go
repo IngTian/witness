@@ -90,7 +90,11 @@ func withoutOpenCodeEnv(env []string) []string {
 	var out []string
 	for _, e := range env {
 		k, _, _ := strings.Cut(e, "=")
-		if !strings.HasPrefix(strings.ToUpper(k), "OPENCODE_") {
+		up := strings.ToUpper(k)
+		// OPENCODE_API_KEY is a credential in the allowed "env-var API keys" class (spec §7.6:
+		// the runner accepts env-var keys but copies no credentials). The strip exists to stop
+		// config and behaviour leaks (OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT / OPENCODE_CONFIG_DIR).
+		if !strings.HasPrefix(up, "OPENCODE_") || up == "OPENCODE_API_KEY" {
 			out = append(out, e)
 		}
 	}
