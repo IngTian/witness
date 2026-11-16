@@ -16,9 +16,15 @@ on:
       - "internal/platform/opencode/**"
       - "npm/opencode/**"
       - "internal/proc/**"
-      # The worker's containment and Detach, which only T7 exercises.
+      # What only T7 (and the capture test's `wire`) exercises: the worker's containment and
+      # Detach, `worker stop`, the wakeup spawn, the mine/review engine and the OpenCode wiring.
       - "cmd/commands/worker.go"
       - "cmd/commands/cli.go"
+      - "cmd/commands/distill.go"
+      - "cmd/commands/worker_wakeup.go"
+      - "cmd/commands/install.go"
+      - "cmd/commands/install_windows.go"
+      - "internal/distill/**"
       - "scripts/opencode-contract/**"
       - ".github/workflows/opencode-contract.yml"
   schedule:
@@ -66,6 +72,8 @@ jobs:
       WITNESS_CONTRACT_OPENCODE_VERSION: ${{ matrix.opencode }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v5
         with:
@@ -94,6 +102,7 @@ jobs:
           key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       - name: embedding model
+        timeout-minutes: 5
         run: '"$WITNESS_CONTRACT_WITNESS_BIN" model fetch'
 
       - uses: actions/cache/save@v4
@@ -104,6 +113,7 @@ jobs:
 
       # fetch.sh never runs the binary, so T11 below is its first run.
       - name: fetch OpenCode ${{ matrix.opencode }}
+        timeout-minutes: 5
         run: |
           if [ "$RUNNER_OS" = Windows ]; then asset=opencode-windows-x64.zip; else asset=opencode-linux-x64-baseline.tar.gz; fi
           scripts/opencode-contract/fetch.sh "$WITNESS_CONTRACT_OPENCODE_VERSION" "$asset" "$RUNNER_TEMP/opencode"
@@ -141,11 +151,14 @@ jobs:
       WITNESS_CONTRACT_CHANNEL: ${{ matrix.channel }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
+      # No shared module/build cache: the curl leg pipes the unpinned opencode.ai installer into bash.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       # As in pinned, on the npm legs only: T5, all the curl and desktop legs run, needs neither
       # witness nor the model.
@@ -167,6 +180,7 @@ jobs:
 
       - name: embedding model
         if: matrix.channel == 'npm'
+        timeout-minutes: 5
         run: '"$WITNESS_CONTRACT_WITNESS_BIN" model fetch'
 
       - uses: actions/cache/save@v4
@@ -205,6 +219,7 @@ jobs:
 
       - name: fetch the desktop installer
         if: matrix.channel == 'desktop'
+        timeout-minutes: 5
         run: scripts/opencode-contract/fetch.sh "$OPENCODE_NEWEST" opencode-desktop-win-x64.exe "$RUNNER_TEMP/desktop"
 
       # T5-desktop checks the install left the user PATH alone, against this file. pwsh 7 writes
@@ -252,11 +267,14 @@ jobs:
       WITNESS_CONTRACT_CHANNEL: latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
+      # No shared module/build cache: this job runs the newest, unpinned OpenCode.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       # As in pinned.
       - name: build witness
@@ -274,6 +292,7 @@ jobs:
           key: e5-${{ hashFiles('internal/model/fetch.go') }}
 
       - name: embedding model
+        timeout-minutes: 5
         run: '"$WITNESS_CONTRACT_WITNESS_BIN" model fetch'
 
       - uses: actions/cache/save@v4
@@ -286,6 +305,7 @@ jobs:
       # the binary on PATH is that version.
       - name: fetch the latest OpenCode
         id: fetch
+        timeout-minutes: 5
         run: |
           if [ "$RUNNER_OS" = Windows ]; then asset=opencode-windows-x64.zip; else asset=opencode-linux-x64-baseline.tar.gz; fi
           v=$(scripts/opencode-contract/fetch.sh latest "$asset" "$RUNNER_TEMP/opencode")

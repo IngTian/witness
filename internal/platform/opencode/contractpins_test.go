@@ -112,8 +112,9 @@ func TestContractWorkflowMatchesSupportRange(t *testing.T) {
 		t.Errorf("workflow lacks %s", want)
 	}
 	// The trigger paths, read from on.pull_request.paths only (a path in a comment or a step triggers
-	// nothing): everything a contract test checks. worker.go and cli.go hold the worker's
-	// containment and Detach, which only T7 exercises.
+	// nothing): everything a contract test checks. The cmd/commands files and internal/distill are
+	// what only T7 (and the capture test's `wire`) drives: containment, Detach, `worker stop`, the
+	// wakeup, the engine and the OpenCode wiring.
 	var paths []string
 	if _, rest, ok := strings.Cut(wf, "\n  pull_request:"); ok {
 		if _, rest, ok = strings.Cut(rest, "\n    paths:\n"); ok {
@@ -130,7 +131,9 @@ func TestContractWorkflowMatchesSupportRange(t *testing.T) {
 		}
 	}
 	for _, p := range []string{"internal/platform/opencode/**", "npm/opencode/**", "internal/proc/**",
-		"cmd/commands/worker.go", "cmd/commands/cli.go", "scripts/opencode-contract/**", ".github/workflows/opencode-contract.yml"} {
+		"cmd/commands/worker.go", "cmd/commands/cli.go", "cmd/commands/distill.go", "cmd/commands/worker_wakeup.go",
+		"cmd/commands/install.go", "cmd/commands/install_windows.go", "internal/distill/**",
+		"scripts/opencode-contract/**", ".github/workflows/opencode-contract.yml"} {
 		if !slices.Contains(paths, p) {
 			t.Errorf("workflow on.pull_request.paths %q lacks %q", paths, p)
 		}

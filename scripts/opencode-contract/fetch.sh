@@ -14,7 +14,10 @@ set -euo pipefail
 version=$1 asset=$2 dest=$3
 want=
 if [ "$version" = latest ]; then
-  version=$(npm view @opencode/cli version)
+  # Bounded: an unbounded registry stall would ride the job's 35 min. coreutils timeout is on the
+  # CI runners (Git Bash's shadows System32's); macOS has none, so there it runs unbounded.
+  t=; if command -v timeout >/dev/null; then t="timeout 60"; fi
+  version=$($t npm view @opencode/cli version)
 else
   want=$(awk -v v="$version" -v a="$asset" '$1 == v && $2 == a { print $3 }' "$(dirname "$0")/pins.txt")
   [ -n "$want" ] || { echo "fetch.sh: no pin for $version $asset in pins.txt" >&2; exit 1; }
@@ -23,7 +26,7 @@ fi
 # tar may misread (a backslash escape, a host:file remote).
 mkdir -p "$dest"
 cd "$dest"
-curl -fsSL --retry 3 --retry-all-errors -o "$asset" "https://opencode.ai/files/bin/$version/$asset"
+curl -fsSL --retry 3 --retry-all-errors --max-time 600 -o "$asset" "https://opencode.ai/files/bin/$version/$asset"
 if [ -n "$want" ]; then
   echo "$want  $asset" | sha256sum -c - >&2
 else
