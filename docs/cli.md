@@ -105,9 +105,9 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
   In `doctor --json`'s `config` block, `triage_model` and `distill_model` are the raw config.toml
   fields; `runner`, `mine_model` and `review_model` are what actually runs, each model with a
   `_from` key saying where it came from. An empty model (and `_from`) means none is set, so the
-  runner uses its own default (`doctor` prints "runner default"). It also names any `config.toml`
-  or `lens.json` key witness does not read, e.g. `mine_model`, which is the CLI's name. The files
-  spell it `triage_model` / `extract_model`.
+  runner uses its own default (`doctor` prints "runner default"). The human `doctor` output (not
+  `--json`) also warns about any `config.toml` or `lens.json` key witness does not read, e.g.
+  `mine_model`, which is the CLI's name. The files spell it `triage_model` / `extract_model`.
 - `witness model fetch` — download the embedding model (multilingual-e5-small, ~470MB) once, pinned
   to one revision and checked by SHA-256. `install.sh` and `make fetch-model` run it; re-running
   checks the files instead of downloading them again. `WITNESS_ASSETS` picks the directory, and
@@ -137,10 +137,11 @@ review_max_chars = 16000      # safety ceiling: max observation chars folded in 
 
 Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
 `claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
-`runner = "opencode"`. Leaving both empty is the safe default and what `witness wire` writes;
-note that an empty `triage_model` under the claude runner inherits your *ambient interactive*
-model, which may be heavier than you want for per-session mining, so pinning a light one is
-usually worth it.
+`runner = "opencode"`. Under `runner = "claude"`, leaving both empty is the safe default and what
+`witness wire claude` writes. OpenCode needs a model: `witness wire opencode` asks for one at a
+terminal, else prints the `witness config set mine_model` line to run. Note that an empty
+`triage_model` under the claude runner inherits your *ambient interactive* model, which may be
+heavier than you want for per-session mining, so pinning a light one is usually worth it.
 
 `chunk_max_chars` and `review_max_chars` are **safety ceilings, not quality dials.** Mining a
 session whole is the best-quality path — splitting it loses insight that spans the session, like a
