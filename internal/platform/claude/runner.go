@@ -45,6 +45,16 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 
 	cmd := buildRunCmdFn(runCtx, model, systemPrompt, input)
 
+	// Run in a fresh, empty per-Run dir. On multi-user Unix, os.TempDir() (/tmp) is world-writable;
+	// a planted /tmp/CLAUDE.md or /tmp/.claude/settings.json hook runs as the owner. Remove the dir
+	// when Run returns (even on error/timeout).
+	dir, err := os.MkdirTemp("", "witness-claude-")
+	if err != nil {
+		return "", fmt.Errorf("claude runner: create per-Run dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	cmd.Dir = dir
+
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -103,16 +113,22 @@ func childOutput(stderr, stdout string) string {
 //   - --strict-mcp-config: load no MCP servers. The worker needs none, and the
 //     user-scope witness MCP is short-circuited by the recursion guard, so trying
 //     to start it just stalls claude -p.
-//   - a neutral cwd (temp dir): avoids loading the user project's CLAUDE.md/.mcp.json.
+//   - --tools "": offer no built-in tool (MCP already off). The corpus is untrusted
+//     and a tool turns an injected instruction into an action. The 2026-11-16 audit
+//     (D1) caught the model using tools; a tool that names no tools is still a tool
+//     (the model saw ["web_search"]). A CLI too old for the flag exits non-zero and
+//     Run reports its stdout and stderr (childOutput), so no doctor probe.
+//   - Run sets a fresh, empty per-Run cwd (witness-claude-*), removed when Run returns;
+//     not the shared, world-writable os.TempDir(). That avoids loading the user project's
+//     CLAUDE.md/.mcp.json.
 //
 // model == "" omits --model so `claude -p` uses its environment default.
 func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
-	args := []string{"-p", "--no-session-persistence", "--strict-mcp-config"}
+	args := []string{"-p", "--no-session-persistence", "--strict-mcp-config", "--tools", ""}
 	if strings.TrimSpace(model) != "" {
 		args = append(args, "--model", model)
 	}
 	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = os.TempDir()
 	return cmd
 }
 

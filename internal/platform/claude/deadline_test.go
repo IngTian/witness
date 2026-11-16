@@ -3,8 +3,10 @@ package claude
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +179,54 @@ func TestClaudeRunFailureKeepsStdout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "prompt is too long") {
 		t.Errorf("the error drops the child's stdout, where `claude -p` prints its error: %v", err)
+	}
+}
+
+// A CLI too old for --tools must fail with its own stderr (nothing pins stderr today; Run
+// reported only the exit code before the owner's 2026-11-01 default-lens-stall diagnosis).
+func TestClaudeRunSurfacesARejectedFlag(t *testing.T) {
+	unsetDisableSwitch(t)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no `sh` to stand in for a failing CLI: %v", err)
+	}
+	prev := buildRunCmdFn
+	buildRunCmdFn = func(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
+		return exec.CommandContext(ctx, sh, "-c", "echo 'error: unknown option --tools' >&2; exit 1")
+	}
+	t.Cleanup(func() { buildRunCmdFn = prev })
+
+	_, err = runner{}.Run(context.Background(), "", "sys", "corpus")
+	if err == nil || !strings.Contains(err.Error(), "unknown option --tools") {
+		t.Errorf("a CLI that rejects a flag must fail with its own stderr in the error: %v", err)
+	}
+}
+
+// Run must use a fresh, empty per-Run cwd, not the shared os.TempDir(). On multi-user Unix
+// /tmp is world-writable; a planted /tmp/CLAUDE.md or /tmp/.claude/settings.json hook runs
+// as the owner. The dir must be removed when Run returns.
+func TestClaudeRunUsesAFreshPerRunDir(t *testing.T) {
+	unsetDisableSwitch(t)
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no `sh` to stand in for the CLI: %v", err)
+	}
+	prev := buildRunCmdFn
+	buildRunCmdFn = func(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
+		return exec.CommandContext(ctx, sh, "-c", "pwd")
+	}
+	t.Cleanup(func() { buildRunCmdFn = prev })
+
+	out, err := runner{}.Run(context.Background(), "", "sys", "corpus")
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	dir := strings.TrimSpace(out)
+	if !strings.HasPrefix(filepath.Base(dir), "witness-claude-") {
+		t.Fatalf("Run must use a fresh witness-claude-* dir, not os.TempDir(); got %q", dir)
+	}
+	if _, statErr := os.Stat(dir); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("the per-Run dir must be removed after Run returns; %q still exists or stat failed: %v", dir, statErr)
 	}
 }
 

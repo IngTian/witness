@@ -34,14 +34,23 @@ func TestBuildRunCmdRoleSeparation(t *testing.T) {
 	}
 }
 
+// The model runs on an untrusted corpus. A tool turns an injected instruction into an
+// action; the 2026-11-16 audit (D1) caught the model using tools. buildRunCmd must
+// pass --tools "". model == "" on purpose, so --tools slipping into the --model branch
+// would fail this.
+func TestBuildRunCmdOffersNoTools(t *testing.T) {
+	cmd := buildRunCmd(context.Background(), "", "SYS", "corpus")
+	i := slices.Index(cmd.Args, "--tools")
+	if i < 0 || i+1 >= len(cmd.Args) || cmd.Args[i+1] != "" {
+		t.Fatalf(`argv must carry --tools "" (no built-in tool on an untrusted corpus): %q`, cmd.Args)
+	}
+}
+
 func TestClaudeCmdIsolation(t *testing.T) {
 	c := newClaudeCmd(context.Background(), "")
-	// The isolation flags themselves are pinned on buildRunCmd (TestBuildRunCmdRoleSeparation).
+	// The isolation flags themselves are pinned on buildRunCmd (TestBuildRunCmdRoleSeparation, TestBuildRunCmdOffersNoTools).
 	if slices.Contains(c.Args, "--model") {
 		t.Errorf("empty model must omit --model, got %v", c.Args)
-	}
-	if c.Dir == "" {
-		t.Errorf("cmd.Dir must be a neutral dir (not inherit the user's project cwd)")
 	}
 
 	c2 := newClaudeCmd(context.Background(), "claude-haiku-4-5")
