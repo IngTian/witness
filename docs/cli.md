@@ -139,7 +139,7 @@ Model ids are passed through to whichever runner is bound, so use that runtime's
 `claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
 `runner = "opencode"`. Under `runner = "claude"`, leaving both empty is the safe default and what
 `witness wire claude` writes. OpenCode needs a model: `witness wire opencode` asks for one at a
-terminal, else prints the `witness config set mine_model` line to run. Note that an empty
+terminal, else prints `witness config set mine_model <provider/model>` to run. Note that an empty
 `triage_model` under the claude runner inherits your *ambient interactive* model, which may be
 heavier than you want for per-session mining, so pinning a light one is usually worth it.
 
