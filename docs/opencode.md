@@ -45,10 +45,11 @@ The runner can use free `opencode/*` models, API keys exported as environment va
 (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`,
 `OPENCODE_API_KEY` for paid Zen), and ambient cloud credentials (`AWS_PROFILE` / `AWS_REGION` /
 `~/.aws` for Bedrock). It never uses `opencode auth login`, ChatGPT or other OAuth sign-ins, or
-providers defined in your `opencode.json`. witness never reads or copies a credential. The stage
-models must be set in your `config.toml`; witness never picks one. On macOS, GUI apps don't read
-shell profiles, so export your API keys from `.zprofile` or use `launchctl setenv`; on Windows, set a
-user environment variable so the worker inherits it.
+providers defined in your `opencode.json`. witness never reads or copies a credential. Keys exported
+in your shell profile work for terminal-launched agents. GUI apps don't read it: use
+`launchctl setenv` on macOS, or a user environment variable on Windows, so the worker inherits the
+key. Set the stage model with `witness config set mine_model <provider/model>` (`review_model` falls
+back to it); witness never picks one.
 
 OpenCode's ChatGPT sign-in is an OAuth login, so witness's OpenCode runner cannot use it.
 ChatGPT-plan users can still capture Codex sessions, and a Codex runner is planned.

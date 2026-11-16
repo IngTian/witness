@@ -37,15 +37,18 @@ OpenCode can be installed through multiple channels:
 
 - **npm**: `npm install -g @opencode/cli` — install scripts must be enabled in your npm config.
 - **Standalone zip**: `opencode-windows-x64.zip` from the OpenCode releases page — unpack and run
-  `opencode.exe` directly.
+  `opencode.exe` directly; put its folder on your PATH (or set `WITNESS_OPENCODE_BIN`) so witness's
+  own commands find it.
 - **curl installer** (under Git Bash): the one-liner installer lands OpenCode in
   `%USERPROFILE%\.opencode\bin` and updates PATH for Git Bash only, but witness looks there anyway so
-  the integration still works. **Git Bash / mintty is not a TTY** — `witness wire opencode` never
-  prompts there and prints hints instead. Run it in Windows Terminal, PowerShell or cmd to get the
-  interactive runner and model prompt.
-- **winget**: `winget install Anomaly.OpenCode` (once published to the Microsoft Store).
+  the integration still works.
+- **winget**: `winget install Anomaly.OpenCode` (once its manifest is accepted into winget's
+  repository).
 - **Desktop app**: downloads include a bundled CLI, but it is not added to PATH — the plugin hands
   witness its `opencode-cli.exe` path, so the integration works regardless.
+
+**Git Bash / mintty is not a TTY** — `witness wire opencode` never prompts there and prints hints
+instead. Run it in Windows Terminal, PowerShell or cmd to get the interactive runner and model prompt.
 
 `bun install -g @opencode/cli` is not verified with witness. Its `opencode.exe` shim may not resolve
 correctly. Stick to npm, the zip, the desktop app, or set `WITNESS_OPENCODE_BIN` to a known-good
