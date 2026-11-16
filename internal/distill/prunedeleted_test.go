@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,7 @@ func TestPruneSkipsADeletedIDThatExistsAgain(t *testing.T) {
 func TestPruneRetiresAFacetLeftCitingNothing(t *testing.T) {
 	s := newStore(t)
 	gone := deletedObs(t, s, "default", "gone")
+	appendLensObs(t, s, "p", slices.Repeat([]string{"default", "math"}, 3000)...) // seqs 2-6001, default at even seqs
 	archived := citing("archived", gone)
 	archived.ArchivedAt, archived.MergedInto, archived.ArchiveReason = "2026-02-01T00:00:00Z", "d/orphan", "same trait"
 	writeFacets(t, s, citing("orphan", gone), citing("uncited"), archived)
@@ -158,7 +160,7 @@ func TestPruneRetiresAFacetLeftCitingNothing(t *testing.T) {
 
 	now := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
 	nowStr := now.Format(time.RFC3339)
-	const through = 3001 // a half-life past the facet's clock, so From must be the decayed value
+	const through = 6000 // a half-life of default observations past the facet's clock (and twice that globally)
 	pruneOnly(t, s, s, through, now)
 
 	orphan := facetNamed(t, s, "default", "orphan")
@@ -176,9 +178,8 @@ func TestPruneRetiresAFacetLeftCitingNothing(t *testing.T) {
 	if a.ArchivedAt != "2026-02-01T00:00:00Z" || a.MergedInto != "d/orphan" || len(a.Versions[0].BecauseOf) != 0 {
 		t.Errorf("an archived facet keeps its archive and loses only the dead id, got %+v", a)
 	}
-	from := (&store.FacetVersion{Confidence: 0.8, ConfidenceSeq: 1}).DecayedConfidence(through)
 	assertLog(t, s, []store.ConfidenceEvent{
-		{Lens: "default", Dimension: "d", Key: "orphan", At: nowStr, ClockSeq: 1, From: from, To: 0.8, Kind: store.EventRetire},
+		{Lens: "default", Dimension: "d", Key: "orphan", At: nowStr, ClockSeq: 1, From: 0.4, To: 0.8, Kind: store.EventRetire},
 	})
 }
 
@@ -362,11 +363,11 @@ func TestMergedFacetsOnSkippedObservationsSurviveTheNextReview(t *testing.T) {
 		t.Fatalf("setup: want 2 paraphrases, 1 orphan and 1 duplicate session skipped, 3 facets new; got %+v %+v %+v",
 			rep.Observations, rep.Sessions, rep.Facets)
 	}
-	hw, err := base.ObservationHighWater()
+	clock, err := base.LensClock("default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pruneOnly(t, base, base, hw, now)
+	pruneOnly(t, base, base, clock[len(clock)-1], now)
 
 	for _, k := range []string{"paraphrase", "orphan", "duplicate"} {
 		if f := facetNamed(t, base, "default", k); !f.Active() {

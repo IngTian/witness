@@ -19,6 +19,7 @@ package store
 
 import (
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -109,12 +110,13 @@ type FacetVersion struct {
 	RecordedAt string   `json:"recorded_at"`        // system: when the reviewer learned it
 	BecauseOf  []string `json:"because_of"`         // observation IDs (provenance for re-grounding)
 	// Confidence is how sure the reviewer was WHEN THE EVIDENCE LAST ARRIVED — not how sure we
-	// should be now. Read it through DecayedConfidence, which accounts for the observations
-	// that have gone by since without confirming it.
+	// should be now. Read it through DecayedConfidence, which accounts for the observations of
+	// its lens that have gone by since without confirming it.
 	Confidence float64 `json:"confidence"` // 0-1; rises on reinforcement, decays on absence
 	// ConfidenceSeq is the observation watermark at which Confidence was set: the clock decay
-	// is measured against. 0 means unknown (a facet written before this was tracked), which
-	// DecayedConfidence treats as "no decay" rather than "infinitely stale".
+	// is measured against. It is a GLOBAL seq; elapsed is counted in the facet's own lens (the
+	// observations of that lens above it). 0 means unknown (a facet written before this was
+	// tracked), which DecayedConfidence treats as "no decay" rather than "infinitely stale".
 	ConfidenceSeq int64 `json:"confidence_seq,omitempty"`
 }
 
@@ -127,7 +129,8 @@ const (
 	// `default` lens (22,501 citations across 16,353 observations for 2,039 facets) and 886 in
 	// `math`. At this half-life a facet confirmed at 0.9 reads ~0.64 after one typical gap —
 	// visibly less certain, not alarming — and reaches the floor after roughly 10,000
-	// uncited observations, which is a facet that genuinely stopped showing up.
+	// uncited observations, which is a facet that genuinely stopped showing up. Those gaps
+	// were measured per lens, so the clock is per lens too (LensClock).
 	//
 	// The rate is the one real judgement call here. Too gentle and every facet pins at
 	// ceiling, which is the ratchet this fixes wearing a different hat; too aggressive and a
@@ -145,22 +148,50 @@ const (
 	FacetConfidenceFloor = 0.1
 )
 
+// LensClock is one lens's observation seqs, ascending: the clock its facets decay on. Keyed by
+// the lens's DATA name (Facet.Lens, observations.lens).
+//
+// Per lens because a review folds only its own lens: a facet can be cited only by its own
+// lens's observations, so counting every lens's aged a lens at 1/(its share) of the calibrated
+// rate — math at least 5.5x, default about 1.2x on a real archive — while the half-life was
+// measured per lens.
+type LensClock []int64
+
+// Through is the prefix of c at or below seq: the clock as of a fold that has read through seq.
+func (c LensClock) Through(seq int64) LensClock {
+	return c[:sort.Search(len(c), func(i int) bool { return c[i] > seq })]
+}
+
+// ContiguousClock is a TEST FIXTURE: the clock of a gap-free one-lens archive of `through`
+// observations (seqs 1..through), on which the per-lens count equals the old n - ConfidenceSeq.
+// Exported because tests in other packages decay through it. nil for through < 1.
+func ContiguousClock(through int64) LensClock {
+	if through < 1 {
+		return nil
+	}
+	c := make(LensClock, through)
+	for i := range c {
+		c[i] = int64(i + 1)
+	}
+	return c
+}
+
 // DecayedConfidence is what a reader should see: the stored confidence decayed for the
 // observations that have passed since it was set, floored at FacetConfidenceFloor.
 //
-// currentSeq is the archive's high-water observation seq. A zero ConfidenceSeq (a facet that
-// predates the column) or a currentSeq at or below it means no elapsed evidence, so no decay —
-// never the reverse, because guessing "infinitely stale" would decay a whole archive to the
-// floor on first read.
-func (v *FacetVersion) DecayedConfidence(currentSeq int64) float64 {
-	if v.ConfidenceSeq <= 0 || currentSeq <= v.ConfidenceSeq {
+// c is the facet's own lens clock; elapsed is its entries above ConfidenceSeq. A zero
+// ConfidenceSeq (a facet that predates the column) or nothing elapsed (a nil clock included)
+// means no decay — never the reverse, because guessing "infinitely stale" would decay a whole
+// archive to the floor on first read.
+func (v *FacetVersion) DecayedConfidence(c LensClock) float64 {
+	elapsed := len(c) - sort.Search(len(c), func(i int) bool { return c[i] > v.ConfidenceSeq })
+	if v.ConfidenceSeq <= 0 || elapsed == 0 {
 		return v.Confidence
 	}
 	if v.Confidence <= FacetConfidenceFloor {
 		return v.Confidence // already at or under the floor; decay has nothing to do
 	}
-	elapsed := float64(currentSeq - v.ConfidenceSeq)
-	decayed := v.Confidence * math.Pow(0.5, elapsed/FacetDecayHalfLifeObs)
+	decayed := v.Confidence * math.Pow(0.5, float64(elapsed)/FacetDecayHalfLifeObs)
 	if decayed < FacetConfidenceFloor {
 		return FacetConfidenceFloor
 	}

@@ -78,7 +78,7 @@ func TestTraitBasics(t *testing.T) {
 			// Sunday night in EST, Monday Mar 9 in UTC: its week is Mar 2 only when bucketed in loc.
 			{ID: "n5", TS: "2026-03-08T22:00:00-05:00", Session: "s1", Lens: "default", Observation: "o5", Evidence: "e5", Poignancy: 1},
 		},
-		HighWater: 4000, // 3000 observations past the open version's clock: one half-life
+		Clocks: map[string]store.LensClock{"default": store.ContiguousClock(4000)}, // 3000 observations past the open version's clock: one half-life
 	}
 	m := Build(in, nil, time.Date(2026, 3, 12, 0, 0, 0, 0, est), est)
 
@@ -101,8 +101,8 @@ func TestTraitBasics(t *testing.T) {
 		},
 	})
 	// The GUI and `witness facets` must never disagree about the same trait.
-	if want := in.Facets[0].Current().DecayedConfidence(in.HighWater); got.Today != want {
-		t.Errorf("Today = %v, want DecayedConfidence(HighWater) = %v", got.Today, want)
+	if want := in.Facets[0].Current().DecayedConfidence(in.Clocks["default"]); got.Today != want {
+		t.Errorf(`Today = %v, want DecayedConfidence(Clocks["default"]) = %v`, got.Today, want)
 	}
 	wantNotebooks(t, m.Notebooks, []Notebook{{Name: "default", Topics: []Topic{
 		{Key: "biases", Label: "blind spots", Traits: []int{0}, AxisStart: "2026-02-01"},
@@ -148,7 +148,7 @@ func TestTraitPointsAndSpans(t *testing.T) {
 			{Lens: "default", Dimension: "habits", Key: "other", At: "2026-01-20T12:00:00Z", To: 0.3, Kind: store.EventNew},
 			{Lens: "math", Dimension: "habits", Key: "ships_small", At: "2026-01-21T12:00:00Z", To: 0.3, Kind: store.EventNew},
 		},
-		HighWater: 50,
+		Clocks: map[string]store.LensClock{"default": store.ContiguousClock(50)},
 	}
 	m := Build(in, nil, time.Date(2026, 3, 25, 0, 0, 0, 0, est), est)
 
@@ -163,6 +163,18 @@ func TestTraitPointsAndSpans(t *testing.T) {
 		Trend: "up", TrendFrom: 0.5, Rewrites: 2, Changes: 3,
 		Weeks: []Week{}, Evidence: []Evidence{},
 	})
+}
+
+// Today decays a math trait on math's clock (0.64), never on default's (0.45).
+func TestTodayDecaysOnItsOwnClock(t *testing.T) {
+	in := &store.ViewInput{
+		Facets: []store.Facet{{Lens: "math", Dimension: "habits", Key: "k", LastSeen: "2026-03-20T12:00:00Z",
+			Versions: []store.FacetVersion{{Value: "v", ValidFrom: "2026-03-05T00:00:00Z", Confidence: 0.9, ConfidenceSeq: 1}}}},
+		Clocks: map[string]store.LensClock{"math": store.ContiguousClock(1501), "default": store.ContiguousClock(3001)},
+	}
+	if got := traitByKey(t, Build(in, nil, time.Date(2026, 3, 25, 0, 0, 0, 0, time.UTC), time.UTC), "k").Today; got != 0.64 {
+		t.Errorf("Today = %v, want math's own-clock 0.64", got)
+	}
 }
 
 func TestTraitSpanSkipsLoggedVersion(t *testing.T) {

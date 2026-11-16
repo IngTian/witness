@@ -32,7 +32,7 @@ func TestApplyFacetRejectsAnEmptyValueInsteadOfSupersedingAGoodOne(t *testing.T)
 
 	applied := rv.applyFacet(byKey, "L", reviewedFacet{
 		Dimension: "d", Key: "k", Value: "", Confidence: 0.8, Contradicts: true,
-	}, applyNow, 0)
+	}, applyNow, 0, nil)
 	if applied {
 		t.Error("applyFacet reported success for an assertion with no value")
 	}
@@ -69,7 +69,7 @@ func TestApplyFacetRejectsAnUnidentifiableFacet(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			byKey := indexFacets([]store.Facet{goodFacet()})
-			if rv := (&Reviewer{}); rv.applyFacet(byKey, "L", tc.rf, applyNow, 0) {
+			if rv := (&Reviewer{}); rv.applyFacet(byKey, "L", tc.rf, applyNow, 0, nil) {
 				t.Error("applyFacet reported success for an unusable assertion")
 			}
 			if len(byKey) != 1 {
@@ -93,7 +93,7 @@ func TestApplyFacetStillAppliesWellFormedAssertions(t *testing.T) {
 		byKey := map[string]*store.Facet{}
 		if !(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 			Dimension: "d", Key: "k", Value: "v", Confidence: 0,
-		}, applyNow, 0) {
+		}, applyNow, 0, nil) {
 			t.Fatal("a well-formed new facet was rejected")
 		}
 		f := byKey["L|d|k"]
@@ -106,7 +106,7 @@ func TestApplyFacetStillAppliesWellFormedAssertions(t *testing.T) {
 		byKey := indexFacets([]store.Facet{goodFacet()})
 		if !(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 			Dimension: "d", Key: "k", Value: "prefers Rust", Confidence: 0.8, Contradicts: true,
-		}, applyNow, 0) {
+		}, applyNow, 0, nil) {
 			t.Fatal("a well-formed contradiction was rejected")
 		}
 		f := byKey["L|d|k"]
@@ -125,7 +125,7 @@ func TestApplyFacetStillAppliesWellFormedAssertions(t *testing.T) {
 		byKey := indexFacets([]store.Facet{goodFacet()})
 		if !(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 			Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.95, BecauseOf: []string{"o2"},
-		}, applyNow, 0) {
+		}, applyNow, 0, nil) {
 			t.Fatal("a reaffirmation was rejected")
 		}
 		cur := byKey["L|d|k"].Current()

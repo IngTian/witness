@@ -21,13 +21,13 @@ type ViewTurn struct {
 // ViewInput is everything the view builder needs, read consistently in one transaction.
 // Facets includes archived ones (the "rewrite" count needs their version history); Notes
 // and Turns are complete (the view filters by session prefix); Log is insertion-ordered;
-// HighWater is the observation clock for decayed confidence display.
+// Clocks are each lens's observation clock for decayed confidence display.
 type ViewInput struct {
-	Facets    []Facet           // ALL facets, archived included
-	Notes     []ViewNote        // every observation, never the embedding
-	Turns     []ViewTurn        // every raw row: session + ts only, never text
-	Log       []ConfidenceEvent // ORDER BY id
-	HighWater int64             // COALESCE(MAX(seq),0) of observations
+	Facets []Facet              // ALL facets, archived included
+	Notes  []ViewNote           // every observation, never the embedding
+	Turns  []ViewTurn           // every raw row: session + ts only, never text
+	Log    []ConfidenceEvent    // ORDER BY id
+	Clocks map[string]LensClock // each lens's observation seqs, ascending (the decay clocks)
 }
 
 // ReadViewInput loads all view ingredients in ONE read transaction. It never reads turn
@@ -53,20 +53,24 @@ func (s *Store) ReadViewInput(ctx context.Context) (*ViewInput, error) {
 		return nil, err
 	}
 
-	// Read all observations: never the embedding (privacy: view must not export it)
+	// Read all observations: never the embedding (privacy: view must not export it). The same
+	// pass builds each lens's decay clock; ORDER BY seq keeps every clock ascending.
+	in.Clocks = map[string]LensClock{}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy
+		`SELECT seq, obs_id, ts, session, lens, dimension, observation, evidence, poignancy
 		   FROM observations ORDER BY seq`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var n ViewNote
-		if err := rows.Scan(&n.ID, &n.TS, &n.Session, &n.Lens, &n.Dimension, &n.Observation, &n.Evidence, &n.Poignancy); err != nil {
+		var seq int64
+		if err := rows.Scan(&seq, &n.ID, &n.TS, &n.Session, &n.Lens, &n.Dimension, &n.Observation, &n.Evidence, &n.Poignancy); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		in.Notes = append(in.Notes, n)
+		in.Clocks[n.Lens] = append(in.Clocks[n.Lens], seq)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -93,12 +97,6 @@ func (s *Store) ReadViewInput(ctx context.Context) (*ViewInput, error) {
 
 	// Read confidence log, ORDER BY id (insertion order)
 	in.Log, err = readConfidenceLog(ctx, tx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Read observation high-water mark (the decay clock for confidence display)
-	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM observations`).Scan(&in.HighWater)
 	if err != nil {
 		return nil, err
 	}

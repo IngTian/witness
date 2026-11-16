@@ -34,7 +34,11 @@ func TestBuildSizeAt75kNotes(t *testing.T) {
 	lenses := []string{"default", "health", "math", "money", "work"}
 	prose := func(n int) string { return strings.Repeat("A realistic sentence of archive prose. ", n) }
 
-	in := &store.ViewInput{HighWater: notes}
+	in := &store.ViewInput{Clocks: map[string]store.LensClock{}}
+	clock := store.ContiguousClock(notes)
+	for _, l := range lenses {
+		in.Clocks[l] = clock
+	}
 	for i := 0; i < sessions*turnsPer; i++ {
 		in.Turns = append(in.Turns, store.ViewTurn{Session: fmt.Sprintf("s%d", i/turnsPer), TS: rfc(at(i, sessions*turnsPer))})
 	}

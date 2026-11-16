@@ -38,11 +38,10 @@ type fakeMCPStore struct {
 	whyEmpty store.EmptyReason
 	// whyLens is the lens the last WhyEmpty asked about: the mined name, never the registered one.
 	whyLens string
-	// highWater is the decay clock's "now" for get_facets; 0 renders every confidence as stored.
-	highWater int64
+	clocks  map[string]store.LensClock // each lens's decay clock; nil leaves every confidence as stored
 }
 
-func (f *fakeMCPStore) ObservationHighWater() (int64, error) { return f.highWater, nil }
+func (f *fakeMCPStore) LensClock(lens string) (store.LensClock, error) { return f.clocks[lens], nil }
 
 func (f *fakeMCPStore) ReadObservations(lens string) ([]store.Observation, error) {
 	f.readCalls++

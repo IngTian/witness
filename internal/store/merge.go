@@ -1038,10 +1038,12 @@ func currentEvidence(obsTS map[string]string, f *Facet) string {
 	return ""
 }
 
-// rebaseClocks moves one side's decay clocks into the merged archive's seq space. Decay is
-// "observations since last confirmed", measured as head - clock. Each version keeps its distance
-// from its own side's head, PLUS the observations the other side contributes that are newer than
-// THIS VERSION's own evidence: those were real chances to confirm it, and none did.
+// rebaseClocks moves one side's decay clocks into the merged archive's seq space. Decay counts
+// the observations of the facet's own lens above its clock (DecayedConfidence). This keeps each
+// clock's global-seq distance, which that count reads approximately (about the lens's share of
+// it). Each version keeps its distance from its own side's head, PLUS the observations the other
+// side contributes that are newer than THIS VERSION's own evidence: those were real chances to
+// confirm it, and none did.
 //
 // Per version, not per side. Measured against a side's newest row, one late observation on an
 // otherwise idle laptop cancelled thousands of real chances — a June facet sat 1 observation from

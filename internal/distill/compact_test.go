@@ -32,15 +32,17 @@ func cf(dim, key, value string, conf float64, versions int) store.Facet {
 }
 
 type fakeCompactStore struct {
-	facets    []store.Facet
-	writes    int
-	written   []store.Facet
-	events    []store.ConfidenceEvent
-	highWater int64 // the decay clock's "now"; 0 leaves every confidence as stored
+	facets  []store.Facet
+	writes  int
+	written []store.Facet
+	events  []store.ConfidenceEvent
+	clocks  map[string]store.LensClock // each lens's decay clock; nil leaves every confidence as stored
 }
 
-func (f *fakeCompactStore) ReadFacets() ([]store.Facet, error)   { return f.facets, nil }
-func (f *fakeCompactStore) ObservationHighWater() (int64, error) { return f.highWater, nil }
+func (f *fakeCompactStore) ReadFacets() ([]store.Facet, error) { return f.facets, nil }
+func (f *fakeCompactStore) LensClock(lens string) (store.LensClock, error) {
+	return f.clocks[lens], nil
+}
 func (f *fakeCompactStore) WriteFacets(fs []store.Facet) error {
 	f.writes++
 	f.written = fs

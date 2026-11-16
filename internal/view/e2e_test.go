@@ -90,7 +90,7 @@ func TestWriteE2EFixtures(t *testing.T) {
 			{Lens: "default", Dimension: "habits", Key: "asks_direct_questions", At: "2026-10-25T12:00:00Z", From: 0.85, To: 0.9, Kind: "review"},
 			{Lens: "default", Dimension: "biases", Key: "confirmation_bias", At: "2026-11-02T12:00:00Z", From: 0.85, To: 0.88, Kind: "review"},
 		},
-		HighWater: 3000,
+		Clocks: map[string]store.LensClock{"default": store.ContiguousClock(3000), "corpus": store.ContiguousClock(3000)},
 	}
 	addAttentionTopic(fullIn)
 
@@ -191,7 +191,7 @@ func TestWriteE2EFixtures(t *testing.T) {
 				},
 			},
 		},
-		HighWater: 100,
+		Clocks: map[string]store.LensClock{hostile: store.ContiguousClock(100)},
 	}
 	hostilePortrait := []PortraitFile{
 		{

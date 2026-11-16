@@ -1,10 +1,14 @@
 package distill
 
 import (
+	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -21,7 +25,7 @@ func TestTheReviewCallSeesDecayedConfidence(t *testing.T) {
 
 	// One half-life of observations later.
 	at := int64(100 + store.FacetDecayHalfLifeObs)
-	view := slimFacets([]store.Facet{f}, "default", at)
+	view := slimFacets([]store.Facet{f}, "default", store.ContiguousClock(at))
 	blob, _ := json.Marshal(view)
 
 	if strings.Contains(string(blob), "0.9") {
@@ -29,6 +33,44 @@ func TestTheReviewCallSeesDecayedConfidence(t *testing.T) {
 	}
 	if !strings.Contains(string(blob), "0.45") {
 		t.Errorf("want the decayed 0.45 in the prompt view:\n%s", blob)
+	}
+}
+
+// Each review window is shown confidences decayed on its own lens's observations up to what
+// that window has read: never another lens's, and never the ones later windows have yet to fold.
+// The math facet at seq 1 is 1,500 math observations old when window 1 (the lone giant at seq
+// 4501) folds, and 3,000 when window 2 (seqs 4502-6001) does.
+func TestTheReviewDecaysEachWindowOnItsOwnClock(t *testing.T) {
+	s := newStore(t)
+	a := mathArchive()
+	appendLensObs(t, s, "a", a[:len(a)-1]...) // seqs 1-4500
+	if err := s.AppendObservations([]store.Observation{{ID: "big", Lens: "math", Observation: strings.Repeat("a", 500_000)}}); err != nil {
+		t.Fatal(err) // seq 4501, a window to itself
+	}
+	appendLensObs(t, s, "b", slices.Repeat([]string{"math"}, 1500)...) // seqs 4502-6001
+	f := openFacet("d", "k", "v", 0.9, 1)
+	f.Lens = "math"
+	writeFacets(t, s, f)
+	if err := s.StampReviewLens("math", 4500); err != nil {
+		t.Fatal(err)
+	}
+	var inputs []string
+	r := &Reviewer{Store: s, Lenses: []*lens.Lens{{Name: "math", Review: "REVIEW"}}, Config: store.Config{ReviewMaxChars: 400_000},
+		Runner: func(_ context.Context, _, _, input string) (string, error) {
+			inputs = append(inputs, input)
+			return "[]", nil
+		}}
+	if err := r.Run(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(inputs) != 2 {
+		t.Fatalf("want two review windows, got %d", len(inputs))
+	}
+	if !strings.Contains(inputs[0], `"current_confidence": 0.64`) {
+		t.Errorf("window 1 must read 0.64, decayed on math through its own seq; the prompt ends:\n%s", inputs[0][len(inputs[0])-600:])
+	}
+	if !strings.Contains(inputs[1], `"current_confidence": 0.45`) {
+		t.Errorf("window 2 must read 0.45, decayed on math through its own seq; the prompt ends:\n%s", inputs[1][len(inputs[1])-600:])
 	}
 }
 
@@ -43,7 +85,7 @@ func TestConfirmingADecayedFacetDoesNotUndoTheDecay(t *testing.T) {
 	at := int64(100 + store.FacetDecayHalfLifeObs) // decayed to 0.45
 	(&Reviewer{}).applyFacet(byKey, "default", reviewedFacet{
 		Dimension: "thinking", Key: "stale", Value: "a value", Confidence: 0.45,
-	}, applyNow, at)
+	}, applyNow, at, store.ContiguousClock(at))
 
 	cur := byKey["default|thinking|stale"].Current()
 	if cur.Confidence > 0.5 {
@@ -53,7 +95,7 @@ func TestConfirmingADecayedFacetDoesNotUndoTheDecay(t *testing.T) {
 	if cur.ConfidenceSeq != at {
 		t.Errorf("a confirmation should restamp the clock to %d, got %d", at, cur.ConfidenceSeq)
 	}
-	if cur.DecayedConfidence(at) != cur.Confidence {
+	if cur.DecayedConfidence(store.ContiguousClock(at)) != cur.Confidence {
 		t.Error("a just-confirmed facet should read exactly as stored")
 	}
 }
@@ -68,7 +110,7 @@ func TestFreshEvidenceLiftsADecayedFacet(t *testing.T) {
 	at := int64(100 + store.FacetDecayHalfLifeObs) // 0.45
 	(&Reviewer{}).applyFacet(byKey, "default", reviewedFacet{
 		Dimension: "thinking", Key: "revived", Value: "a value", Confidence: 0.95,
-	}, applyNow, at)
+	}, applyNow, at, store.ContiguousClock(at))
 
 	cur := byKey["default|thinking|revived"].Current()
 	if cur.Confidence <= 0.45 {
@@ -85,7 +127,7 @@ func TestANewFacetIsStampedWithTheClock(t *testing.T) {
 	byKey := indexFacets(nil)
 	(&Reviewer{}).applyFacet(byKey, "default", reviewedFacet{
 		Dimension: "thinking", Key: "brand_new", Value: "v", Confidence: 0.6,
-	}, applyNow, 4242)
+	}, applyNow, 4242, store.ContiguousClock(4242))
 	cur := byKey["default|thinking|brand_new"].Current()
 	if cur.ConfidenceSeq != 4242 {
 		t.Errorf("a new facet must carry the clock, got %d", cur.ConfidenceSeq)
@@ -101,7 +143,7 @@ func TestAChangeArcStampsTheClock(t *testing.T) {
 	(&Reviewer{}).applyFacet(byKey, "default", reviewedFacet{
 		Dimension: "thinking", Key: "moved", Value: "a genuinely new value",
 		Confidence: 0.7, Contradicts: true,
-	}, applyNow, 9000)
+	}, applyNow, 9000, store.ContiguousClock(9000))
 
 	fc := byKey["default|thinking|moved"]
 	if len(fc.Versions) != 2 {

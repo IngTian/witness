@@ -45,7 +45,7 @@ func TestApplyFacetWithNoClockKeepsTheKnownOne(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			byKey := indexFacets([]store.Facet{tc.facet})
-			if !(&Reviewer{}).applyFacet(byKey, "L", tc.assert, applyNow, 0) {
+			if !(&Reviewer{}).applyFacet(byKey, "L", tc.assert, applyNow, 0, nil) {
 				t.Fatal("the assertion was rejected, so nothing below is exercised")
 			}
 			cur := byKey["L|d|k"].Current()
@@ -59,7 +59,7 @@ func TestApplyFacetWithNoClockKeepsTheKnownOne(t *testing.T) {
 			// The outcome: one half-life on, the facet must have decayed. With the clock at 0 it
 			// reads back exactly as stored, forever.
 			later := int64(establishedClock) + int64(store.FacetDecayHalfLifeObs)
-			if got := cur.DecayedConfidence(later); got >= cur.Confidence {
+			if got := cur.DecayedConfidence(store.ContiguousClock(later)); got >= cur.Confidence {
 				t.Errorf("the facet stopped decaying: %.2f, one half-life later still %.2f", cur.Confidence, got)
 			}
 		})
@@ -73,7 +73,7 @@ func TestApplyFacetClockStillRestartsOnARealSeq(t *testing.T) {
 	byKey := indexFacets([]store.Facet{clockedFacet(false)})
 	(&Reviewer{}).applyFacet(byKey, "L", reviewedFacet{
 		Dimension: "d", Key: "k", Value: "prefers Go", Confidence: 0.8, BecauseOf: []string{"o2"},
-	}, applyNow, 900)
+	}, applyNow, 900, store.ContiguousClock(900))
 	if got := byKey["L|d|k"].Current().ConfidenceSeq; got != 900 {
 		t.Errorf("a review at seq 900 must restart the clock there, got %d", got)
 	}
@@ -81,7 +81,7 @@ func TestApplyFacetClockStillRestartsOnARealSeq(t *testing.T) {
 	fresh := map[string]*store.Facet{}
 	(&Reviewer{}).applyFacet(fresh, "L", reviewedFacet{
 		Dimension: "d", Key: "new", Value: "an arc", Confidence: 0.6, BecauseOf: []string{"o3"},
-	}, applyNow, 0)
+	}, applyNow, 0, nil)
 	if got := fresh["L|d|new"].Current().ConfidenceSeq; got != 0 {
 		t.Errorf("a new facet with no clock information must start without a clock, got %d", got)
 	}
@@ -106,7 +106,7 @@ func TestApplyFacetClockNeverMovesBackwards(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			byKey := indexFacets([]store.Facet{tc.facet})
-			if !(&Reviewer{}).applyFacet(byKey, "L", tc.assert, applyNow, establishedClock-400) {
+			if !(&Reviewer{}).applyFacet(byKey, "L", tc.assert, applyNow, establishedClock-400, store.ContiguousClock(establishedClock-400)) {
 				t.Fatal("the assertion was rejected, so nothing below is exercised")
 			}
 			if got := byKey["L|d|k"].Current().ConfidenceSeq; got != establishedClock {

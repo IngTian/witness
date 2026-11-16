@@ -24,15 +24,31 @@ func ObservationID(session, lens, text string) string {
 // themselves.
 type obsIO struct{ db *sql.DB }
 
-// ObservationHighWater is the highest observation seq in the archive — the "now" of the
-// decay clock (#173). Confidence decays on READ, by the observations elapsed since a facet was
-// last confirmed, so every surface that shows a confidence to a person or a model needs this to
-// show the CURRENT one: FacetVersion.DecayedConfidence(ObservationHighWater()). The stored
-// Confidence is the value as of the last confirmation, which is a record, not a reading.
-func (o *obsIO) ObservationHighWater() (int64, error) {
-	var hw int64
-	err := o.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM observations`).Scan(&hw)
-	return hw, err
+// LensClock is one lens's observation seqs, ascending — the decay clock (#173) of that lens's
+// facets. Confidence decays on READ, by the lens's observations elapsed since a facet was last
+// confirmed, so every surface that shows a confidence to a person or a model needs this to show
+// the CURRENT one: FacetVersion.DecayedConfidence(LensClock(f.Lens)). The stored Confidence is
+// the value as of the last confirmation, which is a record, not a reading. (nil, nil) for a lens
+// with no observations.
+//
+// idx_obs_lens holds (lens, rowid=seq), so this is a covering range scan with no sort, no new
+// index and no schema bump: O(lens observations), a few ms at 75k, where a per-facet COUNT
+// would be O(facets) queries.
+func (o *obsIO) LensClock(lens string) (LensClock, error) {
+	rows, err := o.db.Query(`SELECT seq FROM observations WHERE lens = ? ORDER BY seq`, lens)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var c LensClock
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			return nil, err
+		}
+		c = append(c, seq)
+	}
+	return c, rows.Err()
 }
 
 // --- active observation staging (in-session via MCP) ------------------------

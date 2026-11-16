@@ -24,7 +24,7 @@ func TestReviewPromptHidesArchivedFacets(t *testing.T) {
 
 	view := slimFacets([]store.Facet{
 		cf("thinking", "survivor", "live value", 0.8, 1), archived, retired,
-	}, "default", 0)
+	}, "default", nil)
 
 	blob, _ := json.Marshal(view)
 	got := string(blob)
@@ -53,7 +53,7 @@ func TestAssertionOnAMergedFacetRedirectsToTheSurvivor(t *testing.T) {
 	ok := r.applyFacet(byKey, "default", reviewedFacet{
 		Dimension: "thinking", Key: "absorbed", Value: "new evidence value",
 		Confidence: 0.9, Contradicts: true,
-	}, "2026-10-03T00:00:00Z", 0)
+	}, "2026-10-03T00:00:00Z", 0, nil)
 	if !ok {
 		t.Fatal("the assertion should be applied, not dropped")
 	}
@@ -85,7 +85,7 @@ func TestAssertionOnARetiredFacetResurrectsIt(t *testing.T) {
 	r.applyFacet(byKey, "default", reviewedFacet{
 		Dimension: "habits", Key: "came_back", Value: "it is a pattern after all",
 		Confidence: 0.8, Contradicts: true,
-	}, "2026-10-03T00:00:00Z", 0)
+	}, "2026-10-03T00:00:00Z", 0, nil)
 
 	got := byKey["default|habits|came_back"]
 	if !got.Active() {

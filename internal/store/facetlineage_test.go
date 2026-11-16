@@ -98,7 +98,7 @@ func TestFacetRoundTripsEveryField(t *testing.T) {
 	if v.Gist() != v.Claim {
 		t.Errorf("Gist should return the claim, got %q", v.Gist())
 	}
-	if d := v.DecayedConfidence(v.ConfidenceSeq + int64(FacetDecayHalfLifeObs)); d >= v.Confidence {
+	if d := v.DecayedConfidence(ContiguousClock(v.ConfidenceSeq + int64(FacetDecayHalfLifeObs))); d >= v.Confidence {
 		t.Errorf("a surviving decay clock should produce decay, got %v", d)
 	}
 }

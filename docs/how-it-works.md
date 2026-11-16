@@ -31,11 +31,12 @@ is less sure. Either way a single review moves it by at most 0.1, so confidence 
 across reviews" rather than "whatever the last window felt". A facet needs several reviews to climb
 to a high number, which is the point: the number should track repeated independent evidence.
 
-It also **decays when nothing cites the facet.** The clock is observations elapsed, not wall-clock
-time — decay has to mean "evidence was possible and did not arrive", so a fortnight away from the
-keyboard costs you nothing. The half-life is 3,000 observations: a facet last confirmed at 0.9
-reads around 0.64 after a typical gap between citations, and approaches the floor after roughly
-10,000 uncited observations.
+It also **decays when nothing cites the facet.** The clock is the observations elapsed in the
+facet's own lens, not wall-clock time — decay has to mean "evidence was possible and did not
+arrive", so a fortnight away from the keyboard costs you nothing, and a quiet lens (say `math`) is
+not aged by a busy one. The half-life is 3,000 of the lens's observations: a facet last confirmed
+at 0.9 reads around 0.64 after a typical gap between citations, and approaches the floor after
+roughly 10,000 uncited observations.
 
 **The floor is 0.1, and it never goes below.** Absence of evidence is not evidence of absence: a
 quiet trait is still a trait, so decay marks a facet uncertain and never retires it. One citation

@@ -496,7 +496,7 @@ func (r *EmergentReviewer) RunFull(ctx context.Context, now time.Time) error {
 			// as "unknown", and unknown never erases known (knownClock in reviewer.go). Before
 			// that rule, this call overwrote an established facet's real clock with 0 and
 			// froze it.
-			if !rv.applyFacet(byKey, ln.Name, rf, nowStr, 0) {
+			if !rv.applyFacet(byKey, ln.Name, rf, nowStr, 0, nil) {
 				slog.Warn("emergent: dropped a malformed arc facet", "lens", ln.Name,
 					"dimension", rf.Dimension, "key", rf.Key)
 				continue

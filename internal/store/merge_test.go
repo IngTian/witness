@@ -103,10 +103,11 @@ func (a *arch) facet(lens, dim, key string) *Facet {
 	return nil
 }
 
+// highWater is the archive's global max seq: rebaseClocks and its tests measure on it.
 func (a *arch) highWater() int64 {
 	a.t.Helper()
-	hw, err := a.st.ObservationHighWater()
-	if err != nil {
+	var hw int64
+	if err := a.st.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM observations`).Scan(&hw); err != nil {
 		a.t.Fatal(err)
 	}
 	return hw

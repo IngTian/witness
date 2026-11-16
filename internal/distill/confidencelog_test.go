@@ -26,11 +26,11 @@ func stageObs(t *testing.T, s *store.Store, lensName, text string) int64 {
 	}}); err != nil {
 		t.Fatalf("AppendObservations: %v", err)
 	}
-	seq, err := s.ObservationHighWater()
+	clock, err := s.LensClock(lensName)
 	if err != nil {
-		t.Fatalf("ObservationHighWater: %v", err)
+		t.Fatalf("LensClock: %v", err)
 	}
-	return seq
+	return clock[len(clock)-1]
 }
 
 // answering is a review runner whose reply the test sets before each fold.
@@ -296,7 +296,7 @@ func TestApplyFacetLogsFromTheDecayedConfidence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rv := &Reviewer{}
-			if !rv.applyFacet(indexFacets([]store.Facet{tc.facet}), "L", tc.assert, applyNow, later) {
+			if !rv.applyFacet(indexFacets([]store.Facet{tc.facet}), "L", tc.assert, applyNow, later, store.ContiguousClock(later)) {
 				t.Fatal("the assertion was rejected, so nothing below is exercised")
 			}
 			if got := rv.takeEvents(); !reflect.DeepEqual(got, []store.ConfidenceEvent{tc.want}) {
