@@ -7,7 +7,11 @@ package opencode
 //     and the npm `.cmd` shim that production resolves away (T3);
 //   - startHolder runs the test binary as a `hold` stub that starts witness's OWN private serve
 //     (startPrivateServe → buildServeCmd: HideWindow, WaitDelay, Cancel = stdin.Close, the isolated
-//     env), so killing the holder is exactly a worker dying with its serve (T1, T4, T8).
+//     env), so killing the holder is exactly a worker dying with its serve (T1, T4, T8, T9). Its
+//     extraEnv selects two variants: WITNESS_CONTRACT_HOLD_RAW=1 holds a raw `bin serve --stdio`
+//     instead (T3's `.cmd` chain, which witness's own spawn resolves away), and
+//     WITNESS_CONTRACT_HOLD_OVERLAY=<json> becomes privateConfigOverlay (T9's MCP server, since
+//     the private serve drops OPENCODE_CONFIG_CONTENT).
 
 import (
 	"bytes"
@@ -219,8 +223,9 @@ func (h holderInfo) Client(s scratch) *rawServe {
 
 // startHolder starts a `hold` stub that holds witness's private serve of bin, contained in a
 // kill-on-close job first when contain (Windows; a no-op elsewhere), plus a sleeping sibling child
-// when sibling. The test kills holder; Cleanup kills whatever is left.
-func startHolder(t *testing.T, bin string, s scratch, contain, sibling bool) (holder *exec.Cmd, h holderInfo) {
+// when sibling. extraEnv goes to the stub (the variants above). The test kills holder; Cleanup
+// kills whatever is left.
+func startHolder(t *testing.T, bin string, s scratch, contain, sibling bool, extraEnv ...string) (holder *exec.Cmd, h holderInfo) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -228,7 +233,7 @@ func startHolder(t *testing.T, bin string, s scratch, contain, sibling bool) (ho
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), contractProcessBound)
 	holder = exec.CommandContext(ctx, exe, "-test.run=^$") // if the stub ever misfires, it runs no test
-	env := []string{"WITNESS_CONTRACT_STUB=hold", "WITNESS_CONTRACT_HOLD_BIN=" + bin}
+	env := append([]string{"WITNESS_CONTRACT_STUB=hold", "WITNESS_CONTRACT_HOLD_BIN=" + bin}, extraEnv...)
 	if contain {
 		env = append(env, "WITNESS_CONTRACT_HOLD_CONTAIN=1")
 	}
@@ -285,8 +290,9 @@ func startHolder(t *testing.T, bin string, s scratch, contain, sibling bool) (ho
 }
 
 // holdStub is WITNESS_CONTRACT_STUB=hold: start witness's private serve of $WITNESS_CONTRACT_HOLD_BIN
-// under the scratch WITNESS_HOME's runtime root (as the worker does), print holderInfo as one JSON
-// line, then hold the lease until killed or contractProcessBound.
+// under the scratch WITNESS_HOME's runtime root (as the worker does), or a raw serve under
+// WITNESS_CONTRACT_HOLD_RAW=1, print holderInfo as one JSON line, then hold the lease until killed
+// or contractProcessBound.
 func holdStub() {
 	fail := func(err error) {
 		fmt.Fprintln(os.Stderr, "witness contract hold stub:", err)
@@ -299,12 +305,44 @@ func holdStub() {
 			fail(err)
 		}
 	}
-	if err := os.Setenv(openCodeBinEnv, os.Getenv("WITNESS_CONTRACT_HOLD_BIN")); err != nil { // pluginExe picks it
-		fail(err)
+	if js := os.Getenv("WITNESS_CONTRACT_HOLD_OVERLAY"); js != "" {
+		if err := json.Unmarshal([]byte(js), &privateConfigOverlay); err != nil {
+			fail(fmt.Errorf("WITNESS_CONTRACT_HOLD_OVERLAY: %w", err))
+		}
 	}
-	serve, err := startPrivateServe(ctx, filepath.Join(os.Getenv("WITNESS_HOME"), "runtime"), false)
-	if err != nil {
-		fail(err)
+	bin := os.Getenv("WITNESS_CONTRACT_HOLD_BIN")
+	var serve *privateServe
+	if os.Getenv("WITNESS_CONTRACT_HOLD_RAW") == "1" {
+		// The pre-G16 raw spawn: bin as given (no ResolveExe, so a `.cmd` stays a `.cmd` and
+		// serve_pid is cmd.exe's), in this stub's env, held on its StdinPipe. waitReady (the same
+		// /api/info gate) reads only Password, logs and the wait fields.
+		serve = &privateServe{Password: randomHex(24), logs: &safeBuffer{}, waitDone: make(chan struct{})}
+		serve.cmd = exec.CommandContext(ctx, bin, "serve", "--stdio", "--port", "0", "--hostname", "127.0.0.1", "--log-level", "error")
+		serve.cmd.Env = append(os.Environ(), "OPENCODE_PASSWORD="+serve.Password)
+		url := make(chan string, 1)
+		serve.cmd.Stdout, serve.cmd.Stderr = &readyLine{ch: url}, serve.logs
+		var err error
+		if serve.stdin, err = serve.cmd.StdinPipe(); err != nil {
+			fail(err)
+		}
+		if err := serve.cmd.Start(); err != nil {
+			fail(err)
+		}
+		go func() { // also keeps serve, and so the lease's write end, reachable while we hold
+			serve.waitErr = serve.cmd.Wait()
+			close(serve.waitDone)
+		}()
+		if err := serve.waitReady(ctx, url); err != nil {
+			fail(err)
+		}
+	} else {
+		if err := os.Setenv(openCodeBinEnv, bin); err != nil { // pluginExe picks it
+			fail(err)
+		}
+		var err error
+		if serve, err = startPrivateServe(ctx, filepath.Join(os.Getenv("WITNESS_HOME"), "runtime"), false); err != nil {
+			fail(err)
+		}
 	}
 	h := holderInfo{ServePID: serve.cmd.Process.Pid, URL: serve.URL, Password: serve.Password}
 	if os.Getenv("WITNESS_CONTRACT_HOLD_SIBLING") == "1" {

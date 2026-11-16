@@ -48,6 +48,15 @@ func init() {
 	case "":
 		return
 	case "sleep": // a `claude -p` or MCP server that never answers
+		// T9: an MCP server's own child, the grandchild a contained serve must not lose to breakaway.
+		if child := os.Getenv("WITNESS_CONTRACT_SLEEP_CHILD"); child != "" {
+			c := exec.Command(child, "-test.run=^$") // bounded: it sleeps 600 s too
+			c.Env = append(os.Environ(), "WITNESS_CONTRACT_SLEEP_CHILD=")
+			if err := c.Start(); err != nil {
+				fmt.Fprintln(os.Stderr, "witness contract stub: start sleep child:", err)
+				os.Exit(1)
+			}
+		}
 		time.Sleep(600 * time.Second)
 		os.Exit(0)
 	case "fail": // a `claude -p` that fails at once, so the mine backs off
@@ -268,7 +277,7 @@ func noLeaks(t *testing.T) {
 	// The test's ONE TempDir RemoveAll is registered at its first TempDir call; making that call
 	// here, before our Cleanup, puts our wait ahead of the removal whatever order the test calls in.
 	_ = t.TempDir()
-	watched := map[string]bool{"opencode": true, "opencode-pty": true, "opencode-cli": true, "wstub": true, "claude": true, "witness": true}
+	watched := map[string]bool{"opencode": true, "opencode-pty": true, "opencode-cli": true, "wstub": true, "wgrand": true, "claude": true, "witness": true}
 	if bin := os.Getenv("WITNESS_CONTRACT_WITNESS_BIN"); bin != "" {
 		watched[procName(filepath.Base(bin))] = true
 	}
