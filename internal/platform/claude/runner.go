@@ -3,9 +3,11 @@ package claude
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,13 +16,14 @@ import (
 )
 
 // NewRunner mints the Claude distillation runner. Claude shells out to `claude -p`
-// per Run; there is no persistent server, so Open/Close are no-ops and nothing is
-// persisted to clean up (the nested run uses --no-session-persistence and the
-// WITNESS_WORKER=1 recursion guard). cfg is unused today but kept in the signature
-// so the RunnerProvider contract is uniform with OpenCode's model-bearing runner.
-func (Platform) NewRunner(_ store.Config) platform.Runner { return runner{} }
+// per Run; there is no persistent server, so Open/Close are no-ops (the nested run uses
+// --no-session-persistence and the WITNESS_WORKER=1 recursion guard). cfg supplies only
+// RuntimeRoot, under which every Run's cwd lives (see workDir).
+func (Platform) NewRunner(cfg store.Config) platform.Runner {
+	return runner{runtimeRoot: cfg.RuntimeRoot}
+}
 
-type runner struct{}
+type runner struct{ runtimeRoot string }
 
 func (runner) Open(context.Context) error { return nil }
 func (runner) Close() error               { return nil }
@@ -36,23 +39,18 @@ func (runner) InvocationHint() string { return "claude -p" }
 // being analyzed (transcript, prior observations, or facets). They are kept in
 // separate turns — see buildRunCmd — so corpus text can't impersonate instructions.
 // Output is the final assistant message (plain text); callers parse JSON out of it.
-func (runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
+func (r runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
 	if platform.ExternalRunnersDisabled() {
 		return "", fmt.Errorf("claude runner disabled by %s", platform.DisableExternalRunnersEnv)
+	}
+	dir, err := r.workDir()
+	if err != nil {
+		return "", err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, claudeRunTimeout)
 	defer cancel()
 
 	cmd := buildRunCmdFn(runCtx, model, systemPrompt, input)
-
-	// Run in a fresh, empty per-Run dir. On multi-user Unix, os.TempDir() (/tmp) is world-writable;
-	// a planted /tmp/CLAUDE.md or /tmp/.claude/settings.json hook runs as the owner. Remove the dir
-	// when Run returns (even on error/timeout).
-	dir, err := os.MkdirTemp("", "witness-claude-")
-	if err != nil {
-		return "", fmt.Errorf("claude runner: create per-Run dir: %w", err)
-	}
-	defer os.RemoveAll(dir)
 	cmd.Dir = dir
 
 	var out, errb bytes.Buffer
@@ -84,6 +82,36 @@ func (runner) Run(ctx context.Context, model, systemPrompt, input string) (strin
 		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", err, childOutput(errb.String(), out.String()))
 	}
 	return out.String(), nil
+}
+
+// workDir is the one cwd every Run shares: <RuntimeRoot>/claude-cwd, 0700, never removed.
+//
+// Claude Code reads .claude/settings.json (hooks) and .mcp.json from its cwd, and CLAUDE.md,
+// .claude/CLAUDE.md, .claude/rules/*.md and CLAUDE.local.md (AGENTS.md as a fallback) from the cwd
+// AND every ancestor, with no ownership check. So the cwd must be witness-owned and empty, and no
+// ancestor may be writable by another user. Anything under os.TempDir() fails that on Linux: a
+// planted /tmp/CLAUDE.md steers every distillation even from a private dir below it. RuntimeRoot
+// sits under the user's data dir, so its ancestors are the user's own dirs.
+//
+// Stable, not per-Run: Claude Code makes a ~/.claude/projects/<cwd>/memory/ dir for each new cwd,
+// so a fresh dir per call left one behind per model call (thousands for a backfill). Concurrent
+// Runs share it safely: with --tools "" nothing writes there.
+func (r runner) workDir() (string, error) {
+	// Fail closed: an empty root would make the cwd relative to wherever the worker started,
+	// which may be the very project dir this avoids.
+	if r.runtimeRoot == "" {
+		return "", errors.New("claude runner: witness runtime root is unavailable")
+	}
+	dir := filepath.Join(r.runtimeRoot, "claude-cwd")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("claude runner: create cwd: %w", err)
+	}
+	// MkdirAll keeps an existing dir's mode; tighten one created looser. On Windows Chmod only
+	// toggles read-only, and 0o700 keeps the dir writable, so this is harmless there.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("claude runner: restrict cwd: %w", err)
+	}
+	return dir, nil
 }
 
 // claudeRunTimeout bounds one `claude -p`. It is a var only so the deadline-attribution test can
@@ -118,9 +146,9 @@ func childOutput(stderr, stdout string) string {
 //     (D1) caught the model using tools; a tool that names no tools is still a tool
 //     (the model saw ["web_search"]). A CLI too old for the flag exits non-zero and
 //     Run reports its stdout and stderr (childOutput), so no doctor probe.
-//   - Run sets a fresh, empty per-Run cwd (witness-claude-*), removed when Run returns;
-//     not the shared, world-writable os.TempDir(). That avoids loading the user project's
-//     CLAUDE.md/.mcp.json.
+//   - Run sets the cwd to witness's own empty <RuntimeRoot>/claude-cwd (workDir), never
+//     the user's project or os.TempDir(), so no foreign CLAUDE.md, .mcp.json or
+//     .claude/settings.json hook loads.
 //
 // model == "" omits --model so `claude -p` uses its environment default.
 func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {

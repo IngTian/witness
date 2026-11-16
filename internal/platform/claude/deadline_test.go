@@ -3,15 +3,16 @@ package claude
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/store"
 )
 
 // unsetDisableSwitch clears WITNESS_DISABLE_EXTERNAL_RUNNERS for one test.
@@ -29,6 +30,11 @@ func unsetDisableSwitch(t *testing.T) {
 		t.Fatal("the external-runner kill switch is still set; this test cannot reach Run's " +
 			"error classification")
 	}
+}
+
+// testRunner is the runner NewRunner mints, over a scratch runtime root (Run refuses an empty one).
+func testRunner(t *testing.T) platform.Runner {
+	return Platform{}.NewRunner(store.Config{RuntimeRoot: t.TempDir()})
 }
 
 // A `claude -p` that runs out of time must be reported as context.DeadlineExceeded.
@@ -66,7 +72,7 @@ func TestClaudeRunReportsTimeoutAsDeadlineExceeded(t *testing.T) {
 	t.Cleanup(func() { claudeRunTimeout = prevTimeout })
 
 	start := time.Now()
-	out, err := runner{}.Run(context.Background(), "", "sys", "corpus")
+	out, err := testRunner(t).Run(context.Background(), "", "sys", "corpus")
 	if err == nil {
 		t.Fatalf("a child that never exits must fail; got output %q", out)
 	}
@@ -118,7 +124,7 @@ func TestClaudeRunDistinguishesCallerCancellationFromTimeout(t *testing.T) {
 	}()
 	defer cancel()
 
-	_, err := runner{}.Run(ctx, "", "sys", "corpus")
+	_, err := testRunner(t).Run(ctx, "", "sys", "corpus")
 	if err == nil {
 		t.Fatal("a cancelled Run must return an error")
 	}
@@ -173,7 +179,7 @@ func TestClaudeRunFailureKeepsStdout(t *testing.T) {
 	}
 	t.Cleanup(func() { buildRunCmdFn = prev })
 
-	_, err = runner{}.Run(context.Background(), "", "sys", "corpus")
+	_, err = testRunner(t).Run(context.Background(), "", "sys", "corpus")
 	if err == nil {
 		t.Fatal("a child that exits 1 must fail")
 	}
@@ -196,37 +202,60 @@ func TestClaudeRunSurfacesARejectedFlag(t *testing.T) {
 	}
 	t.Cleanup(func() { buildRunCmdFn = prev })
 
-	_, err = runner{}.Run(context.Background(), "", "sys", "corpus")
+	_, err = testRunner(t).Run(context.Background(), "", "sys", "corpus")
 	if err == nil || !strings.Contains(err.Error(), "unknown option --tools") {
 		t.Errorf("a CLI that rejects a flag must fail with its own stderr in the error: %v", err)
 	}
 }
 
-// Run must use a fresh, empty per-Run cwd, not the shared os.TempDir(). On multi-user Unix
-// /tmp is world-writable; a planted /tmp/CLAUDE.md or /tmp/.claude/settings.json hook runs
-// as the owner. The dir must be removed when Run returns.
-func TestClaudeRunUsesAFreshPerRunDir(t *testing.T) {
+// Every Run must use ONE stable, private cwd under witness's runtime root. Claude Code loads
+// CLAUDE.md from every ancestor of its cwd, so a dir under the world-writable temp dir still
+// loads a planted /tmp/CLAUDE.md; and a fresh cwd per call leaves a ~/.claude/projects entry
+// behind per call. The stub's child is a missing binary, so Run fails at Start and nothing spawns;
+// the cwd is read off the *exec.Cmd Run was handed.
+func TestClaudeRunUsesOneStablePrivateCwd(t *testing.T) {
 	unsetDisableSwitch(t)
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skipf("no `sh` to stand in for the CLI: %v", err)
+	root, tmp := t.TempDir(), t.TempDir()
+	// Point os.TempDir() at a sibling of root, so "not under the temp dir" can fail here.
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, tmp)
 	}
+	var cmds []*exec.Cmd
 	prev := buildRunCmdFn
 	buildRunCmdFn = func(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
-		return exec.CommandContext(ctx, sh, "-c", "pwd")
+		c := exec.CommandContext(ctx, filepath.Join(tmp, "no-such-cli"))
+		cmds = append(cmds, c)
+		return c
 	}
 	t.Cleanup(func() { buildRunCmdFn = prev })
 
-	out, err := runner{}.Run(context.Background(), "", "sys", "corpus")
-	if err != nil {
-		t.Fatalf("Run failed: %v", err)
-	}
-	dir := strings.TrimSpace(out)
-	if !strings.HasPrefix(filepath.Base(dir), "witness-claude-") {
-		t.Fatalf("Run must use a fresh witness-claude-* dir, not os.TempDir(); got %q", dir)
-	}
-	if _, statErr := os.Stat(dir); !errors.Is(statErr, fs.ErrNotExist) {
-		t.Errorf("the per-Run dir must be removed after Run returns; %q still exists or stat failed: %v", dir, statErr)
+	r := Platform{}.NewRunner(store.Config{RuntimeRoot: root})
+	want := filepath.Join(root, "claude-cwd")
+	for i := range 2 {
+		_, _ = r.Run(context.Background(), "", "sys", "corpus")
+		if len(cmds) != i+1 {
+			t.Fatalf("Run %d did not build its child", i+1)
+		}
+		dir := cmds[i].Dir
+		if dir != want {
+			t.Fatalf("Run %d cwd = %q, want the stable runtime-root dir %q", i+1, dir, want)
+		}
+		if rel, err := filepath.Rel(os.TempDir(), dir); err == nil && !strings.HasPrefix(rel, "..") {
+			t.Fatalf("Run %d cwd %q is under os.TempDir() %q", i+1, dir, os.TempDir())
+		}
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("the cwd must survive Run %d: %v", i+1, err)
+		}
+		if runtime.GOOS != "windows" {
+			if got := fi.Mode().Perm(); got != 0o700 {
+				t.Errorf("Run %d cwd mode = %o, want 0700", i+1, got)
+			}
+			// A dir left looser (an older witness, a manual mkdir) must be tightened next Run.
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 

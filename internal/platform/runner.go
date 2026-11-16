@@ -193,12 +193,14 @@ type Runner interface {
 	//
 	// Claude isolates: no prior or saved conversation (one-shot `-p --no-session-persistence`); no
 	// built-in tools (`--tools ""`); no MCP servers (`--strict-mcp-config`); not the user's
-	// project CLAUDE.md, .mcp.json or .claude/ settings (the cwd is a fresh empty per-Run
-	// directory, removed when Run returns).
+	// project CLAUDE.md, .mcp.json or .claude/ settings (the cwd is witness's own empty
+	// <RuntimeRoot>/claude-cwd, shared by every Run, never under the world-writable temp dir).
 	//
 	// Claude does NOT isolate: Claude Code's own system prompt (witness's is appended via
-	// `--append-system-prompt`); the user-level CLAUDE.md; user and plugin hooks, which fire and
-	// may add context. Those need `--bare`, which (claude 2.1.325 `--help`) limits Anthropic auth
+	// `--append-system-prompt`); the user-level CLAUDE.md; instruction files in the cwd's
+	// ANCESTORS (CLAUDE.md, .claude/CLAUDE.md, .claude/rules/, CLAUDE.local.md, AGENTS.md as a
+	// fallback), which Claude Code loads from every parent dir: the user's own, e.g. a ~/CLAUDE.md;
+	// user and plugin hooks, which fire and may add context. Those need `--bare`, which (claude 2.1.325 `--help`) limits Anthropic auth
 	// to ANTHROPIC_API_KEY/apiKeyHelper, no OAuth or keychain (Bedrock/Vertex keep theirs): a
 	// product call, not done.
 	//
