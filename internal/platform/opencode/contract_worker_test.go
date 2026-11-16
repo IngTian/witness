@@ -18,6 +18,7 @@ package opencode
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -45,8 +46,10 @@ func TestContractWorkerStopTakesChildren(t *testing.T) {
 	var claude []int
 	waitFor(t, 3*time.Minute, "the claude stub and the worker's private serve running (no serve at all: the machine-wide mock "+
 		"provider config may not have loaded into the worker's private serve, so its Open refused mock/ok; witness.log is logged below)", func() bool {
-		claude = spawned(t, before, "claude")
-		return len(claude) == 1 && len(spawned(t, before, "opencode")) >= 1
+		claudeProcs := fresh(t, before, "claude")
+		claude = slices.Collect(maps.Keys(claudeProcs))
+		slices.Sort(claude)
+		return len(claude) == 1 && len(fresh(t, before, "opencode")) >= 1
 	})
 	// The stub must still be running when the stop lands: one that died early (a quarantined copy, a
 	// mistyped stub mode) would read as taken.
@@ -58,7 +61,7 @@ func TestContractWorkerStopTakesChildren(t *testing.T) {
 		t.Fatalf("the claude stub %d outlived `worker stop` by 10 s", claude[0])
 	}
 	waitFor(t, 10*time.Second, "no claude stub, serve or witness left after `worker stop`", func() bool {
-		return len(spawned(t, before, "claude", "opencode", "opencode-pty", witnessName())) == 0
+		return len(fresh(t, before, "claude", "opencode", "opencode-pty", witnessName())) == 0
 	})
 }
 
@@ -91,7 +94,17 @@ func TestContractWakeupOutlivesWorker(t *testing.T) {
 	if worker == 0 || !pidGone(worker, 30*time.Second) {
 		t.Fatalf("worker pid %d: never seen stamped, or still alive 30 s after it released its lock", worker)
 	}
-	pids := spawned(t, before, witnessName())
+	// Windows snapshots can list exited-but-referenced processes for a moment; wait until the worker
+	// is absent from the snapshot, not just !Alive, before counting new witness processes.
+	for deadline := time.Now().Add(30 * time.Second); procList(t)[worker] != ""; {
+		if time.Now().After(deadline) {
+			t.Fatalf("worker %d still in process snapshot 30 s after it exited", worker)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	witnessProcs := fresh(t, before, procName(witnessName()))
+	pids := slices.Collect(maps.Keys(witnessProcs))
+	slices.Sort(pids)
 	if len(pids) != 1 {
 		t.Fatalf("%d new witness processes %v after the worker %d exited, want exactly the sleeping worker-wakeup", len(pids), pids, worker)
 	}
@@ -181,14 +194,3 @@ func witnessName() string { return filepath.Base(os.Getenv("WITNESS_CONTRACT_WIT
 
 // spawned lists the live processes named any of names that were not in before (a pid reused under
 // another name counts as new, as in noLeaks), from one procList.
-func spawned(t *testing.T, before map[int]string, names ...string) []int {
-	t.Helper()
-	var pids []int
-	for pid, n := range procList(t) {
-		if before[pid] != n && slices.ContainsFunc(names, func(w string) bool { return procName(w) == n }) {
-			pids = append(pids, pid)
-		}
-	}
-	slices.Sort(pids)
-	return pids
-}
