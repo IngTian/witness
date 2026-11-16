@@ -81,11 +81,11 @@ func isolatedEnv(root string) []string {
 	}
 }
 
-// withoutOpenCodeEnv drops every inherited OPENCODE_* variable (case-insensitively, since
-// Windows env names are case-insensitive) to prevent the user's config, plugins, MCP servers
-// and credentials from leaking into witness's private opencode serve (critic.md G1). HOME
-// stays (Bedrock's credential chain reads ~/.aws). API-key env vars stay (the runner copies
-// no credentials, spec §7.6).
+// withoutOpenCodeEnv drops every inherited OPENCODE_* variable except OPENCODE_API_KEY (an
+// env-var key, allowed by spec §7.6), case-insensitively since Windows env names are
+// case-insensitive, to prevent the user's config, plugins and MCP servers from leaking into
+// witness's private opencode serve (critic.md G1). HOME stays (Bedrock's credential chain
+// reads ~/.aws). Other API-key env vars stay (the runner copies no credentials, spec §7.6).
 func withoutOpenCodeEnv(env []string) []string {
 	var out []string
 	for _, e := range env {

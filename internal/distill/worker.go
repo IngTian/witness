@@ -347,6 +347,8 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 					// backpressure), and a child the stop's group SIGTERM killed reports "signal:
 					// terminated". The predicate closes the race where that child dies and Run returns
 					// before NotifyStop cancels ctx: `worker stop` sets its flag BEFORE the SIGTERM.
+					// A foreground Ctrl-C sets no flag, so a child its SIGINT kills first can still be
+					// charged once.
 					if ctx.Err() != nil || (stop != nil && stop()) {
 						slog.Info("mine interrupted; stays pending", "session", session, "lens", ln.Name, "err", err)
 						skip = true

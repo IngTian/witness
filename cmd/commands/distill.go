@@ -153,13 +153,26 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 	if waitBackoffs {
 		// Ctrl-C during a pass or a between-passes sleep aborts the wait and falls through to
 		// the end-state check, which reports the honest (still-incomplete) state.
+		errStopped := errors.New("worker stop requested")
 		if err := backfillDrainWithRetry(ctx, backfillRetryDeps{
-			rerun:            func() error { _, e := backfillRun(false, sessionTimeRange{}, progressWhere, tap); return e },
+			rerun: func() error {
+				// Between passes no lock is held, so `worker stop` only sets the flag — which the
+				// manual rerun would clear before draining on. Honor it; the end-state check reports.
+				if st, err := store.Open(); err == nil {
+					stop := st.MetaString(metaWorkerStopRequested) == "1"
+					st.Close()
+					if stop {
+						return errStopped
+					}
+				}
+				_, e := backfillRun(false, sessionTimeRange{}, progressWhere, tap)
+				return e
+			},
 			waitForNextRetry: waitForNextBackfillRetry,
 			sleep:            interruptibleSleep,
 			maxWait:          backfillMaxWait,
 			logWaiting:       func(d time.Duration) { backfillLogWaiting(quiet, d) },
-		}); err != nil {
+		}); err != nil && err != errStopped {
 			return err
 		}
 	}
@@ -604,6 +617,15 @@ func cmdDistillStop(autoOnly bool) error {
 	if err := terminateWorker(pid); err != nil {
 		fmt.Println(okGlyph() + " stop requested — the worker exits at its next checkpoint")
 		return nil
+	}
+	// On Windows the TerminateProcess skips the worker's deferred clear, and a stale pid is a
+	// kill target: the next lock holder that stamps none (ensureProfileFresh, review) would make
+	// a later stop signal whatever process reused it. Safe, since the flock is the liveness
+	// authority; skipped if a new worker already stamped its own pid.
+	if st.MetaString(metaWorkerPID) == pid {
+		_ = st.SetMetaString(metaWorkerPID, "")
+		_ = st.SetMetaString(metaWorkerMode, "")
+		_ = st.SetMetaString(metaWorkerCurrent, "")
 	}
 	fmt.Println(okGlyph() + " stop requested — sent TERM to worker pid " + pid)
 	return nil

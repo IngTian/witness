@@ -198,7 +198,8 @@ func TestContractRunnerSixteenParallel(t *testing.T) {
 	prev := maxConcurrentGenerations
 	maxConcurrentGenerations = 16
 	t.Cleanup(func() { maxConcurrentGenerations = prev })
-	// spec 7.5 "verify 16": the production cap stays 8 (PR 2) until this is green on both OSes and versions.
+	// spec 7.5 "verify 16": 16-way verified on 2.2.7 and 2.3.0, Linux and Windows; production keeps 8
+	// (maxConcurrentGenerations) pending the owner's decision.
 	// Distinct system prompts load agents serially by design (OpenCodeServer.ensureAgent holds agentMu),
 	// and that is not a generation cap. This test uses one shared system prompt (one agent).
 	r, m, ctx, _ := newContractRunner(t, nil)

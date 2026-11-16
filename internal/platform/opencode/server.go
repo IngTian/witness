@@ -300,7 +300,8 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 // request (runner.md (c)). The caller owns the session: Run deletes it, native keeps it for
 // finalize or the next attempt.
 func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, messageID, input string) (string, error) {
-	// ponytail: 8 is the verified bound (critic G4); raise when 16 parallel sessions are verified
+	// ponytail: 16-way verified on 2.2.7 and 2.3.0, Linux and Windows (TestContractRunnerSixteenParallel);
+	// production keeps 8 pending the owner's decision
 	select {
 	case s.sem <- struct{}{}:
 	case <-ctx.Done():

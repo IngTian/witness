@@ -133,6 +133,34 @@ func TestWaitBackoffsStopsOnACtrlCDuringTheFirstPass(t *testing.T) {
 	}
 }
 
+// M3: a `worker stop` between --wait-backoffs passes finds no lock, so it only sets the flag. The
+// rerun is a manual worker, which clears that flag and drained on; the loop must honor it first.
+func TestWaitBackoffsHonorsAWorkerStopBetweenPasses(t *testing.T) {
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st := openTestStore(t)
+	if err := seedDefaultLens(st); err != nil {
+		t.Fatal(err)
+	}
+	prev, prevRun := procCtl, backfillRun
+	t.Cleanup(func() { procCtl, backfillRun = prev, prevRun })
+	procCtl = &proc.Fake{}
+	runs := 0
+	backfillRun = func(bool, sessionTimeRange, string, *causeTap) (bool, error) {
+		if runs++; runs > 1 {
+			t.Fatalf("pass %d ran after `worker stop`", runs)
+		}
+		// The pass leaves a backoff due within the wait (1 s: next_attempt is whole RFC3339 seconds),
+		// and the stop lands once its lock is released.
+		_ = st.SetNextAttempt("s", store.LensDefault, time.Now().Add(time.Second))
+		_ = st.SetMetaString(metaWorkerStopRequested, "1")
+		return true, nil
+	}
+	_ = cmdDistillBackfill(true, "", "", true)
+	if runs != 1 {
+		t.Fatalf("%d passes, want 1", runs)
+	}
+}
+
 // The backed-off variant suggests --wait-backoffs — a flag that exists — and drops it once the
 // caller already waited.
 func TestBacklogUnfinishedHintsOnlyRealFlags(t *testing.T) {
