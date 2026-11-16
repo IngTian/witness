@@ -110,7 +110,15 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// partial stamp would mark a failed lens reviewed-through-now and let it drift. Per-lens
 	// watermarks already advanced per committed window inside foldLensWindowed (the #55
 	// per-lens state), so a persistent single-lens failure no longer strands healthy lenses.
+	// Without the backoff, the same window fails again from the same watermark on every
+	// capture-hook worker (#221's 24-day stall); the no-stamp rule (#16 C1) stays.
 	if len(failed) > 0 {
+		if ctx.Err() == nil { // stopped/cancelled is interrupted, not failed (mining's rule)
+			n := r.Store.IncReviewRetry()
+			at := now.Add(backoffDelay(n))
+			_ = r.Store.SetReviewRetryAfter(at)
+			slog.Warn("review: failed; automatic reviews back off (`worker review` still runs)", "attempt", n, "retry_after", at.UTC().Format(time.RFC3339))
+		}
 		return fmt.Errorf("review failed for %s (committed windows kept; review left pending)", strings.Join(failed, ", "))
 	}
 	return r.Store.StampReview()

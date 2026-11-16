@@ -592,7 +592,22 @@ func (c *configFile) StampReview() error {
 		tx.Rollback()
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM meta WHERE key IN (?, ?)`, reviewRetryAfterKey, reviewRetriesKey); err != nil {
+		tx.Rollback()
+		return err
+	}
 	return tx.Commit()
+}
+
+// IncReviewRetry increments the failed-review counter and returns the new count.
+func (c *configFile) IncReviewRetry() int {
+	_, _ = c.db.Exec("INSERT INTO meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + 1", reviewRetriesKey)
+	return int(metaGetInt(c.db, reviewRetriesKey))
+}
+
+// SetReviewRetryAfter sets the automatic-review backoff timestamp.
+func (c *configFile) SetReviewRetryAfter(at time.Time) error {
+	return metaSet(c.db, reviewRetryAfterKey, at.UTC().Format(time.RFC3339))
 }
 
 // reviewRowidKey is the meta key holding one lens's incremental-fold watermark: the
@@ -662,8 +677,13 @@ func (c *configFile) PoignancySinceReview() int {
 
 // ReviewDue reports whether the reviewer should run: either enough distilled
 // sessions since the last review (the cap), OR enough accumulated poignancy
-// (salience) — whichever comes first.
+// (salience) — whichever comes first. Every automatic gate calls this;
+// forceReviewTapped (worker review) never does, so it ignores the backoff.
+// An unset or unparsable backoff value reads as the zero time (not blocked).
 func (c *configFile) ReviewDue(cfg Config) bool {
+	if until, _ := time.Parse(time.RFC3339, metaGet(c.db, reviewRetryAfterKey)); time.Now().Before(until) {
+		return false
+	}
 	if c.SessionsSinceReview() >= cfg.ReviewEvery {
 		return true
 	}

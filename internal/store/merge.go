@@ -704,6 +704,7 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 //
 //	review_rowid:*                 recomputed by mergeObservations; incoming values are only read
 //	review_ts, review_obs_rowid    this archive's own review trigger
+//	review_retry_after, review_retries  this archive's own failed-review back-off
 //	runner_bound                   flips how the runner is chosen on THIS machine
 //	opencode_sync_time_updated_ms  a cursor into THIS machine's OpenCode db: a copied value makes our
 //	                               own OpenCode history silently skip on the next sync

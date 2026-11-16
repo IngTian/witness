@@ -375,12 +375,12 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		pending:       pending,
 		drainAll:      drainAll,
 		reviewDue:     func() bool { return st.ReviewDue(cfg) },
-		runReview: func() {
+		runReview: func() bool {
 			// Review also needs the runner set (its own per-lens routing + the unified
 			// summary's default runner). Open it here so a review-only run (no mining) still
 			// has live runners; a failed open skips the review this pass.
 			if !ensureRunners() {
-				return
+				return false
 			}
 			r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runForLens,
 				Claims: autoClaimer(st, cfg, runFn, runForLens)}
@@ -396,22 +396,23 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 			fold.finish()
 			if err != nil {
 				slog.Error("review", "err", err)
-			} else {
-				slog.Info("review complete")
-				var sp *spinner
-				if progressWhere != "" {
-					sp = startSpinner("distilling the profile from the latest facets…")
-				}
-				_ = regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
-				sp.Stop()
-				if progressWhere != "" {
-					sp = startSpinner("linking the profile to its sources…")
-				}
-				// Ignores the self-heal's back-off gate, and lifts it on success.
-				_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens, ensureRunners) // best-effort: logged
-				sp.Stop()
-				reviewRan = true
+				return false
 			}
+			slog.Info("review complete")
+			var sp *spinner
+			if progressWhere != "" {
+				sp = startSpinner("distilling the profile from the latest facets…")
+			}
+			_ = regenerateProfile(ctx, st, cfg, lenses, runFn, runForLens) // best-effort: logged
+			sp.Stop()
+			if progressWhere != "" {
+				sp = startSpinner("linking the profile to its sources…")
+			}
+			// Ignores the self-heal's back-off gate, and lifts it on success.
+			_ = resolvePortraitSources(ctx, st, cfg, lenses, untappedRunFn, untappedRunForLens, ensureRunners) // best-effort: logged
+			sp.Stop()
+			reviewRan = true
+			return true
 		},
 		ensureMiner:    func() bool { return getMiner() != nil },
 		hasUnattempted: func(p []string) bool { return miner.HasUnattempted(p, attempted) },
@@ -483,7 +484,7 @@ type distillLoopDeps struct {
 	pending        func() []string     // currently-distillable sessions (re-consulted each pass)
 	drainAll       func()              // drain every pending session (no-op if none / no miner)
 	reviewDue      func() bool         // is an L2 review due (session-count or poignancy)
-	runReview      func()              // run the reviewer + regenerate the L4 profile
+	runReview      func() bool         // run the reviewer + regenerate L4; false = it failed (or could not start), so this run won't fold it again
 	ensureMiner    func() bool         // lazily build the miner; false if the embedder is unavailable
 	hasUnattempted func([]string) bool // any of these sessions not yet attempted this run
 }
@@ -496,9 +497,13 @@ type distillLoopDeps struct {
 // So we loop: drain everything, review if due, then look again — if new pending
 // work appeared, go around. The (session,RawCount) attempted key (inside
 // hasUnattempted) lets a resumed/regrown session re-enter while a stuck one stays
-// filtered, so this loop terminates. Only a row landing in the sub-millisecond gap
-// between the final pending() check and unlock falls to the next-launch sweep.
+// filtered, so this loop terminates. A failed review latches (reviewFailed) so
+// this run never re-folds the same failing window. Only a row landing in the
+// sub-millisecond gap between the final pending() check and unlock falls to the
+// next-launch sweep.
 func runDistillLoop(d distillLoopDeps) {
+	// Otherwise a failed review re-folds the same window on every pass while new L0 keeps the loop going.
+	reviewFailed := false
 	for !d.stopRequested() {
 		// Gate the drain on a FRESH pending() check every pass — never a stale
 		// pre-loop snapshot. Gating on a one-time `hasPending` livelocked a review-only
@@ -513,8 +518,8 @@ func runDistillLoop(d distillLoopDeps) {
 		}
 		// Review folded into the same single-flight pass (serialized under the lock,
 		// so concurrent reviews can't clobber the facets).
-		if !d.stopRequested() && d.reviewDue() {
-			d.runReview()
+		if !d.stopRequested() && !reviewFailed && d.reviewDue() {
+			reviewFailed = !d.runReview()
 		}
 		// Re-check under the lock: did capture land NEW distillable work while we
 		// drained/reviewed? Consult pending() BEFORE ensureMiner() so a review-only run

@@ -47,8 +47,9 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
   candidate arcs it would verify, with no model call and nothing written.
 - `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
   observations. Review normally runs on its own schedule (`review_every` / `review_poignancy`),
-  so reaching for this by hand is the exception. `--full` also runs the emergent long-arc pass,
-  which nothing runs automatically.
+  so reaching for this by hand is the exception. After a failed review the schedule waits before
+  it tries again (5 min, doubling up to 6 h; the next successful review resets it). This command
+  runs regardless. `--full` also runs the emergent long-arc pass, which nothing runs automatically.
 - `witness lens register|deregister|enable|disable|list` — manage lenses.
 - `witness lens show <name>` — print one lens's settings and a prompt excerpt (`--prompts` prints
   both prompts in full).

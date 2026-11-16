@@ -156,6 +156,9 @@ type ReviewStore interface {
 	ReadObservationsSinceOrdered(lens string, sinceRowid int64) ([]Observation, error)
 	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
 	StampReview() error
+	// The failed-review backoff, cleared by StampReview.
+	IncReviewRetry() int
+	SetReviewRetryAfter(at time.Time) error
 	// ReviewRowid / StampReviewLens are the per-lens fold watermark: what the next
 	// fold reads (seq > ReviewRowid). StampReviewLens advances it to throughRowid —
 	// the max seq of the window just folded (#123), advanced per successful window.

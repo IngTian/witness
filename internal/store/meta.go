@@ -31,10 +31,12 @@ func EmergeSeenKey(lens, sig string) string { return EmergeSeenPrefix(lens) + si
 // this only lets the hint know where it last stood.
 func CompactBaselineKey(lens string) string { return "compact_baseline:" + lens }
 
-// The global review-cadence stamps StampReview writes.
+// The global review-cadence stamps StampReview writes, and the failed-review backoff it clears.
 const (
-	reviewTSKey       = "review_ts"        // when the last review ran
-	reviewObsRowidKey = "review_obs_rowid" // MAX(observations.seq) at that review
+	reviewTSKey         = "review_ts"          // when the last review ran
+	reviewObsRowidKey   = "review_obs_rowid"   // MAX(observations.seq) at that review
+	reviewRetryAfterKey = "review_retry_after" // automatic reviews wait until this RFC3339 time
+	reviewRetriesKey    = "review_retries"     // consecutive failed reviews: backoffDelay's n
 )
 
 // metaGet reads one `meta` value (empty string if absent). A free function, not a

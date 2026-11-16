@@ -334,3 +334,70 @@ func TestReviewerAllLensesSucceedStamps(t *testing.T) {
 		t.Fatal("review_ts should be stamped after a fully-successful review")
 	}
 }
+
+func TestReviewerFailureBacksOffTheAutomaticGates(t *testing.T) {
+	s := newStore(t)
+	stageObsForReview(t, s, "default")
+	calls, fail := 0, true
+	runner := func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		if fail {
+			return "", errors.New("simulated review timeout")
+		}
+		return facetReply("thinking", "clarity", "improving"), nil
+	}
+	r := &Reviewer{Store: s, Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW-default"}}, Runner: runner}
+	now := time.Now()
+	due := store.Config{ReviewEvery: 999, ReviewPoignancy: 1}
+
+	for i, want := range []time.Duration{5 * time.Minute, 10 * time.Minute} { // backoffDelay(1), backoffDelay(2)
+		if err := r.Run(context.Background(), now); err == nil {
+			t.Fatalf("run %d: the failure must surface", i+1)
+		}
+		got, _ := time.Parse(time.RFC3339, s.MetaString("review_retry_after"))
+		if !got.Equal(now.Add(want).Truncate(time.Second)) {
+			t.Fatalf("run %d: review_retry_after = %v, want now+%v", i+1, got, want)
+		}
+		if s.ReviewDue(due) {
+			t.Fatalf("run %d: the automatic gate still sees the review due inside its backoff", i+1)
+		}
+	}
+	if v := s.MetaString("review_ts"); v != "" {
+		t.Fatalf("a failed review must not stamp; review_ts = %q", v)
+	}
+	fail, calls = false, 0 // Reviewer.Run (what `worker review` calls) does not consult the backoff
+	if err := r.Run(context.Background(), now); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("a review run inside the backoff made no model call")
+	}
+	if v := s.MetaString("review_retry_after"); v != "" {
+		t.Errorf("a successful review must clear the backoff, left %q", v)
+	}
+	if v := s.MetaString("review_retries"); v != "" {
+		t.Errorf("a successful review must reset the failure count, left %q", v)
+	}
+}
+
+func TestReviewerInterruptedReviewDoesNotBackOff(t *testing.T) {
+	s := newStore(t)
+	stageObsForReview(t, s, "default")
+	_ = s.SetMetaString("review_retries", "2")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := func(c context.Context, _, _, _ string) (string, error) {
+		cancel()
+		return "", c.Err()
+	} // worker stop mid-fold
+	r := &Reviewer{Store: s, Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW-default"}}, Runner: runner}
+	if err := r.Run(ctx, time.Now()); err == nil {
+		t.Fatal("an interrupted review must still surface its error")
+	}
+	if v := s.MetaString("review_retry_after"); v != "" {
+		t.Errorf("an interrupted review armed the backoff: review_retry_after = %q", v)
+	}
+	if v := s.MetaString("review_retries"); v != "2" {
+		t.Errorf("an interrupted review counted as a failure: review_retries = %q, want 2", v)
+	}
+}

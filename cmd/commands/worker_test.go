@@ -132,7 +132,7 @@ func TestRunDistillLoopReviewOnlyThenArrivalTerminatesAndDrains(t *testing.T) {
 		pending:       pending,
 		drainAll:      drainAll,
 		reviewDue:     func() bool { return !reviewed }, // due exactly once
-		runReview:     func() { reviewRuns++; reviewed = true },
+		runReview:     func() bool { reviewRuns++; reviewed = true; return true },
 		ensureMiner:   func() bool { return true },
 		hasUnattempted: func(p []string) bool {
 			for _, s := range p {
@@ -167,7 +167,7 @@ func TestRunDistillLoopStopsWhenEmbedderUnavailable(t *testing.T) {
 		pending:        func() []string { return []string{"sess"} },
 		drainAll:       func() {}, // no miner → drainAll is a no-op
 		reviewDue:      func() bool { return false },
-		runReview:      func() { t.Fatal("review should not run") },
+		runReview:      func() bool { t.Fatal("review should not run"); return false },
 		ensureMiner:    func() bool { return false }, // embedder unavailable
 		hasUnattempted: func([]string) bool { return true },
 	})
@@ -181,12 +181,56 @@ func TestRunDistillLoopHonorsStopRequest(t *testing.T) {
 		pending:        func() []string { return []string{"sess"} },
 		drainAll:       func() { drained++ },
 		reviewDue:      func() bool { return true },
-		runReview:      func() { t.Fatal("review should not run under a stop request") },
+		runReview:      func() bool { t.Fatal("review should not run under a stop request"); return false },
 		ensureMiner:    func() bool { return true },
 		hasUnattempted: func([]string) bool { return true },
 	})
 	if drained != 0 {
 		t.Fatalf("no drain should happen under an immediate stop; drained=%d", drained)
+	}
+}
+
+func TestRunDistillLoopNeverRetriesAFailedReviewInTheSameRun(t *testing.T) {
+	for _, tc := range []struct {
+		ok   bool
+		want int
+	}{{false, 1}, {true, 3}} {
+		sessions := []string{"s0", "s1", "s2"}
+		passes, reviews := 0, 0
+		attempted := map[string]bool{}
+		runDistillLoop(distillLoopDeps{
+			stopRequested: func() bool {
+				if passes > 10 {
+					t.Fatal("loop did not terminate")
+				}
+				return false
+			},
+			pending: func() []string {
+				if passes >= 3 {
+					return nil
+				}
+				return sessions[passes : passes+1]
+			},
+			drainAll: func() {
+				attempted[sessions[passes]] = true
+				passes++
+			},
+			reviewDue: func() bool { return true }, // stays due: a failed review never stamps
+			runReview: func() bool {
+				reviews++
+				return tc.ok
+			},
+			ensureMiner: func() bool { return true },
+			hasUnattempted: func(p []string) bool {
+				return !attempted[p[0]]
+			},
+		})
+		if passes != 3 {
+			t.Fatalf("ok=%v: drained %d passes, want 3: a failed review must not end the drain", tc.ok, passes)
+		}
+		if reviews != tc.want {
+			t.Fatalf("ok=%v: review ran %d times, want %d", tc.ok, reviews, tc.want)
+		}
 	}
 }
 
@@ -336,6 +380,28 @@ func TestAutoWorkerShouldStartForReviewWithoutModel(t *testing.T) {
 	}
 	if !autoWorkerShouldStart(st, store.Config{AutoDistill: true, ReviewEvery: 99, ReviewPoignancy: 5}, nil, false) {
 		t.Fatal("review-only auto worker should start even when the model is not ready")
+	}
+}
+
+func TestAutoWorkerWaitsOutAFailedReviewsBackoff(t *testing.T) {
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.AppendObservations([]store.Observation{{ID: "o1", Lens: store.LensDefault, Poignancy: 9}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := store.Config{AutoDistill: true, ReviewEvery: 99, ReviewPoignancy: 5}
+	if err := st.SetReviewRetryAfter(time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if autoWorkerShouldStart(st, cfg, nil, false) {
+		t.Fatal("a review-only auto worker must not start inside the review backoff")
+	}
+	if !autoWorkerShouldStart(st, cfg, []string{"sess"}, true) {
+		t.Fatal("the review backoff must not hold mining: pending work still starts a worker")
 	}
 }
 
@@ -720,6 +786,29 @@ func TestForegroundReviewClearsTheSourcesBackoff(t *testing.T) {
 	}
 	if got := st.MetaString("sources_retry_after"); got != "" {
 		t.Errorf("a review that linked the sources left the self-heal back-off at %s", got)
+	}
+}
+
+func TestForegroundReviewIgnoresAndClearsTheReviewBackoff(t *testing.T) {
+	selfHealFixture(t, false, false)
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_ = st.SetReviewRetryAfter(time.Now().Add(6 * time.Hour))
+	_ = st.SetMetaString("review_retries", "3")
+	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+		t.Fatalf("review: ran=%v err=%v", ran, err)
+	}
+	if st.MetaString("review_ts") == "" {
+		t.Error("`worker review` inside the backoff did not review")
+	}
+	if v := st.MetaString("review_retry_after"); v != "" {
+		t.Errorf("a successful `worker review` left the backoff at %s", v)
+	}
+	if v := st.MetaString("review_retries"); v != "" {
+		t.Errorf("a successful `worker review` left the failure count at %s", v)
 	}
 }
 
