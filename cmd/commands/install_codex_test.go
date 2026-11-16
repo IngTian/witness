@@ -619,3 +619,48 @@ func TestCodexWireResultHintsTheHistoryImport(t *testing.T) {
 	}
 	t.Errorf("wire codex result hints %v, missing %v", codexWiredOutcome().hints, want)
 }
+
+// MarshalIndent HTML-escapes & < >, so bytes.Equal sees a change in a foreign && hook. Wire
+// then rewrites a correct file (re-triggering Codex approval), and unwire rewrites a file
+// that holds none of our hooks. Comparing values leaves a correct file untouched.
+func TestCodexWireAndUnwireCompareJSONNotBytes(t *testing.T) {
+	const foreign = `{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify && log > /tmp/x 2>&1"}]}]}}`
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, []byte(foreign), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := unwireCodexHooks(path)
+	if err != nil {
+		t.Errorf("unwire error: %v", err)
+	}
+	if changed {
+		t.Errorf("unwire reported changed=true; want false")
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != foreign {
+		t.Errorf("unwire rewrote the file; want it left alone")
+	}
+
+	h := codexHook{program: unixShim}
+	merged, _ := mergeHooks([]byte(foreign), codexHookSpecs(h), isCodexEntry)
+	bs := string(rune(92)) // backslash
+	raw := strings.NewReplacer(bs+"u0026", "&", bs+"u003e", ">").Replace(string(merged))
+	if raw == string(merged) {
+		t.Fatal("precondition: MarshalIndent no longer escapes & and >; this test proves nothing")
+	}
+	path2 := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path2, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = wireCodexHooks(path2, h)
+	if err != nil {
+		t.Errorf("wire error: %v", err)
+	}
+	if changed {
+		t.Errorf("wire reported changed=true; want false")
+	}
+	got, _ = os.ReadFile(path2)
+	if string(got) != raw {
+		t.Errorf("wire rewrote the file; want it left alone")
+	}
+}

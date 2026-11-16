@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -29,8 +28,8 @@ import (
 //     `commandWindows` (PowerShell) override — not Claude's exec-form {command, args}.
 //   - Trust. Non-managed Codex hooks are inert until the user approves them, and Codex
 //     records trust against the hook's HASH, so any edit re-triggers review. We
-//     therefore skip the write entirely when the bytes are unchanged (see
-//     cmdInstallCodex) and tell the user to run /hooks, which install cannot do for them.
+//     therefore skip the write entirely when the document is unchanged, compared as JSON
+//     (see wireCodexHooks), and tell the user to run /hooks, which install cannot do for them.
 //
 // NOT done here: registering the witness MCP server for Codex. That lives in
 // ~/.codex/config.toml, which also holds account configuration — witness does not
@@ -195,10 +194,11 @@ func wireCodexHooks(path string, h codexHook) (changed bool, err error) {
 	}
 	// Skip a no-op write. This is not an optimization: Codex records hook trust against
 	// the hook's HASH, so rewriting an already-correct file would re-trigger approval and
-	// leave capture silently inert until the user noticed and ran /hooks again. Our
-	// output is byte-stable (Go marshals map keys sorted), so an unchanged wiring
-	// produces identical bytes and we leave the file — and its trust — alone.
-	if bytes.Equal(data, merged) {
+	// leave capture silently inert until the user noticed and ran /hooks again. Byte-stable
+	// output held only for a file we wrote; MarshalIndent HTML-escapes &/</>/, so a foreign
+	// && hook or hand formatting looked like a change. Comparing values leaves a correct file,
+	// and its approval, untouched.
+	if jsonEqual(data, merged) {
 		return false, nil
 	}
 	if err := store.WriteFileAtomic(path, merged); err != nil {
@@ -259,7 +259,7 @@ func unwireCodexHooks(path string) (changed bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("%s: %w (edit it by hand to remove the witness hooks)", path, err)
 	}
-	if bytes.Equal(data, cleaned) {
+	if jsonEqual(data, cleaned) {
 		return false, nil
 	}
 	// If nothing is left, remove the FILE rather than leaving a `{}` stub behind. On a
