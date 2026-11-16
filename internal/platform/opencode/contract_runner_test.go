@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -242,7 +243,7 @@ func TestContractRunnerSixteenParallel(t *testing.T) {
 		}
 	}
 	if len(seen) != 16 {
-		t.Errorf("found %d distinct PAR-xx markers, want 16: %v", len(seen), maps.Keys(seen))
+		t.Errorf("found %d distinct PAR-xx markers, want 16: %v", len(seen), slices.Sorted(maps.Keys(seen)))
 	}
 	for mark, count := range seen {
 		if count != 1 {

@@ -68,6 +68,21 @@ func (m *metaKV) MetaString(key string) string { return metaGet(m.db, key) }
 // SetMetaString stores a small scalar watermark under key.
 func (m *metaKV) SetMetaString(key, value string) error { return metaSet(m.db, key, value) }
 
+// ClearMetaIf atomically clears key's value to "" if and only if its current value matches
+// want. Returns true if the row was cleared (the value matched), false if the value did not
+// match (another writer already changed it, so the clear was skipped). A test-and-set primitive
+// for the worker-pid stale-clear in cmdDistillStop: once the worker's TerminateProcess call
+// returns, another worker can take the lock and stamp its own pid before the old-pid clear
+// runs — and clearing that new pid would orphan it at the next stop signal.
+func (m *metaKV) ClearMetaIf(key, want string) (bool, error) {
+	res, err := m.db.Exec(`UPDATE meta SET value = '' WHERE key = ? AND value = ?`, key, want)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // SetSessionPlatform records which platform OWNS a session (the per-session axis,
 // issue #21) — distinct from the default distillation runner. Upsert, since a CC
 // session has no session_meta row until now: INSERT the row if absent, else set

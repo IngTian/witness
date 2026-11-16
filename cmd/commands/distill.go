@@ -622,8 +622,8 @@ func cmdDistillStop(autoOnly bool) error {
 	// kill target: the next lock holder that stamps none (ensureProfileFresh, review) would make
 	// a later stop signal whatever process reused it. Safe, since the flock is the liveness
 	// authority; skipped if a new worker already stamped its own pid.
-	if st.MetaString(metaWorkerPID) == pid {
-		_ = st.SetMetaString(metaWorkerPID, "")
+	cleared, _ := st.ClearMetaIf(metaWorkerPID, pid)
+	if cleared {
 		_ = st.SetMetaString(metaWorkerMode, "")
 		_ = st.SetMetaString(metaWorkerCurrent, "")
 	}

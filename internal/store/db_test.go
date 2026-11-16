@@ -1224,3 +1224,31 @@ func TestPlatformBackfillStillClassifiesPreV4Sessions(t *testing.T) {
 			"must still be applied when the column is introduced", got)
 	}
 }
+
+func TestClearMetaIf(t *testing.T) {
+	s := tempStore(t)
+	// Match: the value is what we expect, so the clear happens.
+	_ = s.SetMetaString("test_key", "old_value")
+	cleared, err := s.ClearMetaIf("test_key", "old_value")
+	if err != nil {
+		t.Fatalf("ClearMetaIf (matching): %v", err)
+	}
+	if !cleared {
+		t.Errorf("ClearMetaIf (matching): cleared=false, want true")
+	}
+	if got := s.MetaString("test_key"); got != "" {
+		t.Errorf("ClearMetaIf (matching): value=%q after clear, want empty", got)
+	}
+	// Non-match: another writer changed it, so the clear is skipped.
+	_ = s.SetMetaString("test_key", "new_value")
+	cleared, err = s.ClearMetaIf("test_key", "old_value")
+	if err != nil {
+		t.Fatalf("ClearMetaIf (non-matching): %v", err)
+	}
+	if cleared {
+		t.Errorf("ClearMetaIf (non-matching): cleared=true, want false — the value did not match")
+	}
+	if got := s.MetaString("test_key"); got != "new_value" {
+		t.Errorf("ClearMetaIf (non-matching): value=%q after skipped clear, want new_value", got)
+	}
+}

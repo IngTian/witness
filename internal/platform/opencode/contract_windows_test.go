@@ -387,8 +387,6 @@ func servePID(t *testing.T, c *rawServe) int {
 	return info.Pid
 }
 
-// fresh maps every live process named any of names (procName form) that was not in before to its
-// name, from one procList; a pid reused under another name counts as new, as in noLeaks.
 // hasName reports whether procs holds a process named name.
 func hasName(procs map[int]string, name string) bool {
 	return slices.Contains(slices.Collect(maps.Values(procs)), name)

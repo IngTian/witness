@@ -247,13 +247,13 @@ func stubPath(t *testing.T, name string) string {
 // carry .exe.
 func procName(name string) string { return strings.TrimSuffix(strings.ToLower(name), ".exe") }
 
-// fresh returns live processes with these names that are not in the snapshot (a reused pid under
-// another name counts as new).
+// fresh returns live processes with these names (procName form) that are not in the snapshot (a
+// reused pid under another name counts as new).
 func fresh(t *testing.T, before map[int]string, names ...string) map[int]string {
 	t.Helper()
 	out := map[int]string{}
 	for pid, n := range procList(t) {
-		if before[pid] != n && slices.Contains(names, n) {
+		if before[pid] != n && slices.ContainsFunc(names, func(w string) bool { return procName(w) == procName(n) }) {
 			out[pid] = n
 		}
 	}

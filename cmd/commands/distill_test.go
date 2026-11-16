@@ -149,9 +149,10 @@ func TestWaitBackoffsHonorsAWorkerStopBetweenPasses(t *testing.T) {
 		if runs++; runs > 1 {
 			t.Fatalf("pass %d ran after `worker stop`", runs)
 		}
-		// The pass leaves a backoff due within the wait (1 s: next_attempt is whole RFC3339 seconds),
-		// and the stop lands once its lock is released.
-		_ = st.SetNextAttempt("s", store.LensDefault, time.Now().Add(time.Second))
+		// The pass leaves a backoff due within the wait (next_attempt is whole RFC3339 seconds, and
+		// the wait loop's strict `>` makes +1s vacuous across a second boundary), and the stop lands
+		// once its lock is released.
+		_ = st.SetNextAttempt("s", store.LensDefault, time.Now().Add(2*time.Second))
 		_ = st.SetMetaString(metaWorkerStopRequested, "1")
 		return true, nil
 	}
@@ -313,5 +314,49 @@ func TestBackfillDrainWithRetryHonorsContextCancel(t *testing.T) {
 	}
 	if reruns != 0 {
 		t.Fatalf("a pre-cancelled context must not rerun; reruns=%d", reruns)
+	}
+}
+
+// A wrapper that hooks into TerminateGroup to simulate a new worker re-stamping its pid before
+// the old-pid clear runs.
+type terminateHook struct {
+	*proc.Fake
+	onTerminate func(pid int)
+}
+
+func (h terminateHook) TerminateGroup(pid int) error {
+	h.onTerminate(pid)
+	return h.Fake.TerminateGroup(pid)
+}
+
+// The stale-pid clear is atomic: a new worker that stamps its pid between the TerminateGroup call
+// and the clear must not have its pid orphaned. ClearMetaIf ensures this via a single UPDATE
+// statement; without it, a compare-then-clear would race.
+func TestWorkerStopStaleClearAtomic(t *testing.T) {
+	st := openTestStore(t)
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		t.Fatal("could not take worker lock")
+	}
+	defer unlock()
+	_ = st.SetMetaString(metaWorkerPID, "1234")
+	_ = st.SetMetaString(metaWorkerMode, "distill")
+	_ = st.SetMetaString(metaWorkerCurrent, "test-session")
+	prev := procCtl
+	t.Cleanup(func() { procCtl = prev })
+	procCtl = terminateHook{&proc.Fake{}, func(pid int) {
+		// A new worker takes the lock and stamps its own pid before the clear runs.
+		_ = st.SetMetaString(metaWorkerPID, "5678")
+	}}
+	if err := cmdDistillStop(false); err != nil {
+		t.Fatalf("cmdDistillStop: %v", err)
+	}
+	// The new pid 5678 must survive (cleared=false means the guard worked).
+	if got := st.MetaString(metaWorkerPID); got != "5678" {
+		t.Errorf("worker_pid=%q after stop, want 5678 — the new worker's pid was orphaned", got)
+	}
+	// The mode/current survive too, since cleared=false skips their clear.
+	if got := st.MetaString(metaWorkerMode); got == "" {
+		t.Errorf("worker_mode cleared when pid did not match, want kept")
 	}
 }

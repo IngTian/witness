@@ -86,13 +86,24 @@ func TestContractWakeupOutlivesWorker(t *testing.T) {
 			worker = pid
 		}
 		// The stamp first: WorkerActive briefly holds the worker lock, and probing it before the
-		// worker has taken it could make that worker lose the lock and no-op.
-		return st.MetaString("worker_manual_wakeup_at") != "" && !st.WorkerActive()
+		// worker has taken it could make that worker lose the lock and no-op. If the stamp was missed
+		// but the wakeup was armed, fall back to "worker not active and wakeup set".
+		return st.MetaString("worker_manual_wakeup_at") != "" && !st.WorkerActive() && (worker != 0 || st.MetaString("worker_pid") == "")
 	})
 	// Past the worker's exit, which on Windows closes its job: a worker still tearing down (the
-	// embedder unloading) would count as a second process below.
-	if worker == 0 || !pidGone(worker, 30*time.Second) {
-		t.Fatalf("worker pid %d: never seen stamped, or still alive 30 s after it released its lock", worker)
+	// embedder unloading) would count as a second process below. On Windows, a reused pid under
+	// another name means the worker is gone (the snapshot entry's name differs).
+	if worker == 0 {
+		t.Fatalf("worker pid never seen stamped")
+	}
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		if time.Now().After(deadline) {
+			t.Fatalf("worker %d still alive 30 s after it released its lock", worker)
+		}
+		if procList(t)[worker] != procName(witnessName()) {
+			break // gone (absent from the snapshot or reused under another name)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	// Windows snapshots can list exited-but-referenced processes for a moment; wait until the worker
 	// is absent from the snapshot, not just !Alive, before counting new witness processes.
@@ -191,6 +202,3 @@ func startT7Worker(t *testing.T, s scratch, stub, lensJSON string) []string {
 
 // witnessName is the process name of the witness binary under test.
 func witnessName() string { return filepath.Base(os.Getenv("WITNESS_CONTRACT_WITNESS_BIN")) }
-
-// spawned lists the live processes named any of names that were not in before (a pid reused under
-// another name counts as new, as in noLeaks), from one procList.
