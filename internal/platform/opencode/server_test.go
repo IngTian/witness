@@ -164,6 +164,21 @@ func TestRunReusesTheAgentForTheSamePrompt(t *testing.T) {
 	}
 }
 
+func TestAgentRewriteRecoversMissedWatcherEvent(t *testing.T) {
+	prevRewrite := agentRewriteEvery
+	agentRewriteEvery = 50 * time.Millisecond
+	t.Cleanup(func() { agentRewriteEvery = prevRewrite })
+	fake, srv := newFakeV2(t)
+	// Simulate a watcher that misses the first write: agent loads only after the 2nd write
+	fake.agentLoadAfterWrites = 2
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D"); err != nil {
+		t.Fatalf("Run failed: %v; want success after the re-write triggers the watcher", err)
+	}
+	if fake.configWrites < 2 {
+		t.Errorf("config written %d times, want >= 2 (initial + at least one re-write)", fake.configWrites)
+	}
+}
+
 func TestRunFailsWhenTheAgentNeverLoads(t *testing.T) {
 	prev := healthCheckBudget
 	healthCheckBudget = 200 * time.Millisecond

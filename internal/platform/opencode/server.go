@@ -169,6 +169,7 @@ var (
 	openCodeRequestTimeout = 60 * time.Second
 	openCodeProbeTimeout   = 60 * time.Second
 	healthCheckBudget      = 30 * time.Second
+	agentRewriteEvery      = 3 * time.Second // re-write config while an agent is unlisted
 )
 
 // Run sends one isolated distillation request through the private serve: one fresh session per
@@ -257,6 +258,8 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, healthCheckBudget)
 	defer cancel()
+	rewriteTicker := time.NewTicker(agentRewriteEvery)
+	defer rewriteTicker.Stop()
 	// lastErr keeps the poll failure, so a serve that died after readiness (connection refused) or
 	// a 401/500 is reported as such, not as an agent that "did not load" (lastPollNote's reason).
 	var lastErr error
@@ -289,6 +292,12 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 			err := fmt.Errorf("opencode did not load witness's agent %s within %s%s", id, healthCheckBudget, lastPollNote(lastErr))
 			s.loaded.Store(id, err)
 			return "", err
+		case <-rewriteTicker.C:
+			// OpenCode's file watcher can miss one event (observed on 2.2.7/Linux); re-writing the
+			// private config re-triggers it. A dead watcher still fails at the 30 s budget as before.
+			if err := writePrivateConfig(s.configPath, s.agents); err != nil {
+				lastErr = err
+			}
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

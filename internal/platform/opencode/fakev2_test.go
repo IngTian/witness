@@ -25,11 +25,12 @@ import (
 //   - a prompt to a session whose agent is not listed ends in an idle `failed` "Agent not found",
 //     the real serve's loud failure (critic C1).
 type fakeV2 struct {
-	t          *testing.T
-	configPath string
-	agentDelay int
-	models     []map[string]any    // GET /api/model's data
-	envNames   map[string][]string // GET /api/integration/{provider}: the provider's env var names
+	t                    *testing.T
+	configPath           string
+	agentDelay           int
+	agentLoadAfterWrites int                 // if > 0, list agents only after this many config writes
+	models               []map[string]any    // GET /api/model's data
+	envNames             map[string][]string // GET /api/integration/{provider}: the provider's env var names
 	// turn renders a PROMPTED session's whole message list (an unprompted one is empty). It runs
 	// under mu. A nil list makes that poll fail with a 500.
 	turn                  func(*fakeSession) []map[string]any
@@ -38,10 +39,12 @@ type fakeV2 struct {
 	calls                 []string          // "METHOD path", in arrival order
 	inFlight, maxInFlight int               // prompted sessions whose turn has not yet shown an idle
 
-	mu         sync.Mutex
-	sessions   map[string]*fakeSession
-	order      []string // session ids in creation order
-	agentPolls int
+	mu              sync.Mutex
+	sessions        map[string]*fakeSession
+	order           []string // session ids in creation order
+	agentPolls      int
+	lastConfigMtime time.Time
+	configWrites    int
 }
 
 type fakeSession struct {
@@ -155,6 +158,18 @@ func (f *fakeV2) config() map[string]any {
 
 // listed reports the agent ids /api/agent shows right now. Caller holds mu.
 func (f *fakeV2) listed() []string {
+	// Track config writes by mtime to simulate a watcher that misses the first event
+	if stat, err := os.Stat(f.configPath); err == nil {
+		mtime := stat.ModTime()
+		if !mtime.Equal(f.lastConfigMtime) {
+			f.lastConfigMtime = mtime
+			f.configWrites++
+		}
+	}
+	// agentLoadAfterWrites simulates a watcher that misses the first N-1 writes
+	if f.agentLoadAfterWrites > 0 && f.configWrites < f.agentLoadAfterWrites {
+		return nil
+	}
 	if f.agentPolls <= f.agentDelay {
 		return nil
 	}
