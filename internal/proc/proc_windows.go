@@ -7,9 +7,21 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
+)
+
+// The worker's job, set once by ContainChildren and NEVER closed: closing the last handle IS
+// the kill, so the OS does it when this process dies — by return, crash or TerminateProcess.
+var (
+	containOnce sync.Once
+	containErr  error
+	workerJob   windows.Handle
+	contained   atomic.Bool // read by Detach on any goroutine
 )
 
 // Detach is the Windows analogue of Unix setsid for the detached worker.
@@ -18,8 +30,67 @@ import (
 // Ctrl-C/Ctrl-Break sent to the parent's group. Together they detach the worker
 // from the launching terminal the way Setsid does on Unix. (The SessionStart
 // backlog sweep is the fallback recovery path on either platform.)
+//
+// Once this process is contained, CREATE_BREAKAWAY_FROM_JOB too: a Detach'd child (a worker-run,
+// the retry wakeup) exists to outlive its spawner, so it must leave the job that kills the
+// worker. Only then: an uncontained spawner may sit in someone else's job that forbids
+// breakaway, where the flag makes CreateProcess fail (libuv skips it for the same reason).
+//
+// ponytail: inside an outer job that forbids breakaway, the wakeup still starts — nested jobs
+// judge the flag by the IMMEDIATE job (ours, BREAKAWAY_OK), and the child climbs out only until
+// it meets a job that forbids it — but it then lives in that outer job and dies when that job
+// closes. Upgrade: skip containment when IsProcessInJob finds such an outer job.
 func (sys) Detach(cmd *exec.Cmd) {
-	ensureSysProcAttr(cmd).CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	if contained.Load() {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	}
+	ensureSysProcAttr(cmd).CreationFlags |= flags
+}
+
+// ContainChildren puts THIS process into a fresh kill-on-close job, so every child it starts
+// afterwards (`claude -p`, the private `opencode serve`, and their descendants, such as OpenCode
+// 2.3.0's pty daemon, which nests its own jobs without breakaway) dies with it, however it dies.
+// The first call's result holds for the life of the process — a process can never leave a job —
+// which also makes a backfill's in-process worker rerun a no-op. On Windows 8+ the job nests
+// inside any job this process already runs in. The handle is unnamed and not inheritable, and
+// Go hands a child only the handles it lists (PROC_THREAD_ATTRIBUTE_HANDLE_LIST: its stdio), so
+// no child can hold the job open past us.
+func (sys) ContainChildren() error {
+	containOnce.Do(func() {
+		job, err := newWorkerJob()
+		if err == nil {
+			if err = windows.AssignProcessToJobObject(job, windows.CurrentProcess()); err != nil {
+				windows.CloseHandle(job)
+				err = fmt.Errorf("AssignProcessToJobObject: %w", err)
+			}
+		}
+		if err != nil {
+			containErr = fmt.Errorf("contain the worker's children in a job: %w", err)
+			return
+		}
+		workerJob = job
+		contained.Store(true)
+	})
+	return containErr
+}
+
+// newWorkerJob creates an unnamed job with EXACTLY KILL_ON_JOB_CLOSE | BREAKAWAY_OK: the first
+// is the point, the second lets Detach's CREATE_BREAKAWAY_FROM_JOB out. Never
+// SILENT_BREAKAWAY_OK, which lets every child out unasked and leaves nothing to kill.
+func newWorkerJob() (windows.Handle, error) {
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 0, fmt.Errorf("CreateJobObject: %w", err)
+	}
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		windows.CloseHandle(job)
+		return 0, fmt.Errorf("SetInformationJobObject: %w", err)
+	}
+	return job, nil
 }
 
 // TerminateGroup stops the detached worker on Windows. There is no process-group
@@ -28,21 +99,13 @@ func (sys) Detach(cmd *exec.Cmd) {
 // honors the worker_stop_requested meta flag cooperatively; this is the forceful
 // backstop the way SIGTERM is on Unix.
 //
-// KNOWN GAP, UNFIXED (tracked in #216, split out of #199 as F138 part b; #42 was folded into #43, which
-// closed as a refactor without it): TerminateProcess is uncatchable, so the worker's
-// stop context (NotifyStop, which cancels the drain ctx and thus its `claude -p`
-// children on Unix) never runs here, and TerminateProcess does not cascade to
-// children — up to mine_concurrency `claude -p` can orphan on a Windows stop, with
-// nothing bounding them (the 20-min claudeRunTimeout is a context the worker itself
-// enforces, and the worker is what just died). The `opencode serve` child is not part
-// of the gap: it ends on its stdin lease, because TerminateProcess closes the worker's
-// write end of the serve's stdin pipe and the serve exits on that EOF (read in
-// OpenCode's source; a Windows run is still owed, windows.md §C4). The fix is to
-// put the worker itself into a KILL_ON_JOB_CLOSE Job Object at startup so its
-// children inherit it; BindToParent runs before Start, so it cannot.
-// That job would also kill the detached children the worker means to outlive it
-// (spawnDetached's wakeups), so those need CREATE_BREAKAWAY_FROM_JOB — part of why it
-// waits for a Windows box to verify on.
+// TerminateProcess is uncatchable, so the worker's stop context (NotifyStop) never runs
+// here, and it does not cascade down the process tree. The worker's children die anyway
+// because the worker contained itself (ContainChildren; #218, which absorbed #216): the
+// terminated worker's handles close, the last handle to its kill-on-close job with them, and
+// the OS kills every member — up to mine_concurrency `claude -p` (whose 20-min timeout is a
+// context the dead worker can no longer enforce) and the `opencode serve`, which also ends on
+// its stdin lease. A Detach'd wakeup broke away from that job, so it survives, as it must.
 func (sys) TerminateGroup(pid int) error {
 	p, err := os.FindProcess(pid)
 	if err != nil {

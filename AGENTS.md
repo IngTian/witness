@@ -67,7 +67,7 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   them, so a copied/installed binary self-locates its assets.
 - `internal/{embed,vector,lens,mcp}/` — embeddings (pure-Go GoMLX), cosine
   search, lens loading, the MCP server.
-- `internal/proc/` — the process-control port (detach, bind-to-parent,
+- `internal/proc/` — the process-control port (detach, bind-to-parent, contain,
   terminate) behind one interface with per-OS adapters and a `Fake`.
 - `internal/view/` — builds the read-only HTML snapshot `witness view` opens; Go
   computes every number, the page only draws (`make view-e2e` checks it headless).
@@ -98,6 +98,18 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   the Unix shim `hooks/witness.sh` and `commands.Run()` check it — and on Windows
   (exec-form hooks, no shim) `commands.Run()` is the *only* guard, so keep it
   intact.
+- **Windows worker containment.** Once it holds the worker lock, the worker puts
+  itself in a kill-on-close Job Object (`procCtl.ContainChildren`), because
+  `worker stop`'s TerminateProcess neither cascades nor runs defers. Every child
+  then dies with the worker, so anything that must outlive it (the worker-wakeup)
+  must be spawned through `procCtl.Detach` (breakaway). See
+  `internal/proc/proc_windows.go` and `cmd/commands/worker.go`.
+- **Private OpenCode isolation.** witness's private `opencode serve` gets no
+  inherited `OPENCODE_*` variable except `OPENCODE_API_KEY` (an env-var key).
+  Its deny-all tool policy goes on the agent AND on every session, because
+  OpenCode's bundled browser plugin appends rules after the agent's
+  (`denyAll` in `internal/platform/opencode/serve.go`). The contract tests prove
+  both on real OpenCode.
 - **Install is per-platform (`resolveClaudeInstall` + `resolveOpenCodeInstall`, both
   GOOS-split).** Unix points at the in-repo `hooks/witness.sh` shim. Windows has no
   guaranteed shell, so `install_windows.go` COPIES the binary + `prompts/` + model
@@ -141,6 +153,8 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
 - New behavior needs a test. The CC capture path and the hook name-contract are
   guarded (`internal/platform/claude/capture_test.go`,
   `cmd/commands/hookcontract_test.go`) — keep them passing.
+- Real OpenCode runs only in `contract_*_test.go` (`//go:build opencodecontract`),
+  driven by `.github/workflows/opencode-contract.yml`; never in `make test`.
 - A `schemaVersion` bump adds that version's schema dump:
   `WITNESS_DUMP_SCHEMA=1 go test -run TestUpgradedSchemaMatchesFresh ./internal/store/`
   writes `internal/store/testdata/schema/v<N>.sql`; commit it. Every dump there is

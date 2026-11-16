@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/IngTian/witness/internal/platform/opencode"
 )
 
 // The docs ride on a NAME CONTRACT, the same way the Claude hooks do
@@ -239,6 +242,27 @@ func TestDocumentedInstallScriptInvocations(t *testing.T) {
 		}
 	}
 	t.Logf("checked %d documented install.sh invocations against accepted targets %v", checked, keysOf(accepted))
+}
+
+func TestOpenCodeDocsNameTheSupportedRange(t *testing.T) {
+	floor := fmt.Sprintf("v%d.%d.%d+ only", opencode.MinVersion.Major, opencode.MinVersion.Minor, opencode.MinVersion.Patch)
+	for _, rel := range []string{"../../docs/opencode.md", "../../npm/opencode/README.md"} {
+		b, err := os.ReadFile(rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"OpenCode " + floor, "v0.13.0 is the last release for OpenCode v1"} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s lacks %q", rel, want)
+			}
+		}
+		if strings.Contains(string(b), "opencode-ai@1") {
+			t.Errorf("%s still tells users to install OpenCode v1", rel)
+		}
+	}
+	if b, _ := os.ReadFile("../../docs/windows.md"); !strings.Contains(string(b), `%ProgramData%\opencode`) {
+		t.Error("docs/windows.md must say %ProgramData%\\opencode is outside witness's control (spec 7.9)")
+	}
 }
 
 // shellOperator is the set of standalone tokens after which a documented line is no longer the

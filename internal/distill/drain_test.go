@@ -74,7 +74,7 @@ func TestMineSessionSafeRecoversPanic(t *testing.T) {
 		panic("boom in the model exec")
 	})
 	capture(t, s, "boom", "user", "turn")
-	m, err := w.mineSessionSafe(context.Background(), "boom")
+	m, err := w.mineSessionSafe(context.Background(), "boom", nil)
 	if err == nil {
 		t.Fatal("a panic in mining must surface as an error, not crash")
 	}
@@ -761,5 +761,60 @@ func TestDrainKeepsFullConcurrencyWhenNothingTimesOut(t *testing.T) {
 	if maxInFlight < 2 {
 		t.Errorf("maxInFlight=%d — a healthy provider must keep real parallelism; narrowing on a "+
 			"clean run would make every drain serial", maxInFlight)
+	}
+}
+
+// `worker stop` sets the stop flag BEFORE its group SIGTERM, so the child can die and Run return
+// while the drain's ctx is still live. A mine that fails while the drain's stop predicate holds is
+// interrupted too (no retry, no next_attempt, still pending); with no stop it is a failure. Both
+// dispatch paths: serial (Conc 1) and the rolling window.
+func TestMineFailingUnderAStopRequestIsInterrupted(t *testing.T) {
+	for _, conc := range []int{1, 2} {
+		for _, stopRequested := range []bool{true, false} {
+			t.Run(fmt.Sprintf("conc=%d stop=%v", conc, stopRequested), func(t *testing.T) {
+				s := newStore(t)
+				capture(t, s, "s", "user", "alpha")
+				var stop atomic.Bool
+				w := drainWorker(s, func(context.Context, string, string, string) (string, error) {
+					stop.Store(stopRequested) // the flag lands mid-call; ctx is not cancelled yet
+					return "", fmt.Errorf("claude -p failed: signal: terminated")
+				})
+				w.Drain(context.Background(), DrainOpts{Conc: conc, Pending: func() []string { return []string{"s"} }, Stop: stop.Load})
+				wantRetries := 0
+				if !stopRequested {
+					wantRetries = 1
+				}
+				if got := s.RetryCount("s", "default"); got != wantRetries {
+					t.Fatalf("retries %d, want %d", got, wantRetries)
+				}
+				if got := s.LensBackedOff("s", "default", time.Now()); got != !stopRequested {
+					t.Fatalf("backed off = %v, want %v", got, !stopRequested)
+				}
+				if got, _ := s.PendingSessions([]string{"default"}); stopRequested && len(got) != 1 {
+					t.Fatalf("the interrupted delta must stay pending, got %v", got)
+				}
+			})
+		}
+	}
+}
+
+// A cancelled drain ctx (Ctrl-C) ends the drain: it must not send every remaining pending session to
+// an instant, interrupted mine.
+func TestDrainEndsWhenItsCtxIsCancelled(t *testing.T) {
+	s := newStore(t)
+	for _, id := range []string{"a", "b", "c"} {
+		capture(t, s, id, "user", "turn")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	w := drainWorker(s, func(ctx context.Context, _, _, _ string) (string, error) {
+		calls++
+		cancel() // Ctrl-C while the first session mines
+		return "", ctx.Err()
+	})
+	w.Drain(ctx, DrainOpts{Conc: 1, Pending: func() []string { return []string{"a", "b", "c"} }})
+	if calls != 1 {
+		t.Fatalf("mined %d sessions after the cancel, want only the one in flight", calls)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -99,6 +100,65 @@ func TestDistillBackfillFailsWhenWorkRemains(t *testing.T) {
 				t.Errorf("the hint suggests %s, which `witness worker run` does not have", f)
 			}
 		}
+	}
+}
+
+// A Ctrl-C during the first pass of `worker run --wait-backoffs` ends the wait too, because the
+// wait's stop ctx exists before that pass. Created after it, the pass's own NotifyStop took the
+// signal, and once a backoff fell due the loop started a fresh worker that made real model calls.
+func TestWaitBackoffsStopsOnACtrlCDuringTheFirstPass(t *testing.T) {
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st := openTestStore(t)
+	if err := seedDefaultLens(st); err != nil {
+		t.Fatal(err)
+	}
+	var live []context.CancelFunc // every NotifyStop ctx created so far: a SIGINT reaches them all
+	prev, prevRun := procCtl, backfillRun
+	t.Cleanup(func() { procCtl, backfillRun = prev, prevRun })
+	procCtl = stopCtl{&proc.Fake{}, func(cancel context.CancelFunc) { live = append(live, cancel) }}
+	runs := 0
+	backfillRun = func(bool, sessionTimeRange, string, *causeTap) (bool, error) {
+		runs++
+		if runs == 1 { // the pass leaves a backoff due within the wait, then the Ctrl-C lands
+			_ = st.SetNextAttempt("s", store.LensDefault, time.Now().Add(2*time.Second))
+			for _, cancel := range live {
+				cancel()
+			}
+		}
+		return true, nil
+	}
+	_ = cmdDistillBackfill(true, "", "", true) // unfinished either way; only the pass count matters
+	if runs != 1 {
+		t.Fatalf("%d passes after a Ctrl-C in the first, want 1", runs)
+	}
+}
+
+// M3: a `worker stop` between --wait-backoffs passes finds no lock, so it only sets the flag. The
+// rerun is a manual worker, which clears that flag and drained on; the loop must honor it first.
+func TestWaitBackoffsHonorsAWorkerStopBetweenPasses(t *testing.T) {
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st := openTestStore(t)
+	if err := seedDefaultLens(st); err != nil {
+		t.Fatal(err)
+	}
+	prev, prevRun := procCtl, backfillRun
+	t.Cleanup(func() { procCtl, backfillRun = prev, prevRun })
+	procCtl = &proc.Fake{}
+	runs := 0
+	backfillRun = func(bool, sessionTimeRange, string, *causeTap) (bool, error) {
+		if runs++; runs > 1 {
+			t.Fatalf("pass %d ran after `worker stop`", runs)
+		}
+		// The pass leaves a backoff due within the wait (next_attempt is whole RFC3339 seconds, and
+		// the wait loop's strict `>` makes +1s vacuous across a second boundary), and the stop lands
+		// once its lock is released.
+		_ = st.SetNextAttempt("s", store.LensDefault, time.Now().Add(2*time.Second))
+		_ = st.SetMetaString(metaWorkerStopRequested, "1")
+		return true, nil
+	}
+	_ = cmdDistillBackfill(true, "", "", true)
+	if runs != 1 {
+		t.Fatalf("%d passes, want 1", runs)
 	}
 }
 
@@ -254,5 +314,49 @@ func TestBackfillDrainWithRetryHonorsContextCancel(t *testing.T) {
 	}
 	if reruns != 0 {
 		t.Fatalf("a pre-cancelled context must not rerun; reruns=%d", reruns)
+	}
+}
+
+// A wrapper that hooks into TerminateGroup to simulate a new worker re-stamping its pid before
+// the old-pid clear runs.
+type terminateHook struct {
+	*proc.Fake
+	onTerminate func(pid int)
+}
+
+func (h terminateHook) TerminateGroup(pid int) error {
+	h.onTerminate(pid)
+	return h.Fake.TerminateGroup(pid)
+}
+
+// The stale-pid clear is atomic: a new worker that stamps its pid between the TerminateGroup call
+// and the clear must not have its pid orphaned. ClearMetaIf ensures this via a single UPDATE
+// statement; without it, a compare-then-clear would race.
+func TestWorkerStopStaleClearAtomic(t *testing.T) {
+	st := openTestStore(t)
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		t.Fatal("could not take worker lock")
+	}
+	defer unlock()
+	_ = st.SetMetaString(metaWorkerPID, "1234")
+	_ = st.SetMetaString(metaWorkerMode, "distill")
+	_ = st.SetMetaString(metaWorkerCurrent, "test-session")
+	prev := procCtl
+	t.Cleanup(func() { procCtl = prev })
+	procCtl = terminateHook{&proc.Fake{}, func(pid int) {
+		// A new worker takes the lock and stamps its own pid before the clear runs.
+		_ = st.SetMetaString(metaWorkerPID, "5678")
+	}}
+	if err := cmdDistillStop(false); err != nil {
+		t.Fatalf("cmdDistillStop: %v", err)
+	}
+	// The new pid 5678 must survive (cleared=false means the guard worked).
+	if got := st.MetaString(metaWorkerPID); got != "5678" {
+		t.Errorf("worker_pid=%q after stop, want 5678 — the new worker's pid was orphaned", got)
+	}
+	// The mode/current survive too, since cleared=false skips their clear.
+	if got := st.MetaString(metaWorkerMode); got == "" {
+		t.Errorf("worker_mode cleared when pid did not match, want kept")
 	}
 }

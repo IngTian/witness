@@ -41,7 +41,8 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	}
 	env := envMap(t, cmd.Env)
 	for k := range env {
-		if strings.HasPrefix(strings.ToUpper(k), "OPENCODE_") && k != "OPENCODE_DB" {
+		up := strings.ToUpper(k)
+		if strings.HasPrefix(up, "OPENCODE_") && up != "OPENCODE_DB" && up != "OPENCODE_API_KEY" {
 			t.Errorf("inherited %s reached opencode (critic G1)", k)
 		}
 	}
@@ -52,6 +53,24 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 		if env[k] != v {
 			t.Errorf("%s = %q, want %q", k, env[k], v)
 		}
+	}
+	// OPENCODE_API_KEY passes in either spelling (spec §7.6: env-var keys). One spelling per
+	// subtest: on Windows the two are ONE variable, so the entry keeps whichever name the OS
+	// holds and is matched case-insensitively there.
+	for _, name := range []string{"OPENCODE_API_KEY", "opencode_api_key"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "sk-zen-"+name)
+			var got []string
+			for _, e := range openCodeCommand(context.Background(), root, "--version").Env {
+				k, v, _ := strings.Cut(e, "=")
+				if k == name || runtime.GOOS == "windows" && strings.EqualFold(k, name) {
+					got = append(got, v)
+				}
+			}
+			if len(got) != 1 || got[0] != "sk-zen-"+name {
+				t.Errorf("%s reached opencode as %q, want exactly [sk-zen-%s]", name, got, name)
+			}
+		})
 	}
 
 	// No runtime root: still isolated (relative to the temp-dir cwd), never the user's DB —

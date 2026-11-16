@@ -169,6 +169,7 @@ var (
 	openCodeRequestTimeout = 60 * time.Second
 	openCodeProbeTimeout   = 60 * time.Second
 	healthCheckBudget      = 30 * time.Second
+	agentRewriteEvery      = 3 * time.Second // re-write config while an agent is unlisted
 )
 
 // Run sends one isolated distillation request through the private serve: one fresh session per
@@ -257,6 +258,8 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, healthCheckBudget)
 	defer cancel()
+	rewriteTicker := time.NewTicker(agentRewriteEvery)
+	defer rewriteTicker.Stop()
 	// lastErr keeps the poll failure, so a serve that died after readiness (connection refused) or
 	// a 401/500 is reported as such, not as an agent that "did not load" (lastPollNote's reason).
 	var lastErr error
@@ -289,6 +292,13 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 			err := fmt.Errorf("opencode did not load witness's agent %s within %s%s", id, healthCheckBudget, lastPollNote(lastErr))
 			s.loaded.Store(id, err)
 			return "", err
+		case <-rewriteTicker.C:
+			// A 2.2.7/Linux contract run once never listed a new agent within 30 s (its re-run passed),
+			// as if the file watcher missed the write. Re-writing the same config re-fires the watcher;
+			// a dead watcher still fails at the budget as before.
+			if err := writePrivateConfig(s.configPath, s.agents); err != nil {
+				lastErr = err
+			}
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -300,7 +310,8 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 // request (runner.md (c)). The caller owns the session: Run deletes it, native keeps it for
 // finalize or the next attempt.
 func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, messageID, input string) (string, error) {
-	// ponytail: 8 is the verified bound (critic G4); raise when 16 parallel sessions are verified
+	// ponytail: 16-way verified on 2.2.7 and 2.3.0, Linux and Windows (TestContractRunnerSixteenParallel);
+	// production keeps 8 pending the owner's decision
 	select {
 	case s.sem <- struct{}{}:
 	case <-ctx.Done():
@@ -539,7 +550,7 @@ func (s *OpenCodeServer) createSession(ctx context.Context, model, agent string)
 	if err != nil {
 		return "", err
 	}
-	data, err := s.doJSON(ctx, http.MethodPost, "/api/session", map[string]any{"title": "witness", "agent": agent, "model": ref}, http.StatusOK)
+	data, err := s.doJSON(ctx, http.MethodPost, "/api/session", map[string]any{"title": "witness", "agent": agent, "model": ref, "permissions": denyAll}, http.StatusOK)
 	if err != nil {
 		return "", err
 	}

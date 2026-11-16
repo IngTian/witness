@@ -66,7 +66,7 @@ func TestRunCreatesPromptsAndDeletesOneSessionPerJob(t *testing.T) {
 	}
 	s := fake.session("ses_1")
 	wantCreate := map[string]any{"title": "witness", "agent": agentID("EXTRACT"),
-		"model": map[string]any{"providerID": "openai", "id": "gpt-5.5"}}
+		"model": map[string]any{"providerID": "openai", "id": "gpt-5.5"}, "permissions": []any{map[string]any{"action": "*", "resource": "*", "effect": "deny"}}}
 	if !reflect.DeepEqual(s.Create, wantCreate) {
 		t.Errorf("POST /api/session body = %v, want %v", s.Create, wantCreate)
 	}
@@ -161,6 +161,20 @@ func TestRunReusesTheAgentForTheSamePrompt(t *testing.T) {
 	}
 	if agents, _ := fake.config()["agents"].(map[string]any); len(agents) != 1 {
 		t.Errorf("config agents = %v, want exactly one for one distinct prompt", agents)
+	}
+}
+
+func TestAgentRewriteRecoversMissedWatcherEvent(t *testing.T) {
+	prevRewrite := agentRewriteEvery
+	agentRewriteEvery = 50 * time.Millisecond
+	prevBudget := healthCheckBudget
+	healthCheckBudget = 2 * time.Second
+	t.Cleanup(func() { agentRewriteEvery, healthCheckBudget = prevRewrite, prevBudget })
+	fake, srv := newFakeV2(t)
+	// A watcher that misses the first write: the agent is listed only after the 2nd write.
+	fake.agentLoadAfterWrites = 2
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D"); err != nil {
+		t.Fatalf("Run failed: %v; want success after the re-write re-fires the watcher", err)
 	}
 }
 

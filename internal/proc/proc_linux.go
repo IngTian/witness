@@ -11,7 +11,7 @@ import (
 // Pdeathsig=SIGKILL: the moment the parent thread-group dies — including a SIGKILL
 // or an OOM-kill the parent's Go cleanup (Close/ctx-cancel) can never survive — the
 // kernel SIGKILLs the child too. This is the Linux analog of the Windows Job Object
-// fix (still unbuilt — see proc_windows.go) and the direct answer to issue #54 I2,
+// (ContainChildren in proc_windows.go) and the direct answer to issue #54 I2,
 // where a hard kill of the worker used to orphan the `opencode serve` process (a
 // fresh port each start, so nothing reclaimed the stray).
 //

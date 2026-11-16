@@ -11,6 +11,7 @@ import (
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/platform/opencode"
+	"github.com/IngTian/witness/internal/proc"
 )
 
 func TestMain(m *testing.M) {
@@ -56,6 +57,10 @@ func TestMain(m *testing.M) {
 	openCodeInstallTarget = func() (string, error) { return "", errors.New("no install target under go test") }
 	// No test reads the real stdin for wire prompts.
 	wireAnswers = func() io.Reader { return nil }
+	// No test touches a real process through the port: a runWorker past the lock calls
+	// ContainChildren, which on Windows puts the TEST binary in a kill-on-close job for the rest of
+	// its life. Tests that assert on the port swap in their own Fake and restore this one.
+	procCtl = &proc.Fake{}
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)

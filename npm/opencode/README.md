@@ -13,7 +13,7 @@ OpenCode plugin for witness. It reconciles OpenCode's local session database on 
 
 These are the only platforms supported by the npm distribution. macOS Intel and Linux ARM are not supported; the CLI exits with a clear supported-platform message on those systems.
 
-Requires OpenCode **2.2.7 or newer** (v1 is not supported; witness v0.13.0 was the last release for v1). Both capture and the runner work on v2.2.7+ now, with free models, API keys exported as environment variables, and ambient cloud credentials. On Windows, if you prefer a self-contained install with the embedding model already included — no first-run download — use the zip from the [latest release](https://github.com/IngTian/witness/releases/latest) instead.
+Supports **OpenCode v2.2.7+ only** (`@opencode/cli`); v0.13.0 is the last release for OpenCode v1. The OpenCode runner uses free `opencode/*` models, API keys exported as environment variables, or ambient cloud credentials, never `opencode auth login`; set its model with `npm exec --yes --package=@witness-ai/opencode -- witness config set mine_model <provider/model>` (see [docs/opencode.md](https://github.com/IngTian/witness/blob/main/docs/opencode.md)). On Windows, if you prefer a self-contained install with the embedding model already included — no first-run download — use the zip from the [latest release](https://github.com/IngTian/witness/releases/latest) instead.
 
 ## Install
 

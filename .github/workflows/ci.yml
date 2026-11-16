@@ -46,6 +46,12 @@ jobs:
       - name: go test
         run: go test ./...
 
+      # setup-go's cache restores GOCACHE, test results included, so an unchanged internal/proc would
+      # print `(cached)` and its Job Object tests would never re-run on a new runner image.
+      - name: go test internal/proc, uncached (Windows)
+        if: runner.os == 'Windows'
+        run: go test -count=1 ./internal/proc/
+
   # Everything that is not the test suite and only needs to run once: formatting, vet, the race
   # detector, the release artefacts' own checks, and the cross-compile.
   checks:
@@ -72,7 +78,8 @@ jobs:
 
       # Reuse the Makefile so the CGO_ENABLED=0 + cross-compile invariant lives in exactly one
       # place. No model or `claude` CLI needed: tests inject fake embedders, and the only go:embed
-      # files (the OpenCode plugin JS, the view's page.js/page.css) are committed.
+      # files (the OpenCode plugin JS, the view's page.js/page.css) are committed. make vet also vets
+      # the OpenCode contract tests (//go:build opencodecontract) for linux and windows.
       - name: vet
         run: make vet
 

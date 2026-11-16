@@ -50,7 +50,8 @@ func EffectiveConcurrency(want int) int {
 
 // DrainOpts configures a drain. pending reports the currently-distillable sessions
 // (re-consulted so mid-drain arrivals are picked up); stop reports a graceful-stop
-// request (checked before dispatching each new session); max caps the number of
+// request (checked before dispatching each new session, and by a miner whose call
+// failed, so it must be safe to call from any goroutine); max caps the number of
 // sessions committed (<=0 = unbounded); onCommit is called just before each
 // session's results are committed (e.g. to stamp worker_current).
 //
@@ -163,7 +164,9 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 	if conc < 1 {
 		conc = 1
 	}
-	stop := func() bool { return opts.Stop != nil && opts.Stop() }
+	// A cancelled ctx (Ctrl-C, a SIGTERM) is a stop too: without it every remaining pending session
+	// went to an instant, interrupted mine.
+	stop := func() bool { return ctx.Err() != nil || (opts.Stop != nil && opts.Stop()) }
 	reached := func(claimed int) bool { return opts.Max > 0 && claimed >= opts.Max }
 
 	// Input-size admission (issue #56 B2). sized(session) estimates the pending-input
@@ -220,7 +223,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 					return processed
 				}
 				attempted[w.attemptKey(s)] = true
-				m, err := w.mineSessionSafe(ctx, s)
+				m, err := w.mineSessionSafe(ctx, s, stop)
 				w.commitResult(m, err, opts.OnCommit)
 				processed++
 				tick(processed)
@@ -381,7 +384,7 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 		go func(idx int, session string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			m, err := w.mineSessionSafe(ctx, session)
+			m, err := w.mineSessionSafe(ctx, session, stop)
 			done <- minedResult{idx: idx, m: m, err: err}
 		}(idx, s)
 	}
@@ -404,14 +407,14 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 // SessionMining carrying the session id so the error is attributable. This upholds
 // the "distillation must never take down the process" invariant now that mining
 // runs across goroutines.
-func (w *Worker) mineSessionSafe(ctx context.Context, session string) (m *SessionMining, err error) {
+func (w *Worker) mineSessionSafe(ctx context.Context, session string, stop func() bool) (m *SessionMining, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			m = &SessionMining{Session: session}
 			err = fmt.Errorf("panic mining session %s: %v", session, r)
 		}
 	}()
-	return w.MineSession(ctx, session)
+	return w.MineSession(ctx, session, stop)
 }
 
 // commitResult applies one mining result: a map-phase read error is logged and

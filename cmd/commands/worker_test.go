@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -185,6 +187,40 @@ func TestRunDistillLoopHonorsStopRequest(t *testing.T) {
 	})
 	if drained != 0 {
 		t.Fatalf("no drain should happen under an immediate stop; drained=%d", drained)
+	}
+}
+
+// A Ctrl-C cancels the drain ctx without setting the stop flag, and Drain then stops dispatching,
+// so the sessions it never reached stay unattempted. The loop must still end: the worker's stop
+// predicate counts the cancelled ctx, or the loop spins under the lock on instant no-op drains.
+// Verified through runWorker, so it guards the production wiring and not just the helper: a fake
+// embedder (workerEmbedder) lets the miner build, and the Ctrl-C lands while it does, so the drain
+// never dispatches and both sessions stay unattempted. If the worker's stop predicate ignores the
+// ctx, its re-check loop spins; the test then sets the stop flag to end the spin and fails.
+func TestCtrlCEndsTheWorkerRun(t *testing.T) {
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st := openTestStore(t)
+	if err := seedDefaultLens(st); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"a", "b"} {
+		if err := st.AppendRaw(store.RawRecord{Session: s, Seq: 0, Role: "user", Text: "hi"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var ctrlC context.CancelFunc
+	prev, prevEmb := procCtl, workerEmbedder
+	t.Cleanup(func() { procCtl, workerEmbedder = prev, prevEmb })
+	procCtl = stopCtl{&proc.Fake{}, func(cancel context.CancelFunc) { ctrlC = cancel }}
+	workerEmbedder = func() (distill.Embedder, error) { ctrlC(); return fixedEmbedder{}, nil }
+	done := make(chan struct{})
+	go func() { defer close(done); _, _ = runWorker(false) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = st.SetMetaString(metaWorkerStopRequested, "1") // end the spin, so the run returns
+		<-done
+		t.Fatal("after a Ctrl-C the worker's re-check loop spun until the stop flag ended it")
 	}
 }
 

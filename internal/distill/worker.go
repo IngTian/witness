@@ -208,7 +208,7 @@ type LensMining struct {
 // single-session callers and every existing test. The parallel drain calls
 // MineSession (concurrently) and CommitMining (serially) directly instead.
 func (w *Worker) Process(ctx context.Context, session string) error {
-	m, err := w.MineSession(ctx, session)
+	m, err := w.MineSession(ctx, session, nil)
 	if err != nil {
 		return err
 	}
@@ -221,8 +221,9 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 // sessions concurrently. Embeddings for active obs are computed here too (the
 // embedder guards itself with a mutex, so concurrent callers serialize on it
 // briefly — cheap relative to the LLM call). The obsID idempotency check and all
-// writes happen later in CommitMining.
-func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMining, error) {
+// writes happen later in CommitMining. stop, if non-nil, is the drain's stop predicate
+// (DrainOpts.Stop): a call that fails while it holds was interrupted, not failed.
+func (w *Worker) MineSession(ctx context.Context, session string, stop func() bool) (*SessionMining, error) {
 	// Read the delta AND its raw "generation" (highest raw.id) as ONE atomic snapshot.
 	// CommitMining advances each lens's watermark only if this id still exists, so a
 	// replace-import/cleanup that deletes raw mid-mine can't have a stale count blind-
@@ -282,7 +283,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			continue
 		}
 		lm := LensMining{Lens: ln.Name}
-		quota := false // a free-allowance refusal: skip this lens without a backoff
+		skip := false // a free-allowance refusal or an interrupted drain: skip this lens without a backoff
 		if total > done {
 			anyDelta = true
 			// Track drift across ALL of this lens's inputs (a session may render to
@@ -338,13 +339,28 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 					lm.Native = append(lm.Native, native)
 				}
 				if err != nil {
+					// The drain itself was stopped (`worker stop`, or a Ctrl-C reached NotifyStop):
+					// interrupted, not failed, so it skips like a refusal below. A backoff here charged
+					// every in-flight session a retry and armed the wakeup that resumed the stopped
+					// drain. Decided on OUR ctx and the drain's stop predicate, never on err: a per-call
+					// timeout cancels only the runner's child ctx and stays a failure (and
+					// backpressure), and a child the stop's group SIGTERM killed reports "signal:
+					// terminated". The predicate closes the race where that child dies and Run returns
+					// before NotifyStop cancels ctx: `worker stop` sets its flag BEFORE the SIGTERM.
+					// A foreground Ctrl-C sets no flag, so a child its SIGINT kills first can still be
+					// charged once.
+					if ctx.Err() != nil || (stop != nil && stop()) {
+						slog.Info("mine interrupted; stays pending", "session", session, "lens", ln.Name, "err", err)
+						skip = true
+						break
+					}
 					// The free allowance is used up: cmd's gate now holds every free-model call
 					// until the reset, so this is not this session's failure. Skip the lens
 					// entirely (below) — no IncRetry/next_attempt, watermark kept — and it mines
 					// once the pause lifts. A backoff here would add hours per session on top.
 					var qe *platform.QuotaExhaustedError
 					if errors.As(err, &qe) {
-						quota = true
+						skip = true
 						break
 					}
 					if errors.Is(err, errNoArray) {
@@ -379,7 +395,7 @@ func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMinin
 			}
 			lm.Drifted = sawDrift && !producedObs
 		}
-		if quota {
+		if skip {
 			// CommitMining advances and backs off only lenses in m.Lenses, so leaving it out
 			// keeps the watermark and next_attempt untouched (the same skip as a backed-off lens).
 			continue

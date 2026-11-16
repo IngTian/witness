@@ -4,8 +4,10 @@ From-source wiring and the isolated-runtime model. **Installing from npm** (`@wi
 supported platforms, first-run model download) is documented in the
 [npm package README](../npm/opencode/README.md).
 
-> **OpenCode 2.2.7 or newer.** v1 is refused by name (`opencode upgrade --major`); witness v0.13.0
-> was the last release for v1. Both capture and the runner work on v2.2.7+ now.
+> **OpenCode v2.2.7+ only; v0.13.0 is the last release for OpenCode v1.** `witness doctor`,
+> `witness wire opencode` and the runner refuse OpenCode below 2.2.7 and all of v1; `witness import`
+> refuses a v1 database. Above the newest CI-tested minor (2.3.x), `witness doctor` warns and witness
+> keeps working. Run `opencode upgrade --major` to upgrade v1 to v2.
 
 ### OpenCode support
 
@@ -31,10 +33,26 @@ entry, it is left untouched.
 witness reads your OpenCode database **read-only** to import sessions and never writes to it.
 Distillation runs on a private `opencode serve` whose `XDG_DATA_HOME` and `OPENCODE_DB` point under
 witness's own runtime directory, so its scratch sessions never appear in your OpenCode session list.
-The runner can use free `opencode/*` models, API keys exported as environment variables (e.g.
-`ANTHROPIC_API_KEY`), and ambient cloud credentials such as `AWS_PROFILE`/`AWS_REGION` for Amazon
-Bedrock. It never uses logins saved with `opencode auth login`, ChatGPT or other OAuth sign-ins, or
-providers defined in your `opencode.json`.
+
+The private serve has its own config dir, database, state and cache, but keeps your real `HOME` (for
+ambient cloud credentials). Machine-wide OpenCode config in `/etc/opencode`,
+`/Library/Application Support/opencode` (macOS) and `%ProgramData%\opencode` (Windows) loads into it
+too; these are outside witness's control and are set by admin policy. The private serve still
+discovers skills under `~/.agents/skills` at startup, but witness denies every tool so the model
+cannot use them.
+
+The runner can use free `opencode/*` models, API keys exported as environment variables
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`,
+`OPENCODE_API_KEY` for paid Zen), and ambient cloud credentials (`AWS_PROFILE` / `AWS_REGION` /
+`~/.aws` for Bedrock). It never uses `opencode auth login`, ChatGPT or other OAuth sign-ins, or
+providers defined in your `opencode.json`. witness never reads or copies a credential. Keys exported
+in your shell profile work for terminal-launched agents. GUI apps don't read it: use
+`launchctl setenv` on macOS, or a user environment variable on Windows, so the worker inherits the
+key. Set the stage model with `witness config set mine_model <provider/model>` (`review_model` falls
+back to it); witness never picks one.
+
+OpenCode's ChatGPT sign-in is an OAuth login, so witness's OpenCode runner cannot use it.
+ChatGPT-plan users can still capture Codex sessions, and a Codex runner is planned.
 
 > **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is
 > `witness-distill` when distillation was interrupted. Current releases never create them and skip

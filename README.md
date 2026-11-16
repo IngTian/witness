@@ -179,8 +179,9 @@ See [How it works](docs/how-it-works.md).
 - **Local by default.** One SQLite file plus markdown under your data dir (`witness doctor` prints
   the path). No telemetry, no account, no cloud key.
 - **Local embeddings.** Multilingual (English and Chinese) embeddings run pure-Go on your machine.
-- **Distillation uses your own tooling** — your existing Claude Code or OpenCode auth, whichever you
-  bound. Nothing goes anywhere you haven't already chosen.
+- **Distillation uses your own tooling** — your Claude Code login, or OpenCode's free models,
+  environment API keys and ambient cloud credentials. witness never copies a credential. Nothing goes
+  anywhere you haven't already chosen.
 - **Readable and deletable.** Plain SQLite and plain markdown; delete the data dir and it's gone.
 - **Portable.** `witness export --all <dir>` snapshots the whole archive — the database, your config
   and your lenses. On a fresh machine, point `WITNESS_HOME` at that directory. On one that already

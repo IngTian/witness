@@ -162,7 +162,7 @@ func TestWorkerMinesAgainstFakeQueue(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	mining, err := w.MineSession(ctx, sess)
+	mining, err := w.MineSession(ctx, sess, nil)
 	if err != nil {
 		t.Fatalf("MineSession against fake queue: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestDrainDoesNotReadTheObservationCorpus(t *testing.T) {
 	}
 	// Re-committing the same mining (a crash before the watermark landed) must not duplicate.
 	q.distilled[sess]["default"] = 0
-	m, err := w.MineSession(context.Background(), sess)
+	m, err := w.MineSession(context.Background(), sess, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestMineSessionPassesCapturedTranscriptDigestToNativeRunner(t *testing.T) {
 			return "[]", nil
 		},
 	}
-	if _, err := w.MineSession(context.Background(), session); err != nil {
+	if _, err := w.MineSession(context.Background(), session, nil); err != nil {
 		t.Fatal(err)
 	}
 	if seen != want {

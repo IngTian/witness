@@ -60,6 +60,10 @@ const (
 	workerModeAutoPending = "auto-pending" // spawned by the auto gate, lock not yet claimed
 )
 
+// workerEmbedder loads the worker's embedder. A var only so a test can build the miner without the
+// ~448MB model, which is what makes the drain → re-check loop reachable from runWorker in a test.
+var workerEmbedder = func() (distill.Embedder, error) { return embed.New() }
+
 // runWorker is the SILENT worker run: background wakeups, auto runs, and any caller that has not
 // asked for progress.
 func runWorker(auto bool) (bool, error) {
@@ -105,6 +109,13 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		return false, nil // a consumer already holds the lock; our jobs are on disk for it
 	}
 	defer unlock()
+	// Contain our children before the first one exists: on Windows, a kill-on-close job, so the
+	// TerminateProcess of `worker stop` (which runs no defers and does not cascade) still takes
+	// every `claude -p` and the `opencode serve` along (#218). Only now: a trigger that lost the
+	// lock exits without one. Best-effort — a refused job costs the stop its reach, not the drain.
+	if err := procCtl.ContainChildren(); err != nil {
+		slog.Warn("worker: could not contain children in a job; a Windows `worker stop` may orphan them", "err", err)
+	}
 	if auto && st.MetaString(metaWorkerStopRequested) == "1" {
 		_ = st.SetMetaString(metaWorkerMode, "")
 		return true, nil
@@ -136,9 +147,6 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		_ = st.SetMetaString(metaWorkerCurrent, "")
 		_ = st.SetMetaString(metaWorkerHeartbeat, time.Now().UTC().Format(time.RFC3339))
 	}()
-	if timeRange.empty() {
-		defer scheduleRetryWakeup(st)
-	}
 
 	lenses := activeLenses(st)
 	// The pending query cross-joins sessions against the ACTIVE lens set (#55). Use
@@ -156,11 +164,23 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// Without this, stopping the parent left up to `conc` orphaned children running with
 	// no bound at all — their 20-min timeout is a context THIS process enforces, so it
 	// dies with it (issue #22 audit; on Windows the stop is a TerminateProcess this never
-	// sees, which is #216). runner.Close still runs (deferred)
-	// to sweep any OpenCode distill sessions. proc.NotifyStop is the port's
-	// signal-aware ctx (SIGINT+SIGTERM).
+	// sees, so the kill-on-close job ContainChildren put us in takes them, #218). runner.Close
+	// still runs (deferred) to sweep any OpenCode distill sessions. proc.NotifyStop is the
+	// port's signal-aware ctx (SIGINT+SIGTERM).
 	ctx, stopSignals := procCtl.NotifyStop(context.Background())
 	defer stopSignals()
+	// On exit, arm the one future wakeup a deferred need (a backoff, the free-model pause) asks
+	// for — unless the run ended on a stop: its ctx fired, or worker_stop_requested is set (a stop
+	// whose signal missed). `worker stop` clears every wakeup before its SIGTERM, and re-arming one
+	// here resumed the stopped drain 5 min later (G2, reproduced). A stopped worker waits for the
+	// next real trigger. Deferred after stopSignals so it runs first: stopSignals cancels ctx too.
+	if timeRange.empty() {
+		defer func() {
+			if !workerStopped(ctx, st) {
+				scheduleRetryWakeup(st)
+			}
+		}()
+	}
 
 	// Run drain-start import for any wired sources that can go stale without a live
 	// trigger (OpenCode's plugin can be silently rejected by the editor with only a log
@@ -242,8 +262,10 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// SHARED `attempted` set across iterations makes this safe: a session that stays
 	// pending without backing off (a commit/read error, not a mining timeout) is
 	// tried once total, so a persistent failure can't spin the loop or re-mine
-	// forever. We only loop again while a pass makes progress (commits > 0).
-	stopRequested := func() bool { return st.MetaString(metaWorkerStopRequested) == "1" }
+	// forever. We only loop again while a pass makes progress (commits > 0). A cancelled ctx
+	// counts as a stop: Drain stops dispatching on one, so the sessions it never reached stay
+	// unattempted, and a flag-only check would spin this loop on instant no-op drains (Ctrl-C).
+	stopRequested := func() bool { return workerStopped(ctx, st) }
 
 	// Lazily build the parallel-mining worker the first time there is mining to do;
 	// the embedder loads once and is shared across drain passes (its parsed weights
@@ -306,7 +328,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 			// the last line in the log.
 			slog.Info("worker startup: loading the embedding model", "assets", embed.AssetsDir())
 			t1 := time.Now()
-			emb, err := embed.New()
+			emb, err := workerEmbedder()
 			if err != nil {
 				slog.Error("embedder", "err", err, "assets", embed.AssetsDir()) // can't mine this run; review may still run
 				tap.note(fmt.Errorf("embedding model: %w", err))
@@ -603,4 +625,11 @@ func importAtDrainStart(ctx context.Context, st *store.Store) {
 // - ctx.Err(): if context is cancelled, skip (worker is shutting down)
 func selfHealAllowed(reviewRan bool, stopRequested func() bool, ctx context.Context) bool {
 	return !reviewRan && !stopRequested() && ctx.Err() == nil
+}
+
+// workerStopped reports whether this run was stopped: worker_stop_requested is set (`worker stop`
+// sets it BEFORE its SIGTERM, and it stands alone when the signal missed), or the drain ctx was
+// cancelled (that SIGTERM, a Ctrl-C).
+func workerStopped(ctx context.Context, st store.MetaKV) bool {
+	return ctx.Err() != nil || st.MetaString(metaWorkerStopRequested) == "1"
 }

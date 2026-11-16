@@ -203,7 +203,7 @@ func TestCommitDoesNotAdvanceWatermarkWhenRawReplacedMidMine(t *testing.T) {
 	capture(t, s, sess, "assistant", "original two")
 
 	// MAP: mine the original generation (captures RawHighID at read time).
-	mining, err := w.MineSession(ctx, sess)
+	mining, err := w.MineSession(ctx, sess, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestCommitDoesNotWriteMinedObsWhenRawReplacedMidMine(t *testing.T) {
 	capture(t, s, sess, "assistant", "original two")
 
 	// MAP: mine the original generation (obs hash the old text; RawHighID captured).
-	mining, err := w.MineSession(ctx, sess)
+	mining, err := w.MineSession(ctx, sess, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestCommitAdvancesWatermarkOnAppendOnlyPath(t *testing.T) {
 	capture(t, s, sess, "user", "one")
 	capture(t, s, sess, "assistant", "two")
 
-	mining, err := w.MineSession(ctx, sess)
+	mining, err := w.MineSession(ctx, sess, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +511,7 @@ func TestEmbedFailureIsLoggedForActiveAndMinedObs(t *testing.T) {
 		t.Fatal(err)
 	}
 	capture(t, s, "s", "user", "alpha")
-	if _, err := w.MineSession(context.Background(), "s"); err != nil {
+	if _, err := w.MineSession(context.Background(), "s", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Count(buf.String(), "tokenizer panic"); got != 2 {
@@ -908,6 +908,46 @@ func TestQuotaErrorSkipsTheLensWithoutBackoff(t *testing.T) {
 	}
 	if got := s.RetryCount("s", "broken"); got != 1 {
 		t.Fatalf("a plain error must still back off, got %d retries", got)
+	}
+}
+
+// A mine cut short by the drain's own cancellation (`worker stop`'s SIGTERM, a Ctrl-C) was
+// interrupted, not failed: no retry, no next_attempt, the delta stays pending. Decided on the
+// drain's ctx, not the error — the stopped child may report a plain "signal: terminated" — while a
+// per-call timeout, which cancels only the call's own child ctx, still backs off.
+func TestInterruptedMineStaysPendingWithoutBackoff(t *testing.T) {
+	s := newStore(t)
+	capture(t, s, "s", "user", "alpha")
+	ctx, stop := context.WithCancel(context.Background())
+	w := testWorker(s, &fakeMiner{})
+	w.Run = func(context.Context, string, string, string) (string, error) {
+		stop() // the stop lands while the call is in flight
+		return "", fmt.Errorf("claude -p failed: signal: terminated")
+	}
+	if err := w.Process(ctx, "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.RetryCount("s", "default"); got != 0 {
+		t.Fatalf("an interrupted mine must not count a retry, got %d", got)
+	}
+	if s.LensBackedOff("s", "default", time.Now()) {
+		t.Fatal("an interrupted mine must not set a next_attempt")
+	}
+	if got, _ := s.PendingSessions([]string{"default"}); len(got) != 1 {
+		t.Fatalf("the interrupted delta must stay pending, got %v", got)
+	}
+
+	w.Run = func(ctx context.Context, _, _, _ string) (string, error) {
+		call, cancel := context.WithTimeout(ctx, 0) // the runner's per-call timeout firing
+		defer cancel()
+		<-call.Done()
+		return "", call.Err()
+	}
+	if err := w.Process(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.RetryCount("s", "default"); got != 1 {
+		t.Fatalf("a per-call timeout is a failure and must back off, got %d retries", got)
 	}
 }
 

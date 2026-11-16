@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -114,5 +116,51 @@ func TestSpawnDetachedOKReportsSuccessWhenSuppressedUnderTest(t *testing.T) {
 	scheduleWorkerWakeup(st, time.Now().Add(10*time.Minute), "auto")
 	if got := st.MetaString(workerWakeupKey("auto")); got == "" {
 		t.Error("scheduleWorkerWakeup through the real spawner must still stamp under test")
+	}
+}
+
+// stopCtl is a proc.Fake whose NotifyStop calls onNotify with the stop ctx's cancel — the point
+// mid-run where the worker starts watching for a stop — so a test can fire one there.
+type stopCtl struct {
+	*proc.Fake
+	onNotify func(cancel context.CancelFunc)
+}
+
+func (c stopCtl) NotifyStop(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := c.Fake.NotifyStop(parent)
+	c.onNotify(cancel)
+	return ctx, cancel
+}
+
+// A run that ends on a stop arms no wakeup, an older deferred need's (here the free-model pause)
+// included: `worker stop` clears every wakeup before its SIGTERM, and one re-armed by the dying
+// worker resumed the stopped drain minutes later (G2, reproduced). Both stop signals count — the
+// SIGTERM that cancels the drain ctx, and the flag a stop whose signal missed leaves behind.
+func TestAStoppedWorkerArmsNoWakeup(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stop  func(st *store.Store, cancel context.CancelFunc)
+		armed bool
+	}{
+		{"no stop", func(*store.Store, context.CancelFunc) {}, true},
+		{"SIGTERM cancels the drain", func(_ *store.Store, cancel context.CancelFunc) { cancel() }, false},
+		{"stop flag only", func(st *store.Store, _ context.CancelFunc) {
+			_ = st.SetMetaString(metaWorkerStopRequested, "1")
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t)
+			_ = st.SetMetaString(freeModelsPausedKey, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			prev := procCtl
+			t.Cleanup(func() { procCtl = prev })
+			procCtl = stopCtl{&proc.Fake{}, func(cancel context.CancelFunc) { tc.stop(st, cancel) }}
+			if ran, err := runWorker(false); err != nil || !ran {
+				t.Fatalf("ran=%v err=%v", ran, err)
+			}
+			got := st.MetaString(workerWakeupKey("manual")) + st.MetaString(workerWakeupKey("auto"))
+			if (got != "") != tc.armed {
+				t.Fatalf("wakeup stamp %q, want armed=%v", got, tc.armed)
+			}
+		})
 	}
 }

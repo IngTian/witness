@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/store"
 )
 
 type nativeRuntime struct {
@@ -80,16 +81,20 @@ func isolatedEnv(root string) []string {
 	}
 }
 
-// withoutOpenCodeEnv drops every inherited OPENCODE_* variable (case-insensitively, since
-// Windows env names are case-insensitive) to prevent the user's config, plugins, MCP servers
-// and credentials from leaking into witness's private opencode serve (critic.md G1). HOME
-// stays (Bedrock's credential chain reads ~/.aws). API-key env vars stay (the runner copies
-// no credentials, spec §7.6).
+// withoutOpenCodeEnv drops every inherited OPENCODE_* variable except OPENCODE_API_KEY (an
+// env-var key, allowed by spec §7.6), case-insensitively since Windows env names are
+// case-insensitive, to prevent the user's config, plugins and MCP servers from leaking into
+// witness's private opencode serve (critic.md G1). HOME stays (Bedrock's credential chain
+// reads ~/.aws). Other API-key env vars stay (the runner copies no credentials, spec §7.6).
 func withoutOpenCodeEnv(env []string) []string {
 	var out []string
 	for _, e := range env {
 		k, _, _ := strings.Cut(e, "=")
-		if !strings.HasPrefix(strings.ToUpper(k), "OPENCODE_") {
+		up := strings.ToUpper(k)
+		// OPENCODE_API_KEY is a credential in the allowed "env-var API keys" class (spec §7.6:
+		// the runner accepts env-var keys but copies no credentials). The strip exists to stop
+		// config and behaviour leaks (OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT / OPENCODE_CONFIG_DIR).
+		if !strings.HasPrefix(up, "OPENCODE_") || up == "OPENCODE_API_KEY" {
 			out = append(out, e)
 		}
 	}
@@ -418,31 +423,19 @@ func (n *nativeRuntime) sweepResidue(entries []os.DirEntry) {
 // session's high-water mark. The `id > RawHigh` clause is what bounds accumulation: a
 // mine always reads the session's present max(raw.id), so once a later turn arrives the
 // older generation can never be the one that commits — without this, a lens that keeps
-// failing (or one later disabled) strands one manifest + full-session snapshot + live
-// isolated scratch session per drain, forever.
+// failing (or one later disabled) strands one manifest + live isolated scratch session
+// per drain, forever.
 func (n *nativeRuntime) generationStatus(m nativeManifest) (current, committed bool, err error) {
 	db, err := sql.Open("sqlite", readOnlyURI(filepath.Join(filepath.Dir(n.root), "witness.db")))
 	if err != nil {
 		return false, false, err
 	}
 	defer db.Close()
-	var currentValue, committedValue int
-	err = db.QueryRow(`SELECT
-		CASE WHEN (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
-		       OR (EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)
-		           AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ? AND id > ?)) THEN 1 ELSE 0 END,
-		CASE WHEN COALESCE((SELECT distilled >= ? FROM progress WHERE session = ? AND lens = ?), 0)
-		     THEN 1 ELSE 0 END`,
-		m.RawHigh, m.Session, m.Session, m.RawHigh, m.Session, m.RawHigh, m.Total, m.Session, m.Lens,
-	).Scan(&currentValue, &committedValue)
-	if err != nil {
-		return false, false, err
-	}
-	return currentValue != 0, committedValue != 0, nil
+	return store.GenerationStatus(db, m.Session, m.Lens, m.RawHigh, m.Total)
 }
 
 // readOnlyURI is the SQLite `file:` URI witness uses to read a database WITHOUT being able to
-// write it — the guarantee that keeps distillation off the user's own opencode.db. Composed by
+// write it — here, opening witness.db read-only for generation checks. Composed by
 // platform.SQLiteFileURI, never url.URL (issue #10 — see there).
 func readOnlyURI(path string) string {
 	return platform.SQLiteFileURI(path, "mode=ro")
