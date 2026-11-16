@@ -293,8 +293,9 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 			s.loaded.Store(id, err)
 			return "", err
 		case <-rewriteTicker.C:
-			// OpenCode's file watcher can miss one event (observed on 2.2.7/Linux); re-writing the
-			// private config re-triggers it. A dead watcher still fails at the 30 s budget as before.
+			// A 2.2.7/Linux contract run once never listed a new agent within 30 s (its re-run passed),
+			// as if the file watcher missed the write. Re-writing the same config re-fires the watcher;
+			// a dead watcher still fails at the budget as before.
 			if err := writePrivateConfig(s.configPath, s.agents); err != nil {
 				lastErr = err
 			}
