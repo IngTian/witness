@@ -31,6 +31,32 @@ To remove an editor integration: `witness.exe unwire claude` / `unwire opencode`
 (strips the hooks/plugin + MCP entry). The copied files and PATH entry are left in
 place, since the other integration may still be using them.
 
+### OpenCode on Windows
+
+OpenCode can be installed through multiple channels:
+
+- **npm**: `npm install -g @opencode/cli` — install scripts must be enabled in your npm config.
+- **Standalone zip**: `opencode-windows-x64.zip` from the OpenCode releases page — unpack and run
+  `opencode.exe` directly.
+- **curl installer** (under Git Bash): the one-liner installer lands OpenCode in
+  `%USERPROFILE%\.opencode\bin` and updates PATH for Git Bash only, but witness looks there anyway so
+  the integration still works. **Git Bash / mintty is not a TTY** — `witness wire opencode` never
+  prompts there and prints hints instead. Run it in Windows Terminal, PowerShell or cmd to get the
+  interactive runner and model prompt.
+- **winget**: `winget install Anomaly.OpenCode` (once published to the Microsoft Store).
+- **Desktop app**: downloads include a bundled CLI, but it is not added to PATH — the plugin hands
+  witness its `opencode-cli.exe` path, so the integration works regardless.
+
+`bun install -g @opencode/cli` is not verified with witness. Its `opencode.exe` shim may not resolve
+correctly. Stick to npm, the zip, the desktop app, or set `WITNESS_OPENCODE_BIN` to a known-good
+binary.
+
+`%ProgramData%\opencode` holds machine-wide OpenCode config and plugins for every user. It loads into
+witness's private OpenCode serve too, and witness does not manage it.
+
+`witness worker stop` ends the worker's `claude -p` and `opencode` children as well — they run in its
+Job Object so Windows tears them down automatically.
+
 ---
 
 [← back to the README](../README.md)
