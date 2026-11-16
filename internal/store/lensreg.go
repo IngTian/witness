@@ -100,6 +100,9 @@ const (
 	LensKeyReviewModel  = "review_model"
 )
 
+// LensKeys are the lens.json keys witness reads. A test proves this matches LensConfig's tags.
+var LensKeys = []string{LensKeyName, LensKeyDimensions, LensKeyRunner, LensKeyExtractModel, LensKeyReviewModel}
+
 // ReadLensExtract reads a lens directory's mining prompt — the one required file — and
 // refuses a missing or blank one: a lens without a mining prompt would mine nothing, and an
 // empty prompt must be a loud error, never a silently-empty section.
@@ -135,6 +138,28 @@ func ResolveLensName(dir, fallback string) (string, error) {
 		return strings.TrimSpace(cfg.Name), nil
 	}
 	return fallback, nil
+}
+
+// UnknownLensKeys returns the lens.json keys witness does not read, sorted. A missing or
+// unparseable file returns nil.
+func (r *lensReg) UnknownLensKeys(name string) []string {
+	dir := filepath.Join(r.LensesDir(), sanitize(name))
+	data, err := os.ReadFile(filepath.Join(dir, LensConfigFile))
+	if err != nil {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil
+	}
+	var unknown []string
+	for k := range m {
+		if !slices.Contains(LensKeys, k) {
+			unknown = append(unknown, k)
+		}
+	}
+	slices.Sort(unknown)
+	return unknown
 }
 
 // ValidLensName is the lens-NAME rule, shared by RegisterLens and by `witness merge`, which

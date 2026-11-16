@@ -272,6 +272,14 @@ func cmdDoctor(asJSON bool) error {
 	}
 	row("worker", fmt.Sprintf("auto %s · %d parallel · chunking %s", auto, cfg.MineConcurrency, chunkingLabel(cfg.ChunkMaxChars)),
 		"review window "+humanCount(cfg.ReviewMaxChars)+" chars")
+	for _, k := range st.UnknownConfigKeys() {
+		warn(fmt.Sprintf("config.toml: unknown key %q is ignored", k))
+	}
+	for _, name := range st.RegisteredLenses() {
+		for _, k := range st.UnknownLensKeys(name) {
+			warn(fmt.Sprintf("lens %s: unknown lens.json key %q is ignored", name, k))
+		}
+	}
 	// Surface prose_drift: the mine model returned no JSON observation array on some
 	// pass, so those sessions distilled to zero observations even though they may not be
 	// uneventful. The remedy is a stronger mine model then a re-mine (#57) — of the lens it

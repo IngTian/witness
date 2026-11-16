@@ -177,3 +177,41 @@ func TestDoctorShowsPortraitInputSize(t *testing.T) {
 		t.Fatalf("doctor should show %q, got:\n%s", want, out)
 	}
 }
+
+// Unknown keys in config.toml and lens.json should be named in doctor's human output (not --json).
+// The CLI's model keys are mine_model, but the config file spells them triage_model / extract_model.
+func TestDoctorWarnsOnUnknownConfigAndLensJSONKeys(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	t.Setenv("WITNESS_ASSETS", t.TempDir()) // embedder fails fast; never loads the real model
+	t.Setenv("NO_COLOR", "1")
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Append unknown keys to config.toml
+	f, err := os.OpenFile(st.ConfigPath(), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString("triage_model = \"claude-haiku-4-5\"\nmine_model = \"claude-haiku-4-5\"\nauto_distill_interval_minutes = 10\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	// Register a lens with unknown keys
+	if err = st.RegisterLens("math", writeLensDir(t, "math", "mine", "", store.LensKeyExtractModel, "claude-haiku-4-5", "mine_model", "claude-haiku-4-5")); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	out, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) }) // err (embedder unavailable) ignored
+	if !strings.Contains(out, `config.toml: unknown key "mine_model" is ignored`) {
+		t.Errorf("doctor should warn about config.toml mine_model, got:\n%s", out)
+	}
+	if !strings.Contains(out, `lens math: unknown lens.json key "mine_model" is ignored`) {
+		t.Errorf("doctor should warn about lens math mine_model, got:\n%s", out)
+	}
+	if strings.Count(out, " is ignored") != 2 {
+		t.Errorf("doctor should produce exactly 2 warnings, got:\n%s", out)
+	}
+}

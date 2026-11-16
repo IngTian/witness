@@ -183,7 +183,7 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 	}
 	// Includes the retired auto_distill_interval_minutes / auto_distill_session_budget
 	// lines (pre-#22): Open must still preserve them byte-for-byte, and LoadConfig
-	// must ignore them gracefully (unknown keys) rather than error.
+	// must ignore them gracefully (a no-op case) rather than error.
 	original := []byte("# my custom config from an older CLI\n" +
 		"runner = \"opencode\"\n" +
 		"triage_model = \"my-fine-model\"\n" +

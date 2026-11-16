@@ -28,7 +28,7 @@ const (
 
 // Config holds the user-tunable knobs. Parsed from a tiny line-based config.toml
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
-// keys are ignored; missing file = all defaults.
+// keys are ignored; `witness doctor` names them.
 type Config struct {
 	// RuntimeRoot is witness-owned, non-user-configurable runtime state. It is
 	// deliberately populated from Store.Root, not config.toml: OpenCode must never
@@ -125,13 +125,13 @@ func DefaultConfig() Config {
 	}
 }
 
-// LoadConfig reads config.toml if present, layering over defaults.
-func (c *configFile) LoadConfig() Config {
-	cfg := DefaultConfig()
+// loadConfig reads config.toml if present, layering over defaults and returning unknown keys.
+func (c *configFile) loadConfig() (cfg Config, unknown []string) {
+	cfg = DefaultConfig()
 	cfg.RuntimeRoot = filepath.Join(c.root, "runtime")
 	data, err := os.ReadFile(c.configPath())
 	if err != nil {
-		return cfg
+		return cfg, nil
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		k, v, ok := parseConfigLine(line)
@@ -174,7 +174,9 @@ func (c *configFile) LoadConfig() Config {
 		// pre-#22 throughput throttles (a start cooldown + a per-run session cap).
 		// They are gone: WorkerLock single-flights the worker and it self-drains via
 		// its re-check loop, so throttling WHEN it starts bought nothing but the 1 Hz
-		// wakeup cascade. Old config lines are harmlessly ignored (unknown keys are).
+		// wakeup cascade. Both keys are accepted silently because the #18 template
+		// (cbf198e) wrote them as active lines, so doctor must not flag a line witness wrote.
+		case "auto_distill_interval_minutes", "auto_distill_session_budget":
 		case "mine_concurrency":
 			// <=0 restores the default rather than disabling mining (0 goroutines
 			// would drain nothing); the engine still clamps the effective value.
@@ -214,9 +216,24 @@ func (c *configFile) LoadConfig() Config {
 			if v != "" && !slices.Contains(cfg.EnabledLenses, v) {
 				cfg.EnabledLenses = append(cfg.EnabledLenses, v)
 			}
+		default:
+			unknown = append(unknown, k)
 		}
 	}
+	return cfg, unknown
+}
+
+// LoadConfig reads config.toml if present, layering over defaults.
+func (c *configFile) LoadConfig() Config {
+	cfg, _ := c.loadConfig()
 	return cfg
+}
+
+// UnknownConfigKeys returns config.toml keys witness does not read, in file order.
+// A missing file returns nil.
+func (c *configFile) UnknownConfigKeys() []string {
+	_, unknown := c.loadConfig()
+	return unknown
 }
 
 // runnerBoundKey is the SINGLE source of truth for "did the user explicitly bind a
