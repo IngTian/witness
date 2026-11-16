@@ -2,6 +2,7 @@ package distill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -92,17 +94,26 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// facets, watermark advanced through them), but refuse the global stamp and surface
 	// the failure so the review stays due and resumes from the watermark next pass.
 	var failed []string
+	// backoff: some failure is the review's own. A free-allowance refusal is not: cmd's free gate
+	// holds every free-model call until the reset and wakes the worker then (mining skips it the
+	// same way), so backing off too only stalls the review, and every lens, past the reset.
+	backoff := false
 	// Before any lens folds, so no window folds against a facet still citing a deleted observation.
 	// A failure here strands no lens: the folds go on, the list stays, and the next review retries.
 	if err := r.pruneDeletedEvidence(nowStr); err != nil {
 		slog.Error("review: pruning deleted observations from facets failed (they stay pending)", "err", err)
 		failed = append(failed, "the deleted-observation prune")
+		backoff = true
 	}
 	for _, ln := range r.Lenses {
 		if err := r.foldLensWindowed(ctx, ln, nowStr); err != nil {
 			slog.Error("review: lens fold failed (committed windows kept; watermark left at last good window)",
 				"lens", ln.Name, "err", err)
 			failed = append(failed, ln.Name)
+			var qe *platform.QuotaExhaustedError
+			if !errors.As(err, &qe) {
+				backoff = true
+			}
 		}
 	}
 
@@ -113,7 +124,7 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// Without the backoff, the same window fails again from the same watermark on every
 	// capture-hook worker (#221's 24-day stall); the no-stamp rule (#16 C1) stays.
 	if len(failed) > 0 {
-		if ctx.Err() == nil { // stopped/cancelled is interrupted, not failed (mining's rule)
+		if backoff && ctx.Err() == nil { // stopped/cancelled is interrupted, not failed (mining's rule)
 			n := r.Store.IncReviewRetry()
 			at := time.Now().Add(backoffDelay(n))
 			_ = r.Store.SetReviewRetryAfter(at)

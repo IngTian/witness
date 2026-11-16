@@ -3,11 +3,13 @@ package distill
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -426,5 +428,46 @@ func TestReviewerInterruptedReviewDoesNotBackOff(t *testing.T) {
 	}
 	if v := s.MetaString("review_retries"); v != "2" {
 		t.Errorf("an interrupted review counted as a failure: review_retries = %q, want 2", v)
+	}
+}
+
+// A free-allowance refusal is paced by cmd's free gate and its wakeup at the reset, so a review
+// that failed only on it must not arm the review backoff too; one real failure beside it must.
+func TestReviewerQuotaRefusalDoesNotBackOff(t *testing.T) {
+	quota := &platform.QuotaExhaustedError{ResetAt: time.Now().Add(7 * time.Hour), Runtime: "opencode"}
+	for _, tc := range []struct {
+		name    string
+		other   error // what the second lens's review returns
+		backoff bool
+	}{
+		{"every lens refused", quota, false},
+		{"one real failure beside it", errors.New("simulated review timeout"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			stageObsForReview(t, s, "default")
+			stageObsForReview(t, s, "other")
+			_ = s.SetMetaString("review_retries", "2")
+			runner := func(_ context.Context, _, sys, _ string) (string, error) {
+				if sys == "REVIEW-other" {
+					return "", tc.other
+				}
+				return "", fmt.Errorf("gate: %w", quota)
+			}
+			r := &Reviewer{Store: s, Runner: runner, Lenses: []*lens.Lens{
+				{Name: "default", Review: "REVIEW-default"}, {Name: "other", Review: "REVIEW-other"},
+			}}
+			if err := r.Run(context.Background(), time.Now()); err == nil {
+				t.Fatal("the failure must still surface")
+			}
+			after, retries := s.MetaString("review_retry_after"), s.MetaString("review_retries")
+			if tc.backoff {
+				if after == "" || retries != "3" {
+					t.Errorf("a real failure must arm the backoff: review_retry_after = %q, review_retries = %q (want 3)", after, retries)
+				}
+			} else if after != "" || retries != "2" {
+				t.Errorf("a quota-only failure armed the backoff: review_retry_after = %q, review_retries = %q (want 2)", after, retries)
+			}
+		})
 	}
 }
