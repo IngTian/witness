@@ -215,23 +215,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		}
 		tick(processed)
 
-		if conc == 1 {
-			// Serial fast path: no goroutines/channels for the common laptop case
-			// (a single pending session, or MineConcurrency 1).
-			for _, s := range batch {
-				if stop() || reached(processed) {
-					return processed
-				}
-				attempted[w.attemptKey(s)] = true
-				m, err := w.mineSessionSafe(ctx, s, stop)
-				w.commitResult(m, err, opts.OnCommit)
-				processed++
-				tick(processed)
-			}
-			continue
-		}
-
-		// Parallel path: a TRUE rolling window. Up to `conc` miners run at once; a
+		// A TRUE rolling window. Up to `conc` miners run at once; a
 		// miner slot frees the moment ANY map finishes (not just the oldest), so one
 		// slow session no longer idles the other slots or stalls new dispatch (issue
 		// #22 review #3). Commits happen as each map finishes (commit-as-ready, issue
@@ -356,7 +340,6 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 		for len(sizeByIdx) > 0 && inFlightChars+size > maxChars {
 			reap(<-done)
 		}
-		attempted[w.attemptKey(s)] = true
 		// Honour a NARROWED window before taking a semaphore slot. sem's capacity is fixed at
 		// `conc`, so backpressure is enforced here: reap until in-flight work fits the smaller
 		// number. len(sizeByIdx) is the in-flight count, and a non-empty sizeByIdx guarantees a
@@ -376,6 +359,15 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 			}
 			break
 		}
+		// A stop landing during the waits (`worker stop`, or ctx cancel, which `stop()` includes)
+		// would else dispatch one more session, since the top-of-loop check already passed;
+		// `attempted` is marked only past this check (a held-back session was never attempted);
+		// `reached()` needs no re-check (`dispatched` is unchanged during the waits).
+		if stop() {
+			<-sem // hand back the slot this session will not use (cannot block: we just filled it)
+			break
+		}
+		attempted[w.attemptKey(s)] = true
 		idx := dispatched
 		sizeByIdx[idx] = size
 		inFlightChars += size

@@ -84,8 +84,8 @@ func TestDrainProgressCountsEverySession(t *testing.T) {
 }
 
 // A session captured mid-drain is mined by the next scan, so the total grows to include it —
-// which is why the stage is Open — and the bar still ends at its (grown) total. Both paths: the
-// parallel one counts a later batch on top of the sessions earlier batches finished.
+// which is why the stage is Open — and the bar still ends at its (grown) total. At Conc 1 and 2
+// alike, a later batch counts on top of the sessions earlier batches finished.
 func TestDrainProgressTotalGrowsWithAMidDrainArrival(t *testing.T) {
 	for _, conc := range []int{1, 2} {
 		s := newStore(t)

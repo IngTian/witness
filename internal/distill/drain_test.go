@@ -164,7 +164,7 @@ func TestDrainStopsAfterBudget(t *testing.T) {
 	}
 }
 
-// The parallel path (Conc>1) must uphold the SAME attempt-once contract and be
+// A wide window (Conc>1) must uphold the SAME attempt-once contract and be
 // race-free. Run with `go test -race` to exercise the concurrent MAP phase.
 func TestDrainParallelAttemptsEachOnce(t *testing.T) {
 	s := newStore(t)
@@ -333,7 +333,7 @@ func TestDrainReattemptsRegrownSession(t *testing.T) {
 	}
 }
 
-// Issue #56 B2: the parallel path admits on TWO dimensions — the count cap AND a
+// Issue #56 B2: the window admits on TWO dimensions — the count cap AND a
 // char budget across in-flight miners. A batch of GIANT sessions (each near the whole
 // budget) must NOT all mine at once even when the count cap `conc` would allow it: the
 // char budget throttles them below `conc`. We gate every miner on a barrier so all
@@ -550,7 +550,7 @@ func TestDrainCharBudgetRunsLoneOverBudgetSession(t *testing.T) {
 	}
 }
 
-// Review #3: the parallel path must be a TRUE rolling window — a slow oldest job
+// Review #3: the drain must be a TRUE rolling window — a slow oldest job
 // must NOT idle the other slots. We make session "slow0" block on a gate while the
 // rest finish fast; if the window were FIFO-blocked on the oldest, the fast jobs
 // couldn't complete until slow0 released. We assert the fast jobs finish while
@@ -588,7 +588,10 @@ func TestDrainRollingWindowDoesNotHeadOfLineBlock(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- w.Drain(context.Background(), DrainOpts{Conc: n, Pending: pending})
+		// Conc 2 < len(ids) forces a slot to free while slow0 holds the other; at Conc == len(ids)
+		// nothing waited, so the test could not catch #22 review #3's bug (reap blocked on the oldest
+		// in-flight job).
+		done <- w.Drain(context.Background(), DrainOpts{Conc: 2, Pending: pending})
 	}()
 
 	select {
@@ -766,8 +769,8 @@ func TestDrainKeepsFullConcurrencyWhenNothingTimesOut(t *testing.T) {
 
 // `worker stop` sets the stop flag BEFORE its group SIGTERM, so the child can die and Run return
 // while the drain's ctx is still live. A mine that fails while the drain's stop predicate holds is
-// interrupted too (no retry, no next_attempt, still pending); with no stop it is a failure. Both
-// dispatch paths: serial (Conc 1) and the rolling window.
+// interrupted too (no retry, no next_attempt, still pending); with no stop it is a failure. Conc 1
+// and 2: the rolling window at its narrowest and wider.
 func TestMineFailingUnderAStopRequestIsInterrupted(t *testing.T) {
 	for _, conc := range []int{1, 2} {
 		for _, stopRequested := range []bool{true, false} {
@@ -816,5 +819,58 @@ func TestDrainEndsWhenItsCtxIsCancelled(t *testing.T) {
 	w.Drain(ctx, DrainOpts{Conc: 1, Pending: func() []string { return []string{"a", "b", "c"} }})
 	if calls != 1 {
 		t.Fatalf("mined %d sessions after the cancel, want only the one in flight", calls)
+	}
+}
+
+// A `worker stop` landing while `drainWindow` waits on a full window, after the
+// top-of-loop `stop()` check, still dispatched the next session (one paid call after the stop).
+func TestDrainStopDuringASlotWaitDispatchesNothingMore(t *testing.T) {
+	s := newStore(t)
+	for _, id := range []string{"a", "b", "c"} {
+		capture(t, s, id, "user", "turn-"+id)
+	}
+	gate := make(chan struct{})
+	var once sync.Once
+	var calls atomic.Int32
+	var stop atomic.Bool
+	w := drainWorker(s, func(ctx context.Context, model, prompt, input string) (string, error) {
+		calls.Add(1)
+		<-gate
+		return (&safeMiner{}).run(ctx, model, prompt, input)
+	})
+	// Sized is the dispatcher's last call before its waits. When it sizes c, a and b hold both
+	// slots and cannot finish (gated), so nothing is reaped before c's window wait.
+	sized := func(sess string) int {
+		if sess == "c" {
+			once.Do(func() { close(gate) })
+		}
+		return 1
+	}
+	attempted := map[string]bool{}
+	// OnCommit runs inside reap, on the dispatcher goroutine, so the stop lands INSIDE the
+	// wait for a free slot. A re-check placed before that wait cannot see it.
+	opts := DrainOpts{Conc: 2, Pending: func() []string { return []string{"a", "b", "c"} },
+		Stop: stop.Load, Sized: sized, Attempted: attempted, OnCommit: func(string) { stop.Store(true) }}
+	done := make(chan int, 1)
+	go func() { done <- w.Drain(context.Background(), opts) }()
+	var n int
+	select {
+	case n = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain hung")
+	}
+	if n != 2 {
+		t.Fatalf("Drain reaped %d sessions, want 2: c was dispatched after the stop", n)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("%d model calls, want 2 (a and b only)", got)
+	}
+	if attempted[w.attemptKey("c")] {
+		t.Fatal("c is marked attempted, but the stop kept it from being dispatched")
+	}
+	for sess, want := range map[string]int{"a": 1, "b": 1, "c": 0} { // in-flight work still commits
+		if got := s.DistilledCount(sess, "default"); got != want {
+			t.Errorf("%s watermark %d, want %d", sess, got, want)
+		}
 	}
 }
