@@ -2,7 +2,6 @@ package distill
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,9 +105,6 @@ type Worker struct {
 	// instead of the default one. nil → every lens uses Run (the single-runner path, and
 	// what every test that injects only Run relies on). See runFor.
 	RunFor func(ln *lens.Lens) MineFunc
-	// NativeFor reports whether this lens's selected runner supports the optional
-	// retained OpenCode-fork protocol. Nil keeps injected/test MineFuncs ordinary.
-	NativeFor func(ln *lens.Lens) bool
 }
 
 // runFor returns the MineFunc for a lens: the per-lens runner via RunFor when wired,
@@ -198,9 +194,6 @@ type LensMining struct {
 	// uneventful history. It is NOT a MineFailed: drift never backs off (that would
 	// re-hammer a deterministically-drifting model forever and wedge the backfill queue).
 	Drifted bool
-	// Native holds retained OpenCode fork finalizers for this lens's rendered
-	// inputs. They run only after the generation-gated L1 commit succeeds.
-	Native []*platform.NativeSession
 }
 
 // Process runs a full fast-path pass for one session: MineSession then CommitMining.
@@ -291,30 +284,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 			// anywhere AND at least one input drifted — so a long session where one chunk
 			// extracts fine is never miscounted as drift (see LensMining.Drifted).
 			producedObs, sawDrift := false, false
-			// Ask the platform whether its sessions can host a retained scratch context, rather
-			// than comparing its NAME. Both halves of this decision are now capabilities: the
-			// session owner via SupportsNativeSessionSource, and the runner via w.NativeFor
-			// (which asserts platform.NativeSessionSupport). The name compare that used to be
-			// here was the engine's only piece of hardcoded platform knowledge, and the
-			// acceptance guard that forbids exactly that could not see it.
-			isNative := platform.SupportsNativeSessionSource(platform.ForSession(w.Store, session)) &&
-				w.NativeFor != nil && w.NativeFor(ln)
-			var nativeDigest string
-			if isNative {
-				entries := make([]platform.TranscriptEntry, len(raw))
-				for i, record := range raw {
-					entries[i] = platform.TranscriptEntry{Role: record.Role, Text: record.Text}
-				}
-				nativeDigest = platform.TranscriptDigest(entries)
-			}
 			for chunkIndex, transcript := range distillInputs(w.Store, w.Config, session, raw[done:]) {
-				callCtx := ctx
-				var native *platform.NativeSession
-				if isNative {
-					h := sha256.Sum256([]byte(transcript))
-					native = &platform.NativeSession{Session: session, RawHigh: rawHighID, Total: total, Lens: ln.Name, Input: fmt.Sprintf("%d:%x", chunkIndex, h[:]), Digest: nativeDigest}
-					callCtx = platform.WithNativeSession(callCtx, native)
-				}
 				// Log the SIZE of what we are about to send, and how long it took.
 				//
 				// This was a blind spot with real cost: a mine that times out reported only
@@ -330,14 +300,11 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 				slog.Info("mine: sending", "session", session, "lens", ln.Name,
 					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
 					"input_bytes", len(transcript), "records", len(raw[done:]))
-				obs, err := w.mine(callCtx, ln, session, transcript)
+				obs, err := w.mine(ctx, ln, session, transcript)
 				slog.Info("mine: returned", "session", session, "lens", ln.Name,
 					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
 					"took", time.Since(started).String(), "observations", len(obs),
 					"err", errText(err))
-				if native != nil {
-					lm.Native = append(lm.Native, native)
-				}
 				if err != nil {
 					// The drain itself was stopped (`worker stop`, or a Ctrl-C reached NotifyStop):
 					// interrupted, not failed, so it skips like a refusal below. A backoff here charged
@@ -568,19 +535,6 @@ func (w *Worker) CommitMining(m *SessionMining) error {
 	// session re-mines the new one). Best-effort — a stamp hiccup must never fail a commit
 	// whose L1/watermark writes already landed.
 	if generationCurrent {
-		// L1 is durable before a native fork is finalized. A finalizer failure is
-		// deliberately non-fatal: its manifest has already been marked committed and
-		// OpenCode retries that cleanup on the next runner Open.
-		for _, lm := range m.Lenses {
-			if lm.MineFailed {
-				continue
-			}
-			for _, native := range lm.Native {
-				if err := native.Finalize(); err != nil {
-					slog.Warn("distill: retain native cleanup for retry", "session", m.Session, "lens", lm.Lens, "err", err)
-				}
-			}
-		}
 		for _, ln := range driftedLenses {
 			if err := w.Store.SetDrift(m.Session, ln); err != nil {
 				slog.Warn("distill: could not stamp per-lens drift", "session", m.Session, "lens", ln, "err", err)

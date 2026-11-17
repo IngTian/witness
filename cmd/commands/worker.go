@@ -336,7 +336,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 				return nil
 			}
 			slog.Info("worker startup: embedding model ready", "took", time.Since(t1).String())
-			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens, NativeFor: rs.NativeFor}
+			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens}
 		}
 		return miner
 	}

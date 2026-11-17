@@ -2,12 +2,9 @@ package platform
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/IngTian/witness/internal/store"
@@ -40,37 +37,6 @@ func StderrExcerpt(s string) string {
 	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
 }
 
-// NativeSession identifies one L0 input whose owning runtime keeps its own conversation
-// store. Runners that support native isolation use it to RETAIN an isolated scratch context
-// until that input's L1 commit succeeds, so a crash mid-generation resumes instead of
-// re-billing the model. Other runners ignore it. The finalizer is set by the runner and
-// called only by distill after the generation CAS succeeds.
-//
-// "Scratch context", deliberately, not "fork": the retained thing must be seeded only by
-// witness's own turns (see the fresh-context invariant on Runner.Run). This port named it a
-// fork after OpenCode's /session/{id}/fork endpoint, which put one runtime's mechanism in
-// the cross-runtime vocabulary — and the fork's inherited history was itself the bug.
-type NativeSession struct {
-	Session  string
-	RawHigh  int64
-	Total    int
-	Lens     string
-	Input    string
-	Digest   string
-	mu       sync.Mutex
-	finalize func() error
-}
-
-type TranscriptEntry struct {
-	Role string `json:"role"`
-	Text string `json:"text"`
-}
-
-func TranscriptDigest(entries []TranscriptEntry) string {
-	b, _ := json.Marshal(entries)
-	return fmt.Sprintf("%x", sha256.Sum256(b))
-}
-
 // QuotaExhaustedError is returned when a runtime's free usage limit is reached and will reset
 // at a known time. The distill drain recognises this via errors.As and pauses free-model calls
 // until ResetAt, without incrementing per-session backoff.
@@ -87,60 +53,6 @@ func (e *QuotaExhaustedError) Error() string {
 // what a QuotaExhaustedError refusal exhausts. cmd's free-model gate asks it per call so it can
 // pause exactly those calls without naming a runtime; a runner without it has no free allowance.
 type FreeAllowance interface{ OnFreeModel(model string) bool }
-
-// NativeSessionSupport is implemented only by runners that understand the retained
-// scratch-context protocol (create once, prompt, resume on retry, delete after L1 is durable).
-type NativeSessionSupport interface{ SupportsNativeSession() bool }
-
-// NativeSessionSource is the PLATFORM-side half of the same capability: a platform whose sessions
-// live in its own conversation store, so a runner can retain a scratch context keyed to one of
-// them and resume it after a crash.
-//
-// Both halves are needed, and until now only one was a capability. The runner half was already
-// asked politely (runnerSet.NativeFor asserts NativeSessionSupport); the SESSION half was a
-// hardcoded string compare in the engine — `ForSession(...).Name() == AgentOpenCode` in
-// internal/distill — which is exactly the platform-name dispatch the architecture forbids and
-// internal/platform/acceptance_test.go exists to catch. That guard missed it: none of its patterns
-// match a `.Name() ==` equality, so the single real violation sat inside the fence it was written
-// to enforce. Asking here instead means a third runtime with its own session store implements a
-// method rather than editing the engine.
-//
-// Nil-safe access is SupportsNativeSessionSource below.
-type NativeSessionSource interface{ SupportsNativeSessions() bool }
-
-// SupportsNativeSessionSource reports whether p's sessions can host a retained scratch context —
-// nil-safe and assertion-safe, so the engine never has to know which platforms qualify. A platform
-// that does not implement the capability answers false, which is the correct default: without a
-// private conversation store there is nothing to retain.
-func SupportsNativeSessionSource(p Platform) bool {
-	if p == nil {
-		return false
-	}
-	src, ok := p.(NativeSessionSource)
-	return ok && src.SupportsNativeSessions()
-}
-
-type nativeSessionKey struct{}
-
-func WithNativeSession(ctx context.Context, n *NativeSession) context.Context {
-	return context.WithValue(ctx, nativeSessionKey{}, n)
-}
-
-func NativeSessionFromContext(ctx context.Context) *NativeSession {
-	n, _ := ctx.Value(nativeSessionKey{}).(*NativeSession)
-	return n
-}
-
-func (n *NativeSession) SetFinalizer(f func() error) { n.mu.Lock(); n.finalize = f; n.mu.Unlock() }
-func (n *NativeSession) Finalize() error {
-	n.mu.Lock()
-	f := n.finalize
-	n.mu.Unlock()
-	if f == nil {
-		return nil
-	}
-	return f()
-}
 
 // Runner is the default distillation-engine lifecycle: one engine drains every
 // pending session regardless of which platform produced it. It is the whole of
@@ -171,11 +83,9 @@ type Runner interface {
 	//     sets it), so a test can never start a real model CLI.
 	//
 	// FRESH-CONTEXT INVARIANT. The only turns witness puts into a Run are systemPrompt and the
-	// fenced corpus; a runtime may add its own framing (listed per runner below). A runner may
-	// retain such a context across a crash to resume one generation, and may add its own retry
-	// turns to it, but must NEVER inherit a conversation witness did not author. A Run must offer
-	// the model no tools, because the corpus is untrusted and a tool turns an injected
-	// instruction into an action.
+	// fenced corpus; a runtime may add its own framing (listed per runner below). A runner must
+	// NEVER inherit a conversation witness did not author. A Run must offer the model no tools,
+	// because the corpus is untrusted and a tool turns an injected instruction into an action.
 	//
 	// This is a correctness requirement, not hygiene, and it is stated here because it was
 	// previously only implied — each adapter restated it in prose, nothing defined or enforced
@@ -204,12 +114,11 @@ type Runner interface {
 	// to ANTHROPIC_API_KEY/apiKeyHelper, no OAuth or keychain (Bedrock/Vertex keep theirs): a
 	// product call, not done.
 	//
-	// OpenCode: a fresh session in the private DB, prompted once and deleted when Run returns. A
-	// native mining session is kept until its L1 commit succeeds. Witness's prompt is the agent's
-	// system prompt. Private config, nothing from the user's opencode.json;
-	// `OPENCODE_DISABLE_PROJECT_CONFIG=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`. `denyAll` on the
-	// agent AND the session. Not isolated (machine-wide admin config, skill discovery):
-	// docs/opencode.md "The isolated runtime".
+	// OpenCode: a fresh session in the private DB, prompted once and deleted when Run returns.
+	// Witness's prompt is the agent's system prompt. Private config, nothing from the user's
+	// opencode.json; `OPENCODE_DISABLE_PROJECT_CONFIG=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`.
+	// `denyAll` on the agent AND the session. Not isolated (machine-wide admin config, skill
+	// discovery): docs/opencode.md "The isolated runtime".
 	//
 	// Enforced by: `TestNoCodePathForksAConversation` (source scan, OpenCode no-fork);
 	// `TestContractRunnerRoundTrip` (tag `opencodecontract`, contract workflow: zero tools on real

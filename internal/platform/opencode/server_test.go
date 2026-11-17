@@ -291,43 +291,6 @@ func assertInterruptedThenDeleted(t *testing.T, calls []string, id string) {
 	}
 }
 
-// replyForMessage is the native resume's harvest: a reply counts only once its turn is idle
-// `succeeded`. A dead turn (a SIGKILLed serve leaves [user, assistant] with no idle) or a failed
-// one yields "", so the caller re-prompts instead of committing a partial or empty reply.
-func TestReplyForMessageHarvestsOnlyASucceededTurn(t *testing.T) {
-	fake, srv := newFakeV2(t)
-	agent, err := srv.ensureAgent(context.Background(), "P")
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := srv.createSession(context.Background(), "openai/gpt-5.5", agent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := srv.doJSON(context.Background(), http.MethodPost, "/api/session/"+id+"/prompt",
-		map[string]string{"id": "msg_r", "text": "D"}, http.StatusOK); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name string
-		turn func(*fakeSession) []map[string]any
-		want string
-	}{
-		{"succeeded", okTurn("[1]"), "[1]"},
-		{"dead", func(s *fakeSession) []map[string]any { return []map[string]any{s.user(), assistantRec("partial", nil)} }, ""},
-		{"failed", func(s *fakeSession) []map[string]any {
-			return []map[string]any{s.user(), assistantRec("partial", nil), idleRec("failed", nil)}
-		}, ""},
-	} {
-		fake.mu.Lock()
-		fake.turn = tc.turn
-		fake.mu.Unlock()
-		if got, err := srv.replyForMessage(context.Background(), id, "msg_r"); err != nil || got != tc.want {
-			t.Errorf("%s: replyForMessage = %q, %v; want %q", tc.name, got, err, tc.want)
-		}
-	}
-}
-
 // privateConfigOverlay is the contract job's seam (PR 3 adds a mock provider through it): merged
 // beside witness's agents, and absent by default so the private serve gets no provider config.
 func TestPrivateConfigOverlayIsMerged(t *testing.T) {

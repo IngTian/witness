@@ -214,8 +214,7 @@ func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input str
 }
 
 // agentID names the agent for one system prompt: "w-" plus the first 16 hex characters of its
-// sha256. Deterministic, so a resumed native session finds its agent again in the next serve's
-// config, and two lenses with the same prompt share one agent.
+// sha256. Deterministic, so two lenses with the same prompt share one agent.
 func agentID(systemPrompt string) string {
 	sum := sha256.Sum256([]byte(systemPrompt))
 	return "w-" + hex.EncodeToString(sum[:])[:16]
@@ -305,10 +304,9 @@ func (s *OpenCodeServer) ensureAgent(ctx context.Context, systemPrompt string) (
 }
 
 // runSessionWithMessage prompts an existing session with input under messageID and waits for the
-// turn. Run's sessions and native's retained scratch sessions both come through here, so the
-// generation cap covers both. On any failure it interrupts the turn, which aborts the upstream
-// request (runner.md (c)). The caller owns the session: Run deletes it, native keeps it for
-// finalize or the next attempt.
+// turn. Run's session comes through here, so the generation cap covers it. On any failure it
+// interrupts the turn, which aborts the upstream request (runner.md (c)). Run owns the session and
+// deletes it.
 func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, messageID, input string) (string, error) {
 	// ponytail: 16-way verified on 2.2.7 and 2.3.0, Linux and Windows (TestContractRunnerSixteenParallel);
 	// production keeps 8 pending the owner's decision
@@ -340,9 +338,8 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	}
 	if err != nil {
 		// A failed prompt POST is interrupted too: the serve may have recorded the turn before the
-		// response failed, and a native session is retained, not deleted (spec 7.5: any error).
-		// Attribute the failure to a SIZE and a DURATION, so a stall is diagnosable from the log
-		// alone rather than by re-running with a debugger attached.
+		// response failed (spec 7.5: any error). Attribute the failure to a SIZE and a DURATION, so a
+		// stall is diagnosable from the log alone rather than by re-running with a debugger attached.
 		slog.Warn("opencode: generation did not complete", "session", sessionID, "corpus_chars", corpusChars,
 			"waited", time.Since(sent).String(), "err", err.Error())
 		s.interruptBestEffort(sessionID)
@@ -353,31 +350,15 @@ func (s *OpenCodeServer) runSessionWithMessage(ctx context.Context, sessionID, m
 	return reply, nil
 }
 
-// replyForMessage harvests a retained turn (native resume): the reply once the turn is idle
-// `succeeded`, else "". A turn with no idle never finishes — a private --stdio serve does not resume
-// one after a restart (critic C3) — so the caller starts a fresh session rather than waiting on it.
-func (s *OpenCodeServer) replyForMessage(ctx context.Context, sessionID, messageID string) (string, error) {
-	data, err := s.doJSON(ctx, http.MethodGet, messagesPath(sessionID), nil, http.StatusOK)
-	if err != nil {
-		return "", err
-	}
-	st, err := parseTurn(data, messageID)
-	if err != nil || st.Idle == nil || st.Idle.Outcome != "succeeded" {
-		return "", err
-	}
-	return st.Reply, nil
-}
-
 // turnPageSize is how many messages each poll fetches, oldest first. A session holds only
 // witness's own turns — our request, its assistant record(s), the idle — so our request is near
-// the start; the page is generous so a resumed native session's earlier attempts still fit.
-// requestMissingStreak below is the guard for that being wrong: rather than trust the page for the
-// full generateTimeout, we surface it.
+// the start; the page is generous. requestMissingStreak below is the guard for that being wrong:
+// rather than trust the page for the full generateTimeout, we surface it.
 const turnPageSize = 200
 
-// messagesPath is the ONE spelling of the poll URL, so both poll sites (waitForReply,
-// replyForMessage) read the same page in the same order. The order must be asc: the default is
-// newest-first, and parseTurn reads the records AFTER our request.
+// messagesPath is the ONE spelling of the poll URL, so waitForReply and the fakeV2 test fake agree
+// on the page and its order. The order must be asc: the default is newest-first, and parseTurn
+// reads the records AFTER our request.
 func messagesPath(sessionID string) string {
 	return fmt.Sprintf("/api/session/%s/message?order=asc&limit=%d", sessionID, turnPageSize)
 }

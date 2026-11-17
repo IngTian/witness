@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 // openCodeCommand builds every `opencode` invocation witness makes, so the platform
@@ -68,4 +70,73 @@ func pluginExe() (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+// isolatedEnv returns the data, cache, state dirs and DB path under witness's runtime root,
+// so every spawned opencode process writes to witness's private copy, never the user's.
+func isolatedEnv(root string) []string {
+	db := "opencode-v2.db"
+	data := "opencode-data"
+	cache := "opencode-cache"
+	state := "opencode-state"
+	if root != "" {
+		db = filepath.Join(root, db)
+		data = filepath.Join(root, data)
+		cache = filepath.Join(root, cache)
+		state = filepath.Join(root, state)
+	}
+	return []string{
+		"XDG_DATA_HOME=" + data,
+		"XDG_CACHE_HOME=" + cache,
+		"XDG_STATE_HOME=" + state,
+		"OPENCODE_DB=" + db,
+	}
+}
+
+// withoutOpenCodeEnv drops every inherited OPENCODE_* variable except OPENCODE_API_KEY (an
+// env-var key, allowed by spec §7.6), case-insensitively since Windows env names are
+// case-insensitive, to prevent the user's config, plugins and MCP servers from leaking into
+// witness's private opencode serve (critic.md G1). HOME stays (Bedrock's credential chain
+// reads ~/.aws). Other API-key env vars stay (the runner copies no credentials, spec §7.6).
+func withoutOpenCodeEnv(env []string) []string {
+	var out []string
+	for _, e := range env {
+		k, _, _ := strings.Cut(e, "=")
+		up := strings.ToUpper(k)
+		// OPENCODE_API_KEY is a credential in the allowed "env-var API keys" class (spec §7.6:
+		// the runner accepts env-var keys but copies no credentials). The strip exists to stop
+		// config and behaviour leaks (OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT / OPENCODE_CONFIG_DIR).
+		if !strings.HasPrefix(up, "OPENCODE_") || up == "OPENCODE_API_KEY" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+func replaceEnv(base, updates []string) []string {
+	m := map[string]string{}
+	order := []string{}
+	for _, e := range base {
+		k, _, _ := strings.Cut(e, "=")
+		if _, ok := m[k]; !ok {
+			order = append(order, k)
+		}
+		m[k] = e
+	}
+	for _, e := range updates {
+		k, _, _ := strings.Cut(e, "=")
+		if _, ok := m[k]; !ok {
+			order = append(order, k)
+		}
+		m[k] = e
+	}
+	out := make([]string, 0, len(order))
+	for _, k := range order {
+		out = append(out, m[k])
+	}
+	return out
+}
+
+// indirection keeps command execution testable without touching process globals.
+var execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, name, args...)
 }

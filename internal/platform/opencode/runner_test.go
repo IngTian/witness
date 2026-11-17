@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -54,31 +53,23 @@ func TestRunnerOpenHonorsExternalProcessFuse(t *testing.T) {
 	}
 }
 
-// An Open that fails after the serve started (reconcile cannot read the native dir) must end that
-// serve: runnerSet keeps no runner whose Open failed, so nothing would ever Close it, and in the
-// MCP server it would live as long as the process.
-func TestOpenClosesItsServeWhenReconcileFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// ReadDir of a plain file reads as not-exist there, so reconcile has no portable way to fail;
-		// the Open error path under test is OS-independent and runs on the other OSes.
-		t.Skip("no portable reconcile failure on Windows")
-	}
+// An archive from a release with the native-session cache still has <runtime>/opencode-native.
+// Nothing reads it any more; Open must succeed with it present and remove it.
+func TestOpenRemovesTheRetiredNativeManifests(t *testing.T) {
 	t.Setenv(platform.DisableExternalRunnersEnv, "")
 	useFakeServe(t, "lease")
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "opencode-native"), nil, 0o600); err != nil { // a file: ReadDir fails
-		t.Fatal(err)
-	}
+	seedFiles(t, root, "opencode-native/0a1b.json", "opencode-native/0a1b.json.tmp")
 	r := &runner{cfg: store.Config{RuntimeRoot: root}}
 	t.Cleanup(func() { _ = r.Close() })
-	if err := r.Open(context.Background()); err == nil {
-		t.Fatal("Open succeeded with an unreadable native dir")
+	if err := r.Open(context.Background()); err != nil {
+		t.Fatalf("Open with a leftover opencode-native dir = %v, want nil", err)
 	}
-	if r.server != nil {
-		t.Error("a failed Open kept its server")
+	if r.server == nil {
+		t.Fatal("Open succeeded but kept no server")
 	}
-	if entries, err := os.ReadDir(filepath.Join(root, "opencode-serve")); err != nil || len(entries) != 0 {
-		t.Errorf("serve dirs after the failed Open = %d (%v), want 0: the serve was not closed", len(entries), err)
+	if _, err := os.Stat(filepath.Join(root, "opencode-native")); !os.IsNotExist(err) {
+		t.Errorf("opencode-native after Open: stat err = %v, want not-exist", err)
 	}
 }
 

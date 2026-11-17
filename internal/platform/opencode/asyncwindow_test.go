@@ -84,19 +84,18 @@ func TestWaitForReplyFailsFastWhenOurRequestNeverAppears(t *testing.T) {
 // This is the invariant every other stage already honours and that mining silently broke:
 //   - the Claude runner runs `claude -p --no-session-persistence`: a stateless one-shot process
 //     with zero conversation context (claude/runner.go);
-//   - the plain OpenCode path creates a session, prompts it, deletes it (server.go Run);
-//   - L2 review, L4 profile and `witness lens try` all take that plain path, because
-//     platform.WithNativeSession has exactly ONE producer (distill/worker.go, in MineSession).
+//   - every OpenCode stage, mining included, takes server.go Run: it creates a session, prompts
+//     it, deletes it.
 //
-// Only native MINING forked the user's session, so it alone started with ~the whole conversation
-// already in the model's context. That cost three things and bought nothing (see the comment at
-// the createSession call in native.go): it contradicted the "treat the user turn as untrusted"
-// system prompt, it pushed witness's own request outside the reply window on a long session —
-// producing the `context deadline exceeded` that made Windows distillation look like a slow model
-// — and it re-sent the whole history to the provider on every call.
+// Mining once broke it: the removed native-session path forked the user's session, so it started
+// with ~the whole conversation already in the model's context. That cost three things and bought
+// nothing: it contradicted the "treat the user turn as untrusted" system prompt, it pushed
+// witness's own request outside the reply window on a long session — producing the `context
+// deadline exceeded` that made Windows distillation look like a slow model — and it re-sent the
+// whole history to the provider on every call.
 //
 // A source scan, because the property is "no code path forks", which no single behavioural test
-// can establish. The behavioural half is TestNativeRunUsesADistinctFreshScratchSessionPerJob,
+// can establish. The behavioural half is TestRunCreatesPromptsAndDeletesOneSessionPerJob,
 // whose fake (fakeV2) answers `POST /api/session` and fails on any route it does not know.
 func TestNoCodePathForksAConversation(t *testing.T) {
 	files, err := filepath.Glob("*.go")

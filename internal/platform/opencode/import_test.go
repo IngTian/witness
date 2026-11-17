@@ -548,24 +548,6 @@ func TestImportReadsAWALDatabaseCopiedWithoutItsSidecars(t *testing.T) {
 	}
 }
 
-func TestTranscriptDigestMatchesTheImportedL0(t *testing.T) {
-	dbPath := seedOpenCodeDB(t)
-	fake := newFakeImportStore()
-	mustImport(t, fake, dbPath)
-	if len(fake.imports) == 0 || len(fake.imports[0].records) == 0 {
-		t.Fatal("no records were imported")
-	}
-
-	var entries []platform.TranscriptEntry
-	for _, r := range fake.imports[0].records {
-		entries = append(entries, platform.TranscriptEntry{Role: r.Role, Text: r.Text})
-	}
-	fromImport, fromRead := platform.TranscriptDigest(entries), TranscriptDigest(readTurns(t, dbPath, "ses_test"))
-	if fromImport != fromRead {
-		t.Fatalf("digest from import = %q, from ReadTurns = %q, want equal", fromImport, fromRead)
-	}
-}
-
 func TestImportRecordsTheNewestActivityItSaw(t *testing.T) {
 	dbPath := seedV2DB(t,
 		session("ses_new", 9500),
@@ -804,12 +786,6 @@ func TestReadersNeverWriteTheSourceDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close() // before hashing: a writer would checkpoint on the last close
-	// The native runner's drift check reads the same DB.
-	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
-	w := &platform.NativeSession{Session: SessionPrefix + "ses_test", Digest: "captured earlier"}
-	if err := newNativeRuntime(t.TempDir(), nil).checkDigest(context.Background(), w); !errors.Is(err, errNativeSessionChanged) {
-		t.Fatalf("checkDigest = %v, want errNativeSessionChanged", err)
-	}
 
 	if after := sum(); before != after {
 		t.Fatalf("opencode.db was modified: before=%x after=%x", before, after)

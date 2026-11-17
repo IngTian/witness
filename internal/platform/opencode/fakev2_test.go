@@ -52,7 +52,6 @@ type fakeSession struct {
 	Create, Prompt         map[string]any // the request bodies, as decoded
 	Prompted               time.Time
 	idle, deleted          bool
-	prior                  []map[string]any // leftover: the messages an earlier serve recorded
 }
 
 func (s *fakeSession) user() map[string]any {
@@ -121,14 +120,6 @@ func (f *fakeV2) peak() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.maxInFlight
-}
-
-// leftover seeds a session an earlier serve left in the root's private DB (every serve of one
-// root shares it): its messages are served as recorded, whatever this serve's agents are.
-func (f *fakeV2) leftover(id string, msgs ...map[string]any) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.sessions[id] = &fakeSession{ID: id, prior: msgs}
 }
 
 // session returns a copy of the session with this id (nil when none was created).
@@ -253,8 +244,6 @@ func (f *fakeV2) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		data := []map[string]any{}
 		switch {
-		case s.prior != nil:
-			data = s.prior
 		case s.MsgID == "":
 		case !slices.Contains(f.listed(), s.Agent):
 			data = []map[string]any{s.user(), idleRec("failed", map[string]any{"type": "unknown", "message": "Agent not found: \"" + s.Agent + "\""})}

@@ -144,15 +144,6 @@ func (rs *runnerSet) RunFor(ln *lens.Lens) distill.MineFunc {
 	return brokenRun(name, or.err)
 }
 
-func (rs *runnerSet) NativeFor(ln *lens.Lens) bool {
-	or := rs.byName[distill.RunnerFor(rs.cfg, ln)]
-	if or == nil || or.runner == nil {
-		return false
-	}
-	s, ok := or.runner.(platform.NativeSessionSupport)
-	return ok && s.SupportsNativeSession()
-}
-
 // Close tears down every opened runner (each Close runs its own post-cleanup sweep). A
 // broken runtime (never opened) has nothing to close.
 func (rs *runnerSet) Close() {

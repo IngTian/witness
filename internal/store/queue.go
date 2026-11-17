@@ -155,33 +155,6 @@ func (q *queue) MarkDistilledIfCurrent(session, lens string, count int, rawHighI
 	return q.CommitLensDistillation(nil, session, count, rawHighID, []string{lens})
 }
 
-// GenerationStatus reports whether a generation (identified by session, lens, rawHigh,
-// total) is still the one a commit could land for (current) and whether it already
-// landed (committed).
-//
-// "Current" requires the manifest's raw high id to still exist AND to still be the
-// session's high-water mark. The `id > rawHigh` clause is what bounds accumulation: a
-// mine always reads the session's present max(raw.id), so once a later turn arrives the
-// older generation can never be the one that commits. This is STRICTER than
-// CommitLensDistillation's predicate, which only checks `id=rawHigh` exists — the
-// stricter check is deliberate, as it prevents a lens that keeps failing (or one later
-// disabled) from stranding one manifest per drain forever.
-func GenerationStatus(db *sql.DB, session, lens string, rawHigh int64, total int) (current, committed bool, err error) {
-	var currentValue, committedValue int
-	err = db.QueryRow(`SELECT
-		CASE WHEN (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
-		       OR (EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)
-		           AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ? AND id > ?)) THEN 1 ELSE 0 END,
-		CASE WHEN COALESCE((SELECT distilled >= ? FROM progress WHERE session = ? AND lens = ?), 0)
-		     THEN 1 ELSE 0 END`,
-		rawHigh, session, session, rawHigh, session, rawHigh, total, session, lens,
-	).Scan(&currentValue, &committedValue)
-	if err != nil {
-		return false, false, err
-	}
-	return currentValue != 0, committedValue != 0, nil
-}
-
 // CommitLensDistillation is the ATOMIC write for issue #67-2: it writes the lens-
 // MINED observations AND advances the given (successful) lenses' watermarks in ONE
 // generation-gated transaction, returning whether the generation was still current

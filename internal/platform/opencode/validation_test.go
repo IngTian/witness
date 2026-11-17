@@ -146,14 +146,14 @@ func seedFiles(t *testing.T, root string, paths ...string) {
 
 // An empty root must remove nothing: relative to "", the v1 paths are the CWD's, and the worker's
 // cwd is a user repo. Open refuses an empty root first today; this keeps the deleter safe alone.
-func TestRemoveV1RuntimeNeedsARoot(t *testing.T) {
+func TestRemoveRetiredRuntimeNeedsARoot(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	seedFiles(t, cwd, "xdg/opencode/auth.json", "opencode.db")
-	removeV1Runtime("")
+	removeRetiredRuntime("")
 	for _, p := range []string{"xdg/opencode/auth.json", "opencode.db"} {
 		if _, err := os.Stat(filepath.Join(cwd, filepath.FromSlash(p))); err != nil {
-			t.Errorf("removeV1Runtime(\"\") removed the cwd's %s: %v", p, err)
+			t.Errorf("removeRetiredRuntime(\"\") removed the cwd's %s: %v", p, err)
 		}
 	}
 }
