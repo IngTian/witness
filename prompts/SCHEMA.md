@@ -21,12 +21,12 @@ an explicit, confirmed action).
 Table `observations`. Atomic, evidence-anchored noticings, tagged by lens. Written by the worker
 (`source` is `mined`, or `active` for one an agent recorded mid-session) and by `witness merge`.
 `obs_id` hashes session + lens + text, so an identical re-mine is ignored; near-duplicates are
-Each row carries a 384-d embedding for semantic search.
+kept. Each row carries a 384-d embedding for semantic search.
 
 ## facets — derived, bi-temporal (L2)
 
-…written by the review fold, compaction, the claim pass and `witness merge`.
-…written by the review fold, compaction, the claim pass and `witness merge`.
+Tables `facets` + `facet_versions`. Evolving named attributes within a lens+dimension,
+written by the review fold, compaction, the claim pass and `witness merge`. A facet's
 ordered `facet_versions` rows ARE its change history; the version with `valid_to == ''` is current.
 Old versions are kept, never deleted — they are the trajectory. A facet is in the live profile only
 while `archived_at == ''`: compaction and `merge` archive a facet into another (`merged_into`)

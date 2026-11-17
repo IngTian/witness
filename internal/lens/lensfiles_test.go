@@ -12,9 +12,10 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// Every file the loader reads from a lens directory must be in store.LensFiles, because that is
-// exactly how an optional prompt file was lost from v0.6.0 to v0.7.3. A source scan, because the
-// property is "no other read exists".
+// Every file the loader reads from a lens directory must be in store.LensFiles, because that
+// list is what RegisterLens copies and merge compares. A file the loader reads but the list
+// omits is silently dropped on register — exactly how an optional prompt file was lost from v0.6.0 to
+// v0.7.3. A source scan, because the property is "no other read exists".
 func TestLoadDirReadsOnlyLensFiles(t *testing.T) {
 	src, err := os.ReadFile("lens.go")
 	if err != nil {
