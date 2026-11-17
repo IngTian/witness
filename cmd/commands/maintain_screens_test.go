@@ -151,26 +151,6 @@ func TestABusyWorkerIsOneMessage(t *testing.T) {
 	}
 }
 
-func TestCandidatesRefusesAnUnknownLens(t *testing.T) {
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	t.Setenv(noDefaultLensEnv, "1")
-	_, errOut, err := captureBoth(t, func() error { return cmdCandidates("nope") })
-	if err == nil || !strings.Contains(err.Error(), `lens "nope" is not registered`) {
-		t.Fatalf("an unknown lens reported success: %v", err)
-	}
-	if errOut != "" {
-		t.Errorf("nothing should run for a lens that does not exist, but it drew %q", errOut)
-	}
-}
-
-// Observations were cut by BYTES, splitting a multi-byte character into U+FFFD.
-func TestTruncateCutsRunesNotBytes(t *testing.T) {
-	got := truncate("ab—cd—ef", 4)
-	if !utf8.ValidString(got) || got != "ab—…" {
-		t.Fatalf("truncate = %q", got)
-	}
-}
-
 // Every lens row leads with a glyph so the names line up — in a pipe too, where the glyphs are
 // ASCII of different widths ("+" against "[!]"): there they used to start 2 columns apart.
 func TestMergeLensRowsLineUpInPlainOutput(t *testing.T) {
@@ -223,7 +203,7 @@ func TestReviewSaysWhenTheProfileWasNotRegenerated(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
 	t.Setenv(noDefaultLensEnv, "1")
 	t.Setenv("WITNESS_PROMPTS", filepath.Join(t.TempDir(), "none"))
-	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	out, err := captureStdoutErr(t, func() error { return cmdReview() })
 	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") ||
 		!strings.Contains(out, "cause") || strings.Contains(out, "profile regenerated\n") {
 		t.Fatalf("(%v)\n%s", err, out)
@@ -318,7 +298,7 @@ func portraitFailLines(l, cause string) []string {
 func TestReviewShowsAFailedPortraitsSizeAndLever(t *testing.T) {
 	st, want := portraitFailArchive(t), portraitFailLines("test", "claude -p: exit status 1: Prompt is too long")
 	st.Close()
-	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	out, err := captureStdoutErr(t, func() error { return cmdReview() })
 	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") {
 		t.Fatalf("(%v)\n%s", err, out)
 	}
@@ -347,7 +327,7 @@ func TestLensBackfillShowsAFailedPortraitsSizeAndLever(t *testing.T) {
 // only the first lens's, so the one that overflowed the context window could be the one left off.
 func TestReviewShowsEveryFailedPortrait(t *testing.T) {
 	portraitFailArchive(t, "alpha", "test").Close()
-	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	out, err := captureStdoutErr(t, func() error { return cmdReview() })
 	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") {
 		t.Fatalf("(%v)\n%s", err, out)
 	}
@@ -363,7 +343,7 @@ func TestReviewShowsEveryFailedPortrait(t *testing.T) {
 // its own error. It used to be shown by the tap's first, which was an unrelated claim batch's.
 func TestReviewShowsAFailedPortraitsOwnErrorWhenNoCallFailed(t *testing.T) {
 	portraitFailArchive(t, "blank").Close()
-	out, err := captureStdoutErr(t, func() error { return cmdReviewFull(false) })
+	out, err := captureStdoutErr(t, func() error { return cmdReview() })
 	if err != nil || !strings.HasPrefix(out, "[!] review complete — the profile was NOT regenerated") ||
 		!strings.Contains(out, kvRow("cause", "summarize lens blank: the model returned an empty summary", "")) ||
 		strings.Contains(out, "claim batch") {

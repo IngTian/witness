@@ -414,15 +414,15 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 	// Done in the map phase so the serial commit stays cheap; the embedder's own mutex
 	// makes this concurrency-safe. An obs whose embedding FAILS (an embedder error, or a
 	// tokenizer panic Embed recovers into one) is KEPT with no vector — "keep full L1 to
-	// preserve expensive mining work" — but such a row is left out of vector search and of
-	// long-arc clustering, and NOTHING re-embeds it later. So each failure is logged: that
-	// warning is the only trace. (A doctor count and a re-embed pass wait until it shows up.)
+	// preserve expensive mining work" — but such a row is left out of vector search, and
+	// NOTHING re-embeds it later. So each failure is logged: that warning is the only trace.
+	// (A doctor count and a re-embed pass wait until it shows up.)
 	for i := range m.Active {
 		if len(m.Active[i].Embedding) == 0 {
 			if v, err := w.Embedder.Embed(m.Active[i].Observation); err == nil {
 				m.Active[i].Embedding = v
 			} else {
-				slog.Warn("embed: active observation kept without a vector; search and long-arc clustering will skip it",
+				slog.Warn("embed: active observation kept without a vector; search will skip it",
 					"session", session, "obs", m.Active[i].ID, "err", err)
 			}
 		}
@@ -432,7 +432,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 			if v, err := w.Embedder.Embed(m.Lenses[li].Mined[i].Observation); err == nil {
 				m.Lenses[li].Mined[i].Embedding = v
 			} else {
-				slog.Warn("embed: mined observation kept without a vector; search and long-arc clustering will skip it",
+				slog.Warn("embed: mined observation kept without a vector; search will skip it",
 					"session", session, "lens", m.Lenses[li].Lens, "obs", m.Lenses[li].Mined[i].ID, "err", err)
 			}
 		}

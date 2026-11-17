@@ -251,10 +251,10 @@ func (r *rawIO) RawPruneStats(cutoff string) (sessions, records int, err error) 
 // i.e. the rows PruneSessionsBefore must reclaim when a session's L0 is purged.
 //
 // It is an explicit ALLOWLIST rather than a positional match on the key, because `meta` also
-// holds namespaces of the same shape that key on a LENS (review_rowid, profile_sig,
-// emerge_seen). A positional predicate cannot tell them apart, and deleting the wrong one is
-// silently destructive — a wiped review watermark re-folds the whole L1 history into L2 —
-// whereas a namespace this list forgets merely leaks one dead row. Fail safe, not destructive.
+// holds namespaces of the same shape that key on a LENS (review_rowid, profile_sig). A positional
+// predicate cannot tell them apart, and deleting the wrong one is silently destructive — a wiped
+// review watermark re-folds the whole L1 history into L2 — whereas a namespace this list forgets
+// merely leaks one dead row. Fail safe, not destructive.
 //
 // The store OWNS these spellings and every producer (the codex and opencode importers, `witness
 // ingest`) builds its key from the constants below, so a rename moves both sides at once. They
@@ -337,13 +337,12 @@ func (r *rawIO) PruneSessionsBefore(cutoff string) (sessions, records int, err e
 		// never-ingested, so the next `witness ingest` re-appends every already-durable record.
 		//
 		// The NAMESPACE axis: match only the per-session namespaces, by name. A positional
-		// `substr(key, instr(key,':')+1) = ?` is namespace-BLIND, and three live namespaces
-		// share the same "<ns>:<x>" shape while keying on a LENS: review_rowid:<lens>,
-		// profile_sig:<lens>, emerge_seen:<lens>:<sig>. Nothing constrains a session id to a
-		// UUID (capture takes it from the hook payload, ingest from the caller), so a session
-		// named like a lens wiped that lens's review watermark — re-folding the entire L1
-		// history into L2 on the next review. Verified: pruning a session "default" deleted
-		// review_rowid:default and profile_sig:default.
+		// `substr(key, instr(key,':')+1) = ?` is namespace-BLIND, and live namespaces share the
+		// same "<ns>:<x>" shape while keying on a LENS (review_rowid:<lens>, profile_sig:<lens>).
+		// Nothing constrains a session id to a UUID (capture takes it from the hook payload,
+		// ingest from the caller), so a session named like a lens wiped that lens's review
+		// watermark — re-folding the entire L1 history into L2 on the next review. Verified:
+		// pruning a session "default" deleted review_rowid:default and profile_sig:default.
 		//
 		// Adding a per-session namespace means adding it here. That coupling is the point: an
 		// allowlist fails safe (a leaked row) where a positional match fails destructively.

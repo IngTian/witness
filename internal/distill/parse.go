@@ -3,8 +3,6 @@
 //   - worker.go, drain.go — MINE (L0→L1): per session, each enabled lens's extract prompt
 //     turns new raw turns into observations. Mining runs in parallel; one goroutine commits.
 //   - reviewer.go — REVIEW (L1→L2): folds a lens's new observations into bi-temporal facets.
-//   - emergent.go — the long-arc pass (`worker review --full`): clusters a lens's history
-//     for arcs no single fold could see, and merges verified ones through the same path.
 //   - compact.go, claim.go — maintenance, run only by `witness compact`: merge or retire
 //     facets, and write each facet's short claim, which the review reads instead of its prose.
 //   - summarize.go, sources.go — L4: the per-lens and unified portraits, and the links from

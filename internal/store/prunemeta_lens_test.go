@@ -9,17 +9,16 @@ import (
 //
 // PruneSessionsBefore reaps orphaned per-SESSION meta ("<namespace>:<session>", today
 // opencode_import_keys / file_import_keys) by matching everything after the first colon against
-// the session id. That predicate is namespace-BLIND: three live namespaces share the same
-// `<ns>:<x>` shape but key on a LENS, not a session — review_rowid:<lens> (config.go),
-// profile_sig:<lens> (distill/summarize.go) and emerge_seen:<lens>:<sig> (distill/emergent.go).
-// So a session whose id happens to equal a lens name collides with all three.
+// the session id. That predicate is namespace-BLIND: per-LENS namespaces share the same
+// `<ns>:<x>` shape but key on a LENS, not a session — review_rowid:<lens> (config.go) and
+// profile_sig:<lens> (distill/summarize.go). So a session whose id happens to equal a lens name
+// collides with them.
 //
 // Why such an id is reachable: `witness capture` takes the session id from the hook payload and
 // `witness ingest` lets the caller supply one; nothing constrains either to a UUID. The damage is
 // invisible and large — deleting review_rowid:<lens> resets that lens's review watermark to zero,
 // so the next review re-folds the ENTIRE L1 history into L2 (duplicate facet assertions across
-// the whole archive); losing profile_sig forces a full profile regeneration; losing emerge_seen
-// re-proposes every long arc the user already dismissed.
+// the whole archive), and losing profile_sig forces a full profile regeneration.
 func TestPruneSessionsBeforeKeepsPerLensMetaRows(t *testing.T) {
 	s := tempStore(t)
 
@@ -31,11 +30,10 @@ func TestPruneSessionsBeforeKeepsPerLensMetaRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The three per-LENS keys, which must SURVIVE.
+	// The per-LENS keys, which must SURVIVE.
 	perLens := map[string]string{
-		"review_rowid:" + lens:          "579",
-		"profile_sig:" + lens:           "abc123",
-		"emerge_seen:" + lens + ":sig1": "1",
+		"review_rowid:" + lens: "579",
+		"profile_sig:" + lens:  "abc123",
 	}
 	for k, v := range perLens {
 		if err := s.SetMetaString(k, v); err != nil {

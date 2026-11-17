@@ -306,42 +306,6 @@ func TestApplyFacetLogsFromTheDecayedConfidence(t *testing.T) {
 	}
 }
 
-// The long-arc pass has no clock (seq 0). A new arc is logged without one; an arc landing on an
-// established facet is logged at the clock that facet KEPT (knownClock), not at 0 — the log
-// must say what the version carries, not what the caller happened to pass.
-func TestEmergentLogsWithKnownClock(t *testing.T) {
-	const key = "abstracts_to_structure"
-	verify := func(context.Context, string, string, string) (string, error) {
-		return `[{"dimension":"thinking","key":"` + key + `","value":"reflexively abstracts","confidence":0.8,"contradicts_prior":false}]`, nil
-	}
-	now := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
-	at := now.Format(time.RFC3339)
-
-	t.Run("new arc", func(t *testing.T) {
-		s := newStore(t)
-		seedArc(t, s, "a", 6, []float32{1, 0, 0})
-		if err := emergentReviewer(s, verify).RunFull(context.Background(), now); err != nil {
-			t.Fatalf("RunFull: %v", err)
-		}
-		assertLog(t, s, []store.ConfidenceEvent{
-			{Lens: "math", Dimension: "thinking", Key: key, At: at, ClockSeq: 0, From: 0, To: 0.8, Kind: store.EventNew},
-		})
-	})
-	t.Run("existing facet", func(t *testing.T) {
-		s := newStore(t)
-		f := openFacet("thinking", key, "reflexively abstracts", 0.5, establishedClock)
-		f.Lens = "math"
-		writeFacets(t, s, f)
-		seedArc(t, s, "a", 6, []float32{1, 0, 0})
-		if err := emergentReviewer(s, verify).RunFull(context.Background(), now); err != nil {
-			t.Fatalf("RunFull: %v", err)
-		}
-		assertLog(t, s, []store.ConfidenceEvent{
-			{Lens: "math", Dimension: "thinking", Key: key, At: at, ClockSeq: establishedClock, From: 0.5, To: 0.6, Kind: store.EventReinforce},
-		})
-	})
-}
-
 // Claims rewrite the profile (WriteFacets is a full replace) but change no confidence, so the
 // claim pass must leave the log exactly as it found it — no rows added, none lost to the replace.
 func TestClaimPassLogsNothing(t *testing.T) {

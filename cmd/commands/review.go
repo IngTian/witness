@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
@@ -20,17 +19,15 @@ func autoClaimer(st *store.Store, cfg store.Config, run distill.MineFunc, runFor
 	return &distill.Claimer{Store: st, Config: cfg, Runner: run, RunnerFor: runFor, MaxBatches: distill.AutoClaimBatches}
 }
 
-// review.go holds cmdReviewFull and forceReviewTapped: the implementation functions for the
+// review.go holds cmdReview and forceReviewTapped: the implementation functions for the
 // unconditional review pass. The old top-level `review` command was removed from the
 // visible front door (#102); the functionality migrated to the `worker review`
 // subcommand, but the implementation functions remain here, called by worker_group.go
 // and lens.go (backfill's forced review).
 
-// cmdReviewFull runs the ordinary review; with full=true it ALSO runs the S3 emergent
-// long-arc retrieval pass (cluster L1 → verify → merge) in the same locked runner
-// session (issue #16). The emergent pass is additive: it never advances the review
-// watermark, so it composes with the ordinary review without disturbing S2's fold.
-func cmdReviewFull(full bool) error {
+// cmdReview runs the unconditional review (forceReviewTapped) behind `witness worker
+// review` and prints its result.
+func cmdReview() error {
 	st, err := store.Open()
 	if err != nil {
 		return err
@@ -38,7 +35,7 @@ func cmdReviewFull(full bool) error {
 	defer st.Close()
 	defer setupLogging(st)()
 	tap := &causeTap{}
-	ran, profErr, err := forceReviewTapped(st, full, tap)
+	ran, profErr, err := forceReviewTapped(st, tap)
 	if err != nil {
 		return err
 	}
@@ -47,9 +44,6 @@ func cmdReviewFull(full bool) error {
 		return nil
 	}
 	done := "review complete"
-	if full {
-		done += ", with the emergent long-arc pass"
-	}
 	if profErr != nil {
 		// The facets landed; only the narrative did not. Say so rather than "profile regenerated".
 		fmt.Println(warnGlyph() + " " + done + " — the profile was NOT regenerated (the previous one is kept)")
@@ -92,12 +86,12 @@ func printProfileCause(profErr error) {
 // regenerates the L4 profiles — the unconditional review `worker review` exposes, shared with
 // `lens backfill` (a backfill re-mines a lens's observations and must force a review afterwards
 // to keep its facets from drifting — and `--fresh` DELETES the facets outright; the periodic
-// ReviewDue triggers may not fire on a small archive). full=true adds the S3 emergent long-arc
-// pass. It notes the first model error in tap — a failed fold names it under its headline — and
-// returns the profile regeneration's own failure (profErr) separately: the review's facets have
-// landed by then, so it is not the review failing, and every caller must report it. ran=false
-// means another worker holds the lock. The caller owns st and setupLogging.
-func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, profErr, err error) {
+// ReviewDue triggers may not fire on a small archive). It notes the first model error in tap —
+// a failed fold names it under its headline — and returns the profile regeneration's own failure
+// (profErr) separately: the review's facets have landed by then, so it is not the review failing,
+// and every caller must report it. ran=false means another worker holds the lock. The caller owns
+// st and setupLogging.
+func forceReviewTapped(st *store.Store, tap *causeTap) (ran bool, profErr, err error) {
 	// Hold the same single-consumer lock the worker uses so foreground review and a
 	// background drain cannot race facet/profile commits or open duplicate runner sets.
 	unlock, ok := st.WorkerLock()
@@ -135,20 +129,6 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 		}
 		return false, nil, err
 	}
-	// S3 emergent long-arc pass (issue #16): after the ordinary fold, cluster L1 and
-	// verify candidate arcs the fold is blind to, merging accepted ones into L2. Additive
-	// and idempotent (its own cluster-signature state); it never advances the review
-	// watermark. Runs in the SAME locked runner session so it can't race a background
-	// worker. Best-effort: a failure here must not undo the review that already landed.
-	if full {
-		arcs := &phaseProgress{start: startProgress}
-		er := &distill.EmergentReviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: runFor, Progress: arcs.update}
-		err := er.RunFull(ctx, time.Now())
-		arcs.finish()
-		if err != nil {
-			slog.Error("emergent long-arc pass failed (ordinary review still applied)", "err", err)
-		}
-	}
 	// The same spinner, and message, as the read-time regeneration (profilepull.go).
 	sp := startSpinner("distilling the profile from the latest facets…")
 	profErr = regenerateProfile(ctx, st, cfg, lenses, runFn, runFor)
@@ -161,9 +141,9 @@ func forceReviewTapped(st *store.Store, full bool, tap *causeTap) (ran bool, pro
 
 // phaseProgress draws each phase of a pass — a new Where, or a new set of stages — on a fresh
 // progress line. A line estimates time left from its own start, so one line carried across lenses
-// would divide the first lens's hours by the second lens's count, and one carried from clustering
-// (minutes of CPU per step) into verifying (one model call per step) would price every call at a
-// clustering step. Not safe for concurrent use: both review passes are sequential.
+// would divide the first lens's hours by the second lens's count, and one carried from the claim
+// pass into the fold would estimate the fold's windows from the claims' pace. Not safe for
+// concurrent use: a review is sequential.
 type phaseProgress struct {
 	start func() *progressLine // startProgress; a test supplies its own
 	cur   *progressLine

@@ -96,9 +96,9 @@ func readFacetsFrom(ctx context.Context, q rowQuerier, activeOnly bool) ([]Facet
 }
 
 // WriteFacets atomically replaces the L2 profile. Its callers, directly or through
-// WriteFacetsLogged, are the reviewer, the long-arc pass, the claim pass and compaction; the
-// merge writes through writeFacetsTx. The whole rewrite runs in one transaction;
-// foreign_keys=ON cascades the old versions when their facets are deleted.
+// WriteFacetsLogged, are the reviewer, the claim pass and compaction; the merge writes through
+// writeFacetsTx. The whole rewrite runs in one transaction; foreign_keys=ON cascades the old
+// versions when their facets are deleted.
 //
 // It is a REPLACE, so the slice must be the complete profile — every lens, archived facets
 // included. Hand it the output of ReadActiveFacets and it will delete every archived facet and

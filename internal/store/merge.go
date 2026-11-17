@@ -107,7 +107,7 @@ type MergeReport struct {
 	Sessions     MergeSessions
 	RawRows      int
 	ProgressRows int // mining-progress rows added or upgraded
-	MetaKeys     int // importer keys and emergent marks written
+	MetaKeys     int // importer keys written
 	Observations MergeObservations
 	Staged       int
 	Facets       MergeFacets
@@ -696,11 +696,10 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 	return nil
 }
 
-// mergeL0 merges transcripts, session metadata, mining progress, importer keys, the staged buffer
-// and the content-keyed emergent marks.
+// mergeL0 merges transcripts, session metadata, mining progress, importer keys and the staged buffer.
 //
-// The meta table is an ALLOW-list: only the per-session importer keys and emerge_seen marks cross
-// over. Everything else there is the other machine's state, and copying it does damage:
+// The meta table is an ALLOW-list: only the per-session importer keys cross over. Everything else
+// there is the other machine's state, and copying it does damage:
 //
 //	review_rowid:*                 recomputed by mergeObservations; incoming values are only read
 //	review_ts, review_obs_rowid    this archive's own review trigger
@@ -831,15 +830,6 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 	n, _ = res.RowsAffected()
 	rep.Staged = int(n)
 
-	// emerge_seen marks are keyed by a hash of member obs_ids — content, not position — so a
-	// union is exact. Dropping one would only cost a re-verification.
-	res, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.meta(key, value)
-		SELECT key, value FROM inc.meta WHERE key LIKE 'emerge\_seen:%' ESCAPE '\'`)
-	if err != nil {
-		return err
-	}
-	n, _ = res.RowsAffected()
-	rep.MetaKeys += int(n)
 	return nil
 }
 

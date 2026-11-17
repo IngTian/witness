@@ -14,17 +14,12 @@ import (
 // exercised (and, at the Phase-B seam, mocked) on its own.
 type metaKV struct{ db *sql.DB }
 
-// Per-lens meta keys distill writes and the store DELETES (DeleteLensData). The store owns the
-// spelling so the two sides cannot drift: a renamed prefix used to pass every test while
-// `backfill --fresh` stopped clearing it, so the emergent pass skipped re-verifying arcs whose
-// facets it had just deleted.
+// Per-lens meta key distill writes and the store DELETES (DeleteLensData). The store owns the
+// spelling so the two sides cannot drift: a renamed literal would pass every test while
+// `backfill --fresh` silently stopped clearing it.
 //
 // ProfileSigKey holds the content signature of the last summary written for a lens (#73-S5).
-// EmergeSeenKey records that one emergent cluster (sig) was already verified; EmergeSeenPrefix is
-// every such key for a lens, ending in ':' so "math" never matches "mathsy".
-func ProfileSigKey(lens string) string      { return "profile_sig:" + lens }
-func EmergeSeenPrefix(lens string) string   { return "emerge_seen:" + lens + ":" }
-func EmergeSeenKey(lens, sig string) string { return EmergeSeenPrefix(lens) + sig }
+func ProfileSigKey(lens string) string { return "profile_sig:" + lens }
 
 // CompactBaselineKey holds a lens's active facet count as `witness compact` left it, so doctor
 // and status can say when the lens has grown enough to compact again. Compaction stays manual;

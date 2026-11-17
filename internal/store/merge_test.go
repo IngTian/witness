@@ -577,11 +577,13 @@ func TestMergeDryRunWritesNothingAndMatchesTheApply(t *testing.T) {
 	}
 }
 
-// Only the per-session importer keys and emerge_seen marks cross over. Everything else in the
-// other archive's meta is the other machine's state, and copying it does damage.
+// Only the per-session importer keys cross over. Everything else in the other archive's meta is
+// the other machine's state, and copying it does damage. `emerge_seen:*` rows are what the
+// removed long-arc pass left: inert, so ours stay and theirs are not copied.
 func TestMergeLeavesTheOtherMachinesStateBehind(t *testing.T) {
 	base, inc := newArch(t), newArch(t)
 	_ = base.st.SetMetaString("runner_bound", "")
+	_ = base.st.SetMetaString("emerge_seen:default:ours", "1")
 	for k, v := range map[string]string{
 		"runner_bound":                  "1",
 		"opencode_sync_time_updated_ms": "99999999999",
@@ -596,15 +598,18 @@ func TestMergeLeavesTheOtherMachinesStateBehind(t *testing.T) {
 		_ = inc.st.SetMetaString(k, v)
 	}
 	inc.raw("s2", "user:x") // something to merge
-	base.merge(inc.export(), true)
+	rep := base.merge(inc.export(), true)
 	for _, k := range []string{"runner_bound", "opencode_sync_time_updated_ms", "worker_stop_requested", "worker_pid",
-		"profile_sig:default", "review_ts", "review_retry_after", "review_retries"} {
+		"profile_sig:default", "review_ts", "emerge_seen:default:abc", "review_retry_after", "review_retries"} {
 		if got := base.st.MetaString(k); got != "" {
 			t.Errorf("%s crossed over from the other machine (%q)", k, got)
 		}
 	}
-	if base.st.MetaString("emerge_seen:default:abc") != "1" {
-		t.Error("content-keyed emerge_seen marks should be unioned")
+	if got := base.st.MetaString("emerge_seen:default:ours"); got != "1" {
+		t.Errorf("merge touched this archive's own leftover emerge_seen row: %q", got)
+	}
+	if rep.MetaKeys != 0 {
+		t.Errorf("MetaKeys = %d, want 0: only importer keys count, and the incoming archive has none", rep.MetaKeys)
 	}
 }
 

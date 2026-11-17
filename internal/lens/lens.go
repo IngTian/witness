@@ -13,7 +13,6 @@
 //	<name>/lens.json    structured settings (name, dimensions, per-lens models)
 //	<name>/extract.md   the mining (L0→L1) prompt — read whole, no parsing
 //	<name>/review.md    the review (L1→L2) prompt — read whole, no parsing
-//	<name>/emerge.md    OPTIONAL long-arc verify prompt; absent → review.md is used
 //
 // Settings live in JSON (mutated safely by `witness config set --lens` via a map
 // round-trip that keeps every other key — no text surgery, unlike the old `# key:`
@@ -52,7 +51,6 @@ type Lens struct {
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
-	Emerge       string // prompt for the S3 long-arc VERIFY step -> facets; "" = fall back to Review
 	Runner       string // per-lens runtime ("claude"/"opencode"); "" = default runner
 	ExtractModel string // per-lens override for the mine (L0→L1) model; "" = runner default
 	ReviewModel  string // per-lens override for the review (L1→L2) model; "" = runner default
@@ -77,7 +75,6 @@ const (
 	ConfigFile  = store.LensConfigFile
 	ExtractFile = store.LensExtractFile
 	ReviewFile  = store.LensReviewFile
-	EmergeFile  = store.LensEmergeFile // S3 long-arc verify prompt; OPTIONAL (absent → fall back to review.md)
 )
 
 // promptsDir resolves the bundled prompts directory. Resolution (bundle.Dir):
@@ -190,23 +187,17 @@ func LoadResolvePrompts() (lensPrompt, unifiedPrompt string, err error) {
 // silently empty from a mis-parse: a missing extract.md is a hard, named error. review.md
 // is allowed to be absent/empty (a lens may mine without a custom review prompt), but
 // extract.md is required — it is the mining prompt, the reason the lens exists.
-func readPromptPair(dir string) (extract, review, emerge string, err error) {
+func readPromptPair(dir string) (extract, review string, err error) {
 	e, err := store.ReadLensExtract(dir)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	// review.md may not exist; treat absence as an empty review prompt rather than an error.
 	r, rerr := os.ReadFile(filepath.Join(dir, ReviewFile))
 	if rerr != nil && !os.IsNotExist(rerr) {
-		return "", "", "", fmt.Errorf("read %s: %w", ReviewFile, rerr)
+		return "", "", fmt.Errorf("read %s: %w", ReviewFile, rerr)
 	}
-	// emerge.md is OPTIONAL (S3 long-arc verify); absence → empty, and the reviewer falls
-	// back to the review prompt.
-	m, merr := os.ReadFile(filepath.Join(dir, EmergeFile))
-	if merr != nil && !os.IsNotExist(merr) {
-		return "", "", "", fmt.Errorf("read %s: %w", EmergeFile, merr)
-	}
-	return string(e), string(r), string(m), nil
+	return string(e), string(r), nil
 }
 
 // loadDir loads a lens from a directory in the new format: lens.json (settings) +
@@ -216,7 +207,7 @@ func readPromptPair(dir string) (extract, review, emerge string, err error) {
 // lens.md (the pre-#75 sectioned format) is rejected with an actionable error rather
 // than silently mis-loaded: the format changed, and re-registering is the fix.
 func loadDir(dir, fallbackName string) (*Lens, error) {
-	extract, review, emerge, err := readPromptPair(dir)
+	extract, review, err := readPromptPair(dir)
 	if err != nil {
 		// Distinguish "old sectioned lens.md, no new prompt files" from a genuinely broken
 		// directory so the message tells the user exactly what to do.
@@ -233,7 +224,7 @@ func loadDir(dir, fallbackName string) (*Lens, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Lens{Name: name, Extract: extract, Review: review, Emerge: emerge}
+	l := &Lens{Name: name, Extract: extract, Review: review}
 	// lens.json is optional; when present it supplies dimensions/runner/models.
 	if data, jerr := os.ReadFile(filepath.Join(dir, ConfigFile)); jerr == nil {
 		var cfg LensConfig

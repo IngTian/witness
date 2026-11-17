@@ -64,14 +64,13 @@ func (r *lensReg) lensRegistryLock() (unlock func(), ok bool) {
 
 // The lens-directory format (issue #75), defined ONCE. The store is the bottom of the stack,
 // so it owns the format and internal/lens aliases it. The registry used to keep its own
-// literal copies "in sync by comment", and merge a third list: that drift is how emerge.md,
-// which the loader reads, went uncopied by RegisterLens from v0.6.0 to v0.7.3 — the lens
-// silently lost its long-arc verify prompt and fell back to review.md with no warning.
+// literal copies "in sync by comment", and merge a third list: that drift is how an optional
+// prompt the loader read went uncopied by RegisterLens from v0.6.0 to v0.7.3, and the lens
+// silently fell back to review.md.
 const (
 	LensConfigFile  = "lens.json"  // settings; optional
 	LensExtractFile = "extract.md" // the mining prompt; the one required file
 	LensReviewFile  = "review.md"  // the review prompt; optional
-	LensEmergeFile  = "emerge.md"  // the S3 long-arc verify prompt; optional (absent → review.md)
 )
 
 // LensFile is one file of a lens directory.
@@ -87,7 +86,6 @@ var LensFiles = []LensFile{
 	{LensConfigFile, false},
 	{LensExtractFile, true},
 	{LensReviewFile, false},
-	{LensEmergeFile, false},
 }
 
 // The lens.json keys. internal/lens's LensConfig struct tags must spell these (struct tags
@@ -273,9 +271,9 @@ func (r *lensReg) CheckLensRegistration(name, srcDir string) error {
 
 // RegisterLens copies a lens definition DIRECTORY into the registry under `name`,
 // creating/overwriting <root>/lenses/<name>/ with the source's LensFiles: extract.md
-// (required — the mining prompt) and the optional lens.json, review.md and emerge.md. srcDir
-// is the user's authored directory (issue #75: a lens is a directory, not one parsed file);
-// only the LensFiles are copied, so stray files in the source dir are ignored.
+// (required — the mining prompt) and the optional lens.json and review.md. srcDir is the user's
+// authored directory (issue #75: a lens is a directory, not one parsed file); only the LensFiles
+// are copied, so stray files in the source dir are ignored.
 //
 // It is lossless under SELF-REGISTER (srcDir == the registry dir, i.e. the user edited
 // the registered copy in place and re-registered it): ALL source files are read into

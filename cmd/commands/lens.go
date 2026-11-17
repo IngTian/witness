@@ -522,7 +522,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	fmt.Println(dim("re-mine complete; reviewing to refresh the lens's facets + profile…"))
 	// A fresh tap: a failed review's cause must be the review's, not an error the drain survived.
 	rtap := &causeTap{}
-	ranReview, profErr, err := forceReviewTapped(st2, false, rtap)
+	ranReview, profErr, err := forceReviewTapped(st2, rtap)
 	if err != nil {
 		return fmt.Errorf("backfill %q: review failed; observations were re-mined but facets/profile are not refreshed (run `witness worker review`): %w", name, err)
 	}
@@ -763,7 +763,7 @@ func defaultLensStale(st *store.Store) bool {
 	if !slices.Contains(st.RegisteredLenses(), store.LensDefault) || !slices.Contains(st.LoadConfig().EnabledLenses, store.LensDefault) {
 		return false
 	}
-	for _, f := range []string{lens.ExtractFile, lens.ReviewFile, lens.EmergeFile} {
+	for _, f := range []string{lens.ExtractFile, lens.ReviewFile} {
 		shipped, err := os.ReadFile(filepath.Join(lens.DefaultSeedDir(), f))
 		if err != nil {
 			continue

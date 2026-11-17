@@ -12,10 +12,9 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// Every file the loader reads from a lens directory must be in store.LensFiles, because that
-// list is what RegisterLens copies and merge compares. A file the loader reads but the list
-// omits is silently dropped on register — exactly how emerge.md was lost from v0.6.0 to
-// v0.7.3. A source scan, because the property is "no other read exists".
+// Every file the loader reads from a lens directory must be in store.LensFiles, because that is
+// exactly how an optional prompt file was lost from v0.6.0 to v0.7.3. A source scan, because the
+// property is "no other read exists".
 func TestLoadDirReadsOnlyLensFiles(t *testing.T) {
 	src, err := os.ReadFile("lens.go")
 	if err != nil {
@@ -27,7 +26,7 @@ func TestLoadDirReadsOnlyLensFiles(t *testing.T) {
 	}
 	// The aliases lens.go may name a file by. A new one fails below until it is added here
 	// AND to store.LensFiles.
-	aliases := map[string]string{"ConfigFile": ConfigFile, "ExtractFile": ExtractFile, "ReviewFile": ReviewFile, "EmergeFile": EmergeFile}
+	aliases := map[string]string{"ConfigFile": ConfigFile, "ExtractFile": ExtractFile, "ReviewFile": ReviewFile}
 	reads := regexp.MustCompile(`filepath\.Join\(dir, ([^)]+)\)`).FindAllStringSubmatch(string(src), -1)
 	if len(reads) == 0 {
 		t.Fatal("found no lens-directory reads in lens.go — the scan is vacuous")

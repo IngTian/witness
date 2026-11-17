@@ -170,11 +170,12 @@ func TestDefaultLensPromptsDifferFromTheBundle(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, true},
-		{"emerge.md missing", func(t *testing.T, _ *store.Store, dir string) {
-			if err := os.Remove(filepath.Join(dir, "emerge.md")); err != nil {
+		// Archives seeded before the long-arc pass was removed still hold emerge.md; nothing reads it.
+		{"leftover emerge.md from an older seed", func(t *testing.T, _ *store.Store, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "emerge.md"), []byte("an older seed\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, true},
+		}, false},
 		{"no default lens", func(t *testing.T, st *store.Store, _ string) {
 			if err := st.DeregisterLens(store.LensDefault); err != nil {
 				t.Fatal(err)

@@ -174,20 +174,6 @@ type ReviewStore interface {
 	WriteFacetsPruned(facets []Facet, events []ConfidenceEvent, pruned []string) error
 }
 
-// EmergentStore is the surface the S3 long-arc retrieval pass drives (issue #16): it
-// reads embedding-decoded observations (clustering needs the vectors, unlike the fold's
-// stripped reads), reads/writes facets (merge accepted arcs via the same bi-temporal
-// path), and uses meta-KV for its OWN idempotency state (cluster signatures) — it does
-// NOT share the review watermark (ReviewStore), by design: the emergent pass must never
-// advance review_rowid (§5c). Composed from existing interfaces; *Store satisfies it by
-// promotion, so WriteFacetsLogged is the only write method.
-type EmergentStore interface {
-	ObservationReader // ReadObservations(lens) — embeddings decoded
-	MetaKV            // MetaString / SetMetaString — signature state
-	ReadFacets() ([]Facet, error)
-	WriteFacetsLogged(facets []Facet, events []ConfidenceEvent) error
-}
-
 // CompactStore is the surface the Compactor drives: read the WHOLE profile (archived facets
 // included — WriteFacets is a replace, so a writer that reads only the active set would delete
 // the history) and write it back. Includes the unlogged WriteFacets for the Claimer (the final
@@ -250,7 +236,6 @@ var (
 	_ MCPStore              = (*Store)(nil)
 	_ Queue                 = (*Store)(nil)
 	_ ReviewStore           = (*Store)(nil)
-	_ EmergentStore         = (*Store)(nil)
 	_ SummaryStore          = (*Store)(nil)
 	_ ResolverStore         = (*Store)(nil)
 	_ ObservationReader     = (*Store)(nil)

@@ -457,11 +457,6 @@ func (q *queue) SessionsWithNoUsableTimestamp() int {
 // It also clears the lens's DERIVED bookkeeping in `meta`, in the same transaction. Those
 // keys are caches ABOUT the data being deleted, so leaving them behind makes a rebuilt
 // lens look already-processed:
-//   - emerge_seen:<lens>:<sig> — "this emergent cluster was already verified". The
-//     signature hashes the member obs_ids, and obs_id is sha1(session|lens|text), a pure
-//     CONTENT hash — so a re-mine of unchanged text regenerates identical ids and thus an
-//     identical signature. The emergent pass would skip re-verifying an arc whose facets
-//     --fresh just deleted, and nothing would ever restore them.
 //   - profile_sig:<lens> — "the L4 narrative is current for this facet set", which would
 //     otherwise vouch for a profile derived from facets that no longer exist.
 //
@@ -493,30 +488,14 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 	if _, err = tx.Exec(`DELETE FROM confidence_log WHERE lens = ?`, lens); err != nil {
 		return 0, 0, err
 	}
-	// Derived caches about the data just deleted. Exact key for profile_sig; prefix match
-	// for emerge_seen (one row per cluster signature). A sibling lens is untouched — the
-	// prefix ends with ':' so "emerge_seen:math:" can never match "emerge_seen:mathsy:".
+	// Derived caches about the data just deleted, by exact key; a sibling lens is untouched.
 	if _, err = tx.Exec(`DELETE FROM meta WHERE key IN (?, ?)`, ProfileSigKey(lens), CompactBaselineKey(lens)); err != nil {
-		return 0, 0, err
-	}
-	if _, err = tx.Exec(
-		`DELETE FROM meta WHERE key LIKE ? ESCAPE '\'`, escapeMetaLike(EmergeSeenPrefix(lens))+"%"); err != nil {
 		return 0, 0, err
 	}
 	if err = tx.Commit(); err != nil {
 		return 0, 0, err
 	}
 	return int(no), int(nf), nil
-}
-
-// escapeMetaLike escapes the LIKE wildcards in a literal meta-key prefix so a lens name
-// containing '%' or '_' (both legal in a lens name) matches literally instead of acting
-// as a wildcard — '_' in particular would otherwise match ANY character and could reach a
-// sibling lens's rows.
-func escapeMetaLike(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, "%", `\%`)
-	return strings.ReplaceAll(s, "_", `\_`)
 }
 
 // NextBackoffAttempt returns the earliest future retry time among ACTIVE lenses, if

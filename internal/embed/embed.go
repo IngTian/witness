@@ -32,10 +32,9 @@ const (
 	// revision 614241f (internal/model; the deleted npm model.js pinned it too), a "query: " prefix
 	// on every input, masked mean-pool, L2-normalize, maxLen 512 tokens. Every stored L1 vector
 	// was made under it and nothing records that. Changing any part needs a re-embed of all of
-	// L1; merge.go copies embedding blobs verbatim between archives, so both sides must agree;
-	// new vectors re-cluster, so every long-arc component gets a new signature and is
-	// re-verified (model calls); and vector.Search ranks a row of another dimension at 0
-	// (Cosine's length guard) instead of failing. Add a schema stamp when an upgrade is planned.
+	// L1; merge.go copies embedding blobs verbatim between archives, so both sides must agree; and
+	// vector.Search ranks a row of another dimension at 0 (Cosine's length guard) instead of
+	// failing. Add a schema stamp when an upgrade is planned.
 	Dim               = 384 // e5-small hidden size
 	bosID             = 0   // XLM-R <s>
 	eosID             = 2   // XLM-R </s>

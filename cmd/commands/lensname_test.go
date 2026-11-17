@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/IngTian/witness/internal/platform"
@@ -9,8 +8,8 @@ import (
 )
 
 // A lens registered as corpus-example mines as "regime" (its lens.json name). Every command takes
-// the registered name, so each one must map it to the mined name before touching data: these
-// two used the registered name as given, and so refused or found nothing.
+// the registered name, so each one must map it to the mined name before touching data: compact
+// used the registered name as given, and so refused.
 
 // compact --lens corpus-example said "not enabled" and exited 1 for an enabled lens.
 func TestCompactTakesTheRegisteredName(t *testing.T) {
@@ -41,22 +40,6 @@ func TestCompactTakesTheRegisteredName(t *testing.T) {
 	}
 	if a, ar := st.LensFacetCounts("regime"); a != 1 || ar != 2 {
 		t.Fatalf("the plan must run over the lens's facets: %d active, %d archived\n%s", a, ar, out)
-	}
-}
-
-// worker candidates corpus-example reported "0 observations" for a lens that had them.
-func TestCandidatesTakesTheRegisteredName(t *testing.T) {
-	st := readFixture(t)
-	registerRenamedLens(t, st, "corpus-example", "regime")
-	if err := st.AppendObservations([]store.Observation{
-		{ID: "o1", Session: "s1", Lens: "regime", Dimension: "regimes", Observation: "one"},
-		{ID: "o2", Session: "s2", Lens: "regime", Dimension: "regimes", Observation: "two"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	out, _, err := captureBoth(t, func() error { return cmdCandidates("corpus-example") })
-	if err != nil || !strings.Contains(out, "lens corpus-example: 2 observations") {
-		t.Fatalf("candidates must cluster the lens's own observations (err %v):\n%s", err, out)
 	}
 }
 

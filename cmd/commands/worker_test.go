@@ -781,7 +781,7 @@ func TestForegroundReviewClearsTheSourcesBackoff(t *testing.T) {
 	if err := st.SetMetaString("sources_retry_after", time.Now().Add(6*time.Hour).UTC().Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
-	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+	if ran, _, err := forceReviewTapped(st, &causeTap{}); err != nil || !ran {
 		t.Fatalf("review: ran=%v err=%v", ran, err)
 	}
 	if got := st.MetaString("sources_retry_after"); got != "" {
@@ -798,7 +798,7 @@ func TestForegroundReviewIgnoresAndClearsTheReviewBackoff(t *testing.T) {
 	defer st.Close()
 	_ = st.SetReviewRetryAfter(time.Now().Add(6 * time.Hour))
 	_ = st.SetMetaString("review_retries", "3")
-	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+	if ran, _, err := forceReviewTapped(st, &causeTap{}); err != nil || !ran {
 		t.Fatalf("review: ran=%v err=%v", ran, err)
 	}
 	if st.MetaString("review_ts") == "" {

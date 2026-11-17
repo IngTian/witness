@@ -61,7 +61,7 @@ func TestNewerArchiveRefusesEveryDistillationEntryPoint(t *testing.T) {
 		run  func() error
 	}{
 		{"worker run", func() error { _, err := runWorker(false); return err }},
-		{"worker review --full", func() error { return cmdReviewFull(true) }},
+		{"worker review", func() error { return cmdReview() }},
 		{"compact (+ claim pass)", func() error { return cmdCompact(true, "", func(string) bool { return true }) }},
 		{"lens backfill --fresh", withStore(func(st *store.Store) error { return lensBackfill(st, "math", true, true) })},
 		{"profile regeneration", withStore(func(st *store.Store) error { _, err := ensureProfileFresh(st); return err })},

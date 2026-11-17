@@ -73,12 +73,6 @@ the built-in `default` prompts — it doesn't extend them — so each must be **
 including its output JSON schema** (the tool appends the transcript / observations as the user
 message, but injects no schema for you).
 
-**An optional fourth file, `emerge.md`.** `witness worker review --full` also runs a long-arc pass:
-it clusters observations that recur across sessions and asks a judge whether each cluster is a
-pattern the facets have missed. `emerge.md` is that judge's prompt; without it, `review.md` is
-used. The judge gets one cluster at a time and returns one facet in `review.md`'s output shape,
-or `[]` to decline. [`prompts/default/emerge.md`](../prompts/default/emerge.md) is a working one.
-
 Two **complete, copy-paste-ready** lenses ship as starting points. Copy the directory and rewrite the
 dimensions and prose for your domain:
 

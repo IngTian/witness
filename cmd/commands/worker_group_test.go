@@ -25,6 +25,14 @@ func TestWorkerGroupShape(t *testing.T) {
 			t.Errorf("worker missing subcommand %q", want)
 		}
 	}
+	if subs["candidates"] {
+		t.Error("worker candidates is still registered; it went with the long-arc pass")
+	}
+	for _, s := range c.Commands() {
+		if s.Name() == "review" && s.Flags().Lookup("full") != nil {
+			t.Error("worker review still has --full; it went with the long-arc pass")
+		}
+	}
 	// `run` carries the drain flags.
 	var run *cobra.Command
 	for _, s := range c.Commands() {

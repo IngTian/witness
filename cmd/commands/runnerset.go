@@ -57,9 +57,9 @@ type openedRunner struct {
 //
 // The plumbing (store.Config.RunnerModels, a slice) already existed; this task fills it.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
-	// Every model call opens through here (worker, review + emergent, compact + claims, profile
-	// regeneration), so this is the one place to refuse an archive a newer witness wrote — before
-	// a call is paid for, not at the facet write after it (see store.ErrArchiveNewer).
+	// Every model call opens through here (worker, review, compact + claims, profile regeneration),
+	// so this is the one place to refuse an archive a newer witness wrote — before a call is paid
+	// for, not at the facet write after it (see store.ErrArchiveNewer).
 	if err := st.ArchiveNewer(); err != nil {
 		return nil, err
 	}

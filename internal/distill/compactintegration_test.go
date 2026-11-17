@@ -9,9 +9,9 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// Compaction is only worth anything if it STICKS. These cover the three paths that would
-// silently undo it — the review prompt, the review's write-back, and the emergent pass — plus
-// the resurrection rule for a facet that was retired and then earned its way back.
+// Compaction is only worth anything if it STICKS. These cover the two paths that would silently
+// undo it — the review prompt and the review's write-back — plus the resurrection rule for a
+// facet that was retired and then earned its way back.
 
 // If the review prompt shows an archived facet, the model reinforces it, applyFacet reopens it,
 // and the next fold has un-compacted the profile. Nothing would log it.
@@ -153,26 +153,5 @@ func TestRedirectToAMissingSurvivorResurrects(t *testing.T) {
 	got, _ := resolveArchived(byKey, "default", byKey["default|thinking|a"], "default|thinking|a")
 	if !got.Active() || got.MergedInto != "" {
 		t.Errorf("a dangling survivor link should resurrect and clear itself, got %+v", got)
-	}
-}
-
-// An archived facet's citations must not suppress a new candidate arc, or a retirement becomes
-// permanent: the arc could never be re-proposed however much evidence accumulated.
-func TestArchivedFacetsDoNotCoverCandidateArcs(t *testing.T) {
-	members := []store.Observation{{ID: "o1", Lens: "default"}, {ID: "o2", Lens: "default"}}
-	covering := store.Facet{
-		Lens: "default", Dimension: "thinking", Key: "covers",
-		Versions: []store.FacetVersion{{Value: "v", BecauseOf: []string{"o1", "o2"}}},
-	}
-
-	cov, key := bestFacetCoverage(members, []store.Facet{covering}, "default")
-	if cov != 1.0 || key == "" {
-		t.Fatalf("an ACTIVE facet citing both members should fully cover them, got %.2f %q", cov, key)
-	}
-
-	covering.ArchivedAt = "2026-10-02T00:00:00Z"
-	cov, _ = bestFacetCoverage(members, []store.Facet{covering}, "default")
-	if cov != 0 {
-		t.Errorf("an archived facet must not cover an arc, got %.2f", cov)
 	}
 }
