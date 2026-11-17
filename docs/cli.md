@@ -47,8 +47,9 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
   candidate arcs it would verify, with no model call and nothing written.
 - `witness worker review [--full]` — force an L2 review and regenerate L4 profiles from existing
   observations. Review normally runs on its own schedule (`review_every` / `review_poignancy`),
-  so reaching for this by hand is the exception. `--full` also runs the emergent long-arc pass,
-  which nothing runs automatically.
+  so reaching for this by hand is the exception. After a failed review the schedule waits before
+  it tries again (5 min, doubling up to 6 h; the next successful review resets it). This command
+  runs regardless. `--full` also runs the emergent long-arc pass, which nothing runs automatically.
 - `witness lens register|deregister|enable|disable|list` — manage lenses.
 - `witness lens show <name>` — print one lens's settings and a prompt excerpt (`--prompts` prints
   both prompts in full).
@@ -104,7 +105,9 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
   In `doctor --json`'s `config` block, `triage_model` and `distill_model` are the raw config.toml
   fields; `runner`, `mine_model` and `review_model` are what actually runs, each model with a
   `_from` key saying where it came from. An empty model (and `_from`) means none is set, so the
-  runner uses its own default (`doctor` prints "runner default").
+  runner uses its own default (`doctor` prints "runner default"). The human `doctor` output (not
+  `--json`) also warns about any `config.toml` or `lens.json` key witness does not read, e.g.
+  `mine_model`, which is the CLI's name. The files spell it `triage_model` / `extract_model`.
 - `witness model fetch` — download the embedding model (multilingual-e5-small, ~470MB) once, pinned
   to one revision and checked by SHA-256. `install.sh` and `make fetch-model` run it; re-running
   checks the files instead of downloading them again. `WITNESS_ASSETS` picks the directory, and
@@ -120,7 +123,7 @@ you run them: distilling while `auto_distill = false` (`witness worker run`), th
 
 ```toml
 runner           = "claude"   # "claude" (default) or "opencode"
-triage_model     = ""         # MINING (L0 -> L1), once per session; "" = the runner's default
+triage_model     = ""         # MINING (L0 -> L1), once per session; "" = claude -p's default (opencode needs one)
 distill_model    = ""         # REVIEW (L1 -> L2/L4), batched; "" falls back to triage_model
 review_every     = 5          # run the reviewer every N distilled sessions...
 review_poignancy = 30         # ...or sooner once accumulated salience crosses this (0 = off)
@@ -134,10 +137,11 @@ review_max_chars = 16000      # safety ceiling: max observation chars folded in 
 
 Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
 `claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
-`runner = "opencode"`. Leaving both empty is the safe default and what `witness wire` writes;
-note that an empty `triage_model` under the claude runner inherits your *ambient interactive*
-model, which may be heavier than you want for per-session mining, so pinning a light one is
-usually worth it.
+`runner = "opencode"`. Under `runner = "claude"`, leaving both empty is the safe default and what
+`witness wire claude` writes. OpenCode needs a model: `witness wire opencode` asks for one at a
+terminal, else prints `witness config set mine_model <provider/model>` to run. Note that an empty
+`triage_model` under the claude runner inherits your *ambient interactive* model, which may be
+heavier than you want for per-session mining, so pinning a light one is usually worth it.
 
 `chunk_max_chars` and `review_max_chars` are **safety ceilings, not quality dials.** Mining a
 session whole is the best-quality path — splitting it loses insight that spans the session, like a

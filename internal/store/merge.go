@@ -704,6 +704,7 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 //
 //	review_rowid:*                 recomputed by mergeObservations; incoming values are only read
 //	review_ts, review_obs_rowid    this archive's own review trigger
+//	review_retry_after, review_retries  this archive's own failed-review back-off
 //	runner_bound                   flips how the runner is chosen on THIS machine
 //	opencode_sync_time_updated_ms  a cursor into THIS machine's OpenCode db: a copied value makes our
 //	                               own OpenCode history silently skip on the next sync
@@ -1037,10 +1038,12 @@ func currentEvidence(obsTS map[string]string, f *Facet) string {
 	return ""
 }
 
-// rebaseClocks moves one side's decay clocks into the merged archive's seq space. Decay is
-// "observations since last confirmed", measured as head - clock. Each version keeps its distance
-// from its own side's head, PLUS the observations the other side contributes that are newer than
-// THIS VERSION's own evidence: those were real chances to confirm it, and none did.
+// rebaseClocks moves one side's decay clocks into the merged archive's seq space. Decay counts
+// the observations of the facet's own lens above its clock (DecayedConfidence). This keeps each
+// clock's global-seq distance, which that count reads approximately (about the lens's share of
+// it). Each version keeps its distance from its own side's head, PLUS the observations the other
+// side contributes that are newer than THIS VERSION's own evidence: those were real chances to
+// confirm it, and none did.
 //
 // Per version, not per side. Measured against a side's newest row, one late observation on an
 // otherwise idle laptop cancelled thousands of real chances — a June facet sat 1 observation from

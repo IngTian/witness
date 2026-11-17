@@ -145,7 +145,7 @@ func TestCompactionKeepsTheDecayClock(t *testing.T) {
 			// the merged facet must have decayed. With ConfidenceSeq left at 0 it reads back
 			// exactly as stored, forever.
 			later := tc.want + int64(store.FacetDecayHalfLifeObs)
-			if got := cur.DecayedConfidence(later); got >= cur.Confidence {
+			if got := cur.DecayedConfidence(store.ContiguousClock(later)); got >= cur.Confidence {
 				t.Errorf("a compacted facet did not decay: confidence %.2f, one half-life later still %.2f",
 					cur.Confidence, got)
 			}

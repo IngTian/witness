@@ -91,7 +91,7 @@ type Trait struct {
 	Summary   string     `json:"summary"`   // current version's Claim ("" → client says "No short summary yet.")
 	Notes     int        `json:"notes"`     // distinct cited note ids that exist, over ALL versions
 	Arrival   string     `json:"arrival"`   // YYYY-MM-DD (loc) of the earliest cited existing note; else first version's ValidFrom
-	Today     float64    `json:"today"`     // Current().DecayedConfidence(in.HighWater) — what `witness facets` prints
+	Today     float64    `json:"today"`     // Current().DecayedConfidence(in.Clocks[Lens]) — what `witness facets` prints
 	Points    []Point    `json:"points"`    // solid confirmations, ascending
 	Spans     []Span     `json:"spans"`     // dashed "final value of this rewrite" segments, ascending
 	Trend     string     `json:"trend"`     // "up" | "down" | "level" | "only"

@@ -14,7 +14,7 @@ import (
 
 // TestReadViewInputReadsEverything seeds 2 facets (one archived), 3 notes, 4 raw rows across
 // 2 sessions (one file:) and 2 log rows. It asserts counts, the archived facet present,
-// HighWater equal to the max seq, and Log equal to the events written — not to
+// Clocks holding each lens's seqs, and Log equal to the events written — not to
 // ReadConfidenceLog, which shares ReadViewInput's query and so would agree with any bug in it.
 func TestReadViewInputReadsEverything(t *testing.T) {
 	s := tempStore(t)
@@ -111,9 +111,9 @@ func TestReadViewInputReadsEverything(t *testing.T) {
 		t.Error("archived facet not found")
 	}
 
-	// Assert HighWater equals max seq (3)
-	if got, want := in.HighWater, int64(3); got != want {
-		t.Errorf("HighWater = %d, want %d", got, want)
+	// Each lens's decay clock: its own seqs, ascending
+	if want := map[string]LensClock{"default": {1, 2}, "corpus": {3}}; !reflect.DeepEqual(in.Clocks, want) {
+		t.Errorf("Clocks = %v, want %v", in.Clocks, want)
 	}
 
 	// Assert Log is exactly what was written, in insertion order

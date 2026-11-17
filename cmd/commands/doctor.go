@@ -225,6 +225,19 @@ func cmdDoctor(asJSON bool) error {
 			}
 		}
 	}
+	// An ignored key warns below, so a green headline over it would read as "nothing to fix".
+	var ignoredKeys []string
+	for _, k := range st.UnknownConfigKeys() {
+		ignoredKeys = append(ignoredKeys, fmt.Sprintf("config.toml: unknown key %q is ignored", k))
+	}
+	for _, name := range st.RegisteredLenses() {
+		for _, k := range st.UnknownLensKeys(name) {
+			ignoredKeys = append(ignoredKeys, fmt.Sprintf("lens %s: unknown lens.json key %q is ignored", name, k))
+		}
+	}
+	if len(ignoredKeys) > 0 && overall == okGlyph() {
+		overall = warnGlyph()
+	}
 	fmt.Printf("%s  %s\n", overall, title("doctor", tildePath(st.Root), ""))
 	row := func(key, value, note string) { fmt.Println("    " + kvRow(key, value, note)) }
 	// Warnings are a short colored headline; the why and the fix go on the dim lines under it.
@@ -272,6 +285,9 @@ func cmdDoctor(asJSON bool) error {
 	}
 	row("worker", fmt.Sprintf("auto %s · %d parallel · chunking %s", auto, cfg.MineConcurrency, chunkingLabel(cfg.ChunkMaxChars)),
 		"review window "+humanCount(cfg.ReviewMaxChars)+" chars")
+	for _, w := range ignoredKeys {
+		warn(w)
+	}
 	// Surface prose_drift: the mine model returned no JSON observation array on some
 	// pass, so those sessions distilled to zero observations even though they may not be
 	// uneventful. The remedy is a stronger mine model then a re-mine (#57) — of the lens it

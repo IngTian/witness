@@ -3,11 +3,13 @@ package distill
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -332,5 +334,140 @@ func TestReviewerAllLensesSucceedStamps(t *testing.T) {
 	}
 	if got := s.MetaString("review_ts"); got == "" {
 		t.Fatal("review_ts should be stamped after a fully-successful review")
+	}
+}
+
+func TestReviewerFailureBacksOffTheAutomaticGates(t *testing.T) {
+	s := newStore(t)
+	stageObsForReview(t, s, "default")
+	calls, fail := 0, true
+	runner := func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		if fail {
+			return "", errors.New("simulated review timeout")
+		}
+		return facetReply("thinking", "clarity", "improving"), nil
+	}
+	r := &Reviewer{Store: s, Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW-default"}}, Runner: runner}
+	now := time.Now()
+	due := store.Config{ReviewEvery: 999, ReviewPoignancy: 1}
+
+	for i, want := range []time.Duration{5 * time.Minute, 10 * time.Minute} { // backoffDelay(1), backoffDelay(2)
+		before := time.Now()
+		if err := r.Run(context.Background(), now); err == nil {
+			t.Fatalf("run %d: the failure must surface", i+1)
+		}
+		got, _ := time.Parse(time.RFC3339, s.MetaString("review_retry_after"))
+		earliest := before.Add(want).Truncate(time.Second)
+		latest := time.Now().Add(want)
+		if got.Before(earliest) || got.After(latest) {
+			t.Fatalf("run %d: review_retry_after = %v, want between %v and %v", i+1, got, earliest, latest)
+		}
+		if s.ReviewDue(due) {
+			t.Fatalf("run %d: the automatic gate still sees the review due inside its backoff", i+1)
+		}
+	}
+	if v := s.MetaString("review_ts"); v != "" {
+		t.Fatalf("a failed review must not stamp; review_ts = %q", v)
+	}
+	fail, calls = false, 0 // Reviewer.Run (what `worker review` calls) does not consult the backoff
+	if err := r.Run(context.Background(), now); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("a review run inside the backoff made no model call")
+	}
+	if v := s.MetaString("review_retry_after"); v != "" {
+		t.Errorf("a successful review must clear the backoff, left %q", v)
+	}
+	if v := s.MetaString("review_retries"); v != "" {
+		t.Errorf("a successful review must reset the failure count, left %q", v)
+	}
+}
+
+func TestReviewerBackoffAnchorsAtFailureNotStart(t *testing.T) {
+	// A timeout review runs for 20 minutes before failing. backoffDelay(1) is 5 minutes,
+	// so if the backoff anchors at the review's start (the old bug), review_retry_after
+	// is already past when the review fails, and the next hook re-folds immediately.
+	s := newStore(t)
+	stageObsForReview(t, s, "default")
+	runner := func(_ context.Context, _, _, _ string) (string, error) {
+		return "", errors.New("simulated timeout")
+	}
+	r := &Reviewer{Store: s, Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW-default"}}, Runner: runner}
+	// Simulate a review that started 10 minutes ago (longer than backoffDelay(1)).
+	reviewStarted := time.Now().Add(-10 * time.Minute)
+	before := time.Now()
+	if err := r.Run(context.Background(), reviewStarted); err == nil {
+		t.Fatal("the failure must surface")
+	}
+	got, _ := time.Parse(time.RFC3339, s.MetaString("review_retry_after"))
+	// The backoff must be at least before+backoffDelay(1), anchored at the failure.
+	earliest := before.Add(5 * time.Minute).Truncate(time.Second)
+	if got.Before(earliest) {
+		t.Fatalf("review_retry_after = %v, want >= %v (failure time + backoffDelay(1))", got, earliest)
+	}
+}
+
+func TestReviewerInterruptedReviewDoesNotBackOff(t *testing.T) {
+	s := newStore(t)
+	stageObsForReview(t, s, "default")
+	_ = s.SetMetaString("review_retries", "2")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := func(c context.Context, _, _, _ string) (string, error) {
+		cancel()
+		return "", c.Err()
+	} // worker stop mid-fold
+	r := &Reviewer{Store: s, Lenses: []*lens.Lens{{Name: "default", Review: "REVIEW-default"}}, Runner: runner}
+	if err := r.Run(ctx, time.Now()); err == nil {
+		t.Fatal("an interrupted review must still surface its error")
+	}
+	if v := s.MetaString("review_retry_after"); v != "" {
+		t.Errorf("an interrupted review armed the backoff: review_retry_after = %q", v)
+	}
+	if v := s.MetaString("review_retries"); v != "2" {
+		t.Errorf("an interrupted review counted as a failure: review_retries = %q, want 2", v)
+	}
+}
+
+// A free-allowance refusal is paced by cmd's free gate and its wakeup at the reset, so a review
+// that failed only on it must not arm the review backoff too; one real failure beside it must.
+func TestReviewerQuotaRefusalDoesNotBackOff(t *testing.T) {
+	quota := &platform.QuotaExhaustedError{ResetAt: time.Now().Add(7 * time.Hour), Runtime: "opencode"}
+	for _, tc := range []struct {
+		name    string
+		other   error // what the second lens's review returns
+		backoff bool
+	}{
+		{"every lens refused", quota, false},
+		{"one real failure beside it", errors.New("simulated review timeout"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			stageObsForReview(t, s, "default")
+			stageObsForReview(t, s, "other")
+			_ = s.SetMetaString("review_retries", "2")
+			runner := func(_ context.Context, _, sys, _ string) (string, error) {
+				if sys == "REVIEW-other" {
+					return "", tc.other
+				}
+				return "", fmt.Errorf("gate: %w", quota)
+			}
+			r := &Reviewer{Store: s, Runner: runner, Lenses: []*lens.Lens{
+				{Name: "default", Review: "REVIEW-default"}, {Name: "other", Review: "REVIEW-other"},
+			}}
+			if err := r.Run(context.Background(), time.Now()); err == nil {
+				t.Fatal("the failure must still surface")
+			}
+			after, retries := s.MetaString("review_retry_after"), s.MetaString("review_retries")
+			if tc.backoff {
+				if after == "" || retries != "3" {
+					t.Errorf("a real failure must arm the backoff: review_retry_after = %q, review_retries = %q (want 3)", after, retries)
+				}
+			} else if after != "" || retries != "2" {
+				t.Errorf("a quota-only failure armed the backoff: review_retry_after = %q, review_retries = %q (want 2)", after, retries)
+			}
+		})
 	}
 }

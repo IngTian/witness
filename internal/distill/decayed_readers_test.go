@@ -3,9 +3,13 @@ package distill
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -27,6 +31,101 @@ func clockedAt(dim, key, value string, at int64) store.Facet {
 	}
 }
 
+// appendLensObs appends one observation per lens name, in ONE call so their seqs are dense.
+func appendLensObs(t *testing.T, s *store.Store, prefix string, lenses ...string) {
+	t.Helper()
+	obs := make([]store.Observation, len(lenses))
+	for i, l := range lenses {
+		id := prefix + strconv.Itoa(i)
+		obs[i] = store.Observation{ID: id, Lens: l, Observation: "seen " + id}
+	}
+	if err := s.AppendObservations(obs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mathArchive is seqs 1-4501 with math at 1, 4, 7, ..., 4501: a third of the archive. A math
+// facet at 0.90 stamped at seq 1 reads 0.64 on its own clock (1,500 math observations since),
+// 0.45 on default's (3,000), 0.32 on the global one (4,500), and 0.90 on none.
+func mathArchive() []string {
+	return append([]string{"math"}, slices.Repeat([]string{"default", "default", "math"}, 1500)...)
+}
+
+// fakeClocks give that math facet the same readings as mathArchive: math 0.64, default 0.45,
+// and a missing clock 0.90.
+func fakeClocks() map[string]store.LensClock {
+	return map[string]store.LensClock{"math": store.ContiguousClock(1501), "default": store.ContiguousClock(3001)}
+}
+
+// A lens's portrait is written from confidences decayed on that lens's own observations, not
+// on the archive's, of which math holds a third.
+func TestThePortraitDecaysEachLensOnItsOwnClock(t *testing.T) {
+	s := newStore(t)
+	appendLensObs(t, s, "a", mathArchive()...)
+	f := clockedAt("traits", "satisfices", "stops at good enough", 1)
+	f.Lens = "math"
+	if err := s.WriteFacets([]store.Facet{f}); err != nil {
+		t.Fatal(err)
+	}
+	var lensInputs []string
+	run := func(_ context.Context, _, prompt, input string) (string, error) {
+		if prompt == "LENS" {
+			lensInputs = append(lensInputs, input)
+		}
+		return "summary", nil
+	}
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: run}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(lensInputs) != 1 {
+		t.Fatalf("want one per-lens summary call, got %d", len(lensInputs))
+	}
+	if !strings.Contains(lensInputs[0], "(0.64)") {
+		t.Errorf("the math portrait must read 0.64, decayed on math's own observations:\n%s", lensInputs[0])
+	}
+	for _, wrong := range []string{"(0.45)", "(0.32)", "(0.90)"} {
+		if strings.Contains(lensInputs[0], wrong) {
+			t.Errorf("the math portrait reads %s (another lens's clock, the global one, or none):\n%s", wrong, lensInputs[0])
+		}
+	}
+}
+
+// Compaction shows the model, and logs as the From of its write, each facet's confidence on its
+// own lens's clock.
+func TestCompactionDecaysEachLensOnItsOwnClock(t *testing.T) {
+	var facets []store.Facet
+	for _, k := range []string{"a", "b", "c"} {
+		f := clockedAt("thinking", k, "value "+k, 1)
+		f.Lens = "math"
+		facets = append(facets, f)
+	}
+	st := &fakeCompactStore{facets: facets, clocks: fakeClocks()}
+	c := compactor(st, `[{"action":"merge","dimension":"thinking","key":"a","value":"x","absorb":["b","c"],"confidence":0.5,"why":"same"}]`)
+	c.Lenses = []*lens.Lens{{Name: "math", Review: "REVIEW"}}
+	var stage1 string
+	inner := c.Runner
+	c.Runner = func(ctx context.Context, model, prompt, input string) (string, error) {
+		if !strings.Contains(input, "THE TRAIT YOU ARE WRITING") {
+			stage1 = input
+		}
+		return inner(ctx, model, prompt, input)
+	}
+	plans, err := c.Plan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Apply(context.Background(), plans, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stage1, "confidence: 0.64") || strings.Contains(stage1, "confidence: 0.45") || strings.Contains(stage1, "confidence: 0.90") {
+		t.Errorf("stage 1 must show math's own-clock 0.64, not default's 0.45 or the stored 0.90:\n%s", stage1)
+	}
+	if len(st.events) != 1 || st.events[0].From != 0.64 {
+		t.Errorf("the merge must log From 0.64, got %+v", st.events)
+	}
+}
+
 // One half-life after a 0.90 facet was last confirmed, it reads 0.45. Shown 0.90 instead,
 // compaction's model treats a long-uncited facet as the strongest claim in its group, returns
 // about that for the survivor, and Apply gives the survivor the freshest member's clock: a
@@ -39,7 +138,7 @@ func TestCompactionShowsTheModelDecayedConfidence(t *testing.T) {
 			clockedAt("thinking", "b", "value b", confirmedAt),
 			clockedAt("thinking", "c", "value c", confirmedAt),
 		},
-		highWater: confirmedAt + int64(store.FacetDecayHalfLifeObs),
+		clocks: map[string]store.LensClock{"default": store.ContiguousClock(confirmedAt + int64(store.FacetDecayHalfLifeObs))},
 	}
 	var stage1, stage2 string
 	c := compactor(st, `[{"action":"merge","dimension":"thinking","key":"a","value":"x","absorb":["b","c"],"confidence":0.5,"why":"same"}]`)
@@ -86,11 +185,11 @@ func TestPortraitReadsDecayedConfidenceWithoutRegeneratingOnDrift(t *testing.T) 
 	}
 	// One observation, then the facet is confirmed at it; then exactly one half-life more.
 	appendObs(1, 0)
-	hw0, err := s.ObservationHighWater()
+	clock, err := s.LensClock("default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.WriteFacets([]store.Facet{clockedAt("traits", "satisfices", "stops at good enough", hw0)}); err != nil {
+	if err := s.WriteFacets([]store.Facet{clockedAt("traits", "satisfices", "stops at good enough", clock[len(clock)-1])}); err != nil {
 		t.Fatal(err)
 	}
 	appendObs(int(store.FacetDecayHalfLifeObs), 1)

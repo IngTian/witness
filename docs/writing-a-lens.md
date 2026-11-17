@@ -100,7 +100,8 @@ without paying for it on every session — by adding `extract_model` / `review_m
 
 Omit a field (or leave it empty) to ride the default. Since `register` stores a snapshot, edit the
 registered copy under `<witness-data-dir>/lenses/<name>/lens.json` — or edit the source and
-re-register. Verify what a lens resolved to with `witness lens show <name>`.
+re-register. Verify what a lens resolved to with `witness lens show <name>`; `witness doctor`
+names any lens.json key it ignores.
 
 The source directory may live anywhere. As a recommended canonical location, witness keeps the
 registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/` (normally

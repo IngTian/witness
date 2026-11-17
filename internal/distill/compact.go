@@ -159,14 +159,15 @@ type Compactor struct {
 	Progress ProgressFunc
 	prog     compactProgress
 
-	// decaySeq is the observation high-water mark, read once by Plan, so every confidence the
-	// model is shown is the CURRENT (decayed) one. Only grouping is shown any (the writer gets
-	// key and value alone, see renderMergeInput), and it used to render the stored value: a
-	// facet stored at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh
-	// 0.59 duplicate looking like the stronger claim, the model returned ~0.90 for the survivor,
-	// and Apply gave that survivor the fresher member's clock — so a stale confidence came out
+	// clocks is each lens's clock, read once by Plan, so every confidence the model is shown is
+	// the CURRENT one, decayed on its own lens's observations. A nil map (Apply without Plan)
+	// reads every confidence as stored. Only grouping is shown any (the writer gets key and
+	// value alone, see renderMergeInput), and it used to render the stored value: a facet stored
+	// at 0.90 but uncited for 4,400 observations (really ~0.33) sat beside a fresh 0.59
+	// duplicate looking like the stronger claim, the model returned ~0.90 for the survivor, and
+	// Apply gave that survivor the fresher member's clock — so a stale confidence came out
 	// fresh. The review already sends decayed values (slimFacets); compaction now agrees with it.
-	decaySeq int64
+	clocks map[string]store.LensClock
 }
 
 // compactProgress is Plan's running count. Grouping batches are all known before the first call
@@ -212,8 +213,11 @@ func (c *Compactor) Plan(ctx context.Context) ([]CompactPlan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read L2: %w", err)
 	}
-	if c.decaySeq, err = c.Store.ObservationHighWater(); err != nil {
-		return nil, fmt.Errorf("read observation high-water: %w", err)
+	c.clocks = map[string]store.LensClock{}
+	for _, ln := range c.Lenses {
+		if c.clocks[ln.Name], err = c.Store.LensClock(ln.Name); err != nil {
+			return nil, fmt.Errorf("read %s lens clock: %w", ln.Name, err)
+		}
 	}
 	// Every grouping batch is known before the first call (batching is local), so the total is
 	// exact from the start; only the merges are discovered as we go. A multi-batch dimension adds
@@ -403,7 +407,7 @@ func survivorsAfter(inDim []store.Facet, dim string, actions []compactAction, by
 // any prompt. Grouping alone returned 8,191 chars in 3m17s and proposed merges averaging 9.2
 // facets, projecting an 87.6% reduction. Large INPUT is cheap; large OUTPUT is what costs.
 func (c *Compactor) groupBatch(ctx context.Context, ln *lens.Lens, dim string, batch []store.Facet) ([]compactAction, error) {
-	input := renderCompactBatch(ln.Name, dim, batch, c.decaySeq)
+	input := renderCompactBatch(ln.Name, dim, batch, c.clocks[ln.Name])
 	reply, err := c.runnerFor(ln)(ctx, ModelFor(c.Config, ln, PhaseReview), compactGroupPrompt, input)
 	if err != nil {
 		return nil, err
@@ -517,7 +521,7 @@ func (c *Compactor) regroup(ctx context.Context, ln *lens.Lens, dim string, inDi
 				// The regroup call sees no numbers, so the union's confidence is its strongest
 				// member's: round 1 judged each group's, and a lone facet's is its own.
 				if unit.group < 0 {
-					u.Confidence = max(u.Confidence, f.Current().DecayedConfidence(c.decaySeq))
+					u.Confidence = max(u.Confidence, f.Current().DecayedConfidence(c.clocks[ln.Name]))
 				}
 			}
 			if unit.group >= 0 {
@@ -942,7 +946,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 						// Rewritten: capture the decayed confidence BEFORE closing the version.
 						// From is decayed because that is the value the survivor actually had
 						// when compaction replaced it.
-						fromConf := cur.DecayedConfidence(c.decaySeq)
+						fromConf := cur.DecayedConfidence(c.clocks[plan.Lens])
 						toConf := clampConf(a.Confidence)
 						f.Versions[len(f.Versions)-1].ValidTo = nowStr
 						f.Versions = append(f.Versions, store.FacetVersion{
@@ -955,7 +959,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 						// Same value: capture decayed confidence BEFORE refreshing the clock.
 						// From is decayed because that is what the reader saw before this
 						// compaction refreshed the clock.
-						fromConf := cur.DecayedConfidence(c.decaySeq)
+						fromConf := cur.DecayedConfidence(c.clocks[plan.Lens])
 						cur.BecauseOf = because
 						cur.ConfidenceSeq = freshest
 						// Same value, but a claim may be NEW: an existing facet whose text
@@ -971,7 +975,7 @@ func (c *Compactor) Apply(ctx context.Context, plans []CompactPlan, now time.Tim
 					// From is the last version's decayed confidence, captured BEFORE the append.
 					var fromConf float64
 					if len(f.Versions) > 0 {
-						fromConf = f.Versions[len(f.Versions)-1].DecayedConfidence(c.decaySeq)
+						fromConf = f.Versions[len(f.Versions)-1].DecayedConfidence(c.clocks[plan.Lens])
 					}
 					toConf := clampConf(a.Confidence)
 					f.Versions = append(f.Versions, store.FacetVersion{
@@ -1112,13 +1116,13 @@ func renderMergeInput(lensName, dim string, group compactAction, members []store
 // confidence are included because they are the cheap signals for "is this load-bearing": a
 // facet that has never changed and sits at low confidence after many sessions is a retirement
 // candidate, while one with a real change history is carrying an arc worth keeping.
-func renderCompactBatch(lensName, dim string, batch []store.Facet, decaySeq int64) string {
+func renderCompactBatch(lensName, dim string, batch []store.Facet, clock store.LensClock) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "LENS: %s\nDIMENSION: %s\nFACETS: %d\n\n", lensName, dim, len(batch))
 	for _, f := range batch {
 		cur := f.Current()
 		fmt.Fprintf(&b, "key: %s\nconfidence: %.2f\nversions: %d\nlast_seen: %s\nvalue: %s\n\n",
-			f.Key, cur.DecayedConfidence(decaySeq), len(f.Versions), f.LastSeen, cur.Value)
+			f.Key, cur.DecayedConfidence(clock), len(f.Versions), f.LastSeen, cur.Value)
 	}
 	return b.String()
 }

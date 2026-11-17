@@ -2,6 +2,7 @@ package distill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -92,17 +94,26 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// facets, watermark advanced through them), but refuse the global stamp and surface
 	// the failure so the review stays due and resumes from the watermark next pass.
 	var failed []string
+	// backoff: some failure is the review's own. A free-allowance refusal is not: cmd's free gate
+	// holds every free-model call until the reset and wakes the worker then (mining skips it the
+	// same way), so backing off too only stalls the review, and every lens, past the reset.
+	backoff := false
 	// Before any lens folds, so no window folds against a facet still citing a deleted observation.
 	// A failure here strands no lens: the folds go on, the list stays, and the next review retries.
 	if err := r.pruneDeletedEvidence(nowStr); err != nil {
 		slog.Error("review: pruning deleted observations from facets failed (they stay pending)", "err", err)
 		failed = append(failed, "the deleted-observation prune")
+		backoff = true
 	}
 	for _, ln := range r.Lenses {
 		if err := r.foldLensWindowed(ctx, ln, nowStr); err != nil {
 			slog.Error("review: lens fold failed (committed windows kept; watermark left at last good window)",
 				"lens", ln.Name, "err", err)
 			failed = append(failed, ln.Name)
+			var qe *platform.QuotaExhaustedError
+			if !errors.As(err, &qe) {
+				backoff = true
+			}
 		}
 	}
 
@@ -110,7 +121,15 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// partial stamp would mark a failed lens reviewed-through-now and let it drift. Per-lens
 	// watermarks already advanced per committed window inside foldLensWindowed (the #55
 	// per-lens state), so a persistent single-lens failure no longer strands healthy lenses.
+	// Without the backoff, the same window fails again from the same watermark on every
+	// capture-hook worker (#221's 24-day stall); the no-stamp rule (#16 C1) stays.
 	if len(failed) > 0 {
+		if backoff && ctx.Err() == nil { // stopped/cancelled is interrupted, not failed (mining's rule)
+			n := r.Store.IncReviewRetry()
+			at := time.Now().Add(backoffDelay(n))
+			_ = r.Store.SetReviewRetryAfter(at)
+			slog.Warn("review: failed; automatic reviews back off (`worker review` still runs)", "attempt", n, "retry_after", at.UTC().Format(time.RFC3339))
+		}
 		return fmt.Errorf("review failed for %s (committed windows kept; review left pending)", strings.Join(failed, ", "))
 	}
 	return r.Store.StampReview()
@@ -137,6 +156,10 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 	obs, err := r.Store.ReadObservationsSinceOrdered(ln.Name, since)
 	if err != nil {
 		return fmt.Errorf("read L1 delta: %w", err)
+	}
+	clock, err := r.Store.LensClock(ln.Name)
+	if err != nil {
+		return fmt.Errorf("read %s lens clock: %w", ln.Name, err)
 	}
 	// The whole window plan is fixed before the first call: windowEnd is a pure function of the
 	// delta read once above and the budget. Planning it up front is what makes the progress total
@@ -166,11 +189,12 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 		if err != nil {
 			return fmt.Errorf("read L2: %w", err)
 		}
-		// The clock for this fold: the highest observation seq it has read. Confidences
-		// written now are stamped here, decay is measured forward from it, and the prompt
-		// shows confidences decayed to it.
+		// throughSeq is the highest seq this fold has read, and the confidences written now are
+		// stamped with it. The prompt decays over this lens's observations up to throughSeq,
+		// never over ones later windows have yet to fold.
 		throughSeq := window[len(window)-1].Rowid
-		reviewed, err := r.reviewLens(ctx, ln, window, prior, throughSeq)
+		wc := clock.Through(throughSeq)
+		reviewed, err := r.reviewLens(ctx, ln, window, prior, wc)
 		tick(i + 1) // a failed call is still a call done
 		if err != nil {
 			// Surface the cause (was silently discarded pre-#123). Windows already
@@ -182,7 +206,7 @@ func (r *Reviewer) foldLensWindowed(ctx context.Context, ln *lens.Lens, nowStr s
 			// A malformed assertion is dropped, not merged (see wellFormed). Log it: it
 			// means this lens's review prompt is returning entries the schema forbids, and
 			// silence there is how a prompt regression goes unnoticed for weeks.
-			if !r.applyFacet(byKey, ln.Name, rf, nowStr, throughSeq) {
+			if !r.applyFacet(byKey, ln.Name, rf, nowStr, throughSeq, wc) {
 				slog.Warn("review: dropped a malformed facet assertion (empty dimension, key, or value)",
 					"lens", ln.Name, "dimension", rf.Dimension, "key", rf.Key,
 					"value_empty", strings.TrimSpace(rf.Value) == "", "contradicts_prior", rf.Contradicts)
@@ -243,8 +267,12 @@ func (r *Reviewer) pruneDeletedEvidence(nowStr string) error {
 			f.Versions[j].BecauseOf = slices.DeleteFunc(f.Versions[j].BecauseOf, func(id string) bool { return deleted[id] })
 		}
 		if had && f.Active() && len(cur.BecauseOf) == 0 {
+			clock, err := r.Store.LensClock(f.Lens)
+			if err != nil {
+				return fmt.Errorf("read %s lens clock: %w", f.Lens, err)
+			}
 			f.ArchivedAt, f.MergedInto, f.ArchiveReason = nowStr, "", retiredReason
-			events = append(events, confidenceEvent(f, store.EventRetire, cur.DecayedConfidence(r.Store.ReviewRowid(f.Lens)), nowStr))
+			events = append(events, confidenceEvent(f, store.EventRetire, cur.DecayedConfidence(clock.Through(r.Store.ReviewRowid(f.Lens))), nowStr))
 		}
 	}
 	if err := r.Store.WriteFacetsPruned(all, events, pending); err != nil {
@@ -275,8 +303,9 @@ func windowEnd(obs []store.Observation, start, budget int) int {
 
 // applyFacet enforces the bi-temporal rule deterministically. It reports whether the
 // asserted facet was applied; a malformed one is REJECTED rather than merged (see
-// wellFormed) so the caller can log it instead of silently corrupting L2.
-func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf reviewedFacet, nowStr string, seq int64) bool {
+// wellFormed) so the caller can log it instead of silently corrupting L2. seq is the clock it
+// stamps; clock is the lens clock the step's From decays on, the one the model was shown.
+func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf reviewedFacet, nowStr string, seq int64, clock store.LensClock) bool {
 	if !wellFormed(rf) {
 		return false
 	}
@@ -314,7 +343,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 	switch {
 	case cur == nil:
 		// Facet existed but had no open version (all expired) — reopen.
-		from, kind = f.Versions[len(f.Versions)-1].DecayedConfidence(seq), store.EventReopen
+		from, kind = f.Versions[len(f.Versions)-1].DecayedConfidence(clock), store.EventReopen
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
 			BecauseOf: rf.BecauseOf, Confidence: clampConf(rf.Confidence),
@@ -323,7 +352,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 	case rf.Contradicts && cur.Value != rf.Value:
 		// Sustained contradiction => record a change arc: close the old, open the new.
 		// (The "sustained" judgment is the review prompt's job; code just applies it.)
-		from, kind = cur.DecayedConfidence(seq), store.EventRewrite
+		from, kind = cur.DecayedConfidence(clock), store.EventRewrite
 		f.Versions[len(f.Versions)-1].ValidTo = nowStr
 		f.Versions = append(f.Versions, store.FacetVersion{
 			Value: rf.Value, ValidFrom: nowStr, RecordedAt: nowStr,
@@ -354,13 +383,13 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 		//
 		// "Decays on absence" is NOT done here: a fold asserts ~25 facets out of thousands, so
 		// decaying every unmentioned one per fold would rot the whole profile in a few passes.
-		// It is read-time instead (#176): FacetVersion.DecayedConfidence decays by the
+		// It is read-time instead (#176): FacetVersion.DecayedConfidence decays by the lens's
 		// observations elapsed since ConfidenceSeq, floored, and is what the model is shown.
 		// Step from what the model actually SAW — the decayed value — not from the stored
 		// one. Stepping from the stored value would silently undo decay on every citation:
 		// the model would be shown 0.4, agree with 0.4, and the facet would snap back toward
 		// its pre-decay 0.9 because that is what the row still held.
-		from = cur.DecayedConfidence(seq)
+		from = cur.DecayedConfidence(clock)
 		cur.Confidence = clampConf(stepToward(from, rf.Confidence, maxConfidenceStep))
 		cur.ConfidenceSeq = knownClock(seq, cur.ConfidenceSeq) // confirmed now: the decay clock restarts
 		cur.BecauseOf = mergeIDs(cur.BecauseOf, rf.BecauseOf)
@@ -432,9 +461,9 @@ func wellFormed(rf reviewedFacet) bool {
 		strings.TrimSpace(rf.Value) != ""
 }
 
-func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet, throughSeq int64) ([]reviewedFacet, error) {
+func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet, clock store.LensClock) ([]reviewedFacet, error) {
 	input := "OBSERVATIONS (L1):\n" + mustJSON(slimObs(obs)) +
-		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name, throughSeq))
+		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name, clock))
 	reply, err := r.runnerFor(ln)(ctx, ModelFor(r.Config, ln, PhaseReview), ln.Review, input)
 	if err != nil {
 		return nil, err
@@ -466,10 +495,10 @@ type PreviewFacet struct {
 // synthesize (in the tuning loop, the ones the EXTRACT preview just produced in-memory).
 func PreviewReview(ctx context.Context, run MineFunc, cfg store.Config, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]PreviewFacet, error) {
 	rv := &Reviewer{Config: cfg, Runner: run} // Store nil: reviewLens reads only Config+Runner
-	// 0 = no decay clock. A preview writes nothing and an unregistered lens has no watermark,
+	// nil = no decay clock. A preview writes nothing and an unregistered lens has no watermark,
 	// so there is no "observations elapsed" to measure against; showing undecayed confidences
 	// is the honest rendering of a read-only trial.
-	reviewed, err := rv.reviewLens(ctx, ln, obs, prior, 0)
+	reviewed, err := rv.reviewLens(ctx, ln, obs, prior, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +592,7 @@ func slimObs(obs []store.Observation) []map[string]any {
 	return out
 }
 
-func slimFacets(facets []store.Facet, lensName string, decaySeq int64) []map[string]any {
+func slimFacets(facets []store.Facet, lensName string, clock store.LensClock) []map[string]any {
 	out := []map[string]any{}
 	for _, f := range facets {
 		if f.Lens != lensName {
@@ -598,7 +627,7 @@ func slimFacets(facets []store.Facet, lensName string, decaySeq int64) []map[str
 			// against is how sure we should be NOW, after the observations that have gone by
 			// without confirming it. Sending the stored value is what made confidence a
 			// ratchet from the model's point of view (#173).
-			conf = cur.DecayedConfidence(decaySeq)
+			conf = cur.DecayedConfidence(clock)
 		}
 		// current_confidence is REQUIRED, not decorative: applyFacet steps the decayed
 		// current value toward the returned one by at most maxConfidenceStep, so the model

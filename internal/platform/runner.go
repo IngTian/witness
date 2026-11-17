@@ -170,10 +170,12 @@ type Runner interface {
 	//   - It must refuse to spawn anything when ExternalRunnersDisabled() is true (`make test`
 	//     sets it), so a test can never start a real model CLI.
 	//
-	// FRESH-CONTEXT INVARIANT. The context a Run executes in must be seeded EXCLUSIVELY by
-	// witness's own turns: systemPrompt plus the fenced corpus, and nothing else. A runner may
+	// FRESH-CONTEXT INVARIANT. The only turns witness puts into a Run are systemPrompt and the
+	// fenced corpus; a runtime may add its own framing (listed per runner below). A runner may
 	// retain such a context across a crash to resume one generation, and may add its own retry
-	// turns to it, but must NEVER inherit a conversation witness did not author.
+	// turns to it, but must NEVER inherit a conversation witness did not author. A Run must offer
+	// the model no tools, because the corpus is untrusted and a tool turns an injected
+	// instruction into an action.
 	//
 	// This is a correctness requirement, not hygiene, and it is stated here because it was
 	// previously only implied — each adapter restated it in prose, nothing defined or enforced
@@ -189,10 +191,30 @@ type Runner interface {
 	//     pushed it out of the window and the poll then spun to the timeout — the real cause of
 	//     `context deadline exceeded` on OpenCode, long misread as a slow model.
 	//
-	// Both runners satisfy it: Claude via `claude -p --no-session-persistence` (a stateless
-	// one-shot process), OpenCode by creating a fresh session in its private database, prompting
-	// it once, and deleting it after L1 is durable. internal/platform/opencode enforces the
-	// OpenCode half with a source scan (TestNoCodePathForksAConversation).
+	// Claude isolates: no prior or saved conversation (one-shot `-p --no-session-persistence`); no
+	// built-in tools (`--tools ""`); no MCP servers (`--strict-mcp-config`); not the user's
+	// project CLAUDE.md, .mcp.json or .claude/ settings (the cwd is witness's own empty
+	// <RuntimeRoot>/claude-cwd, shared by every Run, never under the world-writable temp dir).
+	//
+	// Claude does NOT isolate: Claude Code's own system prompt (witness's is appended via
+	// `--append-system-prompt`); the user-level CLAUDE.md; instruction files in the cwd's
+	// ANCESTORS (CLAUDE.md, .claude/CLAUDE.md, .claude/rules/, CLAUDE.local.md, AGENTS.md as a
+	// fallback), which Claude Code loads from every parent dir: the user's own, e.g. a ~/CLAUDE.md;
+	// user and plugin hooks, which fire and may add context. Those need `--bare`, which (claude 2.1.325 `--help`) limits Anthropic auth
+	// to ANTHROPIC_API_KEY/apiKeyHelper, no OAuth or keychain (Bedrock/Vertex keep theirs): a
+	// product call, not done.
+	//
+	// OpenCode: a fresh session in the private DB, prompted once and deleted when Run returns. A
+	// native mining session is kept until its L1 commit succeeds. Witness's prompt is the agent's
+	// system prompt. Private config, nothing from the user's opencode.json;
+	// `OPENCODE_DISABLE_PROJECT_CONFIG=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`. `denyAll` on the
+	// agent AND the session. Not isolated (machine-wide admin config, skill discovery):
+	// docs/opencode.md "The isolated runtime".
+	//
+	// Enforced by: `TestNoCodePathForksAConversation` (source scan, OpenCode no-fork);
+	// `TestContractRunnerRoundTrip` (tag `opencodecontract`, contract workflow: zero tools on real
+	// OpenCode); `TestBuildRunCmdOffersNoTools` pins the Claude argv, checked once on real claude
+	// 2.1.325 (stream-json init `tools: []`), not in CI.
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
 	// Close releases engine resources.
 	Close() error

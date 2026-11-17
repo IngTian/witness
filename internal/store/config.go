@@ -28,7 +28,7 @@ const (
 
 // Config holds the user-tunable knobs. Parsed from a tiny line-based config.toml
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
-// keys are ignored; missing file = all defaults.
+// keys are ignored; `witness doctor` names them.
 type Config struct {
 	// RuntimeRoot is witness-owned, non-user-configurable runtime state. It is
 	// deliberately populated from Store.Root, not config.toml: OpenCode must never
@@ -73,7 +73,7 @@ type Config struct {
 
 // DefaultMineConcurrency is the default cap on sessions mined in parallel per
 // drain when mine_concurrency is unset. The embedder is loaded once and shared;
-// runner generation may proceed concurrently when the runner declares it safe.
+// every runner's Run is safe to call concurrently (platform.Runner), so generation runs in parallel too.
 const DefaultMineConcurrency = 4
 
 // DefaultReviewMaxChars is the default review-fold window budget (issue #123): the max
@@ -125,13 +125,13 @@ func DefaultConfig() Config {
 	}
 }
 
-// LoadConfig reads config.toml if present, layering over defaults.
-func (c *configFile) LoadConfig() Config {
-	cfg := DefaultConfig()
+// loadConfig reads config.toml if present, layering over defaults and returning unknown keys.
+func (c *configFile) loadConfig() (cfg Config, unknown []string) {
+	cfg = DefaultConfig()
 	cfg.RuntimeRoot = filepath.Join(c.root, "runtime")
 	data, err := os.ReadFile(c.configPath())
 	if err != nil {
-		return cfg
+		return cfg, nil
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		k, v, ok := parseConfigLine(line)
@@ -174,7 +174,9 @@ func (c *configFile) LoadConfig() Config {
 		// pre-#22 throughput throttles (a start cooldown + a per-run session cap).
 		// They are gone: WorkerLock single-flights the worker and it self-drains via
 		// its re-check loop, so throttling WHEN it starts bought nothing but the 1 Hz
-		// wakeup cascade. Old config lines are harmlessly ignored (unknown keys are).
+		// wakeup cascade. Both keys are accepted silently because the #18 template
+		// (cbf198e) wrote them as active lines, so doctor must not flag a line witness wrote.
+		case "auto_distill_interval_minutes", "auto_distill_session_budget":
 		case "mine_concurrency":
 			// <=0 restores the default rather than disabling mining (0 goroutines
 			// would drain nothing); the engine still clamps the effective value.
@@ -214,9 +216,24 @@ func (c *configFile) LoadConfig() Config {
 			if v != "" && !slices.Contains(cfg.EnabledLenses, v) {
 				cfg.EnabledLenses = append(cfg.EnabledLenses, v)
 			}
+		default:
+			unknown = append(unknown, k)
 		}
 	}
+	return cfg, unknown
+}
+
+// LoadConfig reads config.toml if present, layering over defaults.
+func (c *configFile) LoadConfig() Config {
+	cfg, _ := c.loadConfig()
 	return cfg
+}
+
+// UnknownConfigKeys returns config.toml keys witness does not read, in file order.
+// A missing file returns nil.
+func (c *configFile) UnknownConfigKeys() []string {
+	_, unknown := c.loadConfig()
+	return unknown
 }
 
 // runnerBoundKey is the SINGLE source of truth for "did the user explicitly bind a
@@ -494,10 +511,10 @@ func (c *configFile) EnsureConfigFile() error {
 #   triage_model  — MINING: L0 turns -> L1 observations, once per session (frequent).
 #   distill_model — REVIEW: L1 observations -> L2 facets + L4 profile (batched).
 # Empty distill_model falls back to triage_model, so setting just triage_model gives
-# the whole pipeline one model. Empty triage_model uses the runner's own default
-# (` + "`claude -p`" + ` / ` + "`opencode run`" + `) — but note that for claude that is your
+# the whole pipeline one model. Empty triage_model uses ` + "`claude -p`" + `'s own default — your
 # ambient interactive model, which may be heavy; set triage_model to pin a light one.
-# With runner = opencode, use OpenCode model names such as "openai/gpt-5.5".
+# The ` + "`opencode serve`" + ` runner has no default and refuses an empty model: with runner = opencode,
+# set triage_model to an OpenCode model name such as "openai/gpt-5.5".
 # (A lens may override these per-lens via its lens.json extract_model / review_model.)
 # triage_model  = ` + strconv.Quote(d.TriageModel) + `
 # distill_model = ` + strconv.Quote(d.DistillModel) + `
@@ -516,8 +533,8 @@ func (c *configFile) EnsureConfigFile() error {
 # auto_distill = ` + strconv.FormatBool(d.AutoDistill) + `
 
 # Sessions mined in parallel per drain (backfill speed). The embedder loads once
-# and is shared; each concurrent distillation call adds ~0.35GB. Clamped to the
-# CPU count and to 1 for a runner that can't run concurrently. <=0 = default.
+# and is shared; each concurrent distillation call adds ~0.35GB. The engine clamps
+# this to the CPU count and a memory-safe ceiling. <=0 = default.
 # mine_concurrency = ` + strconv.Itoa(d.MineConcurrency) + `
 
 # Per-input character budget for mining. 0 (default) = mine each session WHOLE — the
@@ -592,7 +609,22 @@ func (c *configFile) StampReview() error {
 		tx.Rollback()
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM meta WHERE key IN (?, ?)`, reviewRetryAfterKey, reviewRetriesKey); err != nil {
+		tx.Rollback()
+		return err
+	}
 	return tx.Commit()
+}
+
+// IncReviewRetry increments the failed-review counter and returns the new count.
+func (c *configFile) IncReviewRetry() int {
+	_, _ = c.db.Exec("INSERT INTO meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(meta.value AS INTEGER) + 1", reviewRetriesKey)
+	return int(metaGetInt(c.db, reviewRetriesKey))
+}
+
+// SetReviewRetryAfter sets the automatic-review backoff timestamp.
+func (c *configFile) SetReviewRetryAfter(at time.Time) error {
+	return metaSet(c.db, reviewRetryAfterKey, at.UTC().Format(time.RFC3339))
 }
 
 // reviewRowidKey is the meta key holding one lens's incremental-fold watermark: the
@@ -662,8 +694,13 @@ func (c *configFile) PoignancySinceReview() int {
 
 // ReviewDue reports whether the reviewer should run: either enough distilled
 // sessions since the last review (the cap), OR enough accumulated poignancy
-// (salience) — whichever comes first.
+// (salience) — whichever comes first. Every automatic gate calls this;
+// forceReviewTapped (worker review) never does, so it ignores the backoff.
+// An unset or unparsable backoff value reads as the zero time (not blocked).
 func (c *configFile) ReviewDue(cfg Config) bool {
+	if until, _ := time.Parse(time.RFC3339, metaGet(c.db, reviewRetryAfterKey)); time.Now().Before(until) {
+		return false
+	}
 	if c.SessionsSinceReview() >= cfg.ReviewEvery {
 		return true
 	}

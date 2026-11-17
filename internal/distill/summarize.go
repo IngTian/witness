@@ -86,9 +86,11 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	hw, err := sm.Store.ObservationHighWater()
-	if err != nil {
-		return fmt.Errorf("read observation high-water: %w", err)
+	clocks := map[string]store.LensClock{}
+	for _, p := range passes {
+		if clocks[p.name], err = sm.Store.LensClock(p.name); err != nil {
+			return fmt.Errorf("read %s lens clock: %w", p.name, err)
+		}
 	}
 
 	// Reap summaries whose lens no longer has facets, BEFORE the early return below.
@@ -128,7 +130,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 		// The model is shown CURRENT (decayed) confidence; the signature (planLenses) is over
 		// the stored rendering.
-		input := renderFacetsForSummary(l, p.facets, hw)
+		input := renderFacetsForSummary(l, p.facets, clocks[l])
 		md, err := sm.runFor(p.lens)(ctx, p.model, sm.LensPrompt, input)
 		if err != nil {
 			err = withInputSize(err, input, p.lens)
@@ -413,11 +415,10 @@ func (sm *Summarizer) reapOrphanProfiles(withFacets map[string][]store.Facet) {
 	}
 }
 
-// storedConfidence, passed as renderFacetsForSummary's decaySeq, renders each facet's confidence
-// as stored rather than decayed: DecayedConfidence returns the stored value for any seq at or
-// below the version's own clock, and 0 is below every clock. Named so the signature call site
-// says what it means instead of passing a bare 0.
-const storedConfidence int64 = 0
+// storedConfidence, passed as renderFacetsForSummary's clock, renders each facet's confidence as
+// stored rather than decayed: a nil clock has nothing elapsed, so every confidence reads as
+// stored. Named so the signature call site says what it means instead of passing a bare nil.
+var storedConfidence store.LensClock
 
 // activeByLens groups the facets that have an active version by lens: the set a portrait is
 // written from.
@@ -498,8 +499,8 @@ func (e *InputSizeError) Error() string {
 func (e *InputSizeError) Unwrap() error { return e.Err }
 
 // renderFacetsForSummary formats one lens's active facets as readable input for
-// the summarizer prompt, with each confidence decayed to decaySeq.
-func renderFacetsForSummary(lens string, facets []store.Facet, decaySeq int64) string {
+// the summarizer prompt, with each confidence decayed on clock, that lens's own.
+func renderFacetsForSummary(lens string, facets []store.Facet, clock store.LensClock) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "LENS: %s\n\nFACETS (dimension/key, confidence, value):\n", lens)
 	for _, f := range facets {
@@ -507,7 +508,7 @@ func renderFacetsForSummary(lens string, facets []store.Facet, decaySeq int64) s
 		if cur == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "- %s/%s (%.2f): %s\n", f.Dimension, f.Key, cur.DecayedConfidence(decaySeq), cur.Value)
+		fmt.Fprintf(&b, "- %s/%s (%.2f): %s\n", f.Dimension, f.Key, cur.DecayedConfidence(clock), cur.Value)
 	}
 	return b.String()
 }

@@ -30,7 +30,7 @@ func TestTheReviewCallSeesTheClaimNotTheProse(t *testing.T) {
 	f := cf("thinking", "a", prose, 0.8, 1)
 	f.Versions[0].Claim = "He verifies state before acting on it."
 
-	view := slimFacets([]store.Facet{f}, "default", 0)
+	view := slimFacets([]store.Facet{f}, "default", nil)
 	blob, _ := json.Marshal(view)
 	got := string(blob)
 
@@ -49,7 +49,7 @@ func TestTheReviewCallSeesTheClaimNotTheProse(t *testing.T) {
 // this a progressive improvement rather than a migration everyone has to run.
 func TestAFacetWithNoClaimStillSendsItsValue(t *testing.T) {
 	f := cf("thinking", "a", "the full value", 0.8, 1) // no claim
-	view := slimFacets([]store.Facet{f}, "default", 0)
+	view := slimFacets([]store.Facet{f}, "default", nil)
 	blob, _ := json.Marshal(view)
 	if !strings.Contains(string(blob), "the full value") {
 		t.Errorf("with no claim the value must still be sent:\n%s", blob)

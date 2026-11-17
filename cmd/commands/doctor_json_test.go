@@ -177,3 +177,87 @@ func TestDoctorShowsPortraitInputSize(t *testing.T) {
 		t.Fatalf("doctor should show %q, got:\n%s", want, out)
 	}
 }
+
+// Unknown keys in config.toml and lens.json should be named in doctor's human output (not --json).
+// The CLI's model keys are mine_model, but the config file spells them triage_model / extract_model.
+func TestDoctorWarnsOnUnknownConfigAndLensJSONKeys(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	t.Setenv("WITNESS_ASSETS", t.TempDir()) // embedder fails fast; never loads the real model
+	t.Setenv("NO_COLOR", "1")
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Append unknown keys to config.toml
+	f, err := os.OpenFile(st.ConfigPath(), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString("triage_model = \"claude-haiku-4-5\"\nmine_model = \"claude-haiku-4-5\"\nauto_distill_interval_minutes = 10\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	// Register a lens with unknown keys
+	if err = st.RegisterLens("math", writeLensDir(t, "math", "mine", "", store.LensKeyExtractModel, "claude-haiku-4-5", "mine_model", "claude-haiku-4-5")); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	out, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) }) // err (embedder unavailable) ignored
+	if !strings.Contains(out, `config.toml: unknown key "mine_model" is ignored`) {
+		t.Errorf("doctor should warn about config.toml mine_model, got:\n%s", out)
+	}
+	if !strings.Contains(out, `lens math: unknown lens.json key "mine_model" is ignored`) {
+		t.Errorf("doctor should warn about lens math mine_model, got:\n%s", out)
+	}
+	if strings.Count(out, " is ignored") != 2 {
+		t.Errorf("doctor should produce exactly 2 warnings, got:\n%s", out)
+	}
+}
+
+// An ignored-key warning must turn a healthy headline from ok to warn. The baseline run proves
+// the archive is otherwise healthy, so the second run's warn comes from the key alone.
+func TestDoctorHeadlineWarnsOnAnIgnoredKey(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	t.Setenv("WITNESS_RUNNER", "")
+	t.Setenv("NO_COLOR", "1")
+	// No OpenCode capture checks from whatever this host has wired.
+	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(t.TempDir(), "none.db"))
+	prev := newDoctorEmbedder
+	newDoctorEmbedder = func() (distill.Embedder, error) { return fixedEmbedder{vec: []float32{1, 0, 0}}, nil }
+	t.Cleanup(func() { newDoctorEmbedder = prev })
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := st.ConfigPath()
+	st.Close()
+	headline := func() string {
+		out, err := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+		if err != nil {
+			t.Fatalf("doctor failed: %v\n%s", err, out)
+		}
+		first, _, _ := strings.Cut(out, "\n")
+		return first
+	}
+	if h := headline(); !strings.HasPrefix(h, okGlyph()) {
+		t.Fatalf("the baseline archive must read healthy, got headline %q", h)
+	}
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("mine_model = \"claude-haiku-4-5\"\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if h := headline(); !strings.HasPrefix(h, warnGlyph()) {
+		t.Errorf("an ignored config.toml key must warn in the headline, got %q", h)
+	}
+}

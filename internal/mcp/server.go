@@ -325,11 +325,11 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		if err != nil {
 			return errResult(fmt.Sprintf("read facets: %v", err)), nil, nil
 		}
-		hw, err := st.ObservationHighWater()
+		clock, err := st.LensClock(data)
 		if err != nil {
-			return errResult(fmt.Sprintf("read observation high-water: %v", err)), nil, nil
+			return errResult(fmt.Sprintf("read %s lens clock: %v", data, err)), nil, nil
 		}
-		return textResult(renderFacets(lensName, data, facets, hw, func() string { return emptyHint(st, lensName, data, wire, false) })), nil, nil
+		return textResult(renderFacets(lensName, data, facets, clock, func() string { return emptyHint(st, lensName, data, wire, false) })), nil, nil
 	})
 
 	// get_profile: read the L4 narrative summary (prose) for a lens — the human-
@@ -456,11 +456,11 @@ func renderHits(lens string, hits []vector.Hit, hint func() string) string {
 	return b.String()
 }
 
-// renderFacets reports each facet's CURRENT confidence — decayed to the observation high-water
-// mark — not the value stored at its last confirmation. The stored number only falls when a
+// renderFacets reports each facet's CURRENT confidence — decayed on the lens's own observation
+// clock — not the value stored at its last confirmation. The stored number only falls when a
 // review cites the facet, so an agent shown it would read a trait nothing has evidenced in
 // thousands of observations as a certainty. lensName is shown; data is what the facets are tagged with.
-func renderFacets(lensName, data string, facets []store.Facet, decaySeq int64, hint func() string) string {
+func renderFacets(lensName, data string, facets []store.Facet, clock store.LensClock, hint func() string) string {
 	var b strings.Builder
 	count := 0
 	for _, f := range facets {
@@ -471,7 +471,7 @@ func renderFacets(lensName, data string, facets []store.Facet, decaySeq int64, h
 		if cur == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "- **%s/%s** (confidence %.2f): %s\n", f.Dimension, f.Key, cur.DecayedConfidence(decaySeq), cur.Value)
+		fmt.Fprintf(&b, "- **%s/%s** (confidence %.2f): %s\n", f.Dimension, f.Key, cur.DecayedConfidence(clock), cur.Value)
 		count++
 	}
 	if count == 0 {

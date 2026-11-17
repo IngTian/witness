@@ -170,6 +170,21 @@ func TestConfigTemplateDoesNotPinDefaults(t *testing.T) {
 	}
 }
 
+// The template must make no false claims about runtime behavior. The OpenCode runner is
+// `opencode serve` (refuses an empty model), and #199 removed the concurrency clamp to 1.
+func TestConfigTemplateMakesNoFalseRuntimeClaims(t *testing.T) {
+	s := tempStore(t)
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"opencode run", "can't run concurrently"} {
+		if strings.Contains(string(data), stale) {
+			t.Errorf("template still says %q: the OpenCode runner is `opencode serve` and refuses an empty model, and #199 removed the clamp to 1", stale)
+		}
+	}
+}
+
 // TestOpenPreservesExistingConfig is the forward-compatibility guarantee: a user
 // who already has a hand-edited config.toml (from an older CLI, or their own
 // edits) must not have it overwritten, reformatted, or appended to by any command
@@ -183,7 +198,7 @@ func TestOpenPreservesExistingConfig(t *testing.T) {
 	}
 	// Includes the retired auto_distill_interval_minutes / auto_distill_session_budget
 	// lines (pre-#22): Open must still preserve them byte-for-byte, and LoadConfig
-	// must ignore them gracefully (unknown keys) rather than error.
+	// must ignore them gracefully (a no-op case) rather than error.
 	original := []byte("# my custom config from an older CLI\n" +
 		"runner = \"opencode\"\n" +
 		"triage_model = \"my-fine-model\"\n" +

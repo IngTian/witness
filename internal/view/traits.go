@@ -86,7 +86,7 @@ func buildTraits(in *store.ViewInput, loc *time.Location) ([]Notebook, []Trait, 
 			continue // archived, or every version closed: not part of the live profile
 		}
 		id := facetID{f.Lens, f.Dimension, f.Key}
-		t, rewrites := buildTrait(f, cur, notes, logs[id], absorbers[id], in.HighWater, loc)
+		t, rewrites := buildTrait(f, cur, notes, logs[id], absorbers[id], in.Clocks[f.Lens], loc)
 		traits = append(traits, t)
 		if !corpus(f.Lens) {
 			if t.Arrival != "" {
@@ -133,16 +133,16 @@ func buildTraits(in *store.ViewInput, loc *time.Location) ([]Notebook, []Trait, 
 // buildTrait computes one active trait, and the local dates of its review-written rewrites
 // (for the activity windows).
 func buildTrait(f *store.Facet, cur *store.FacetVersion, notes map[string]*store.ViewNote,
-	rows []stamped, absorbers []string, highWater int64, loc *time.Location) (Trait, []string) {
+	rows []stamped, absorbers []string, clock store.LensClock, loc *time.Location) (Trait, []string) {
 	day := func(t time.Time) string { return t.In(loc).Format(time.DateOnly) }
 	t := Trait{
 		Lens: f.Lens, Dimension: f.Dimension, Key: f.Key,
 		Name: traitName(f.Key),
 		// Trimmed because a whitespace-only claim is "no claim" everywhere else (Gist).
 		Summary: strings.TrimSpace(cur.Claim),
-		// Decayed at the note high-water, exactly what `witness facets` prints: the GUI and the
-		// CLI must never disagree about the same trait.
-		Today:  cur.DecayedConfidence(highWater),
+		// Decayed on the trait's own lens clock, exactly what `witness facets` prints: the GUI and
+		// the CLI must never disagree about the same trait.
+		Today:  cur.DecayedConfidence(clock),
 		Points: []Point{}, Spans: []Span{}, Weeks: []Week{}, Evidence: []Evidence{},
 	}
 

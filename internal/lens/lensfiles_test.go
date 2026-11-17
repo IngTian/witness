@@ -1,11 +1,12 @@
 package lens
 
 import (
-	"encoding/json"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/IngTian/witness/internal/store"
@@ -44,19 +45,16 @@ func TestLoadDirReadsOnlyLensFiles(t *testing.T) {
 // LensConfig's struct tags must spell the store's lens.json keys (tags cannot reference
 // constants), or a `witness lens set` write lands under a key the loader never reads.
 func TestLensConfigTagsMatchStoreKeys(t *testing.T) {
-	b, err := json.Marshal(LensConfig{Name: "n", Dimensions: []string{"d"}, Runner: "r", ExtractModel: "e", ReviewModel: "v"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatal(err)
-	}
+	typ := reflect.TypeOf(LensConfig{})
 	var got []string
-	for k := range m {
-		got = append(got, k)
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name != "" {
+			got = append(got, name)
+		}
 	}
-	want := []string{store.LensKeyName, store.LensKeyDimensions, store.LensKeyRunner, store.LensKeyExtractModel, store.LensKeyReviewModel}
+	want := slices.Clone(store.LensKeys)
 	sort.Strings(got)
 	sort.Strings(want)
 	if !slices.Equal(got, want) {

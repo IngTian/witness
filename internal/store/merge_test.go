@@ -103,10 +103,11 @@ func (a *arch) facet(lens, dim, key string) *Facet {
 	return nil
 }
 
+// highWater is the archive's global max seq: rebaseClocks and its tests measure on it.
 func (a *arch) highWater() int64 {
 	a.t.Helper()
-	hw, err := a.st.ObservationHighWater()
-	if err != nil {
+	var hw int64
+	if err := a.st.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM observations`).Scan(&hw); err != nil {
 		a.t.Fatal(err)
 	}
 	return hw
@@ -589,13 +590,15 @@ func TestMergeLeavesTheOtherMachinesStateBehind(t *testing.T) {
 		"profile_sig:default":           "theirs",
 		"review_ts":                     "2026-12-31T00:00:00Z",
 		"emerge_seen:default:abc":       "1",
+		"review_retry_after":            "2099-01-01T00:00:00Z",
+		"review_retries":                "7",
 	} {
 		_ = inc.st.SetMetaString(k, v)
 	}
 	inc.raw("s2", "user:x") // something to merge
 	base.merge(inc.export(), true)
 	for _, k := range []string{"runner_bound", "opencode_sync_time_updated_ms", "worker_stop_requested", "worker_pid",
-		"profile_sig:default", "review_ts"} {
+		"profile_sig:default", "review_ts", "review_retry_after", "review_retries"} {
 		if got := base.st.MetaString(k); got != "" {
 			t.Errorf("%s crossed over from the other machine (%q)", k, got)
 		}

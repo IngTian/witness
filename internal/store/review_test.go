@@ -3,6 +3,7 @@ package store
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 // TestReadObservationsSinceOrderedByRowid locks the windowed-fold read (#123): it
@@ -233,6 +234,43 @@ func TestReviewDue(t *testing.T) {
 	// Poignancy trigger disabled (0) and count not met → not due.
 	if s.ReviewDue(Config{ReviewEvery: 999, ReviewPoignancy: 0}) {
 		t.Errorf("disabled poignancy + count not met should NOT be due")
+	}
+}
+
+func TestReviewDueWaitsOutAFailedReviewsBackoff(t *testing.T) {
+	s := tempStore(t)
+	s.AppendObservations([]Observation{{ID: "a", TS: "2099-01-01T00:00:00Z", Lens: LensDefault, Poignancy: 7}})
+	cfg := Config{ReviewEvery: 999, ReviewPoignancy: 6}
+
+	if n := s.IncReviewRetry(); n != 1 {
+		t.Fatalf("first failure: n = %d, want 1", n)
+	}
+	if n := s.IncReviewRetry(); n != 2 {
+		t.Fatalf("second failure: n = %d, want 2", n)
+	}
+	if err := s.SetReviewRetryAfter(time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if s.ReviewDue(cfg) {
+		t.Error("a due review inside its backoff must not be due")
+	}
+	_ = s.SetReviewRetryAfter(time.Now().Add(-time.Second))
+	if !s.ReviewDue(cfg) {
+		t.Error("an expired backoff must let the due review run")
+	}
+	_ = s.SetMetaString("review_retry_after", "not-a-time")
+	if !s.ReviewDue(cfg) {
+		t.Error("an unparsable stamp must read as no backoff, not wedge reviews")
+	}
+	_ = s.SetReviewRetryAfter(time.Now().Add(time.Hour))
+	if err := s.StampReview(); err != nil {
+		t.Fatal(err)
+	}
+	if v := s.MetaString("review_retry_after"); v != "" {
+		t.Errorf("StampReview left review_retry_after = %q", v)
+	}
+	if n := s.IncReviewRetry(); n != 1 {
+		t.Errorf("after a successful review the next failure is n = %d, want 1", n)
 	}
 }
 

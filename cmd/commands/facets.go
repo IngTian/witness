@@ -100,16 +100,16 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	// (review only iterates the enabled set), so that hint must point at `lens enable`.
 	registered := slices.Contains(st.RegisteredLenses(), lensName)
 	enabled := slices.Contains(st.LoadConfig().EnabledLenses, lensName)
-	// The listing shows CURRENT confidence (decayed to now); --json above stays the stored
-	// record. docs/how-it-works.md promises this view moves on its own as evidence fails to
-	// arrive, and before this it never did.
-	hw, err := st.ObservationHighWater()
+	// The listing shows CURRENT confidence (decayed on its lens's clock); --json above stays the
+	// stored record. docs/how-it-works.md promises this view moves on its own as evidence fails
+	// to arrive, and before this it never did.
+	clock, err := st.LensClock(dataName)
 	if err != nil {
-		return err
+		return fmt.Errorf("read %s lens clock: %w", dataName, err)
 	}
 	// whyEmpty is a closure, not a value: it costs two indexed queries and is only needed
 	// on the empty path, which is the uncommon one.
-	renderCurrentFacets(lensName, dataName, facets, hw, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(dataName) })
+	renderCurrentFacets(lensName, dataName, facets, clock, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(dataName) })
 	return nil
 }
 
@@ -241,7 +241,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 
 // renderCurrentFacets prints one lens's listing. name is what the user typed — the title and every
 // suggested command use it; dataName is the name the facets are tagged with.
-func renderCurrentFacets(name, dataName string, facets []store.Facet, decaySeq int64, registered, enabled bool, whyEmpty func() store.EmptyReason) {
+func renderCurrentFacets(name, dataName string, facets []store.Facet, clock store.LensClock, registered, enabled bool, whyEmpty func() store.EmptyReason) {
 	count, archived, perDim := 0, 0, map[string]int{}
 	for _, f := range facets {
 		if f.Lens == dataName && f.Current() != nil {
@@ -314,7 +314,7 @@ func renderCurrentFacets(name, dataName string, facets []store.Facet, decaySeq i
 			meta = "seen " + shortTime(f.LastSeen) + " · " + meta
 		}
 		// 4 indent + 4 confidence + 2 gap put the key at column 10; it is cut, never the meta.
-		fmt.Printf("    %s  %s  %s\n", confidence(cur.DecayedConfidence(decaySeq)),
+		fmt.Printf("    %s  %s  %s\n", confidence(cur.DecayedConfidence(clock)),
 			bold(fitLine(f.Key, 10+2+len([]rune(meta)))), dim(meta))
 		// Only reachable under --all. An archived facet listed without saying so would read as
 		// a live claim about the person, which is exactly what compaction decided it is not.

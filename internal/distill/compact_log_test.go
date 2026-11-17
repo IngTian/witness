@@ -139,7 +139,7 @@ func TestCompactLogsSurvivorCases(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			st := &fakeCompactStore{facets: tc.facets, highWater: tc.decaySeq}
+			st := &fakeCompactStore{facets: tc.facets, clocks: map[string]store.LensClock{"default": store.ContiguousClock(tc.decaySeq)}}
 			c := compactor(st, tc.plan)
 			plans, err := c.Plan(context.Background())
 			if err != nil {
@@ -187,7 +187,7 @@ func TestCompactLogsNothingForRetiredOrAbsorbed(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			st := &fakeCompactStore{facets: tc.facets, highWater: 3500}
+			st := &fakeCompactStore{facets: tc.facets, clocks: map[string]store.LensClock{"default": store.ContiguousClock(3500)}}
 			c := compactor(st, tc.plan)
 			plans, err := c.Plan(context.Background())
 			if err != nil {
@@ -228,7 +228,7 @@ func TestCompactSkippedGroupLogsNothing(t *testing.T) {
 			// count = 1, below compactMinAbsorb (2), and the merge is skipped at Apply time.
 			cfSeq("thinking", "a", "value a", 0.7, 500),
 		},
-		highWater: 3500,
+		clocks: map[string]store.LensClock{"default": store.ContiguousClock(3500)},
 	}
 
 	// Hand-built plan: the action absorbs ["a","b"], but "b" vanished after Plan.
