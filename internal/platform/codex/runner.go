@@ -105,7 +105,7 @@ func resolveWindowsCLI(path, arch string) (string, error) {
 			filepath.Join(filepath.Dir(root), "codex-win32-"+pkgArch, "vendor"),
 			filepath.Join(root, "vendor"),
 		} {
-			candidate := filepath.Join(vendor, triple, "codex", "codex.exe")
+			candidate := filepath.Join(vendor, triple, "bin", "codex.exe")
 			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
 				return candidate, nil
 			}

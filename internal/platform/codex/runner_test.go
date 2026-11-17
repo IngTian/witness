@@ -44,7 +44,7 @@ func TestChildEnvironmentDoesNotRedirectCapture(t *testing.T) {
 func TestWindowsNpmShimResolvesNativeBinaryWithoutShell(t *testing.T) {
 	dir := t.TempDir()
 	shim := filepath.Join(dir, "codex.cmd")
-	binary := filepath.Join(dir, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "codex", "codex.exe")
+	binary := filepath.Join(dir, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe")
 	if _, err := resolveWindowsCLI(shim, "amd64"); err == nil {
 		t.Fatal("accepted a missing native CLI")
 	}
