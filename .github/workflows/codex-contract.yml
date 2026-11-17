@@ -19,6 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        codex: ["0.169.0", "0.169.0-alpha.11.1"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     env:
@@ -33,7 +34,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install verified CLI
-        run: npm install -g @openai/codex@0.169.0-alpha.11.1
+        run: npm install -g @openai/codex@${{ matrix.codex }}
       # The test supplies a dummy API key and a loopback endpoint. No account,
       # stored login, model call or repository secret is used in this job.
       - name: Verify outgoing requests

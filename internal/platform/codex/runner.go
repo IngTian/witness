@@ -22,6 +22,8 @@ import (
 // untrusted and must never be offered tools, even read-only ones. New CLI versions
 // need the wire contract checked before this range is extended.
 const testedVersion = "0.169.0"
+const testedDesktopVersion = "0.169.0-alpha.11.1"
+const preflightTimeout = 45 * time.Second
 
 var runTimeout = 20 * time.Minute
 
@@ -134,26 +136,47 @@ func LoginReady(ctx context.Context, root string) bool {
 	if platform.ExternalRunnersDisabled() {
 		return false
 	}
-	if strings.TrimSpace(os.Getenv("CODEX_API_KEY")) != "" {
-		return true
-	}
-	unlock, err := store.RuntimeLock(ctx, filepath.Join(root, "codex"))
-	if err != nil {
-		return false
-	}
-	defer unlock()
 	bin, err := FindBinary()
 	if err != nil {
 		return false
 	}
+	unlock, err := loginLock(ctx, root)
+	if err != nil {
+		return false
+	}
+	defer unlock()
+	return checkLogin(ctx, bin, RunnerHome(root)) == nil
+}
+
+func checkLogin(ctx context.Context, bin, home string) error {
+	if strings.TrimSpace(os.Getenv("CODEX_API_KEY")) != "" {
+		return nil
+	}
 	cmd := commandContext(ctx, bin, "login", "status")
-	cmd.Env = childEnv(RunnerHome(root))
-	return cmd.Run() == nil
+	cmd.Env = childEnv(home)
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("Codex runner needs its own login: run witness auth codex (or set CODEX_API_KEY)")
+	}
+	return nil
+}
+
+func loginLock(ctx context.Context, root string) (func(), error) {
+	if root == "" {
+		return nil, fmt.Errorf("Codex runner requires an archive runtime root")
+	}
+	return store.RuntimeLock(ctx, filepath.Join(root, "codex"))
 }
 
 // Login signs in directly to witness's own home. No credential file is read or
 // copied from the coding account. The same lock covers login, catalog and exec.
 func Login(ctx context.Context, root string) error {
+	return loginCommand(ctx, root, "login", "--device-auth")
+}
+
+func loginCommand(ctx context.Context, root string, args ...string) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("codex runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
@@ -161,61 +184,154 @@ func Login(ctx context.Context, root string) error {
 	if err != nil {
 		return err
 	}
-	unlock, err := store.RuntimeLock(ctx, filepath.Join(root, "codex"))
+	unlock, err := loginLock(ctx, root)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if err := os.MkdirAll(RunnerHome(root), 0700); err != nil {
+	home, err := filepath.Abs(RunnerHome(root))
+	if err != nil {
 		return err
 	}
-	cmd := commandContext(ctx, bin, "login", "--device-auth")
-	cmd.Env = childEnv(RunnerHome(root))
+	if err := os.MkdirAll(home, 0700); err != nil {
+		return err
+	}
+	cmd := commandContext(ctx, bin, args...)
+	for _, v := range childEnv(home) {
+		if key, _, _ := strings.Cut(v, "="); !strings.EqualFold(key, "CODEX_API_KEY") {
+			cmd.Env = append(cmd.Env, v)
+		}
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
 func (r *runner) Open(ctx context.Context) error {
+	bin, err := r.validate(ctx, r.models)
+	if err == nil {
+		r.binary = bin
+	}
+	return err
+}
+
+func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
+	_, err := r.validate(ctx, models)
+	return err
+}
+
+// Use the same checks in doctor and at Open. Run checks again under the lock,
+// since the CLI, managed configuration or login can change during a drain.
+func (r *runner) validate(ctx context.Context, models []string) (string, error) {
 	if platform.ExternalRunnersDisabled() {
-		return fmt.Errorf("codex runner disabled by %s", platform.DisableExternalRunnersEnv)
+		return "", fmt.Errorf("codex runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
-	if r.root == "" {
-		return fmt.Errorf("codex runner requires an archive runtime root")
-	}
-	if err := os.MkdirAll(RunnerHome(r.root), 0700); err != nil {
-		return err
+	if err := validateModelNames(models...); err != nil {
+		return "", err
 	}
 	bin, err := FindBinary()
 	if err != nil {
-		return err
+		return "", err
 	}
-	cmd := commandContext(ctx, bin, "--version")
-	cmd.Env = childEnv(RunnerHome(r.root))
-	v, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	unlock, err := loginLock(ctx, r.root)
 	if err != nil {
-		return fmt.Errorf("codex version: %w", err)
+		return "", err
 	}
-	version := strings.TrimSpace(strings.TrimPrefix(string(v), "codex-cli "))
-	if version != testedVersion && !strings.HasPrefix(version, testedVersion+"-") {
-		return fmt.Errorf("codex %s has no verified tool-free contract; supported CLI: %s (including prereleases)", version, testedVersion)
+	defer unlock()
+	dir, err := scratchDir()
+	if err != nil {
+		return "", err
 	}
-	if !LoginReady(ctx, r.root) {
-		return fmt.Errorf("Codex runner needs its own login: run witness auth codex (or set CODEX_API_KEY)")
+	defer os.RemoveAll(dir)
+	env, err := runnerEnv(dir, r.root)
+	if err != nil {
+		return "", err
 	}
-	if err := r.ValidateModels(ctx, r.models...); err != nil {
-		return err
+	raw, err := prepareCatalog(ctx, bin, dir, env, r.plan)
+	if err != nil {
+		return "", err
 	}
-	r.binary = bin
-	return nil
+	_, err = stripCatalog(raw, models...)
+	return bin, err
 }
 
-func (*runner) ValidateModels(_ context.Context, models ...string) error {
+func validModelName(model string) bool {
+	return strings.TrimSpace(model) != "" && !strings.ContainsAny(model, "/\\ \t\r\n")
+}
+
+func validateModelNames(models ...string) error {
 	for _, model := range models {
-		if strings.TrimSpace(model) == "" || strings.ContainsAny(model, "/\\ \t\r\n") {
+		if !validModelName(model) {
 			return fmt.Errorf("Codex requires a bare model name for every stage; set mine_model/review_model to a Codex model slug")
 		}
 	}
 	return nil
+}
+
+func checkVersion(ctx context.Context, bin, dir string, env []string) error {
+	cmd := commandContext(ctx, bin, "--version")
+	cmd.Dir, cmd.Env = dir, env
+	v, err := cmd.Output()
+	if err != nil {
+		return childError(ctx, "version", err, "")
+	}
+	version := strings.TrimSpace(strings.TrimPrefix(string(v), "codex-cli "))
+	if version != testedVersion && version != testedDesktopVersion {
+		return fmt.Errorf("Codex CLI %s has no verified tool-free contract; install %s or %s and point WITNESS_CODEX_BINARY at it", version, testedVersion, testedDesktopVersion)
+	}
+	return nil
+}
+
+func scratchDir() (string, error) {
+	dir, err := os.MkdirTemp("", "witness-codex-")
+	if err != nil {
+		return "", err
+	}
+	for p := dir; ; p = filepath.Dir(p) {
+		if _, err := os.Stat(filepath.Join(p, ".git")); !os.IsNotExist(err) {
+			_ = os.RemoveAll(dir)
+			return "", fmt.Errorf("Codex scratch directory must be outside a git repository")
+		}
+		if filepath.Dir(p) == p {
+			return dir, nil
+		}
+	}
+}
+
+func runnerEnv(dir, root string) ([]string, error) {
+	home := RunnerHome(root)
+	if strings.TrimSpace(os.Getenv("CODEX_API_KEY")) != "" {
+		// A key-backed call does not need the saved ChatGPT login. Keep it outside
+		// the subprocess home so even subcommands that ignore the key cannot use it.
+		home = filepath.Join(dir, "home")
+	}
+	if err := os.MkdirAll(home, 0700); err != nil {
+		return nil, err
+	}
+	home, err := filepath.Abs(home)
+	if err != nil {
+		return nil, err
+	}
+	return childEnv(home), nil
+}
+
+func prepareCatalog(ctx context.Context, bin, dir string, env []string, plan bool) ([]byte, error) {
+	if err := checkVersion(ctx, bin, dir, env); err != nil {
+		return nil, err
+	}
+	if err := checkManagedConfig(ctx, bin, dir, env, plan); err != nil {
+		return nil, err
+	}
+	cmd := commandContext(ctx, bin, append(isolationArgs(), "debug", "models")...)
+	cmd.Env, cmd.Dir = env, dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	raw, err := cmd.Output()
+	if err != nil {
+		return nil, childError(ctx, "catalog", err, stderr.String())
+	}
+	return raw, nil
 }
 
 // These flags remove configurable tools and all implicit user/project context.
@@ -228,7 +344,8 @@ func isolationArgs() []string {
 		"features.multi_agent=false", "features.goals=false", "features.image_generation=false",
 		"features.apps=false", "features.plugins=false", "features.tool_suggest=false",
 		"features.sleep_tool=false", "features.hooks=false", "features.skill_search=false",
-		"skills.include_instructions=false", "project_doc_max_bytes=0", "project_root_markers=[]",
+		"skills.include_instructions=false", "skills.bundled.enabled=false",
+		"features.reasoning_effort_override=false", "project_doc_max_bytes=0", "project_root_markers=[]",
 		"include_permissions_instructions=false", "include_apps_instructions=false",
 		"include_collaboration_mode_instructions=false", "include_environment_context=false", "analytics.enabled=false",
 	} {
@@ -237,7 +354,7 @@ func isolationArgs() []string {
 	return args
 }
 
-func stripCatalog(raw []byte, model string) ([]byte, error) {
+func stripCatalog(raw []byte, requested ...string) ([]byte, error) {
 	var catalog map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		return nil, fmt.Errorf("Codex model catalog: %w", err)
@@ -246,16 +363,20 @@ func stripCatalog(raw []byte, model string) ([]byte, error) {
 	if err := json.Unmarshal(catalog["models"], &models); err != nil || len(models) == 0 {
 		return nil, fmt.Errorf("Codex model catalog has no models")
 	}
-	found := false
+	found := make(map[string]bool, len(models))
 	for _, m := range models {
-		if m["slug"] == model {
-			found = true
+		slug, ok := m["slug"].(string)
+		if !ok || slug == "" || found[slug] {
+			return nil, fmt.Errorf("Codex model catalog contains an invalid or duplicate slug")
 		}
+		found[slug] = true
 		m["apply_patch_tool_type"], m["shell_type"], m["tool_mode"] = nil, "disabled", "direct"
 		m["experimental_supported_tools"], m["supports_search_tool"] = []any{}, false
 	}
-	if !found {
-		return nil, fmt.Errorf("Codex model %q is absent from this login's catalog", model)
+	for _, model := range requested {
+		if !found[model] {
+			return nil, fmt.Errorf("Codex model %q is absent from this login's catalog", model)
+		}
 	}
 	catalog["models"], _ = json.Marshal(models)
 	return json.Marshal(catalog)
@@ -274,12 +395,10 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 	if r.binary == "" {
 		return "", fmt.Errorf("codex runner is not open")
 	}
-	if err := r.ValidateModels(ctx, model); err != nil {
+	if err := validateModelNames(model); err != nil {
 		return "", err
 	}
-	callCtx, cancel := context.WithTimeout(ctx, runTimeout)
-	defer cancel()
-	unlock, err := store.RuntimeLock(callCtx, filepath.Join(r.root, "codex"))
+	unlock, err := loginLock(ctx, r.root)
 	if err != nil {
 		return "", err
 	}
@@ -293,31 +412,28 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 		}
 	}
 	// Keep the refresh lock until the process has exited, including on cancellation.
-	dir, err := os.MkdirTemp("", "witness-codex-")
+	dir, err := scratchDir()
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(dir)
-	for p := dir; ; p = filepath.Dir(p) {
-		if _, err := os.Stat(filepath.Join(p, ".git")); err == nil {
-			return "", fmt.Errorf("Codex scratch directory must be outside a git repository")
+	env, err := runnerEnv(dir, r.root)
+	if err != nil {
+		return "", err
+	}
+	preflightCtx, stop := context.WithTimeout(ctx, preflightTimeout)
+	raw, err := prepareCatalog(preflightCtx, r.binary, dir, env, r.plan)
+	stop()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
 		}
-		if filepath.Dir(p) == p {
-			break
-		}
+		// A failed preflight sent no generation request and must not narrow the drain.
+		return "", fmt.Errorf("Codex preflight: %v", err)
 	}
 	cwd := filepath.Join(dir, "cwd")
 	if err := os.Mkdir(cwd, 0700); err != nil {
 		return "", err
-	}
-	env := childEnv(RunnerHome(r.root))
-	cmd := commandContext(callCtx, r.binary, append(isolationArgs(), "debug", "models")...)
-	cmd.Env, cmd.Dir = env, cwd
-	var catErr bytes.Buffer
-	cmd.Stderr = &catErr
-	raw, err := cmd.Output()
-	if err != nil {
-		return "", childError(callCtx, "catalog", err, catErr.String())
 	}
 	catalog, err := stripCatalog(raw, model)
 	if err != nil {
@@ -332,7 +448,9 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 	}
 	args := append(isolationArgs(), "-c", configPath("model_catalog_json", catPath), "-c", configPath("model_instructions_file", promptPath))
 	args = append(args, "exec", "--ignore-user-config", "--ignore-rules", "--json", "--ephemeral", "--skip-git-repo-check", "-C", cwd, "-s", "read-only", "-m", model, "-")
-	cmd = commandContext(callCtx, r.binary, args...)
+	callCtx, cancel := context.WithTimeout(ctx, runTimeout)
+	defer cancel()
+	cmd := commandContext(callCtx, r.binary, args...)
 	cmd.Env, cmd.Dir, cmd.Stdin = env, cwd, strings.NewReader(input)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr

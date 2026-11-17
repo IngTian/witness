@@ -62,6 +62,7 @@ type RunnerLoginGate interface {
 
 type RunnerAuthenticator interface {
 	Login(ctx context.Context, root string) error
+	Logout(ctx context.Context, root string) error
 }
 
 // ModelFormat lets wire ask in the runtime's own syntax. Runtimes without it
@@ -135,6 +136,10 @@ type Runner interface {
 	// user and plugin hooks, which fire and may add context. Those need `--bare`, which (claude 2.1.325 `--help`) limits Anthropic auth
 	// to ANTHROPIC_API_KEY/apiKeyHelper, no OAuth or keychain (Bedrock/Vertex keep theirs): a
 	// product call, not done.
+	//
+	// Codex: a fresh ephemeral exec with a witness-owned home, an empty cwd and no user
+	// or project instructions. The CLI's policy preflight rejects managed layers and
+	// workspace logins. Feature flags and a stripped model catalog remove tool offers.
 	//
 	// OpenCode: a fresh session in the private DB, prompted once and deleted when Run returns.
 	// Witness's prompt is the agent's system prompt. Private config, nothing from the user's

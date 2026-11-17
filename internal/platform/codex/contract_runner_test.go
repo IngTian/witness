@@ -35,16 +35,16 @@ func TestContractToolFreeWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var models struct{ Models []struct{ Slug string } }
-	if err := json.Unmarshal(catalog, &models); err != nil {
-		t.Fatal(err)
-	}
 	var mu sync.Mutex
 	var requests []map[string]json.RawMessage
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(catalog)
+			return
+		}
+		if req.Method != "POST" || req.URL.Path != "/v1/responses" || req.Header.Get("Authorization") != "Bearer dummy" {
+			http.Error(w, "unexpected provider request", http.StatusBadRequest)
 			return
 		}
 		var body map[string]json.RawMessage
@@ -68,74 +68,113 @@ func TestContractToolFreeWire(t *testing.T) {
 	}))
 	defer srv.Close()
 	previous := commandContext
-	commandContext = func(ctx context.Context, binary string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, binary, append([]string{"-c", configPath("openai_base_url", srv.URL+"/v1")}, args...)...)
-	}
 	defer func() { commandContext = previous }()
-	for _, m := range models.Models {
-		if m.Slug != "gpt-6.1-sol" && m.Slug != "gpt-5.5" {
-			continue
+	for _, tc := range []struct {
+		slug        string
+		dropCatalog bool
+	}{
+		{"gpt-6.1-sol", false}, {"gpt-5.5", false}, {"gpt-6.1-sol", true},
+	} {
+		name := tc.slug
+		if tc.dropCatalog {
+			name += "/without-catalog-override"
 		}
-		t.Run(m.Slug, func(t *testing.T) {
-			r := (Platform{}).NewRunner(store.Config{RuntimeRoot: t.TempDir(), RunnerModels: []string{m.Slug}})
+		t.Run(name, func(t *testing.T) {
+			mu.Lock()
+			requests = nil
+			mu.Unlock()
+			commandContext = func(ctx context.Context, binary string, args ...string) *exec.Cmd {
+				forwarded := []string{"-c", configPath("openai_base_url", srv.URL+"/v1")}
+				for i := 0; i < len(args); i++ {
+					if tc.dropCatalog && args[i] == "-c" && i+1 < len(args) && strings.HasPrefix(args[i+1], "model_catalog_json=") {
+						i++
+						continue
+					}
+					forwarded = append(forwarded, args[i])
+				}
+				return exec.CommandContext(ctx, binary, forwarded...)
+			}
+			r := (Platform{}).NewRunner(store.Config{RuntimeRoot: t.TempDir(), RunnerModels: []string{tc.slug}})
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			if err := r.Open(ctx); err != nil {
 				t.Fatal(err)
 			}
 			defer r.Close()
-			answer, err := r.Run(ctx, m.Slug, "WITNESS-SYSTEM-ONLY", "WITNESS-CORPUS-ONLY")
+			answer, err := r.Run(ctx, tc.slug, "WITNESS-SYSTEM-ONLY", "WITNESS-CORPUS-ONLY")
 			if err != nil || answer != "WITNESS-PROBE-OK" {
 				t.Fatalf("answer %q, error %v", answer, err)
 			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(requests) == 0 {
+				t.Fatal("no generation request captured")
+			}
+			caught := false
+			for _, req := range requests {
+				if string(req["model"]) != fmt.Sprintf("%q", tc.slug) {
+					t.Fatalf("unexpected model %s", req["model"])
+				}
+				err := checkWireRequest(req)
+				if tc.dropCatalog {
+					if err != nil && strings.Contains(err.Error(), "additional_tools") {
+						caught = true
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.dropCatalog && !caught {
+				t.Fatal("dropping model_catalog_json did not trigger the additional_tools assertion")
+			}
 		})
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(requests) == 0 {
-		t.Fatal("no requests captured")
-	}
-	for _, req := range requests {
-		var offered []any
-		if raw := req["tools"]; len(raw) > 0 {
-			if err := json.Unmarshal(raw, &offered); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if len(offered) != 0 {
-			t.Fatalf("tools offered: %s", req["tools"])
-		}
-		var input []struct {
-			Role    string
-			Content []struct{ Text string }
-		}
-		if err := json.Unmarshal(req["input"], &input); err != nil {
-			t.Fatal(err)
-		}
-		dev, user := 0, 0
-		for _, msg := range input {
-			if msg.Role != "developer" && msg.Role != "user" {
-				continue
-			}
-			for _, part := range msg.Content {
-				if msg.Role == "developer" {
-					dev++
-					if strings.TrimSpace(part.Text) != "WITNESS-SYSTEM-ONLY" {
-						t.Fatalf("unexpected developer instructions/tool schema: %s", part.Text)
-					}
-				}
-				if msg.Role == "user" {
-					user++
-					if part.Text != "WITNESS-CORPUS-ONLY" {
-						t.Fatalf("unexpected corpus: %s", part.Text)
-					}
-				}
-			}
-		}
-		if dev == 0 || user != 1 {
-			t.Fatalf("instruction/corpus channels: developer=%d user=%d", dev, user)
+}
+
+func checkWireRequest(req map[string]json.RawMessage) error {
+	var offered []json.RawMessage
+	if raw := req["tools"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &offered); err != nil {
+			return err
 		}
 	}
+	if len(offered) != 0 {
+		return fmt.Errorf("tools offered: %s", req["tools"])
+	}
+	var input []struct {
+		Type, Role string
+		Content    []struct{ Type, Text string }
+	}
+	if err := json.Unmarshal(req["input"], &input); err != nil {
+		return err
+	}
+	dev, user := 0, 0
+	for _, msg := range input {
+		if msg.Type != "message" {
+			return fmt.Errorf("unexpected wire input item: %s", msg.Type)
+		}
+		if len(msg.Content) != 1 || msg.Content[0].Type != "input_text" {
+			return fmt.Errorf("unexpected %s message content", msg.Role)
+		}
+		switch msg.Role {
+		case "developer":
+			if msg.Content[0].Text != "WITNESS-SYSTEM-ONLY" {
+				return fmt.Errorf("unexpected developer instructions")
+			}
+			dev++
+		case "user":
+			if msg.Content[0].Text != "WITNESS-CORPUS-ONLY" {
+				return fmt.Errorf("unexpected corpus")
+			}
+			user++
+		default:
+			return fmt.Errorf("unexpected message role %q", msg.Role)
+		}
+	}
+	if dev == 0 || user != 1 {
+		return fmt.Errorf("instruction/corpus channels: developer=%d user=%d", dev, user)
+	}
+	return nil
 }
 
 // Opt-in only, uses an already-authorized witness-owned login. Never run by CI.

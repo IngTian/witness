@@ -34,10 +34,13 @@ func (Platform) SessionPrefix() string { return SessionPrefix }
 
 func (Platform) ReadyToBind(ctx context.Context, root string) bool { return LoginReady(ctx, root) }
 func (Platform) Login(ctx context.Context, root string) error      { return Login(ctx, root) }
+func (Platform) Logout(ctx context.Context, root string) error {
+	return loginCommand(ctx, root, "logout")
+}
 
 func (Platform) ModelFormat() (string, string) { return "model", "Codex model slug (bare name)" }
 func (Platform) ValidModel(model string) bool {
-	return (&runner{}).ValidateModels(context.Background(), model) == nil
+	return validModelName(model)
 }
 func (Platform) Import(ctx context.Context, st store.ImportStore, ids []string) (platform.ImportStats, error) {
 	unlock, ok := st.ImportLock("codex")

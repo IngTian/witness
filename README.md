@@ -177,7 +177,7 @@ See [How it works](docs/how-it-works.md).
 ## Your data is yours
 
 - **Local by default.** One SQLite file plus markdown under your data dir (`witness doctor` prints
-  the path). No telemetry, no account, no cloud key.
+  the path). Capture and local reads need no model account or cloud key.
 - **Local embeddings.** Multilingual (English and Chinese) embeddings run pure-Go on your machine.
 - **Distillation uses your own tooling** — your Claude Code login, a witness-owned Codex login, or OpenCode's free models,
   environment API keys and ambient cloud credentials. witness never copies a credential. Nothing goes

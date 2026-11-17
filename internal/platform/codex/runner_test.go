@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -129,7 +130,7 @@ func TestEventsRejectToolsAndPartialOrFailedAnswers(t *testing.T) {
 	}
 }
 
-func helperRunner(t *testing.T) *runner {
+func setUpChild(t *testing.T) *runner {
 	t.Helper()
 	t.Setenv(platform.DisableExternalRunnersEnv, "0")
 	t.Setenv("CODEX_API_KEY", "dummy")
@@ -144,7 +145,12 @@ func helperRunner(t *testing.T) *runner {
 		return exec.CommandContext(ctx, bin, append([]string{"-test.run=^TestCodexChildHelper$", "--"}, args...)...)
 	}
 	t.Cleanup(func() { commandContext = previous })
-	r := (Platform{}).NewRunner(store.Config{RuntimeRoot: t.TempDir(), RunnerModels: []string{"test"}}).(*runner)
+	return (Platform{}).NewRunner(store.Config{RuntimeRoot: t.TempDir(), RunnerModels: []string{"test"}}).(*runner)
+}
+
+func helperRunner(t *testing.T) *runner {
+	t.Helper()
+	r := setUpChild(t)
 	if err := r.Open(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -200,15 +206,24 @@ func TestRunPublishesAndRechecksPlanPauseUnderLoginLock(t *testing.T) {
 }
 
 func TestDisabledRunnerNeverSpawns(t *testing.T) {
+	r := helperRunner(t)
 	t.Setenv(platform.DisableExternalRunnersEnv, "1")
-	r := &runner{}
+	previous := commandContext
+	commandContext = func(context.Context, string, ...string) *exec.Cmd {
+		t.Fatal("disabled runner spawned a child")
+		return nil
+	}
+	defer func() { commandContext = previous }()
 	if err := r.Open(context.Background()); err == nil {
 		t.Fatal("opened disabled runner")
 	}
 	if _, err := r.Run(context.Background(), "test", "p", "i"); err == nil {
 		t.Fatal("ran disabled runner")
 	}
-	if err := Login(context.Background(), t.TempDir()); err == nil {
+	if r.ValidateModels(context.Background(), "test") == nil || LoginReady(context.Background(), r.root) {
+		t.Fatal("disabled runner was reported ready")
+	}
+	if err := Login(context.Background(), r.root); err == nil {
 		t.Fatal("logged in disabled runner")
 	}
 }
@@ -221,11 +236,30 @@ func TestCodexChildHelper(t *testing.T) {
 	}
 	args := strings.Join(os.Args, " ")
 	if strings.Contains(args, "--version") {
-		fmt.Println("codex-cli 0.169.0-alpha.11.1")
+		version := os.Getenv("WITNESS_CODEX_HELPER_VERSION")
+		if version == "" {
+			version = "0.169.0-alpha.11.1"
+		}
+		fmt.Println("codex-cli " + version)
+		os.Exit(0)
+	}
+	mode := os.Getenv("WITNESS_CODEX_HELPER_MODE")
+	if strings.Contains(args, "app-server --listen stdio://") {
+		servePolicyFixture(mode)
+		os.Exit(0)
+	}
+	if strings.Contains(args, "login status") && mode == "logged-out" {
+		os.Exit(1)
+	}
+	if strings.Contains(args, "login status") || strings.Contains(args, "login --device-auth") || strings.HasSuffix(args, " logout") {
 		os.Exit(0)
 	}
 	if strings.Contains(args, "debug models") {
-		fmt.Println(`{"models":[{"slug":"test","tool_mode":"code_mode_only"}]}`)
+		if mode == "bad-catalog" {
+			fmt.Println(`{"models":[]}`)
+			os.Exit(0)
+		}
+		fmt.Println(`{"models":[{"slug":"test","tool_mode":"code_mode_only","shell_type":"shell_command","experimental_supported_tools":["clock"],"apply_patch_tool_type":"freeform","supports_search_tool":true}]}`)
 		os.Exit(0)
 	}
 	if os.Getenv("WITNESS_CODEX_HELPER_MODE") == "hang" {
@@ -242,20 +276,58 @@ func TestCodexChildHelper(t *testing.T) {
 		fmt.Println(string(b))
 		os.Exit(1)
 	}
-	if !strings.Contains(args, "--ignore-user-config --ignore-rules") || !strings.Contains(args, "--ephemeral") || os.Getenv("TZ") != "UTC" || os.Getenv("WITNESS_WORKER") != "1" {
+	for _, flag := range []string{
+		"--ignore-user-config", "--ignore-rules", "--ephemeral", "--json", "--skip-git-repo-check", "-s read-only", "-m test -",
+		"features.shell_tool=false", "features.view_image=false", `web_search="disabled"`,
+		"tools.experimental_request_user_input.enabled=false", "agents.enabled=false", "features.multi_agent=false", "features.goals=false", "features.image_generation=false",
+		"features.apps=false", "features.plugins=false", "features.tool_suggest=false", "features.sleep_tool=false", "features.hooks=false", "features.skill_search=false",
+		"skills.include_instructions=false", "skills.bundled.enabled=false", "features.reasoning_effort_override=false", "project_doc_max_bytes=0", "project_root_markers=[]",
+		"include_permissions_instructions=false", "include_apps_instructions=false", "include_collaboration_mode_instructions=false", "include_environment_context=false", "analytics.enabled=false",
+	} {
+		if !strings.Contains(args, flag) {
+			fmt.Fprintln(os.Stderr, "missing", flag)
+			os.Exit(2)
+		}
+	}
+	if os.Getenv("TZ") != "UTC" || os.Getenv("WITNESS_WORKER") != "1" || os.Getenv("CODEX_HOME") == "" {
 		os.Exit(2)
 	}
+	var prompt, catalog bool
 	for _, arg := range os.Args {
-		if key, value, ok := strings.Cut(arg, "="); ok && key == "model_instructions_file" {
-			var path string
-			if json.Unmarshal([]byte(value), &path) != nil {
-				os.Exit(3)
-			}
-			b, _ := os.ReadFile(filepath.FromSlash(path))
-			if string(b) != "witness-system" {
-				os.Exit(4)
+		key, value, _ := strings.Cut(arg, "=")
+		if key != "model_instructions_file" && key != "model_catalog_json" {
+			continue
+		}
+		var path string
+		if json.Unmarshal([]byte(value), &path) != nil {
+			os.Exit(3)
+		}
+		b, err := os.ReadFile(filepath.FromSlash(path))
+		if err != nil {
+			os.Exit(4)
+		}
+		if key == "model_instructions_file" {
+			prompt = string(b) == "witness-system"
+			continue
+		}
+		var d struct {
+			Models []struct {
+				Slug     string
+				ToolMode string   `json:"tool_mode"`
+				Shell    string   `json:"shell_type"`
+				Search   bool     `json:"supports_search_tool"`
+				Tools    []string `json:"experimental_supported_tools"`
+				Patch    *string  `json:"apply_patch_tool_type"`
 			}
 		}
+		if json.Unmarshal(b, &d) == nil && len(d.Models) == 1 {
+			m := d.Models[0]
+			catalog = m.Slug == "test" && m.ToolMode == "direct" && m.Shell == "disabled" && !m.Search && m.Tools != nil && len(m.Tools) == 0 && m.Patch == nil
+		}
+	}
+	if !catalog || !prompt {
+		fmt.Fprintln(os.Stderr, "bad prompt or catalog")
+		os.Exit(4)
 	}
 	var input bytes.Buffer
 	_, _ = input.ReadFrom(os.Stdin)
@@ -265,4 +337,157 @@ func TestCodexChildHelper(t *testing.T) {
 	fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}`)
 	fmt.Println(`{"type":"turn.completed"}`)
 	os.Exit(0)
+}
+
+func servePolicyFixture(mode string) {
+	scan := bufio.NewScanner(os.Stdin)
+	for scan.Scan() {
+		var req rpcRequest
+		if json.Unmarshal(scan.Bytes(), &req) != nil {
+			os.Exit(5)
+		}
+		var result string
+		switch req.Method {
+		case "initialize":
+			result = `{"userAgent":"fixture"}`
+		case "config/read":
+			result = `{"layers":[{"name":{"type":"system"},"config":{}}]}`
+			if mode == "managed-config" {
+				result = `{"layers":[{"name":{"type":"mdm"},"config":{"features":{"shell_tool":true}}}]}`
+			}
+			if mode == "missing-layers" {
+				result = `{}`
+			}
+		case "configRequirements/read":
+			result = `{"requirements":null}`
+			if mode == "managed-requirements" {
+				result = `{"requirements":{"featureRequirements":{"shell_tool":true}}}`
+			}
+		case "account/read":
+			result = `{"account":{"type":"chatgpt","planType":"plus"}}`
+			if mode == "logged-out" {
+				result = `{"account":null}`
+			}
+			if mode == "managed-account" {
+				result = `{"account":{"type":"chatgpt","planType":"business"}}`
+			}
+		default:
+			continue
+		}
+		fmt.Printf(`{"id":%d,"result":%s}`+"\n", req.ID, result)
+	}
+}
+
+func TestPreflightReportsUnusableRuntime(t *testing.T) {
+	for _, tc := range []struct{ mode, version, model, want string }{
+		{"", "0.169.0-alpha.11", "test", "no verified tool-free contract"},
+		{"", "0.170.0", "test", "no verified tool-free contract"},
+		{"", "0.169.0", "test", ""},
+		{"managed-config", "", "test", "mdm config layer"},
+		{"managed-requirements", "", "test", "managed requirements"},
+		{"missing-layers", "", "test", "did not report config layers"},
+		{"managed-account", "", "test", "managed and unknown plans"},
+		{"logged-out", "", "test", "needs its own ChatGPT login"},
+		{"bad-catalog", "", "test", "catalog has no models"},
+		{"", "", "missing", "absent from this login's catalog"},
+	} {
+		t.Run(tc.mode+tc.version+tc.model, func(t *testing.T) {
+			r := setUpChild(t)
+			r.plan = true
+			t.Setenv("CODEX_API_KEY", "")
+			t.Setenv("WITNESS_CODEX_HELPER_MODE", tc.mode)
+			t.Setenv("WITNESS_CODEX_HELPER_VERSION", tc.version)
+			checkPreflightError(t, r.ValidateModels(context.Background(), tc.model), tc.want)
+			r.models = []string{tc.model}
+			checkPreflightError(t, r.Open(context.Background()), tc.want)
+		})
+	}
+	r := setUpChild(t)
+	t.Setenv("WITNESS_CODEX_BINARY", filepath.Join(t.TempDir(), "missing-codex.exe"))
+	if r.ValidateModels(context.Background(), "test") == nil {
+		t.Fatal("doctor accepted a missing binary")
+	}
+}
+
+func checkPreflightError(t *testing.T, err error, want string) {
+	t.Helper()
+	if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
+		t.Fatalf("want %q, got %v", want, err)
+	}
+}
+
+func TestLoginAndReadinessHoldTheLoginLock(t *testing.T) {
+	r := setUpChild(t)
+	t.Setenv("CODEX_API_KEY", "")
+	previous := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		assertLoginLockHeld(t, r.root)
+		return previous(ctx, bin, args...)
+	}
+	if err := Login(context.Background(), r.root); err != nil {
+		t.Fatal(err)
+	}
+	if !(Platform{}).ReadyToBind(context.Background(), r.root) {
+		t.Fatal("valid witness login was not ready")
+	}
+	if err := (Platform{}).Logout(context.Background(), r.root); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WITNESS_CODEX_HELPER_MODE", "logged-out")
+	if (Platform{}).ReadyToBind(context.Background(), r.root) {
+		t.Fatal("logged out home reported ready")
+	}
+}
+
+func TestRunRechecksManagedPolicyBeforeReceivingCorpus(t *testing.T) {
+	r := helperRunner(t)
+	t.Setenv("WITNESS_CODEX_HELPER_MODE", "managed-requirements")
+	previous := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		for _, arg := range args {
+			if arg == "exec" {
+				t.Fatal("Codex exec started with managed requirements")
+			}
+		}
+		return previous(ctx, bin, args...)
+	}
+	_, err := r.Run(context.Background(), "test", "witness-system", "corpus-only")
+	checkPreflightError(t, err, "managed requirements")
+}
+
+func assertLoginLockHeld(t *testing.T, root string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	release, err := loginLock(ctx, root)
+	if err == nil {
+		release()
+		t.Fatal("Codex subprocess started without the login lock")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+}
+
+func TestRunWaitsForLoginLockBeforeStartingGenerationDeadline(t *testing.T) {
+	r := helperRunner(t)
+	previousTimeout := runTimeout
+	runTimeout = 500 * time.Millisecond
+	defer func() { runTimeout = previousTimeout }()
+	release, err := loginLock(context.Background(), r.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timer := time.AfterFunc(750*time.Millisecond, release)
+	defer timer.Stop()
+	previous := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		assertLoginLockHeld(t, r.root)
+		return previous(ctx, bin, args...)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := r.Run(ctx, "test", "witness-system", "corpus-only"); err != nil {
+		t.Fatal(err)
+	}
 }

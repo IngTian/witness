@@ -505,8 +505,8 @@ func (c *configFile) EnsureConfigFile() error {
 # built-in default; uncomment a line to pin your own value.
 # Docs: https://github.com/IngTian/witness/blob/main/docs/cli.md#configuration
 
-# Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness wire claude|opencode`" + ` also binds it.
+# Distillation runtime: "claude" (default), "opencode", or "codex".
+# Uncomment to bind manually. Codex needs witness auth codex or CODEX_API_KEY.
 # runner = ` + strconv.Quote(d.Runner) + `
 
 # Two distillation stages, two models:
@@ -517,6 +517,7 @@ func (c *configFile) EnsureConfigFile() error {
 # ambient interactive model, which may be heavy; set triage_model to pin a light one.
 # The ` + "`opencode serve`" + ` runner has no default and refuses an empty model: with runner = opencode,
 # set triage_model to an OpenCode model name such as "openai/gpt-5.5".
+# With runner = codex, set triage_model to a bare Codex model slug.
 # (A lens may override these per-lens via its lens.json extract_model / review_model.)
 # triage_model  = ` + strconv.Quote(d.TriageModel) + `
 # distill_model = ` + strconv.Quote(d.DistillModel) + `
