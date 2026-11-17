@@ -54,7 +54,7 @@ Every observation/facet carries a `lens` tag. What the `default` and registered 
 they run is in [how it works](../docs/how-it-works.md#lenses); definitions live in the central
 registry (`<root>/lenses/<name>/`), never in a repo.
 
-A lens is a **directory** of `lens.json` (settings: `name`, `dimensions`, optional per-lens models)
+A lens is a **directory** of `lens.json` (settings: `dimensions`, optional per-lens models)
 plus `extract.md` and `review.md` (each whole file is the prompt for its pass). See
 `prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own with
 `witness config set --lens <name> mine_model|review_model <model>` (or `extract_model` /

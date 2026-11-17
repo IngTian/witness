@@ -47,18 +47,22 @@ A lens is a **directory** of three files:
 
 ```
 math/
-  lens.json     settings: name, dimensions, optional per-lens models
+  lens.json     settings: dimensions, optional per-lens models
   extract.md    per-session — mines observations (the whole file is the prompt)
   review.md     periodic — synthesizes observations into facets (the whole file is the prompt)
 ```
 
 ```json
 // math/lens.json
-{ "name": "math", "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
+{ "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
 ```
 
-`name` is the key your data is stored under; omit it and the registered name is used. Changing it
-later strands existing data (a re-register that would do so is refused).
+A lens has one name: the one you register it under. Every observation, facet and profile it
+produces is stored under that name, and every command and MCP tool takes it. `lens.json` has no
+`name`; one left in an older file is ignored, and `lens register` and `witness doctor` say so. A
+lens whose `lens.json` `name` differed from its registered name was renamed to that name once, on
+the first start after upgrading, so its data stayed with it; `witness doctor` names any lens it
+could not rename (the name was taken, or is not a valid lens name).
 
 ```markdown
 <!-- math/extract.md -->
@@ -89,7 +93,7 @@ without paying for it on every session — by adding `extract_model` / `review_m
 `lens.json`:
 
 ```json
-{ "name": "math", "dimensions": ["proof_rigor"], "extract_model": "claude-sonnet-5" }
+{ "dimensions": ["proof_rigor"], "extract_model": "claude-sonnet-5" }
 ```
 
 Omit a field (or leave it empty) to ride the default. Since `register` stores a snapshot, edit the

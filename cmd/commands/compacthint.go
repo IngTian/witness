@@ -39,16 +39,15 @@ func (n compactNudge) text() string {
 
 func (n compactNudge) command() string { return "witness compact --lens " + n.Lens }
 
-// compactionNudges reads the enabled lenses' facet counts by their data names (a lens can mine
-// under a different name than it is registered as) and reports the ones worth compacting.
+// compactionNudges reads the enabled lenses' facet counts and reports the ones worth compacting.
 func compactionNudges(st *store.Store) []compactNudge {
 	var out []compactNudge
 	for _, name := range st.LoadConfig().EnabledLenses {
-		active, archived := st.LensFacetCounts(lens.DataName(st, name))
+		active, archived := st.LensFacetCounts(name)
 		if active < compactHintMin {
 			continue
 		}
-		base, _ := strconv.Atoi(st.MetaString(store.CompactBaselineKey(lens.DataName(st, name))))
+		base, _ := strconv.Atoi(st.MetaString(store.CompactBaselineKey(name)))
 		switch {
 		case base > 0:
 			if float64(active) >= compactHintGrowth*float64(base) {

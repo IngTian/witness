@@ -9,20 +9,9 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// renamed is a lens whose lens.json `name` differs from its registered one (the shipped
-// corpus-example did until F153): an agent names it "corpus-example" (what
-// `witness lens list` shows), while its rows are tagged "regime" (its lens.json name).
-var renamed = Options{Version: "v0.0.0-fake", DataName: func(l string) string {
-	if l == "corpus-example" {
-		return "regime"
-	}
-	return l
-}}
-
-// Every tool took the agent's lens name as the data tag. record_observation then staged the row
-// under a name no review reads — reporting success — and the read tools told the agent nothing had
-// been mined into a lens the CLI listed facets for.
-func TestToolsMapTheRegisteredLensName(t *testing.T) {
+// Each tool reads and writes the lens it is given: a lens has one name, so the one an agent
+// passes is the one its rows are tagged with.
+func TestToolsReadAndWriteTheLensTheyAreGiven(t *testing.T) {
 	fake := &fakeMCPStore{
 		obs: []store.Observation{{ID: "o1", Lens: "regime", Dimension: "regimes",
 			Observation: "turns when rates move", Embedding: []float32{0.1, 0.2, 0.3}}},
@@ -32,41 +21,41 @@ func TestToolsMapTheRegisteredLensName(t *testing.T) {
 		stagedReturn: true,
 		whyEmpty:     store.NoFacets,
 	}
-	arg := map[string]any{"lens": "corpus-example"}
+	arg := map[string]any{"lens": "regime"}
 
-	if got := callText(t, fake, renamed, "search_observations", map[string]any{"query": "rates", "lens": "corpus-example"}); !strings.Contains(got, "turns when rates move") {
+	if got := callText(t, fake, testOptions, "search_observations", map[string]any{"query": "rates", "lens": "regime"}); !strings.Contains(got, "turns when rates move") {
 		t.Errorf("search must find the lens's observations:\n%s", got)
 	}
 	// F140: one lens's rows, not every lens's embeddings filtered in Go.
 	if fake.readLens != "regime" {
 		t.Errorf("search must read only the lens it searches, read %q", fake.readLens)
 	}
-	if got := callText(t, fake, renamed, "get_facets", arg); !strings.Contains(got, "flips_on_rates") {
+	if got := callText(t, fake, testOptions, "get_facets", arg); !strings.Contains(got, "flips_on_rates") {
 		t.Errorf("get_facets must list the lens's facets:\n%s", got)
 	}
-	if got := callText(t, fake, renamed, "get_profile", arg); !strings.Contains(got, "the regime narrative") {
+	if got := callText(t, fake, testOptions, "get_profile", arg); !strings.Contains(got, "the regime narrative") {
 		t.Errorf("get_profile must serve the lens's narrative:\n%s", got)
 	}
-	callText(t, fake, renamed, "record_observation", map[string]any{"session": "s1", "lens": "corpus-example",
+	callText(t, fake, testOptions, "record_observation", map[string]any{"session": "s1", "lens": "regime",
 		"dimension": "regimes", "observation": "noticed"})
 	if fake.lastStaged.Lens != "regime" || fake.lastStaged.ID != store.ObservationID("s1", "regime", "noticed") {
 		t.Errorf("record must stage under the name the review reads, got lens %q id %q", fake.lastStaged.Lens, fake.lastStaged.ID)
 	}
 }
 
-// The empty hint must ask WhyEmpty about the MINED name: asked about "corpus-example", a lens with
-// observations but no facets (or no embeddings) is told nothing was mined and to re-mine it.
-func TestEmptyHintAsksAboutTheMinedName(t *testing.T) {
-	arg := map[string]any{"lens": "corpus-example"}
+// The empty hint must ask WhyEmpty about the lens it was given: asked about another name, a lens
+// with observations but no facets (or no embeddings) is told nothing was mined and to re-mine it.
+func TestEmptyHintAsksAboutTheLensItWasGiven(t *testing.T) {
+	arg := map[string]any{"lens": "regime"}
 	for tool, args := range map[string]map[string]any{
-		"search_observations": {"query": "rates", "lens": "corpus-example"},
+		"search_observations": {"query": "rates", "lens": "regime"},
 		"get_facets":          arg,
 		"get_profile":         arg,
 	} {
 		fake := &fakeMCPStore{whyEmpty: store.NoFacets}
-		callText(t, fake, renamed, tool, args)
+		callText(t, fake, testOptions, tool, args)
 		if fake.whyLens != "regime" {
-			t.Errorf("%s asked why %q is empty, want the mined name \"regime\"", tool, fake.whyLens)
+			t.Errorf("%s asked why %q is empty, want \"regime\"", tool, fake.whyLens)
 		}
 	}
 }

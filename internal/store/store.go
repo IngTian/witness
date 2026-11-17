@@ -105,6 +105,9 @@ func Open() (*Store, error) {
 	// Idempotent + best-effort (see adoptRunnerBound); needs s.db, so it runs after
 	// openDB. Keeps the "is a runner bound?" decision out of every config read.
 	s.adoptRunnerBound()
+	// One-shot (F3): rename a lens whose lens.json `name` tagged its data to that name. Before
+	// the default seed, so a fresh archive stamps the marker on an empty registry.
+	s.adoptLensDataNames()
 	// One-shot (#44 slice 1a + #102): on the FIRST open of an archive that wants it — a
 	// brand-new personal install OR one that predates 1a (ran under the old always-on
 	// "default") — auto-seed "default" as an ordinary registered+enabled lens, so a fresh
@@ -199,28 +202,73 @@ func (s *Store) UnreviewedDelta(lens string) int {
 	return s.unreviewedDeltaSince(lens, s.ReviewRowid(lens))
 }
 
-// RegisterLens is lensReg.RegisterLens plus the one check the filesystem leaf can't make:
-// a RE-register must not change the name an existing lens's data is stored under (F153).
-// That name is lens.json's `name`, else the registry name, so re-registering from a copy
-// that drops or edits `name` silently moved every later write to a new key, leaving the
-// observations and facets already mined stranded under the old one, read by nothing.
-// A lens with no data under its old name moves freely: nothing is stranded. Every
-// re-register (lens register, load-default) routes through here; merge registers only
-// lenses not yet registered.
-func (s *Store) RegisterLens(name, srcDir string) error {
-	if slices.Contains(s.RegisteredLenses(), name) {
-		oldName, err1 := s.resolveNameFromRegistry(name)
-		newName, err2 := ResolveLensName(srcDir, name)
-		if err1 == nil && err2 == nil && oldName != newName {
-			if obs, facets := s.LensDataCounts(oldName); obs+facets > 0 {
-				// The fix names a copy, not srcDir itself: on load-default srcDir is the shipped
-				// bundle, which no user should edit.
-				return fmt.Errorf("re-registering lens %q would store its data under %q instead of %q, stranding %d observations and %d facets; to keep them, register %q from a copy of %s whose %s sets \"name\": %q",
-					name, newName, oldName, obs, facets, name, srcDir, LensConfigFile, oldName)
+// lensNamesAdoptedKey stamps the one-time rename below, so it runs once per archive.
+const lensNamesAdoptedKey = "lens_names_adopted"
+
+// adoptLensDataNames is a one-shot (F3) that makes a lens's registered name its only name.
+// Before F3 a lens.json `name` overrode the registered one as the tag on every observation,
+// facet and profile, so a lens registered as corpus-example whose lens.json said "regime" has
+// all its data under "regime". Renaming the lens to that name (its registry folder, and its
+// config line if enabled) reunites the two; no observation, facet or profile row is rewritten.
+// A lens is left alone when the name is not one registration would accept or another lens
+// already holds it (doctor reports both). Once the marker is stamped, `name` is inert.
+//
+// Best-effort like adoptRunnerBound: a busy registry or a failed step leaves the marker
+// unstamped, so the next Open retries. The config is switched BEFORE the folder moves because
+// only that order converges: a failed rename leaves the old folder, still carrying its `name`,
+// so the retry finds it and finishes the move into the config line already waiting. Renamed
+// first, a failed config switch would be final, since the moved lens no longer reads as
+// mismatched, leaving it disabled behind an enabled line for a lens that no longer exists.
+func (s *Store) adoptLensDataNames() {
+	if s.MetaString(lensNamesAdoptedKey) != "" {
+		return
+	}
+	unlock, ok := s.lensRegistryLock()
+	if !ok {
+		return
+	}
+	defer unlock()
+	failed := false
+	ignored := s.IgnoredLensNames()
+	for _, reg := range s.RegisteredLenses() {
+		data, ok := ignored[reg]
+		if !ok || ValidLensName(data) != nil || lensDirTaken(s.LensesDir(), reg, data) {
+			continue
+		}
+		if slices.Contains(s.LoadConfig().EnabledLenses, reg) {
+			if s.EnableLens(data) != nil || s.DisableLens(reg) != nil {
+				failed = true
+				continue
 			}
 		}
+		// A sibling rename inside one directory: atomic, never across filesystems, and
+		// lensDirTaken has just checked the target is free.
+		if os.Rename(filepath.Join(s.LensesDir(), reg), filepath.Join(s.LensesDir(), data)) != nil {
+			failed = true
+		}
 	}
-	return s.lensReg.RegisterLens(name, srcDir)
+	if !failed {
+		_ = s.SetMetaString(lensNamesAdoptedKey, "1")
+	}
+}
+
+// lensDirTaken reports whether any registry entry other than reg already answers to data,
+// case-folded because the registry's filesystems usually are (APFS, NTFS). It re-reads the
+// directory, so a lens renamed earlier in the same pass counts: the first lens to claim a
+// name wins. Every entry counts, not only registered lenses: an old-format lens or a stray file
+// under that name is in the way too, and rename(2) would silently replace an empty directory.
+// An unreadable registry reads as taken, so a doubt never becomes a rename.
+func lensDirTaken(dir, reg, data string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if e.Name() != reg && strings.EqualFold(e.Name(), data) {
+			return true
+		}
+	}
+	return false
 }
 
 // EmptyReason explains why a lens has nothing to show. The three cases have COMPLETELY

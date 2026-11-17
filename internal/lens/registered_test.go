@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -38,7 +40,7 @@ func writeLensDir(t *testing.T, root, name string, cfg *LensConfig, extract, rev
 func TestLoadRegistered(t *testing.T) {
 	dir := t.TempDir()
 	writeLensDir(t, dir, "math",
-		&LensConfig{Name: "math", Dimensions: []string{"speed", "proof"}, ExtractModel: "openai/gpt-5.5-mini"},
+		&LensConfig{Dimensions: []string{"speed", "proof"}, ExtractModel: "openai/gpt-5.5-mini"},
 		"mine growth", "synthesize")
 
 	l, err := LoadRegistered("math", dir)
@@ -82,7 +84,7 @@ func TestLoadRegisteredWithoutConfigJSON(t *testing.T) {
 // old sectioned split-parser could produce).
 func TestLoadRegisteredRequiresNonEmptyExtract(t *testing.T) {
 	dir := t.TempDir()
-	writeLensDir(t, dir, "empty", &LensConfig{Name: "empty"}, "   \n", "rev")
+	writeLensDir(t, dir, "empty", &LensConfig{}, "   \n", "rev")
 	if _, err := LoadRegistered("empty", dir); err == nil {
 		t.Fatalf("an empty extract.md must error (the mining prompt is required)")
 	}
@@ -105,31 +107,29 @@ func TestLoadRegisteredRejectsLegacyLensMD(t *testing.T) {
 	}
 }
 
-// The reserved-name guard's ultimate backstop: a lens registered under an innocent
-// directory name whose lens.json `name` resolves to the reserved "unified" identity must
-// be REJECTED at load — else it would clobber the cross-lens unified portrait file.
-// (Since #44 slice 1a "default" is NOT reserved and loads fine.) RegisterLens/EnableLens
-// guard the registry NAME, but only the resolved json name is known here, so this is where the
-// impersonation is caught. Case variants too (the reserved-name check folds case).
-func TestLoadRegisteredRejectsReservedJSONName(t *testing.T) {
-	// Only "unified" is reserved since #44 slice 1a; "default" is an ordinary lens.
-	for _, reserved := range []string{"unified", "UNIFIED", "Unified"} {
-		t.Run(reserved, func(t *testing.T) {
-			dir := t.TempDir()
-			// Registered under an innocent dir name "foo", but lens.json claims a reserved
-			// identity — the exact bypass the registry-name guard can't see.
-			writeLensDir(t, dir, "foo", &LensConfig{Name: reserved}, "mine", "rev")
-			if _, err := LoadRegistered("foo", dir); err == nil {
-				t.Fatalf("a lens whose lens.json name resolves to reserved %q must be rejected at load", reserved)
-			}
-		})
-	}
-	// A lens.json name of "default" is now accepted (it is an ordinary lens).
-	t.Run("allowed/default", func(t *testing.T) {
-		dir := t.TempDir()
-		writeLensDir(t, dir, "default", &LensConfig{Name: "default"}, "mine", "rev")
-		if _, err := LoadRegistered("default", dir); err != nil {
-			t.Fatalf("LoadRegistered must accept the ordinary default lens since #44 slice 1a: %v", err)
+// A lens has one name, the one it is registered under: a `name` left in its lens.json is
+// ignored, so it can neither rename the lens nor make it the reserved "unified" portrait. The
+// registered name itself is still checked against the reserved one.
+func TestLoadRegisteredIgnoresTheLensJSONName(t *testing.T) {
+	dir := t.TempDir()
+	for reg, cfg := range map[string]string{
+		"corpus-example": `{"name":"regime","dimensions":["rates"]}`,
+		"foo":            `{"name":"Unified"}`,
+	} {
+		writeLensDir(t, dir, reg, nil, "mine", "rev")
+		if err := os.WriteFile(filepath.Join(dir, reg, ConfigFile), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
 		}
-	})
+		l, err := LoadRegistered(reg, dir)
+		if err != nil || l.Name != reg {
+			t.Fatalf("LoadRegistered(%q) = %+v, %v; want name %q", reg, l, err, reg)
+		}
+		if reg == "corpus-example" && !slices.Equal(l.Dimensions, []string{"rates"}) {
+			t.Fatalf("the rest of lens.json must still load, dimensions = %v", l.Dimensions)
+		}
+	}
+	writeLensDir(t, dir, "unified", nil, "mine", "rev")
+	if _, err := LoadRegistered("unified", dir); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("a lens registered under the reserved name must be refused at load, got %v", err)
+	}
 }

@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -69,11 +68,6 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		lensName = strings.TrimSpace(args[0])
 	}
-	// Facets are tagged with the lens's MINED name (its lens.json `name`), which can differ from
-	// the name it was registered under: a lens registered as corpus-example from a checkout whose
-	// lens.json still said "regime" must find the facets the worker wrote under that name, not
-	// report an empty lens.
-	dataName := lens.DataName(st, lensName)
 	// The live profile by default: an archived facet is history, and listing it beside the
 	// active ones would misrepresent what witness currently claims about the person.
 	read := st.ReadActiveFacets
@@ -87,7 +81,7 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	if asJSON {
 		filtered := []store.Facet{}
 		for _, f := range facets {
-			if f.Lens == dataName && f.Current() != nil {
+			if f.Lens == lensName && f.Current() != nil {
 				filtered = append(filtered, f)
 			}
 		}
@@ -103,13 +97,13 @@ func cmdFacets(args []string, asJSON, all bool) error {
 	// The listing shows CURRENT confidence (decayed on its lens's clock); --json above stays the
 	// stored record. docs/how-it-works.md promises this view moves on its own as evidence fails
 	// to arrive, and before this it never did.
-	clock, err := st.LensClock(dataName)
+	clock, err := st.LensClock(lensName)
 	if err != nil {
-		return fmt.Errorf("read %s lens clock: %w", dataName, err)
+		return fmt.Errorf("read %s lens clock: %w", lensName, err)
 	}
 	// whyEmpty is a closure, not a value: it costs two indexed queries and is only needed
 	// on the empty path, which is the uncommon one.
-	renderCurrentFacets(lensName, dataName, facets, clock, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(dataName) })
+	renderCurrentFacets(lensName, facets, clock, registered, enabled, func() store.EmptyReason { return st.WhyEmpty(lensName) })
 	return nil
 }
 
@@ -139,7 +133,6 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		lensName = strings.TrimSpace(args[0])
 	}
-	dataName := lens.DataName(st, lensName)
 	dimension, key, ok := store.ParseFacetRef(strings.TrimSpace(ref))
 	if !ok {
 		return fmt.Errorf("--expand wants a facet as dimension/key (e.g. thinking/zooms_out), got %q", ref)
@@ -151,7 +144,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	}
 	var target *store.Facet
 	for i := range all {
-		if all[i].Lens == dataName && all[i].Dimension == dimension && all[i].Key == key {
+		if all[i].Lens == lensName && all[i].Dimension == dimension && all[i].Key == key {
 			target = &all[i]
 			break
 		}
@@ -159,7 +152,7 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 	if target == nil {
 		return fmt.Errorf("no facet %s/%s in lens %q (see `witness facets %s --all`)", dimension, key, lensName, lensName)
 	}
-	tributaries, err := st.FacetTrajectory(dataName, dimension, key)
+	tributaries, err := st.FacetTrajectory(lensName, dimension, key)
 	if err != nil {
 		return err
 	}
@@ -240,11 +233,11 @@ func cmdFacetTrajectory(args []string, ref string, asJSON bool) error {
 }
 
 // renderCurrentFacets prints one lens's listing. name is what the user typed — the title and every
-// suggested command use it; dataName is the name the facets are tagged with.
-func renderCurrentFacets(name, dataName string, facets []store.Facet, clock store.LensClock, registered, enabled bool, whyEmpty func() store.EmptyReason) {
+// suggested command use it, and the facets are tagged with it.
+func renderCurrentFacets(name string, facets []store.Facet, clock store.LensClock, registered, enabled bool, whyEmpty func() store.EmptyReason) {
 	count, archived, perDim := 0, 0, map[string]int{}
 	for _, f := range facets {
-		if f.Lens == dataName && f.Current() != nil {
+		if f.Lens == name && f.Current() != nil {
 			count++
 			perDim[f.Dimension]++
 			if !f.Active() {
@@ -298,7 +291,7 @@ func renderCurrentFacets(name, dataName string, facets []store.Facet, clock stor
 	fmt.Println(title("facets", name, summary))
 	dimension := ""
 	for _, f := range facets {
-		if f.Lens != dataName {
+		if f.Lens != name {
 			continue
 		}
 		cur := f.Current()

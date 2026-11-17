@@ -54,7 +54,9 @@ func TestLensConfigTagsMatchStoreKeys(t *testing.T) {
 			got = append(got, name)
 		}
 	}
-	want := slices.Clone(store.LensKeys)
+	// Since F3 `name` is a known but ignored key: LensKeys keeps it, so doctor does not flag it
+	// as unknown, and LensConfig has no field for it.
+	want := slices.DeleteFunc(slices.Clone(store.LensKeys), func(k string) bool { return k == store.LensKeyName })
 	sort.Strings(got)
 	sort.Strings(want)
 	if !slices.Equal(got, want) {

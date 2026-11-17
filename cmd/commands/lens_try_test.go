@@ -31,16 +31,19 @@ func (limitedPreviewRunner) ValidateModels(context.Context, ...string) error { r
 func (limitedPreviewRunner) InvocationHint() string                          { return "fake opencode" }
 
 // writeLensDir writes a candidate lens DIRECTORY (issue #75: lens.json + extract.md +
-// review.md) and returns its path. name/extract/review empty are simply omitted, so a
-// test can build a lens missing any piece. fields are more lens.json key/value pairs
-// (store.LensKeyRunner, store.LensKeyExtractModel, …).
+// review.md) and returns its path. name is the directory's basename (a lens's only name);
+// extract/review empty are simply omitted, so a test can build a lens missing any piece.
+// fields are lens.json key/value pairs (store.LensKeyRunner, store.LensKeyExtractModel, …).
 func writeLensDir(t *testing.T, name, extract, review string, fields ...string) string {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := map[string]string{}
 	if name != "" {
-		cfg[store.LensKeyName] = name
+		dir = filepath.Join(dir, name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
+	cfg := map[string]string{}
 	for i := 0; i+1 < len(fields); i += 2 {
 		cfg[fields[i]] = fields[i+1]
 	}

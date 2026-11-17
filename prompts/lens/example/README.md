@@ -2,7 +2,7 @@
 
 A complete, ready-to-register example lens. A lens is a **directory** of three files:
 
-    lens.json     structured settings: name, dimensions, optional per-lens models
+    lens.json     structured settings: dimensions, optional per-lens models
     extract.md    the mining (L0→L1) prompt — the whole file is the prompt
     review.md     the review (L1→L2) prompt — the whole file is the prompt
 

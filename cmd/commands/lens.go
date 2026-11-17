@@ -244,11 +244,10 @@ func lensRegister(st *store.Store, name, dir string) error {
 	if err := st.RegisterLens(name, dir); err != nil {
 		return err
 	}
-	note := ""
-	if l, err := lens.LoadRegistered(name, st.LensesDir()); err == nil && l.Name != name {
-		note = fmt.Sprintf("mines as %q", l.Name)
+	fmt.Println(result(okGlyph(), "registered lens "+name, ""))
+	if ignored := st.IgnoredLensNames()[name]; ignored != "" {
+		fmt.Println(result(warnGlyph(), fmt.Sprintf("ignored lens.json name %q", ignored), "lens "+name+" keeps its registered name"))
 	}
-	fmt.Println(result(okGlyph(), "registered lens "+name, note))
 	warnDroppedSettings(st, name, old)
 	if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
 		fmt.Println(hint("turn it on", "witness lens enable "+name))
@@ -345,12 +344,6 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	if err := st.ArchiveNewer(); err != nil {
 		return err
 	}
-	// Resolve the CLI arg to the name the WORKER actually keys data under. A
-	// registered lens's mined observations/facets/progress are tagged with the lens's
-	// resolved name (its lens.json `name`, via lens.LoadRegistered), which can differ
-	// from the registry/CLI name the user typed. Operating on the CLI name would make
-	// DeleteLensData/ResetLensWatermark match ZERO rows and silently "succeed" while
-	// the real data persists. So load the lens and use its resolved .Name.
 	// Since #44 slice 1a "default" has NO privileged always-active status — it is an
 	// ordinary registered lens. So it is subject to the SAME registered+enabled
 	// precondition as every other lens: without it, `lens backfill default --fresh` on a
@@ -363,11 +356,9 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
 		return fmt.Errorf("lens %q is registered but not enabled; enable it first (witness lens enable %s), or it won't be mined", name, name)
 	}
-	l, err := lens.LoadRegistered(name, st.LensesDir())
-	if err != nil {
+	if _, err := lens.LoadRegistered(name, st.LensesDir()); err != nil {
 		return fmt.Errorf("load lens %q: %w", name, err)
 	}
-	minedName := l.Name // the name the worker tags observations/facets/progress with
 	// releaseFresh releases the WorkerLock that --fresh holds across its destructive section.
 	// Declared out here (as an idempotent no-op by default) because the lock spans both the
 	// `if fresh` block AND the ResetLensWatermark below, but must be released before the drain.
@@ -413,12 +404,12 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		}
 		freshLockRelease = freshUnlock
 		defer releaseFresh() // safety net for the error/abort returns below
-		obsAll, facetsN := st.LensDataCounts(minedName)
-		active := st.ActiveObservationCount(minedName)
+		obsAll, facetsN := st.LensDataCounts(name)
+		active := st.ActiveObservationCount(name)
 		// The SECOND non-reproducible class: mined obs whose session's L0 is gone (the cleanup command witness had through v0.13 reclaimed L0 and kept L1). The re-mine enumerates candidates
 		// from `raw`, so those sessions are never offered and their obs never come back.
-		orphaned := st.OrphanedL0ObservationCount(minedName)
-		confLog := st.ConfidenceLogCount(minedName)
+		orphaned := st.OrphanedL0ObservationCount(name)
+		confLog := st.ConfidenceLogCount(name)
 		if !assumeYes {
 			// Headline + one short line per permanent loss; the prompt is the shared askYesNo, so
 			// it accepts y/yes like every other confirmation and says so when nobody can answer.
@@ -444,13 +435,13 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 				return nil
 			}
 		}
-		obs, facets, err := st.DeleteLensData(minedName)
+		obs, facets, err := st.DeleteLensData(name)
 		if err != nil {
 			return fmt.Errorf("drop lens %q data: %w", name, err)
 		}
 		fmt.Println(dim(fmt.Sprintf("dropped %s + %s", countOf(obs, "observation", "observations"), countOf(facets, "facet", "facets"))))
 	}
-	if _, err := st.ResetLensWatermark(minedName); err != nil {
+	if _, err := st.ResetLensWatermark(name); err != nil {
 		return fmt.Errorf("reset lens %q watermark: %w", name, err)
 	}
 	fmt.Println(dim("re-mining lens " + name + " over the whole history, in the foreground…"))
@@ -509,7 +500,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		return err
 	}
 	defer st2.Close()
-	stats := st2.Stats([]string{minedName})
+	stats := st2.Stats([]string{name})
 	if stats.Pending+stats.BackedOff > 0 {
 		return backlogUnfinished(name, stats.Pending, stats.BackedOff, false, tap.cause())
 	}
@@ -600,18 +591,12 @@ func lensShow(name string, full bool) error {
 // excerpt and line count for each prompt, so a glance fits on screen. The full text is
 // one flag away (`--prompts`), pointed to on the hint line.
 //
-// name is the REGISTERED name — the one every lens command takes. The card used to print the
-// lens.json name, so for a corpus-example that mines as "regime" its own footer suggested
-// `witness lens show regime --prompts`, which fails with "not registered". The settings rows are
-// config list --lens's rows, so the same data reads the same way, effective values included.
+// The settings rows are config list --lens's rows, so the same data reads the same way, effective values included.
 func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting, stale bool) string {
 	var b strings.Builder
 	state := "disabled"
 	if enabled {
 		state = "enabled"
-	}
-	if l.Name != name {
-		state += fmt.Sprintf(" · mines as %q", l.Name)
 	}
 	fmt.Fprintln(&b, title("lens", name, state))
 	fmt.Fprintln(&b)
@@ -721,9 +706,6 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 			fmt.Printf("  %s %s\n", enabledGlyph(false), row(name, status, "definition does not load"))
 		default:
 			note := countOf(len(l.Dimensions), "dim", "dims")
-			if l.Name != name {
-				note += fmt.Sprintf(" · mines as %q", l.Name)
-			}
 			fmt.Printf("  %s %s\n", enabledGlyph(isEnabled), row(name, status, note))
 		}
 	}
@@ -745,7 +727,7 @@ func renderLensList(st *store.Store, reg, enabled []string) {
 
 // oldLensFormat is what `lens list` and `doctor` say about a registry dir holding only a
 // pre-v0.3.0 lens.md (store.OldFormatLenses).
-const oldLensFormat = `old lens format: split it into extract.md + review.md (its "# name:"/"# dimensions:" lines go in lens.json as "name"/"dimensions"), then re-register`
+const oldLensFormat = `old lens format: split it into extract.md + review.md (its "# dimensions:" lines go in lens.json as "dimensions"), then re-register`
 
 const defaultLensStaleMsg = "default lens prompts differ from this binary's; refresh with `witness lens load-default` (resets per-lens overrides)"
 

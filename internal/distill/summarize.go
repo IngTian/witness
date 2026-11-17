@@ -467,17 +467,10 @@ func approxCount(n int) string {
 // "regeneration failed" with no cause. Compaction is not the lever: merged facets absorb the
 // merged text, which cuts the count, not the characters. ln is the lens whose review_model made
 // the call; nil (the unified portrait, an orphan lens) means the default review_model.
-//
-// --lens takes the REGISTERED name, which a lens whose lens.json `name` differs from it (one
-// registered from a pre-F153 corpus-example mines as "regime") does not share with its data name.
 func withInputSize(err error, input string, ln *lens.Lens) error {
 	lever := "witness config set review_model <model>"
 	if ln != nil {
-		name := ln.Registered
-		if name == "" {
-			name = ln.Name // built in code, not loaded from the registry
-		}
-		lever += " --lens " + name
+		lever += " --lens " + ln.Name
 	}
 	return &InputSizeError{Err: err, Size: InputSize(utf8.RuneCountInString(input)), Lever: lever}
 }

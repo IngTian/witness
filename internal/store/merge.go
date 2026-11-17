@@ -711,7 +711,7 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 //	                               the staleness check measure against the other machine's activity
 //	worker_*                       a live process: a copied worker_stop_requested stops our worker,
 //	                               a copied worker_pid is what `distill stop` would signal
-//	mine_drift_*, default_lens_migrated_v1a, profile_sig:*  local bookkeeping; profile_sig is stale
+//	mine_drift_*, default_lens_migrated_v1a, lens_names_adopted, profile_sig:*  local bookkeeping; profile_sig is stale
 //	                               anyway once the facets change, so the portrait regenerates
 //	deleted_obs_pending            the other side's unreviewed deletes: a merge is not a sync, so its
 //	                               facets arrive citing them, as they stood there
