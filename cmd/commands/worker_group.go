@@ -44,15 +44,12 @@ func newWorkerCmd() *cobra.Command {
 	run.Flags().BoolVar(&waitBackoffs, "wait-backoffs", false, "wait out transient mining backoffs and retry (foreground only)")
 	w.AddCommand(run)
 
-	var stopAutoOnly bool
 	stop := &cobra.Command{
 		Use:   "stop",
 		Short: "Ask the running worker to stop.",
 		Args:  cobra.NoArgs,
-		RunE:  func(_ *cobra.Command, _ []string) error { return cmdDistillStop(stopAutoOnly) },
+		RunE:  func(_ *cobra.Command, _ []string) error { return cmdDistillStop() },
 	}
-	stop.Flags().BoolVar(&stopAutoOnly, "auto-only", false, "stop only an automatically-started worker")
-	_ = stop.Flags().MarkHidden("auto-only")
 	w.AddCommand(stop)
 
 	w.AddCommand(&cobra.Command{

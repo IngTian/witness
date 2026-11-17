@@ -12,9 +12,9 @@ import (
 
 func newInternalWorkerWakeupCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:    "worker-wakeup <seconds> [stamp] [mode]",
+		Use:    "worker-wakeup <seconds> <stamp> <mode>",
 		Hidden: true,
-		Args:   cobra.RangeArgs(1, 3),
+		Args:   cobra.ExactArgs(3),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdWorkerWakeup(args)
 		},
@@ -35,21 +35,7 @@ func cmdWorkerWakeup(args []string) error {
 	}
 	defer st.Close()
 	cfg := st.LoadConfig()
-	expectedStamp := ""
-	if len(args) >= 2 {
-		expectedStamp = args[1]
-	}
-	mode := ""
-	if len(args) >= 3 {
-		mode = args[2]
-	}
-	if mode == "" {
-		if cfg.AutoDistill {
-			mode = "auto"
-		} else {
-			mode = "manual"
-		}
-	}
+	expectedStamp, mode := args[1], args[2]
 	if expectedStamp != "" && st.MetaString(workerWakeupKey(mode)) != expectedStamp {
 		return nil
 	}

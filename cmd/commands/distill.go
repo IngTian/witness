@@ -575,27 +575,15 @@ type distillQueueJSON struct {
 	BackedOff int `json:"backed_off"`
 }
 
-func cmdDistillStop(autoOnly bool) error {
+func cmdDistillStop() error {
 	st, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if autoOnly {
-		_ = clearScheduledWakeup(st, "auto")
-	}
-	if !autoOnly {
-		_ = clearScheduledWakeup(st, "")
-	}
-	mode := st.MetaString(metaWorkerMode)
-	if autoOnly && mode == workerModeManual {
-		return nil
-	}
+	_ = clearScheduledWakeup(st, "")
 	if err := st.SetMetaString(metaWorkerStopRequested, "1"); err != nil {
 		return err
-	}
-	if autoOnly && mode != workerModeAuto {
-		return nil // cancels an auto worker that has been spawned but has not claimed the lock yet
 	}
 	// The flock is the liveness authority (issue #75): if no worker holds it, none is
 	// running — no `ps` probe, no stale-meta self-heal (a crashed worker's flock was
