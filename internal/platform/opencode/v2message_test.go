@@ -16,7 +16,7 @@ func TestQuotaExhaustedErrorNamesTheReset(t *testing.T) {
 		ResetAt: time.Date(2026, 11, 13, 15, 0, 0, 0, time.UTC),
 		Runtime: "opencode",
 	}
-	want := "opencode free usage limit reached; resets at 2026-11-13T15:00:00Z"
+	want := "opencode usage limit reached; resets at 2026-11-13T15:00:00Z"
 	if got := e.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}

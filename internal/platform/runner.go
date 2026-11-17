@@ -37,8 +37,8 @@ func StderrExcerpt(s string) string {
 	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
 }
 
-// QuotaExhaustedError is returned when a runtime's free usage limit is reached and will reset
-// at a known time. The distill drain recognises this via errors.As and pauses free-model calls
+// QuotaExhaustedError is returned when a shared usage limit is reached and will reset
+// at a known time. The drain recognises it via errors.As and pauses the affected allowance
 // until ResetAt, without incrementing per-session backoff.
 type QuotaExhaustedError struct {
 	ResetAt time.Time
@@ -46,7 +46,29 @@ type QuotaExhaustedError struct {
 }
 
 func (e *QuotaExhaustedError) Error() string {
-	return fmt.Sprintf("%s free usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("%s usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
+}
+
+// PlanAllowance identifies calls drawing on a runner login's shared plan quota.
+// It has a separate pause from OpenCode's network-wide free allowance.
+type PlanAllowance interface{ OnPlanAllowance(model string) bool }
+
+func UsagePauseKey(runtime string) string { return "runner_usage_paused_until:" + runtime }
+
+// RunnerLoginGate lets wire leave capture usable until the runner has a login.
+type RunnerLoginGate interface {
+	ReadyToBind(ctx context.Context, root string) bool
+}
+
+type RunnerAuthenticator interface {
+	Login(ctx context.Context, root string) error
+}
+
+// ModelFormat lets wire ask in the runtime's own syntax. Runtimes without it
+// retain OpenCode's provider/model prompt for compatibility.
+type ModelFormat interface {
+	ModelFormat() (placeholder, description string)
+	ValidModel(model string) bool
 }
 
 // FreeAllowance is the Runner capability "this model draws on a shared free allowance", which is

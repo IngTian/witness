@@ -52,7 +52,7 @@ key. Set the stage model with `witness config set mine_model <provider/model>` (
 back to it); witness never picks one.
 
 OpenCode's ChatGPT sign-in is an OAuth login, so witness's OpenCode runner cannot use it.
-ChatGPT-plan users can still capture Codex sessions, and a Codex runner is planned.
+ChatGPT-plan users can use the separate [Codex runner](codex-runner.md).
 
 > **Upgrade note:** Older witness releases could leave an OpenCode session whose agent or title is
 > `witness-distill` when distillation was interrupted. Current releases never create them and skip

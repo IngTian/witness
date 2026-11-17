@@ -236,9 +236,6 @@ func cmdInstallCodex() (wireOutcome, error) {
 // definition is approved, so stating this plainly is the difference between working
 // capture and an archive that stays empty with no error anywhere. It is the RESULT line,
 // printed last: in the middle of the screen it read as one note among several.
-// Deliberately NOT a "Codex has no runner" note here: cmdInstall already prints that
-// for any venue without a RunnerProvider, derived from the registry. Saying it twice
-// is how two copies of one message drift apart.
 //
 // The import hint: the hooks import only the session that fired them, so Codex history
 // from before wiring arrives only by hand, and `import` is hidden from --help. Right after

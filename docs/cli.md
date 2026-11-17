@@ -91,9 +91,10 @@ history from before you wired it (`witness import --agent codex`).
 - `witness wire <claude|opencode|codex>` — wire the editor integration (hooks + MCP for Claude Code;
   plugin + MCP for OpenCode; hooks for Codex). Source-checkout command; `install.sh` calls this for
   you. Re-running it is safe: it replaces its own entries and preserves any hooks you wrote yourself.
-  Two notes specific to Codex: it runs no model, so wiring it leaves your `runner` alone, and its
+  Two notes specific to Codex: it leaves your `runner` alone until `witness auth codex` saves its own login (or `CODEX_API_KEY` is set), and its
   hooks stay inert until you approve them with `/hooks` inside Codex — wiring cannot grant that trust.
 - `witness unwire <claude|opencode|codex>` — remove the editor integration wiring. Your archive is untouched.
+- `witness auth codex` — device-code sign-in to witness's private Codex home. See [Codex runner](codex-runner.md).
 - `witness ingest [--file <path>]` — accept structured records (notes, logs, market data) as NDJSON
   and distill them into the archive. Reads from stdin or a file. See the record contract in
   [`prompts/SCHEMA.md`](../prompts/SCHEMA.md#records-in-the-ingest-contract).

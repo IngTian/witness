@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,34 @@ type freeGate struct {
 	mu        sync.Mutex // serializes probing and each meta read-decide-write: the drain runs up to 16 miners
 	probing   bool
 	probeDone chan struct{} // closed when the in-flight probe settles; its waiters then re-admit
+	key       string        // empty keeps the legacy OpenCode network allowance key
+	planGates map[string]*freeGate
+}
+
+func runnerPauseKey(runtime string) string { return platform.UsagePauseKey(runtime) }
+
+func (g *freeGate) pauseKey() string {
+	if g.key != "" {
+		return g.key
+	}
+	return freeModelsPausedKey
+}
+
+func (g *freeGate) pausedUntil() (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339, g.st.MetaString(g.pauseKey()))
+	return t, err == nil
+}
+
+// Every runner login gets its own pause and probe election. The legacy free-model
+// key continues to represent OpenCode's network-wide allowance across models.
+func runnerUsagePauses(st store.MetaKV) map[string]time.Time {
+	pauses := map[string]time.Time{}
+	for _, runtime := range platform.RunnerNames() {
+		if at, err := time.Parse(time.RFC3339, st.MetaString(runnerPauseKey(runtime))); err == nil {
+			pauses[runtime] = at
+		}
+	}
+	return pauses
 }
 
 func newFreeGate(st store.MetaKV) *freeGate { return &freeGate{st: st, now: time.Now} }
@@ -54,12 +83,31 @@ var errRunPanicked = errors.New("free-model call panicked")
 // wrap gates the calls run makes to r's free models. It returns run unchanged when r has no free
 // allowance, and passes any non-free model straight through.
 func (g *freeGate) wrap(runtime string, r platform.Runner, run distill.MineFunc) distill.MineFunc {
-	fa, ok := r.(platform.FreeAllowance)
-	if !ok {
+	var uses func(string) bool
+	if plan, ok := r.(platform.PlanAllowance); ok {
+		g.mu.Lock()
+		if g.planGates == nil {
+			g.planGates = map[string]*freeGate{}
+		}
+		gate := g.planGates[runtime]
+		if gate == nil {
+			gate = &freeGate{st: g.st, now: g.now, key: runnerPauseKey(runtime)}
+			g.planGates[runtime] = gate
+		}
+		g.mu.Unlock()
+		return gate.wrapAllowance(runtime, plan.OnPlanAllowance, run)
+	}
+	if fa, ok := r.(platform.FreeAllowance); ok {
+		uses = fa.OnFreeModel
+	} else {
 		return run
 	}
+	return g.wrapAllowance(runtime, uses, run)
+}
+
+func (g *freeGate) wrapAllowance(runtime string, uses func(string) bool, run distill.MineFunc) distill.MineFunc {
 	return func(ctx context.Context, model, prompt, input string) (out string, err error) {
-		if !fa.OnFreeModel(model) {
+		if !uses(model) {
 			return run(ctx, model, prompt, input)
 		}
 		probe, aerr := g.admit(ctx, runtime)
@@ -84,7 +132,7 @@ func (g *freeGate) wrap(runtime string, r platform.Runner, run distill.MineFunc)
 func (g *freeGate) admit(ctx context.Context, runtime string) (probe bool, err error) {
 	for {
 		g.mu.Lock()
-		until, armed := freeModelsPausedUntil(g.st)
+		until, armed := g.pausedUntil()
 		switch {
 		case !armed:
 			g.mu.Unlock()
@@ -116,22 +164,27 @@ func (g *freeGate) settle(probe bool, err error) {
 		close(g.probeDone)
 	}
 	var qe *platform.QuotaExhaustedError
+	scope, calls := "free model", "free-model"
+	if g.key != "" {
+		scope = strings.TrimPrefix(g.key, "runner_usage_paused_until:") + " plan"
+		calls = scope
+	}
 	switch {
-	case errors.As(err, &qe):
+	case errors.As(err, &qe) && qe.ResetAt.After(g.now()):
 		until := qe.ResetAt.UTC().Format(time.RFC3339)
 		// One line per pause: calls already in flight when the first refusal lands come back
 		// refused too, and they find it armed.
-		if prev, armed := freeModelsPausedUntil(g.st); !armed || !g.now().Before(prev) {
-			slog.Warn("distill: the free model allowance is used up; pausing every free-model call until the reset (then one call is tried)", "until", until)
+		if prev, armed := g.pausedUntil(); !armed || !g.now().Before(prev) {
+			slog.Warn("distill: the "+scope+" allowance is used up; pausing every "+calls+" call until the reset (then one call is tried)", "until", until)
 		}
-		if werr := g.st.SetMetaString(freeModelsPausedKey, until); werr != nil {
-			slog.Error("distill: could not store the free-model pause; free-model calls are not paused", "until", until, "err", werr)
+		if werr := g.st.SetMetaString(g.pauseKey(), until); werr != nil {
+			slog.Error("distill: could not store the "+calls+" pause; calls are not paused", "until", until, "err", werr)
 		}
 	case probe && err == nil:
-		if werr := g.st.SetMetaString(freeModelsPausedKey, ""); werr != nil {
-			slog.Error("distill: could not clear the free-model pause; the next free-model call probes again", "err", werr)
+		if werr := g.st.SetMetaString(g.pauseKey(), ""); werr != nil {
+			slog.Error("distill: could not clear the "+calls+" pause; the next call probes again", "err", werr)
 			return
 		}
-		slog.Info("distill: the free model allowance is back; free-model calls resume")
+		slog.Info("distill: the " + scope + " allowance is back; calls resume")
 	}
 }

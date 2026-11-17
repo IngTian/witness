@@ -53,7 +53,7 @@ time your archive is opened.
   runner    the first wire makes the editor the default runner; later wires of another
             editor leave it unless you say yes; change it any time with:
             witness config set runner ` + runnerChoice() + `
-            Codex runs no model, so wiring it leaves the runner alone.
+            Codex needs its own login first: witness auth codex.
   codex     Codex hooks are inert until you approve them with /hooks in Codex;
             wiring cannot grant that trust for you.
   default   remove it with 'witness lens disable/deregister default' (it stays
@@ -593,16 +593,8 @@ func cmdInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Bind the default runner only if this venue can actually RUN a model. A capture
-	// source need not provide a distillation runner (AGENTS.md), and Codex is the first
-	// that does not: writing runner=codex would put a value in config.toml that
-	// RunnerForName cannot resolve, so every later drain would fail and the archive
-	// would silently stop distilling — a worse outcome than not wiring a runner at all.
-	//
-	// The test is ValidateRunnerName, which derives from the registry, rather than a
-	// target == "codex" check: a venue that later gains a RunnerProvider starts binding
-	// with no edit here, and one that loses it stops. That is the same reasoning the
-	// function was introduced for — two writers of one config key must not disagree.
+	// Capture-only sources leave the runner unchanged. A runner with its own login
+	// must be ready before wire can bind it, or capture would start failing drains.
 	if platform.ValidateRunnerName(target) == nil {
 		in := wireAnswers()
 		st, err := store.Open()
@@ -610,11 +602,24 @@ func cmdInstall(args []string) error {
 			fmt.Println(resultRow(warnGlyph(), "runner", "not set", "could not open the archive: "+err.Error()))
 		} else {
 			defer st.Close()
-			if err := chooseRunner(st, target, in); err != nil {
-				return err
+			ready := true
+			p, _ := platform.ByName(target)
+			if gate, ok := p.(platform.RunnerLoginGate); ok {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				ready = gate.ReadyToBind(ctx, st.LoadConfig().RuntimeRoot)
+				cancel()
+				if !ready {
+					fmt.Println(resultRow(skipGlyph(), "runner", "unchanged", target+" needs its own login"))
+					fmt.Println(hint("sign in, then wire again", "witness auth "+target))
+				}
 			}
-			if err := askForModels(st, st.ResolvedConfig().Runner, in); err != nil {
-				return err
+			if ready {
+				if err := chooseRunner(st, target, in); err != nil {
+					return err
+				}
+				if err := askForModels(st, st.ResolvedConfig().Runner, in); err != nil {
+					return err
+				}
 			}
 		}
 	} else {
@@ -775,6 +780,12 @@ func askForModels(st *store.Store, runner string, in io.Reader) error {
 	if !ok || !mr.RequiresModel() {
 		return nil
 	}
+	placeholder, description := "provider/model", "provider/model; `opencode models` lists them"
+	valid := func(model string) bool { return strings.Contains(model, "/") }
+	if format, ok := p.(platform.ModelFormat); ok {
+		placeholder, description = format.ModelFormat()
+		valid = format.ValidModel
+	}
 	for _, s := range effectiveConfig(st, nil) { // by key: a reordered list must not read another setting
 		if s.key == "mine_model" && s.value != "" {
 			return nil
@@ -785,8 +796,8 @@ func askForModels(st *store.Store, runner string, in io.Reader) error {
 		if why != "" {
 			fmt.Println(resultRow(warnGlyph(), "model", "not set", why))
 		}
-		fmt.Println(hint("set a model", "witness config set mine_model <provider/model>"))
-		fmt.Println(dim("  `opencode models` lists what is available"))
+		fmt.Println(hint("set a model", "witness config set mine_model <"+placeholder+">"))
+		fmt.Println(dim("  " + description))
 		return nil
 	}
 	if in == nil {
@@ -794,13 +805,13 @@ func askForModels(st *store.Store, runner string, in io.Reader) error {
 	}
 	// Both answers are checked before either is written, so a bad review model leaves nothing
 	// half-set and the one hint still names the whole fix.
-	mineVal := promptLine(in, "mine model (provider/model; `opencode models` lists them): ")
-	if !strings.Contains(mineVal, "/") {
+	mineVal := promptLine(in, "mine model ("+description+"): ")
+	if !valid(mineVal) {
 		return refuse("invalid format")
 	}
 	// Prompt for review model (optional: blank means same as mine).
 	reviewVal := promptLine(in, "review model (Enter: same as mine model): ")
-	if reviewVal != "" && !strings.Contains(reviewVal, "/") {
+	if reviewVal != "" && !valid(reviewVal) {
 		return refuse("invalid review model format")
 	}
 	if err := st.SetConfigString("triage_model", mineVal); err != nil {

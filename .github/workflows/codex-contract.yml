@@ -1,0 +1,40 @@
+name: Codex contract
+
+on:
+  pull_request:
+    branches: [main, "integration/**"]
+    paths:
+      - "internal/platform/codex/**"
+      - "internal/platform/runner.go"
+      - "internal/store/runtime_lock*"
+      - ".github/workflows/codex-contract.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wire:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install verified CLI
+        run: npm install -g @openai/codex@0.169.0-alpha.11.1
+      # The test supplies a dummy API key and a loopback endpoint. No account,
+      # stored login, model call or repository secret is used in this job.
+      - name: Verify outgoing requests
+        run: go test -tags codexcontract -run TestContractToolFreeWire -v ./internal/platform/codex

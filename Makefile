@@ -87,6 +87,8 @@ test:
 # vetted here too, for both OSes their workflow runs them on: a refactor that breaks one fails the gate.
 vet:
 	CGO_ENABLED=0 GOMAXPROCS=$(TEST_GOMAXPROCS) GOMEMLIMIT=$(TEST_GOMEMLIMIT) go vet -p 1 ./...
+	CGO_ENABLED=0 GOOS=linux go vet -tags codexcontract ./internal/platform/codex/
+	CGO_ENABLED=0 GOOS=windows go vet -tags codexcontract ./internal/platform/codex/
 	CGO_ENABLED=0 GOOS=linux go vet -tags opencodecontract ./internal/platform/opencode/
 	CGO_ENABLED=0 GOOS=windows go vet -tags opencodecontract ./internal/platform/opencode/
 fmt:

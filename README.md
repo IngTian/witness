@@ -179,7 +179,7 @@ See [How it works](docs/how-it-works.md).
 - **Local by default.** One SQLite file plus markdown under your data dir (`witness doctor` prints
   the path). No telemetry, no account, no cloud key.
 - **Local embeddings.** Multilingual (English and Chinese) embeddings run pure-Go on your machine.
-- **Distillation uses your own tooling** — your Claude Code login, or OpenCode's free models,
+- **Distillation uses your own tooling** — your Claude Code login, a witness-owned Codex login, or OpenCode's free models,
   environment API keys and ambient cloud credentials. witness never copies a credential. Nothing goes
   anywhere you haven't already chosen.
 - **Readable and deletable.** Plain SQLite and plain markdown; delete the data dir and it's gone.
@@ -201,6 +201,7 @@ See [How it works](docs/how-it-works.md).
 | look up a command or a flag | [Commands](docs/cli.md#commands) |
 | change the model, cadence, or concurrency | [Configuration](docs/cli.md#configuration) |
 | set up Codex capture | [Codex capture](docs/codex-capture.md) |
+| distill with Codex | [Codex runner](docs/codex-runner.md) |
 | set up OpenCode, or install from npm | [OpenCode support](docs/opencode.md) |
 | install on Windows | [Windows install](docs/windows.md) |
 | back up or move my archive | [`witness export --all <dir>`](docs/cli.md#commands) |

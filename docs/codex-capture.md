@@ -2,8 +2,8 @@
 
 Codex conversations feed the same archive and enabled lenses as Claude Code and
 OpenCode. The `default` lens is shared; `session_meta.platform = codex` and the
-`codex:` session prefix preserve source attribution. A Codex distillation runner
-is not required: configure the existing Claude or OpenCode runner separately.
+`codex:` session prefix preserve source attribution. Distill with the
+[Codex runner](codex-runner.md), or configure Claude or OpenCode separately.
 
 ## Import your history
 
@@ -91,8 +91,9 @@ deletes `hooks.json` outright if witness created it and nothing of yours is left
 rather than leaving an empty file behind. A file holding any hook or key of your own is
 kept.
 
-Codex runs no distillation model, so wiring it does not change your `runner`; set one
-with `witness config set runner <claude|opencode>`.
+Until you sign in with `witness auth codex` (or provide `CODEX_API_KEY`), wiring
+Codex leaves your runner unchanged. After login, re-run `witness wire codex` to
+choose it as the default. See [Codex runner](codex-runner.md) for model settings.
 
 Hooks receive `session_id`, which witness uses to reconcile that conversation from local
 storage — rather than treating `notify` as a complete transcript feed or depending on the

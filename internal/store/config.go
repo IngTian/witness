@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// The two valid distillation runners. Defined here (the config layer that owns the
+// Canonical spellings used by runner tests. Defined here (the config layer that owns the
 // `runner` field) so CLI validation and the config template share one source of truth,
 // without importing internal/platform (which would invert the store→platform layering).
 const (
@@ -34,7 +34,8 @@ type Config struct {
 	// deliberately populated from Store.Root, not config.toml: OpenCode must never
 	// create distillation state in the user's database.
 	RuntimeRoot     string
-	Runner          string // "claude" (default) or "opencode" for headless distillation calls
+	RuntimeMeta     MetaKV // shared usage-pause state; runtime only, never persisted as config
+	Runner          string // registered headless runtime: claude (default), opencode or codex
 	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
 	DistillModel    string // model for the reviewer ("" = claude -p default)
 	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
@@ -129,6 +130,7 @@ func DefaultConfig() Config {
 func (c *configFile) loadConfig() (cfg Config, unknown []string) {
 	cfg = DefaultConfig()
 	cfg.RuntimeRoot = filepath.Join(c.root, "runtime")
+	cfg.RuntimeMeta = &metaKV{db: c.db}
 	data, err := os.ReadFile(c.configPath())
 	if err != nil {
 		return cfg, nil
