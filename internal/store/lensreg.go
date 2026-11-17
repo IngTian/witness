@@ -117,19 +117,23 @@ func ReadLensExtract(dir string) ([]byte, error) {
 }
 
 // lensJSONName is the trimmed `name` left in dir's lens.json, or "" when there is none, it is
-// blank, or the file is missing, unreadable or unparseable (the loader reports a broken file).
-func lensJSONName(dir string) string {
+// blank, or the file is missing or unparseable (the loader reports a broken file). An error is a
+// read that failed, so whether a name is there is not known.
+func lensJSONName(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, LensConfigFile))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
 	if err != nil {
-		return ""
+		return "", err
 	}
 	var cfg struct {
 		Name string `json:"name"` // LensKeyName
 	}
 	if json.Unmarshal(data, &cfg) != nil {
-		return ""
+		return "", nil
 	}
-	return strings.TrimSpace(cfg.Name)
+	return strings.TrimSpace(cfg.Name), nil
 }
 
 // UnknownLensKeys returns the lens.json keys witness does not read, sorted. A missing or
@@ -287,20 +291,35 @@ func (r *lensReg) DeregisterLens(name string) error {
 // extract.md — the one required file, so the presence probe never misses a lens that
 // simply has no lens.json or review.md).
 func (r *lensReg) RegisteredLenses() []string {
+	names, _ := r.registeredLenses()
+	return names
+}
+
+// registeredLenses is RegisteredLenses plus the first read error that may have hidden a lens, for
+// the one-time rename, which must not take a lens it could not see for one that is not there.
+func (r *lensReg) registeredLenses() ([]string, error) {
 	entries, err := os.ReadDir(r.LensesDir())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var names []string
+	var firstErr error
 	for _, e := range entries {
 		if !e.IsDir() || isLensStagingDir(e.Name()) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(r.LensesDir(), e.Name(), LensExtractFile)); err == nil {
+		_, err := os.Stat(filepath.Join(r.LensesDir(), e.Name(), LensExtractFile))
+		switch {
+		case err == nil:
 			names = append(names, e.Name())
+		case !os.IsNotExist(err) && firstErr == nil:
+			firstErr = err
 		}
 	}
-	return names
+	return names, firstErr
 }
 
 // OldFormatLenses lists the registry dirs holding a pre-v0.3.0 single-file lens.md and no
@@ -344,7 +363,7 @@ func isLensStagingDir(name string) bool {
 func (r *lensReg) IgnoredLensNames() map[string]string {
 	ignored := map[string]string{}
 	for _, reg := range r.RegisteredLenses() {
-		if data := lensJSONName(filepath.Join(r.LensesDir(), reg)); data != "" && data != reg {
+		if data, _ := lensJSONName(filepath.Join(r.LensesDir(), reg)); data != "" && data != reg {
 			ignored[reg] = data
 		}
 	}

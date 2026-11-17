@@ -205,6 +205,9 @@ func (s *Store) UnreviewedDelta(lens string) int {
 // lensNamesAdoptedKey stamps the one-time rename below, so it runs once per archive.
 const lensNamesAdoptedKey = "lens_names_adopted"
 
+// LensNamesAdopted reports whether the one-time rename below has finished on this archive.
+func (s *Store) LensNamesAdopted() bool { return s.MetaString(lensNamesAdoptedKey) != "" }
+
 // adoptLensDataNames is a one-shot (F3) that makes a lens's registered name its only name.
 // Before F3 a lens.json `name` overrode the registered one as the tag on every observation,
 // facet and profile, so a lens registered as corpus-example whose lens.json said "regime" has
@@ -213,14 +216,19 @@ const lensNamesAdoptedKey = "lens_names_adopted"
 // A lens is left alone when the name is not one registration would accept or another lens
 // already holds it (doctor reports both). Once the marker is stamped, `name` is inert.
 //
-// Best-effort like adoptRunnerBound: a busy registry or a failed step leaves the marker
-// unstamped, so the next Open retries. The config is switched BEFORE the folder moves because
-// only that order converges: a failed rename leaves the old folder, still carrying its `name`,
-// so the retry finds it and finishes the move into the config line already waiting. Renamed
-// first, a failed config switch would be final, since the moved lens no longer reads as
-// mismatched, leaving it disabled behind an enabled line for a lens that no longer exists.
+// Best-effort like adoptRunnerBound: a busy registry, a failed step or a failed read leaves the
+// marker unstamped, so the next Open retries. A read error is not an answer: taken as "no name
+// here" it would make the skip permanent, and the lens would re-mine its history under the wrong
+// name. An unparseable lens.json is final, as a collision is (the loader refuses that lens until
+// it is fixed), so one broken file cannot hold the pass open for lenses registered later.
+//
+// The config is switched BEFORE the folder moves because only that order converges: a failed
+// rename leaves the old folder, still carrying its `name`, so the retry finds it and finishes the
+// move into the config line already waiting. Renamed first, a failed config switch would be
+// final, since the moved lens no longer reads as mismatched, leaving it disabled behind an
+// enabled line for a lens that no longer exists.
 func (s *Store) adoptLensDataNames() {
-	if s.MetaString(lensNamesAdoptedKey) != "" {
+	if s.LensNamesAdopted() {
 		return
 	}
 	unlock, ok := s.lensRegistryLock()
@@ -228,22 +236,14 @@ func (s *Store) adoptLensDataNames() {
 		return
 	}
 	defer unlock()
-	failed := false
-	ignored := s.IgnoredLensNames()
-	for _, reg := range s.RegisteredLenses() {
-		data, ok := ignored[reg]
-		if !ok || ValidLensName(data) != nil || lensDirTaken(s.LensesDir(), reg, data) {
-			continue
+	regs, err := s.registeredLenses()
+	failed := err != nil
+	for _, reg := range regs {
+		data, skip, err := LensRenameTarget(filepath.Join(s.LensesDir(), reg), reg, s.LensesDir())
+		if err == nil && skip == nil && data != "" {
+			err = s.adoptLensName(reg, data)
 		}
-		if slices.Contains(s.LoadConfig().EnabledLenses, reg) {
-			if s.EnableLens(data) != nil || s.DisableLens(reg) != nil {
-				failed = true
-				continue
-			}
-		}
-		// A sibling rename inside one directory: atomic, never across filesystems, and
-		// lensDirTaken has just checked the target is free.
-		if os.Rename(filepath.Join(s.LensesDir(), reg), filepath.Join(s.LensesDir(), data)) != nil {
+		if err != nil {
 			failed = true
 		}
 	}
@@ -252,23 +252,65 @@ func (s *Store) adoptLensDataNames() {
 	}
 }
 
-// lensDirTaken reports whether any registry entry other than reg already answers to data,
+// adoptLensName renames lens reg to data: its config line first if it is enabled, then its folder.
+func (s *Store) adoptLensName(reg, data string) error {
+	if slices.Contains(s.LoadConfig().EnabledLenses, reg) {
+		if err := s.EnableLens(data); err != nil {
+			return err
+		}
+		if err := s.DisableLens(reg); err != nil {
+			return err
+		}
+	}
+	// A sibling rename inside one directory: atomic, never across filesystems, and
+	// LensRenameTarget has just checked the target is free.
+	return os.Rename(filepath.Join(s.LensesDir(), reg), filepath.Join(s.LensesDir(), data))
+}
+
+// LensRenameTarget is the one-time rename rule, shared by the pass at Open and by `witness merge`:
+// the lens defined at dir and registered (or arriving) as reg is renamed to data, the `name` its
+// lens.json still carries. data is "" when the file names no other lens. A non-nil skip is why reg
+// stays, and is final: data is not a name registration accepts, or an entry other than reg in one
+// of registries already answers to it. A non-nil err is a failed read, so nothing is decided.
+func LensRenameTarget(dir, reg string, registries ...string) (data string, skip, err error) {
+	if data, err = lensJSONName(dir); err != nil || data == "" || data == reg {
+		return "", nil, err
+	}
+	if skip = ValidLensName(data); skip != nil {
+		return data, skip, nil
+	}
+	for _, r := range registries {
+		taken, err := lensDirTaken(r, reg, data)
+		if err != nil {
+			return data, nil, err
+		}
+		if taken != "" {
+			return data, fmt.Errorf("lens %s already exists", taken), nil
+		}
+	}
+	return data, nil, nil
+}
+
+// lensDirTaken names the registry entry other than reg that already answers to data, or "",
 // case-folded because the registry's filesystems usually are (APFS, NTFS). It re-reads the
-// directory, so a lens renamed earlier in the same pass counts: the first lens to claim a
-// name wins. Every entry counts, not only registered lenses: an old-format lens or a stray file
-// under that name is in the way too, and rename(2) would silently replace an empty directory.
-// An unreadable registry reads as taken, so a doubt never becomes a rename.
-func lensDirTaken(dir, reg, data string) bool {
+// directory, so a lens renamed earlier in the same pass counts: the first lens to claim a name
+// wins. Every entry counts, not only registered lenses: an old-format lens or a stray file under
+// that name is in the way too, and rename(2) would silently replace an empty directory. A missing
+// registry holds nothing; an unreadable one is an error, so a doubt never becomes a rename.
+func lensDirTaken(dir, reg, data string) (string, error) {
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
 	if err != nil {
-		return true
+		return "", err
 	}
 	for _, e := range entries {
 		if e.Name() != reg && strings.EqualFold(e.Name(), data) {
-			return true
+			return e.Name(), nil
 		}
 	}
-	return false
+	return "", nil
 }
 
 // EmptyReason explains why a lens has nothing to show. The three cases have COMPLETELY

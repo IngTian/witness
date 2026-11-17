@@ -4,6 +4,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -186,5 +187,59 @@ func TestOpenRenamesOnlyOnce(t *testing.T) {
 	}
 	if got := s2.IgnoredLensNames()["late"]; got != "other" {
 		t.Fatalf("ignored[late] = %q, want other", got)
+	}
+}
+
+// A read that fails at the one Open after the upgrade is not an answer: the marker stays
+// unstamped, so the next Open, with the file readable again, still renames the lens. Stamped, the
+// skip would be permanent and the lens would re-mine its history under the wrong name.
+func TestOpenRetriesTheRenameAfterAFailedRead(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a permission bit that makes a file unreadable (not Windows, not root)")
+	}
+	for _, tc := range []struct {
+		name       string
+		path       func(s *Store) string
+		mode, back os.FileMode
+	}{
+		{"unreadable lens.json", func(s *Store) string { return filepath.Join(s.LensesDir(), "corpus-example", LensConfigFile) }, 0, 0o600},
+		{"unlistable registry", func(s *Store) string { return s.LensesDir() }, 0o300, 0o700},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tempStore(t)
+			registryLens(t, s, "corpus-example", `{"name":"regime"}`)
+			if err := s.EnableLens("corpus-example"); err != nil {
+				t.Fatal(err)
+			}
+			path := tc.path(s)
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(path, tc.back) })
+			s = reopenAsUpgrade(t, s)
+			if s.LensNamesAdopted() {
+				t.Fatal("a failed read must leave the marker unstamped")
+			}
+			if err := os.Chmod(path, tc.back); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			s2, err := Open()
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			t.Cleanup(func() { _ = s2.Close() })
+			if got := s2.RegisteredLenses(); !slices.Equal(got, []string{"regime"}) {
+				t.Fatalf("registered = %v, want [regime] once the file reads again", got)
+			}
+			if got := s2.LoadConfig().EnabledLenses; !slices.Equal(got, []string{"regime"}) {
+				t.Fatalf("enabled = %v, want [regime]", got)
+			}
+			if !s2.LensNamesAdopted() {
+				t.Fatal("the marker must be stamped once the rename is done")
+			}
+		})
 	}
 }
