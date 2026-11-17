@@ -216,48 +216,60 @@ func TestDoctorWarnsOnUnknownConfigAndLensJSONKeys(t *testing.T) {
 	}
 }
 
-// An ignored-key warning must turn a healthy headline from ok to warn. The baseline run proves
-// the archive is otherwise healthy, so the second run's warn comes from the key alone.
+// An ignored config.toml key or lens.json name must turn a healthy headline from ok to warn. The
+// baseline run proves the archive is otherwise healthy, so the second run's warn comes from it alone.
 func TestDoctorHeadlineWarnsOnAnIgnoredKey(t *testing.T) {
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
-	t.Setenv("WITNESS_RUNNER", "")
-	t.Setenv("NO_COLOR", "1")
-	// No OpenCode capture checks from whatever this host has wired.
-	t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
-	t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(t.TempDir(), "none.db"))
-	prev := newDoctorEmbedder
-	newDoctorEmbedder = func() (distill.Embedder, error) { return fixedEmbedder{vec: []float32{1, 0, 0}}, nil }
-	t.Cleanup(func() { newDoctorEmbedder = prev })
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
-		t.Fatal(err)
-	}
-	cfgPath := st.ConfigPath()
-	st.Close()
-	headline := func() string {
-		out, err := captureStdoutErr(t, func() error { return cmdDoctor(false) })
-		if err != nil {
-			t.Fatalf("doctor failed: %v\n%s", err, out)
-		}
-		first, _, _ := strings.Cut(out, "\n")
-		return first
-	}
-	if h := headline(); !strings.HasPrefix(h, okGlyph()) {
-		t.Fatalf("the baseline archive must read healthy, got headline %q", h)
-	}
-	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.WriteString("mine_model = \"claude-haiku-4-5\"\n"); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	if h := headline(); !strings.HasPrefix(h, warnGlyph()) {
-		t.Errorf("an ignored config.toml key must warn in the headline, got %q", h)
+	for name, ignore := range map[string]func(t *testing.T, st *store.Store){
+		"config.toml key": func(t *testing.T, st *store.Store) {
+			f, err := os.OpenFile(st.ConfigPath(), os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString("mine_model = \"claude-haiku-4-5\"\n"); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+		},
+		"lens.json name": func(t *testing.T, st *store.Store) {
+			if err := st.RegisterLens("probe", writeLensDir(t, "", "mine", "rev", "name", "other")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("WITNESS_HOME", t.TempDir())
+			t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+			t.Setenv("WITNESS_RUNNER", "")
+			t.Setenv("NO_COLOR", "1")
+			// No OpenCode capture checks from whatever this host has wired.
+			t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+			t.Setenv("WITNESS_OPENCODE_DB", filepath.Join(t.TempDir(), "none.db"))
+			prev := newDoctorEmbedder
+			newDoctorEmbedder = func() (distill.Embedder, error) { return fixedEmbedder{vec: []float32{1, 0, 0}}, nil }
+			t.Cleanup(func() { newDoctorEmbedder = prev })
+			st, err := store.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if err := st.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
+				t.Fatal(err)
+			}
+			headline := func() string {
+				out, err := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+				if err != nil {
+					t.Fatalf("doctor failed: %v\n%s", err, out)
+				}
+				first, _, _ := strings.Cut(out, "\n")
+				return first
+			}
+			if h := headline(); !strings.HasPrefix(h, okGlyph()) {
+				t.Fatalf("the baseline archive must read healthy, got headline %q", h)
+			}
+			ignore(t, st)
+			if h := headline(); !strings.HasPrefix(h, warnGlyph()) {
+				t.Errorf("an ignored %s must warn in the headline, got %q", name, h)
+			}
+		})
 	}
 }
