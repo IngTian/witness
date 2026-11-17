@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -474,11 +475,27 @@ func transcriptHash8(turns []rawTurn) string {
 //   - merging back carried our own transcript home under its renamed id, so we held it twice, and
 //     a third round folded two transcripts into one session.
 //
-// So: if any member of the family is equal to, a prefix of, or extended by the incoming transcript,
-// that member is the match and the incoming session is renamed to it in the copy. Only when nothing
-// matches and our exact id is taken by a different transcript is a fresh id minted. An incoming
-// session that turns out to be a second copy of one already claimed (a merge back can carry both)
-// is dropped from the copy.
+// Each of our sessions in that family is a MEMBER, AVAILABLE unless another incoming session sits
+// under its id (renaming onto it would fold two incoming transcripts together in the copy). For an
+// incoming transcript T, the first rule that applies wins:
+//
+//  1. an available member equal to T, else 2. one extending T: the session goes there;
+//  3. else, if a claimed member equals or extends T, ours already holds every turn: the session is
+//     a duplicate, dropped from the copy (its L1 is re-derivable);
+//  4. else an available member T extends: T's tail is appended to it;
+//  5. else T arrives as its own session: under its own id, or, if ours holds that id with another
+//     transcript, under the id minted from T's hash. If another incoming session already sits
+//     under the minted id with T or more, this one is a duplicate of it. If the id T needs holds a
+//     different transcript, the merge refuses: that takes an 8-hex collision or a write into a
+//     minted id, and both ways out (folding two transcripts into one session, dropping one) lose
+//     data.
+//
+// The first-match loop this replaced held transcripts twice and folded them, through three habits:
+// it took the first match even when another incoming session claimed it, so a copy of what ours
+// held was re-minted beside it; it took "same hash" for "same transcript", but a minted copy keeps
+// its id while it grows; and it never asked what ours held under the id it minted, so every
+// re-merge appended the transcript again. Its duplicate check also found a minted copy as its own
+// duplicate and dropped it (#223).
 func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[string]string, error) {
 	incoming, err := queryStrings(ctx, tx, `SELECT DISTINCT session FROM inc.raw ORDER BY session`)
 	if err != nil {
@@ -503,13 +520,18 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		if err != nil {
 			return nil, err
 		}
-		// Our exact id first, then the family root, then its other copies, in a stable order.
-		cands := []string{s, sessionFamily(s)}
-		rest := append([]string{}, family[sessionFamily(s)]...)
+		fam := sessionFamily(s)
+		// Our exact id first, then the family root, then its other copies, in a stable order: the
+		// first available member in each relation is that relation's match. Every member is read,
+		// not just up to the first match: an exact copy later in the order outranks an earlier
+		// member theirs merely extends, and a claimed member says ours holds the turns already.
+		cands := []string{s, fam}
+		rest := append([]string{}, family[fam]...)
 		sort.Strings(rest)
 		cands = append(cands, rest...)
 
-		target, kind, oursHasS := "", "", false
+		match := map[string]string{} // relation -> first available member in it
+		claimedHoldsIt := false      // a member another incoming session claims equals or extends theirs
 		seen := map[string]bool{}
 		for _, c := range cands {
 			if seen[c] {
@@ -520,54 +542,56 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			if err != nil {
 				return nil, err
 			}
-			if c == s && len(mine) > 0 {
-				oursHasS = true
-			}
-			if k := turnRelation(mine, theirs); k != "" {
-				target, kind = c, k
-				break
-			}
-		}
-		minted := false
-		if target == "" {
-			target, kind = s, kindNew
-			if oursHasS {
-				target, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), true
+			switch k := turnRelation(mine, theirs); {
+			case k == "":
+			case c != s && held[c]:
+				claimedHoldsIt = claimedHoldsIt || k != kindLongerThere
+			case match[k] == "":
+				match[k] = c
 			}
 		}
-		if target != s && held[target] {
-			// The copy already holds that id. If it is the same transcript, this is a duplicate.
-			other, err := readTurns(ctx, tx, "inc", target)
-			if err != nil {
+
+		target, kind, minted, dup := s, kindNew, false, false
+		switch {
+		case match[kindEqual] != "":
+			target, kind = match[kindEqual], kindEqual
+		case match[kindLongerHere] != "":
+			target, kind = match[kindLongerHere], kindLongerHere
+		case claimedHoldsIt:
+			dup = true
+		case match[kindLongerThere] != "":
+			target, kind = match[kindLongerThere], kindLongerThere
+		default:
+			// If ours holds s, it holds another transcript there: s is never claimed, so a related s
+			// matched above.
+			id := fam + "@" + transcriptHash8(theirs)
+			minted = slices.Contains(family[fam], s)
+			taken := minted && slices.Contains(family[fam], id)
+			// A minted copy's own id is the id it would be minted again: held[s] is s itself, not a
+			// second copy, and dropping it lost its turns and what was mined from them (#223).
+			if !taken && id != s && held[id] {
+				other, err := readTurns(ctx, tx, "inc", id)
+				if err != nil {
+					return nil, err
+				}
+				k := turnRelation(other, theirs)
+				dup = k == kindEqual || k == kindLongerHere
+				taken = minted && !dup
+			}
+			if taken {
+				return nil, fmt.Errorf("session %s would arrive as %s, which already holds a different transcript; refusing to merge rather than fold the two into one session or lose one", s, id)
+			}
+			if minted {
+				target = id
+			}
+		}
+		if dup {
+			if err := dropIncomingSession(ctx, tx, s); err != nil {
 				return nil, err
 			}
-			if reflect.DeepEqual(other, theirs) {
-				if err := dropIncomingSession(ctx, tx, s); err != nil {
-					return nil, err
-				}
-				delete(held, s)
-				rep.Sessions.Duplicates++
-				continue
-			}
-			target, kind, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), kindNew, true
-			if target == s {
-				// s is a copy an earlier merge minted, so it already carries this id. held[s] is s
-				// itself, not a duplicate: dropping it lost its turns and what was mined from them
-				// (#223). It arrives as new under its own id — unless ours holds that id with another
-				// transcript (it would have matched above otherwise), which takes an 8-hex hash
-				// collision: refuse rather than fold two transcripts into one session or lose one.
-				if oursHasS {
-					return nil, fmt.Errorf("session %s: this archive holds a different transcript under the id the merge would give it; refusing to merge rather than lose either", s)
-				}
-				minted = false
-			} else if held[target] { // same hash: the same transcript under a third id
-				if err := dropIncomingSession(ctx, tx, s); err != nil {
-					return nil, err
-				}
-				delete(held, s)
-				rep.Sessions.Duplicates++
-				continue
-			}
+			delete(held, s)
+			rep.Sessions.Duplicates++
+			continue
 		}
 		if target != s {
 			if err := renameIncomingSession(ctx, tx, s, target); err != nil {
