@@ -479,9 +479,13 @@ func transcriptHash8(turns []rawTurn) string {
 //
 // FIRST, exact twins within the incoming archive (one family, one transcript under two ids) are
 // collapsed into one, before anything is matched against ours: placed one by one, the second found
-// its match claimed by the first and arrived beside it. The id kept is the native one, else one
-// of ours, else the one minted from the transcript's hash, else the lowest; everything the others
-// carry is filed under it (dropIncomingSession). Only an IDENTICAL transcript is a twin: a prefix
+// its match claimed by the first and arrived beside it. Two are left alone: a twin whose id ours
+// holds with its turns or more, which rule 1 or 2 places on a session of ours (collapsing it filed
+// what it carried under the other twin, so merging an archive into itself was not empty, and the
+// other side's mining of our copy was skipped as a paraphrase of our twin); and the twins of a
+// family ours lacks, which arrive as the other archive holds them, as a restore must. The id kept
+// is the native one, else one of ours, else the one minted from the transcript's hash, else the
+// lowest; everything the others carry is filed under it (dropIncomingSession). Only an IDENTICAL transcript is a twin: a prefix
 // of another incoming session is a session of its own, and dropping it as a "duplicate" lost what
 // was mined from it.
 //
@@ -529,9 +533,11 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		}
 	}
 
-	// Twins. Only a family with two incoming sessions is read; kept is one id per distinct
-	// transcript so far, and a twin ranking higher takes the id over (incoming is sorted, so a tie
-	// keeps the lowest).
+	// Twins. Only a family with two incoming sessions, and a member here, is read: into a family
+	// ours lacks, every session arrives under its own id as the other archive holds it (rule 5), so
+	// collapsing its twins only made a merge into an empty archive unfaithful, and merging back from
+	// it not empty. kept is one id per distinct transcript so far, and a twin ranking higher takes
+	// the id over (incoming is sorted, so a tie keeps the lowest).
 	perFam := map[string]int{}
 	for _, s := range incoming {
 		perFam[sessionFamily(s)]++
@@ -554,12 +560,21 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	kept, turnsOf := map[string][]string{}, map[string][]rawTurn{}
 	for _, s := range incoming {
 		fam := sessionFamily(s)
-		if perFam[fam] < 2 {
+		if perFam[fam] < 2 || len(family[fam]) == 0 {
 			continue
 		}
 		turns, err := readTurns(ctx, tx, "inc", s)
 		if err != nil {
 			return nil, err
+		}
+		// Ours holds s's own id with these turns or more, so rule 1 or 2 places s on a session of
+		// ours, and no copy is added: it is no twin to collapse.
+		mine, err := readTurns(ctx, tx, "main", s)
+		if err != nil {
+			return nil, err
+		}
+		if k := turnRelation(mine, turns); k == kindEqual || k == kindLongerHere {
+			continue
 		}
 		i := slices.IndexFunc(kept[fam], func(k string) bool { return slices.Equal(turnsOf[k], turns) })
 		if i < 0 {
