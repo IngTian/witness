@@ -138,6 +138,13 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   command names.
 - **Lenses are global** (never repo-scoped): a cloned/hostile repo cannot inject
   a prompt into your archive. Nothing is read from a repo directory.
+- **A lens's registered name is its only identity.** Every observation, facet,
+  profile, progress row and per-lens meta key is keyed by it; a `name` left in
+  `lens.json` is ignored, so never reintroduce an override. The one-time rename at
+  `store.Open` (marker `lens_names_adopted`) moves a mismatched old registration's
+  folder and config line to the name its data carries and never rewrites a data
+  row; `witness merge` applies the same rule (`store.LensRenameTarget`) to an old
+  export's lens.
 - **Data dir adopts, never moves.** `dataDirNames = {"witness","claude-witness"}`
   (preferred first, legacy appended). `resolveRoot()` uses an existing dir under
   any listed name IN PLACE and only creates `witness` on a fresh machine — the

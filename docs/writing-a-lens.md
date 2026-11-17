@@ -57,12 +57,15 @@ math/
 { "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
 ```
 
-A lens has one name: the one you register it under. Every observation, facet and profile it
+A lens's only name is the one it is registered under. Every observation, facet and profile it
 produces is stored under that name, and every command and MCP tool takes it. `lens.json` has no
-`name`; one left in an older file is ignored, and `lens register` and `witness doctor` say so. A
-lens whose `lens.json` `name` differed from its registered name was renamed to that name once, on
-the first start after upgrading, so its data stayed with it; `witness doctor` names any lens it
-could not rename (the name was taken, or is not a valid lens name).
+`name`; one left in an older file is ignored, and `lens register` and `witness doctor` say so.
+An older witness stored a lens's data under its `lens.json` `name` instead, when it had one.
+After you upgrade, the next witness command that opens the archive renames each such lens to its
+`lens.json` name, once, so the lens keeps its data; use the new name from then on. A lens witness
+cannot rename (another lens already has the name, or the name is not a valid lens name) keeps
+its registered name and mines its sessions again under it, one model call per session, while its
+old data stays under the old name. `witness doctor` names that lens and how to stop it.
 
 ```markdown
 <!-- math/extract.md -->
