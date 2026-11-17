@@ -34,10 +34,9 @@ type fakeV2 struct {
 	// turn renders a PROMPTED session's whole message list (an unprompted one is empty). It runs
 	// under mu. A nil list makes that poll fail with a 500.
 	turn                  func(*fakeSession) []map[string]any
-	promptStatus          int               // non-zero: every prompt POST fails with this status
-	onCall                func(call string) // runs under mu as each "METHOD path" arrives, if set
-	calls                 []string          // "METHOD path", in arrival order
-	inFlight, maxInFlight int               // prompted sessions whose turn has not yet shown an idle
+	promptStatus          int      // non-zero: every prompt POST fails with this status
+	calls                 []string // "METHOD path", in arrival order
+	inFlight, maxInFlight int      // prompted sessions whose turn has not yet shown an idle
 
 	mu              sync.Mutex
 	sessions        map[string]*fakeSession
@@ -183,9 +182,6 @@ func (f *fakeV2) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
-	if f.onCall != nil {
-		f.onCall(r.Method + " " + r.URL.Path)
-	}
 	if got := r.Header.Get("Authorization"); got != "Basic test" {
 		f.t.Errorf("%s %s: Authorization = %q, want %q", r.Method, r.URL.Path, got, "Basic test")
 		w.WriteHeader(http.StatusUnauthorized)

@@ -282,6 +282,17 @@ func TestRunInterruptsThenDeletesOnAProviderError(t *testing.T) {
 	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
 }
 
+// A failed prompt POST may still have reached the serve, so it must interrupt too: that aborts the
+// upstream generation instead of leaving it billing (spec 7.5).
+func TestRunInterruptsItsSessionWhenThePromptFails(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	fake.promptStatus = http.StatusInternalServerError
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D"); err == nil {
+		t.Fatal("Run succeeded with a failing prompt POST")
+	}
+	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
+}
+
 // assertInterruptedThenDeleted checks a failed job's last two requests.
 func assertInterruptedThenDeleted(t *testing.T, calls []string, id string) {
 	t.Helper()
