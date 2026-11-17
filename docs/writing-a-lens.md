@@ -38,8 +38,9 @@ witness lens backfill regime             # optional: re-mine your whole history 
 ```
 
 `register` stores a **copy**, so editing `./regime` afterwards changes nothing until you
-re-register. `enable` is a separate switch. `backfill` is what you want if you care about the
-history you already have — a newly enabled lens otherwise only sees new sessions.
+re-register. `enable` is a separate switch. A newly enabled lens mines all sessions without a
+progress row for it — which is your whole history if it's the first time. `backfill` is for
+re-mining sessions a lens already saw.
 
 ## The three files
 
