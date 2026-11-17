@@ -177,11 +177,6 @@ func (e *runnerDownError) Error() string {
 // Claude-side default to an OpenCode runner would make its Open-time validation reject a name that
 // was never meant for it. The runner then falls back to its own default, and per-lens models are
 // supplied per call.
-//
-// Renamed from applyModelUnion, which took a `lenses []*lens.Lens` parameter it never referenced
-// (#148). The name and signature both advertised a union this function has never computed; nothing
-// is lost by dropping them, and a caller can no longer believe passing lenses here achieves
-// anything.
 func clearCrossRuntimeModels(rcfg *store.Config, name, defaultRunner string) {
 	if strings.TrimSpace(name) == strings.TrimSpace(defaultRunner) {
 		return // keep the configured default models; they belong to this runtime

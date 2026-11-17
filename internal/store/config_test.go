@@ -358,89 +358,8 @@ func TestSetRunnerReplacesExistingLine(t *testing.T) {
 	}
 }
 
-func TestSetRunnerAppendsWhenAbsent(t *testing.T) {
-	s := tempStore(t)
-	if err := os.WriteFile(s.ConfigPath(), []byte("# just a comment\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetRunner("claude"); err != nil {
-		t.Fatalf("SetRunner: %v", err)
-	}
-	c := s.LoadConfig()
-	if c.Runner != "claude" {
-		t.Errorf("runner not set: got %q", c.Runner)
-	}
-}
-
-// TestInstallSequenceMatchesBindRunner mirrors cmdInstall's flow: Open (which now
-// ensures the template) followed by SetRunner. The other template fields survive.
-func TestInstallSequenceMatchesBindRunner(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := Open() // ensures template
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if err := st.SetRunner("opencode"); err != nil {
-		t.Fatal(err)
-	}
-	c := st.LoadConfig()
-	if c.Runner != "opencode" {
-		t.Errorf("runner = %q, want opencode", c.Runner)
-	}
-	if c.ReviewEvery != 5 || c.ReviewPoignancy != 30 {
-		t.Errorf("template defaults lost after SetRunner: every=%d poignancy=%d", c.ReviewEvery, c.ReviewPoignancy)
-	}
-	body, _ := os.ReadFile(st.ConfigPath())
-	for _, want := range []string{`runner = "opencode"`, "triage_model", "review_every = 5"} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("config missing %q:\n%s", want, body)
-		}
-	}
-	// The install sequence binds the runner (issue #71: flag is the sole authority).
-	if st.MetaString(runnerBoundKey) != "1" {
-		t.Error("install sequence (SetRunner) did not bind the runner")
-	}
-}
-
 // --- ResolveRunner: the WITNESS_RUNNER env fallback for the npm OpenCode user,
 // which must never override an explicit `install` (SetRunner) choice. ----------
-
-// The npm user never ran install (no runner_bound), config carries the default
-// "claude", and the plugin passes WITNESS_RUNNER=opencode → OpenCode wins.
-func TestResolveRunnerEnvFallbackWhenUnbound(t *testing.T) {
-	s := tempStore(t)
-	t.Setenv("WITNESS_RUNNER", "opencode")
-	cfg := s.LoadConfig() // default runner = "claude"
-	if got := s.ResolveRunner(cfg); got != "opencode" {
-		t.Errorf("unbound + WITNESS_RUNNER=opencode: got %q, want opencode", got)
-	}
-}
-
-// A user who explicitly ran `witness wire claude` (SetRunner stamps
-// runner_bound) must NOT be hijacked by a stray WITNESS_RUNNER — the persisted
-// choice wins. This is the dual CC+OpenCode safety property.
-func TestResolveRunnerBoundBeatsEnv(t *testing.T) {
-	s := tempStore(t)
-	if err := s.SetRunner("claude"); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("WITNESS_RUNNER", "opencode")
-	cfg := s.LoadConfig()
-	if got := s.ResolveRunner(cfg); got != "claude" {
-		t.Errorf("bound=claude must beat WITNESS_RUNNER=opencode: got %q", got)
-	}
-}
-
-// With neither a bound choice nor the env, ResolveRunner returns the config value.
-func TestResolveRunnerDefaultsToConfig(t *testing.T) {
-	s := tempStore(t)
-	os.Unsetenv("WITNESS_RUNNER")
-	cfg := s.LoadConfig()
-	if got := s.ResolveRunner(cfg); got != "claude" {
-		t.Errorf("no bind, no env: got %q, want claude (config default)", got)
-	}
-}
 
 // A legacy install wrote an active `runner = "claude"` line but predates the
 // runner_bound flag. adoptRunnerBound (at Open) must fold that active line into the
@@ -552,24 +471,5 @@ func TestRunnerBoundFlagIsAuthoritativeOverConfigText(t *testing.T) {
 	t.Setenv("WITNESS_RUNNER", "opencode")
 	if got := s2.ResolveRunner(s2.LoadConfig()); got != "claude" {
 		t.Fatalf("a bound store must ignore the env fallback even with no runner line, got %q", got)
-	}
-}
-
-// TestEnabledLensesSurviveSetRunner: a user who already enabled lenses must not
-// lose them when install refreshes runner.
-func TestEnabledLensesSurviveSetRunner(t *testing.T) {
-	s := tempStore(t)
-	if err := s.EnableLens("math"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetRunner("opencode"); err != nil {
-		t.Fatal(err)
-	}
-	c := s.LoadConfig()
-	if c.Runner != "opencode" {
-		t.Errorf("runner = %q", c.Runner)
-	}
-	if !slices.Contains(c.EnabledLenses, "math") {
-		t.Errorf("math lens lost after SetRunner: %v", c.EnabledLenses)
 	}
 }

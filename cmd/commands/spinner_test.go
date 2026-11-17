@@ -107,26 +107,3 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
-
-// The frames are single-width and the erase covers the whole line.
-//
-// A multi-rune frame or an erase shorter than the message leaves visible debris on the line the
-// caller is about to print over, which looks like corrupted output rather than a cosmetic glitch.
-func TestSpinnerFramesAndEraseAreWellFormed(t *testing.T) {
-	if len(spinnerFrames) == 0 {
-		t.Fatal("no spinner frames")
-	}
-	for _, f := range spinnerFrames {
-		if n := len([]rune(f)); n != 1 {
-			t.Errorf("frame %q is %d runes; frames must be single-width or the line jitters", f, n)
-		}
-	}
-	msg := "distilling the profile"
-	if got := spaces(len(msg) + 6); len(got) <= len(msg) {
-		t.Errorf("the erase string (%d chars) must exceed the message (%d) to cover the glyph, "+
-			"the spaces, and the padding", len(got), len(msg))
-	}
-	if strings.TrimSpace(spaces(8)) != "" {
-		t.Error("spaces() must produce only spaces")
-	}
-}

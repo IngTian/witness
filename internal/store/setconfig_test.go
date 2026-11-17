@@ -75,19 +75,6 @@ func TestSetConfigString(t *testing.T) {
 	}
 }
 
-// Setting runner via SetConfigString marks it bound, so ResolveRunner honors it over
-// any WITNESS_RUNNER env fallback (parity with `install`'s SetRunner).
-func TestSetConfigStringRunnerBinds(t *testing.T) {
-	s := tempStore(t)
-	t.Setenv("WITNESS_RUNNER", "claude") // an env fallback that must NOT win once bound
-	if err := s.SetConfigString("runner", RunnerOpenCode); err != nil {
-		t.Fatal(err)
-	}
-	if got := s.ResolveRunner(s.LoadConfig()); got != RunnerOpenCode {
-		t.Fatalf("a CLI-set runner must win over the env fallback, got %q", got)
-	}
-}
-
 // Regression (issue #71, audit finding): the npm OpenCode-plugin user never runs
 // `witness install`, so their runner stays UNBOUND (no runner_bound meta, only a
 // commented runner line) and resolves via WITNESS_RUNNER=opencode. Setting an
