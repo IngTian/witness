@@ -86,6 +86,18 @@ func TestOpenRenamesALensToItsDataName(t *testing.T) {
 	if s.MetaString(lensNamesAdoptedKey) == "" {
 		t.Fatal("the marker must be stamped")
 	}
+	logHas(t, s, `"level":"INFO"`, `"from":"corpus-example","to":"regime"`)
+}
+
+// logHas fails unless witness.log holds every want: the rename pass's only record.
+func logHas(t *testing.T, s *Store, want ...string) {
+	t.Helper()
+	b, _ := os.ReadFile(s.LogPath())
+	for _, w := range want {
+		if !strings.Contains(string(b), w) {
+			t.Errorf("witness.log lacks %s:\n%s", w, b)
+		}
+	}
 }
 
 // A data name another lens already holds (exactly, or only by case on a case-insensitive
@@ -116,6 +128,9 @@ func TestOpenLeavesACollidingLensAlone(t *testing.T) {
 	if s.MetaString(lensNamesAdoptedKey) == "" {
 		t.Fatal("a collision is final: the marker must be stamped")
 	}
+	logHas(t, s, `"level":"WARN"`,
+		`"lens":"corpus-example","name":"regime","reason":"lens regime already exists","retried":false`,
+		`"lens":"probe","name":"rates","reason":"lens Rates already exists","retried":false`)
 }
 
 func TestOpenRenameIsANoOpWhenNamesMatch(t *testing.T) {
@@ -219,6 +234,9 @@ func TestOpenRetriesTheRenameAfterAFailedRead(t *testing.T) {
 			s = reopenAsUpgrade(t, s)
 			if s.LensNamesAdopted() {
 				t.Fatal("a failed read must leave the marker unstamped")
+			}
+			if tc.mode == 0 {
+				logHas(t, s, `"lens":"corpus-example"`, "permission denied", `"retried":true`)
 			}
 			if err := os.Chmod(path, tc.back); err != nil {
 				t.Fatal(err)

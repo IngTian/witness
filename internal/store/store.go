@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -238,18 +239,45 @@ func (s *Store) adoptLensDataNames() {
 	defer unlock()
 	regs, err := s.registeredLenses()
 	failed := err != nil
+	var log *slog.Logger
 	for _, reg := range regs {
 		data, skip, err := LensRenameTarget(filepath.Join(s.LensesDir(), reg), reg, s.LensesDir())
-		if err == nil && skip == nil && data != "" {
+		if err == nil && skip == nil {
+			if data == "" {
+				continue
+			}
 			err = s.adoptLensName(reg, data)
 		}
-		if err != nil {
-			failed = true
+		// witness.log is the only record of what the pass did to a lens, and the only place a
+		// failure's cause is named.
+		if log == nil {
+			var done func()
+			log, done = s.fileLog()
+			defer done()
 		}
+		why := skip
+		if err != nil {
+			why, failed = err, true
+		}
+		if why != nil {
+			log.Warn("lens not renamed to its lens.json name", "lens", reg, "name", data, "reason", why, "retried", err != nil)
+			continue
+		}
+		log.Info("lens renamed to its lens.json name, the name its data is stored under", "from", reg, "to", data)
 	}
 	if !failed {
 		_ = s.SetMetaString(lensNamesAdoptedKey, "1")
 	}
+}
+
+// fileLog is a logger on witness.log for a step of Open. Open runs before any command points slog
+// at that file (until then slog writes nowhere), so the default logger would drop the line.
+func (s *Store) fileLog() (*slog.Logger, func()) {
+	f, err := os.OpenFile(s.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return slog.Default(), func() {}
+	}
+	return slog.New(slog.NewJSONHandler(f, nil)), func() { _ = f.Close() }
 }
 
 // adoptLensName renames lens reg to data: its config line first if it is enabled, then its folder.
