@@ -550,8 +550,17 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 				continue
 			}
 			target, kind, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), kindNew, true
-			// TODO(#223): target == s for a copy an earlier merge minted; it is dropped as its own duplicate.
-			if held[target] { // same hash: the same transcript under a third id
+			if target == s {
+				// s is a copy an earlier merge minted, so it already carries this id. held[s] is s
+				// itself, not a duplicate: dropping it lost its turns and what was mined from them
+				// (#223). It arrives as new under its own id — unless ours holds that id with another
+				// transcript (it would have matched above otherwise), which takes an 8-hex hash
+				// collision: refuse rather than fold two transcripts into one session or lose one.
+				if oursHasS {
+					return nil, fmt.Errorf("session %s: this archive holds a different transcript under the id the merge would give it; refusing to merge rather than lose either", s)
+				}
+				minted = false
+			} else if held[target] { // same hash: the same transcript under a third id
 				if err := dropIncomingSession(ctx, tx, s); err != nil {
 					return nil, err
 				}

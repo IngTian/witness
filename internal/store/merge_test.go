@@ -752,3 +752,100 @@ func TestPerSessionMetaNamespacesListsEveryImporter(t *testing.T) {
 		}
 	}
 }
+
+// mintedID is the id a merge mints for a diverged copy of family's transcript.
+func mintedID(family string, turns ...string) string {
+	var rt []rawTurn
+	for _, turn := range turns {
+		role, text, _ := strings.Cut(turn, ":")
+		rt = append(rt, rawTurn{role: role, text: text})
+	}
+	return family + "@" + transcriptHash8(rt)
+}
+
+func rawTexts(t *testing.T, st *Store, session string) []string {
+	t.Helper()
+	recs, err := st.ReadRaw(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, r := range recs {
+		out = append(out, r.Text)
+	}
+	return out
+}
+
+// A copy an earlier merge minted already carries the id this merge would mint for it again. It is
+// kept under that id: re-minting found the session itself among the incoming ids and dropped it as
+// its own duplicate, losing its turns and everything mined from them (#223).
+func TestMergeKeepsAMintedCopyUnderItsOwnID(t *testing.T) {
+	base, inc := newArch(t), newArch(t)
+	base.raw("file:feed", "user:a")
+	inc.raw("file:feed", "user:a", "assistant:b")
+	copyID := mintedID("file:feed", "user:a", "assistant:c")
+	inc.raw(copyID, "user:a", "assistant:c")
+	inc.obs("oc1", copyID, "default", "2026-03-01T00:00:00Z")
+	if err := inc.st.MarkDistilled(copyID, "default", 2); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := base.merge(inc.export(), true)
+	if rep.Sessions.Duplicates != 0 || rep.Sessions.New != 1 || rep.Sessions.LongerThere != 1 || len(rep.Sessions.Diverged) != 0 {
+		t.Errorf("session report wrong: %+v", rep.Sessions)
+	}
+	if got := rawTexts(t, base.st, copyID); !reflect.DeepEqual(got, []string{"a", "c"}) {
+		t.Errorf("the minted copy %s was lost: it holds %v", copyID, got)
+	}
+	obs, _ := base.st.ReadObservations("default")
+	if !slices.ContainsFunc(obs, func(o Observation) bool { return o.ID == "oc1" && o.Session == copyID }) {
+		t.Errorf("the copy's observation oc1 was lost: %v", idsOf(obs))
+	}
+}
+
+// The same transcript under two incoming ids, one of them the id a merge mints for it, arrives
+// once: the other copy is the duplicate.
+func TestMergeKeepsOneOfTwoCopiesOfAMintedTranscript(t *testing.T) {
+	base, inc := newArch(t), newArch(t)
+	base.raw("file:feed", "user:a")
+	inc.raw("file:feed", "user:a", "assistant:b")
+	copyID := mintedID("file:feed", "user:a", "assistant:c")
+	other := "file:feed@00000000"
+	if other == copyID {
+		other = "file:feed@11111111"
+	}
+	inc.raw(copyID, "user:a", "assistant:c")
+	inc.raw(other, "user:a", "assistant:c")
+
+	rep := base.merge(inc.export(), true)
+	if rep.Sessions.Duplicates != 1 {
+		t.Errorf("want the second copy counted as a duplicate, got %+v", rep.Sessions)
+	}
+	if got := rawTexts(t, base.st, copyID); !reflect.DeepEqual(got, []string{"a", "c"}) {
+		t.Errorf("the copy under its minted id %s was lost: it holds %v", copyID, got)
+	}
+	if got := rawTexts(t, base.st, other); len(got) != 0 {
+		t.Errorf("the duplicate %s arrived too: %v", other, got)
+	}
+}
+
+// Our archive holding that very id with a DIFFERENT transcript takes an 8-hex hash collision.
+// Keeping the copy under it would fold two transcripts into one session, and dropping it loses one:
+// the merge refuses and writes nothing.
+func TestMergeRefusesAMintedIDThatCollidesWithOurs(t *testing.T) {
+	base, inc := newArch(t), newArch(t)
+	copyID := mintedID("file:feed", "user:a", "assistant:c")
+	base.raw("file:feed", "user:a")
+	base.raw(copyID, "user:x")
+	inc.raw("file:feed", "user:a", "assistant:b")
+	inc.raw(copyID, "user:a", "assistant:c")
+
+	before := snapshotArchive(t, base.st)
+	_, err := base.st.Merge(context.Background(), inc.export(), true, mergeNow)
+	if err == nil || !strings.Contains(err.Error(), copyID) {
+		t.Fatalf("want a refusal naming %s, got %v", copyID, err)
+	}
+	if after := snapshotArchive(t, base.st); !reflect.DeepEqual(before, after) {
+		t.Errorf("a refused merge changed the archive")
+	}
+}
