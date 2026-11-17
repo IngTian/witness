@@ -481,14 +481,15 @@ func transcriptHash8(turns []rawTurn) string {
 //
 //  1. an available member equal to T, else 2. one extending T: the session goes there;
 //  3. else, if a claimed member equals or extends T, ours already holds every turn: the session is
-//     a duplicate, dropped from the copy (its L1 is re-derivable);
+//     a duplicate, dropped from the copy, with what it recorded in-session re-filed to that member
+//     (dropIncomingSession);
 //  4. else an available member T extends: T's tail is appended to it;
 //  5. else T arrives as its own session: under its own id, or, if ours holds that id with another
 //     transcript, under the id minted from T's hash. If another incoming session already sits
-//     under the minted id with T or more, this one is a duplicate of it. If the id T needs holds a
-//     different transcript, the merge refuses: that takes an 8-hex collision or a write into a
-//     minted id, and both ways out (folding two transcripts into one session, dropping one) lose
-//     data.
+//     under the minted id with T or more, this one is a duplicate of it, and what it recorded
+//     in-session moves there. If the id T needs holds a different transcript, the merge refuses:
+//     that takes an 8-hex collision or a write into a minted id, and both ways out (folding two
+//     transcripts into one session, dropping one) lose data.
 //
 // The first-match loop this replaced held transcripts twice and folded them, through three habits:
 // it took the first match even when another incoming session claimed it, so a copy of what ours
@@ -513,6 +514,14 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	for _, s := range incoming {
 		held[s] = true
 	}
+	for _, q := range []string{
+		`CREATE TEMP TABLE merge_refile_obs AS SELECT seq, ` + obsCols + ` FROM inc.observations WHERE 0`,
+		`CREATE TEMP TABLE merge_refile_staged AS SELECT id, session, obs_id, payload FROM inc.staged WHERE 0`,
+	} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return nil, err
+		}
+	}
 
 	kinds := map[string]string{}
 	for _, s := range incoming {
@@ -531,7 +540,7 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		cands = append(cands, rest...)
 
 		match := map[string]string{} // relation -> first available member in it
-		claimedHoldsIt := false      // a member another incoming session claims equals or extends theirs
+		heldBy := ""                 // the first member another incoming session claims that equals or extends theirs
 		seen := map[string]bool{}
 		for _, c := range cands {
 			if seen[c] {
@@ -545,20 +554,23 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			switch k := turnRelation(mine, theirs); {
 			case k == "":
 			case c != s && held[c]:
-				claimedHoldsIt = claimedHoldsIt || k != kindLongerThere
+				if k != kindLongerThere && heldBy == "" {
+					heldBy = c
+				}
 			case match[k] == "":
 				match[k] = c
 			}
 		}
 
-		target, kind, minted, dup := s, kindNew, false, false
+		// holder, when set, holds every turn of a duplicate s: one of ours, or an incoming session.
+		target, kind, minted, holder, oursHolds := s, kindNew, false, "", false
 		switch {
 		case match[kindEqual] != "":
 			target, kind = match[kindEqual], kindEqual
 		case match[kindLongerHere] != "":
 			target, kind = match[kindLongerHere], kindLongerHere
-		case claimedHoldsIt:
-			dup = true
+		case heldBy != "":
+			holder, oursHolds = heldBy, true
 		case match[kindLongerThere] != "":
 			target, kind = match[kindLongerThere], kindLongerThere
 		default:
@@ -574,9 +586,10 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 				if err != nil {
 					return nil, err
 				}
-				k := turnRelation(other, theirs)
-				dup = k == kindEqual || k == kindLongerHere
-				taken = minted && !dup
+				if k := turnRelation(other, theirs); k == kindEqual || k == kindLongerHere {
+					holder = id
+				}
+				taken = minted && holder == ""
 			}
 			if taken {
 				return nil, fmt.Errorf("session %s would arrive as %s, which already holds a different transcript; refusing to merge rather than fold the two into one session or lose one", s, id)
@@ -585,8 +598,8 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 				target = id
 			}
 		}
-		if dup {
-			if err := dropIncomingSession(ctx, tx, s); err != nil {
+		if holder != "" {
+			if err := dropIncomingSession(ctx, tx, s, holder, oursHolds); err != nil {
 				return nil, err
 			}
 			delete(held, s)
@@ -603,6 +616,19 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		kinds[target] = kind
 		if minted {
 			rep.Sessions.Diverged = append(rep.Sessions.Diverged, RenamedSession{From: s, To: target})
+		}
+	}
+	// Every session is placed, so no rename can carry them off any more: what duplicates recorded
+	// rejoins the copy under the session of ours that holds their turns, and arrives with the rest
+	// (an active row ours already holds is skipped by obs_id, a staged one by (session, obs_id)).
+	for _, q := range []string{
+		`INSERT INTO inc.observations(seq, ` + obsCols + `) SELECT seq, ` + obsCols + ` FROM temp.merge_refile_obs`,
+		`INSERT OR IGNORE INTO inc.staged(id, session, obs_id, payload) SELECT id, session, obs_id, payload FROM temp.merge_refile_staged`,
+		`DROP TABLE temp.merge_refile_obs`,
+		`DROP TABLE temp.merge_refile_staged`,
+	} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return nil, fmt.Errorf("re-file recorded rows: %w", err)
 		}
 	}
 	for _, k := range kinds {
@@ -648,7 +674,34 @@ func renameIncomingSession(ctx context.Context, tx *sql.Tx, from, to string) err
 	return dropImporterKeys(ctx, tx, from)
 }
 
-func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess string) error {
+// dropIncomingSession removes a duplicate from the copy: its transcript and every row that can be
+// derived from it again (mined observations, progress, session metadata, importer keys). Its ACTIVE
+// observations and staged rows were recorded in-session and exist nowhere else, so they are first
+// re-filed to holder, a session holding every turn of it. An incoming holder takes them in place,
+// so they go wherever it is placed. One of OUR sessions may still be occupied in the copy by an
+// incoming session that a later rename carries off, taking whatever sits under that id with it:
+// for ours they wait outside the copy, in temp.merge_refile_*, until classifySessions has placed
+// every session and puts them back under it. Their seq is kept, so a row the other side already
+// reviewed stays below its review cursor.
+func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess, holder string, oursHolds bool) error {
+	refile := []string{
+		`UPDATE inc.observations SET session = ?1 WHERE session = ?2 AND source = 'active'`,
+		// A row the holder already has stays behind and is dropped with sess.
+		`UPDATE OR IGNORE inc.staged SET session = ?1, payload = json_set(payload, '$.session', ?1) WHERE session = ?2`,
+	}
+	if oursHolds {
+		refile = []string{
+			`INSERT INTO temp.merge_refile_obs SELECT seq, ` + strings.Replace(obsCols, "session", "?1", 1) + `
+			   FROM inc.observations WHERE session = ?2 AND source = 'active'`,
+			`INSERT INTO temp.merge_refile_staged SELECT id, ?1, obs_id, json_set(payload, '$.session', ?1)
+			   FROM inc.staged WHERE session = ?2`,
+		}
+	}
+	for _, q := range refile {
+		if _, err := tx.ExecContext(ctx, q, holder, sess); err != nil {
+			return fmt.Errorf("re-file what %s recorded: %w", sess, err)
+		}
+	}
 	for _, table := range mergeSessionTables {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM inc.`+table+` WHERE session = ?`, sess); err != nil {
 			return fmt.Errorf("drop duplicate from %s: %w", table, err)

@@ -63,6 +63,100 @@ func editLast(t *testing.T, a *arch, session, text string) {
 	}
 }
 
+// recorded seeds an in-session (active) observation and a staged row on a session: what the MCP
+// record_observation handler writes, the only copies there are.
+func recorded(t *testing.T, a *arch, id, session string) {
+	t.Helper()
+	ob := Observation{ID: id, TS: "2026-03-01T00:00:00Z", Session: session, Lens: "default", Dimension: "d",
+		Observation: "text of " + id, Source: "active"}
+	if err := a.st.AppendObservations([]Observation{ob}); err != nil {
+		t.Fatal(err)
+	}
+	ob.ID = id + "-staged"
+	if err := a.st.StageObservation(ob); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recordedOn maps each active observation and staged row to the sessions it is filed under. A
+// staged row whose payload names another session than its column (DrainStaged trusts the payload)
+// reads "column|payload".
+func recordedOn(t *testing.T, a *arch) map[string][]string {
+	t.Helper()
+	rows, err := a.st.db.Query(`SELECT obs_id, session FROM observations WHERE source = 'active'
+		UNION ALL SELECT obs_id, session || CASE WHEN json_extract(payload, '$.session') = session THEN ''
+		  ELSE '|' || json_extract(payload, '$.session') END FROM staged ORDER BY 1, 2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var id, s string
+		if err := rows.Scan(&id, &s); err != nil {
+			t.Fatal(err)
+		}
+		out[id] = append(out[id], s)
+	}
+	return out
+}
+
+// A duplicate's transcript, and what was mined from it, can go: ours holds the turns and mining
+// re-derives the rest. What it recorded in-session cannot: its active observations and staged rows
+// are re-filed to the session holding its turns. Here that is OURS, under an id the incoming
+// archive occupies with another transcript, which the merge moves on to a minted id; rows
+// re-filed to that id in the copy would have gone with it, onto turns they were never recorded on.
+func TestMergeRefilesWhatADuplicateRecordedOntoOurCopy(t *testing.T) {
+	base, inc := newArch(t), newArch(t)
+	base.raw("file:feed@11111111", "user:X1", "user:X2")
+	inc.raw("file:feed@11111111", "user:X1", "user:X3")
+	inc.raw("file:feed@00000000", "user:X1", "user:X2")
+	recorded(t, inc, "dup", "file:feed@00000000")
+	recorded(t, inc, "claimant", "file:feed@11111111")
+	inc.cursor("default", inc.highWater()) // both reviewed there
+
+	rep := base.merge(inc.export(), true)
+	ours, minted := "file:feed@11111111", mintedID("file:feed", "user:X1", "user:X3")
+	want := map[string][]string{"dup": {ours}, "dup-staged": {ours}, "claimant": {minted}, "claimant-staged": {minted}}
+	if got := recordedOn(t, base); !reflect.DeepEqual(got, want) {
+		t.Errorf("recorded rows filed as %v, want %v (%+v)", got, want, rep.Sessions)
+	}
+	if o := rep.Observations; o.Reviewed != 2 || o.Unreviewed != 0 {
+		t.Errorf("both observations were reviewed on the incoming side and must arrive below the cursor: %+v", o)
+	}
+	if n := copiesOf(heldTranscripts(t, base)); n["X1 X2"] != 1 {
+		t.Errorf("[X1 X2] held %d times: %v", n["X1 X2"], heldTranscripts(t, base))
+	}
+	if again := base.merge(inc.export(), true); !again.Empty() {
+		t.Errorf("merging the same export again: %+v staged=%d observations=%+v", again.Sessions, again.Staged, again.Observations)
+	}
+}
+
+// The same when the duplicate is a second incoming copy: what it recorded arrives on the twin that
+// is kept.
+func TestMergeRefilesWhatADuplicateRecordedOntoItsTwin(t *testing.T) {
+	base, inc := newArch(t), newArch(t)
+	base.raw("file:feed", "user:a")
+	inc.raw("file:feed", "user:a", "assistant:b")
+	copyID := mintedID("file:feed", "user:a", "assistant:c")
+	twin := "file:feed@00000000"
+	if twin == copyID {
+		twin = "file:feed@11111111"
+	}
+	inc.raw(copyID, "user:a", "assistant:c")
+	inc.raw(twin, "user:a", "assistant:c")
+	recorded(t, inc, "twin", twin)
+
+	rep := base.merge(inc.export(), true)
+	if rep.Sessions.Duplicates != 1 {
+		t.Fatalf("setup: want the twin dropped as a duplicate, got %+v", rep.Sessions)
+	}
+	want := map[string][]string{"twin": {copyID}, "twin-staged": {copyID}}
+	if got := recordedOn(t, base); !reflect.DeepEqual(got, want) {
+		t.Errorf("recorded rows filed as %v, want %v", got, want)
+	}
+}
+
 // Ours holds the incoming [X1 X2] already, under an id the incoming archive claims with another
 // transcript. Re-minting it gave it an id of its own beside ours: the same turns held, and later
 // mined, twice. It is a duplicate of what we hold.
@@ -237,24 +331,27 @@ func TestMergeRefusesAMintedIDTheIncomingArchiveHoldsDifferently(t *testing.T) {
 
 // TestMergeFamilyInvariants plays fixed random histories of three and four machines that ingest one
 // named file feed (sharing its first record, starting their own, or starting empty), append to it,
-// edit its last record in place (as `witness ingest` does) or not, and merge each other in random
-// order. After every merge: no transcript of either side is lost (each is a prefix of a session
-// afterwards); none is held twice (appends and edits write fresh text, so only a merge can make a
-// second copy); none is folded (every session is a prefix of a state some feed really had); the
-// dry run reported exactly what the merge did; and merging the same export again is empty and
-// changes nothing.
+// edit its last record in place (as `witness ingest` does) or not, record active observations and
+// staged rows on it now and then, and merge each other in random order. After every merge: no
+// transcript of either side is lost (each is a prefix of a session afterwards); none is held twice
+// (appends and edits write fresh text, so only a merge can make a second copy); none is folded
+// (every session is a prefix of a state some feed really had); every recorded row of ours stays
+// where it was, and every one of theirs arrives on a session holding the turns of the session it
+// was on; the dry run reported exactly what the merge did; and merging the same export again is
+// empty and changes nothing.
 func TestMergeFamilyInvariants(t *testing.T) {
-	// 30 ops a history. Besides seeds 1 and 2 of each kind, the first seeds whose history broke an
-	// earlier classifySessions: the one before #223's fix lost a minted copy as its own duplicate
-	// in 3/plain 32, 3/edits 16, 4/plain 8 and 4/edits 7; the first fix appended a re-merged
-	// transcript to itself in 3/edits 37 and held a copy twice in 4/edits 57. A seed names a history
-	// only for this mergeHistory: change how it draws and the seeds name others.
+	// 30 ops a history. Besides seed 1 of each kind, the first seeds whose history broke an earlier
+	// classifySessions: the one before #223's fix lost a minted copy as its own duplicate in
+	// 3/plain 32, 3/edits 16, 4/plain 8 and 4/edits 7; the first fix appended a re-merged transcript
+	// to itself in 3/edits 37 and held a copy twice in 4/edits 57; the second lost what a dropped
+	// duplicate recorded in 3/edits 145 and 4/plain 156. A seed names a history only for this
+	// mergeHistory: change how it draws and the seeds name others.
 	const steps = 30
 	for _, c := range []struct {
 		machines int
 		edits    bool
 		seeds    []int64
-	}{{3, false, []int64{1, 2, 32}}, {3, true, []int64{1, 2, 16, 37}}, {4, false, []int64{1, 2, 8}}, {4, true, []int64{1, 2, 7, 57}}} {
+	}{{3, false, []int64{1, 32}}, {3, true, []int64{1, 16, 37, 145}}, {4, false, []int64{1, 8, 156}}, {4, true, []int64{1, 7, 57}}} {
 		for _, seed := range c.seeds {
 			t.Run(fmt.Sprintf("machines=%d/edits=%v/seed=%d", c.machines, c.edits, seed), func(t *testing.T) {
 				if broke := mergeHistory(t, seed, c.machines, steps, c.edits); broke != "" {
@@ -270,6 +367,7 @@ func TestMergeFamilyInvariants(t *testing.T) {
 func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) string {
 	ctx := context.Background()
 	r := rand.New(rand.NewSource(seed))
+	rec := rand.New(rand.NewSource(-seed)) // its own stream, so a seed's ops are the same with or without it
 	names := []string{"A", "B", "C", "D"}[:machines]
 	ar := map[string]*arch{}
 	legit := [][]string{{"a"}} // every state some machine's feed really had
@@ -292,6 +390,14 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) str
 		}
 	}
 	for step := 1; step <= steps; step++ {
+		// Every step some machine records in-session, between turns as record_observation does: so
+		// two copies of one transcript can carry different recorded rows, and a dropped duplicate
+		// can hold rows nothing else does.
+		if m := names[rec.Intn(machines)]; ar[m].st.RawCount("file:feed") > 0 {
+			id := fmt.Sprintf("%s%d-rec", m, step)
+			recorded(t, ar[m], id, "file:feed")
+			ops = append(ops, m+".feed records "+id)
+		}
 		if r.Intn(3) == 0 {
 			m := names[r.Intn(machines)]
 			text := fmt.Sprintf("%s%d", m, step)
@@ -309,6 +415,7 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) str
 		x, y := names[i], names[(i+1+r.Intn(machines-1))%machines]
 		ops = append(ops, x+" <- "+y)
 		ours, theirs := heldTranscripts(t, ar[x]), heldTranscripts(t, ar[y])
+		recOurs, recTheirs := recordedOn(t, ar[x]), recordedOn(t, ar[y])
 		export := ar[y].export()
 		dry, err := ar[x].st.Merge(ctx, export, false, mergeNow)
 		if err != nil {
@@ -337,6 +444,24 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) str
 		for s, turns := range after {
 			if !slices.ContainsFunc(legit, func(l []string) bool { return isPrefix(turns, l) }) {
 				return broke("%s holds %s %v, which no feed ever held", x, s, turns)
+			}
+		}
+		recAfter := recordedOn(t, ar[x])
+		for id, sessions := range recOurs {
+			for _, s := range sessions {
+				if !slices.Contains(recAfter[id], s) {
+					return broke("%s's recorded %s left %s: now on %v", x, id, s, recAfter[id])
+				}
+			}
+		}
+		for id, sessions := range recTheirs {
+			if len(recOurs[id]) > 0 {
+				continue // ours has it already, and keeps where it is
+			}
+			for _, s := range sessions {
+				if !slices.ContainsFunc(recAfter[id], func(on string) bool { return isPrefix(theirs[s], after[on]) }) {
+					return broke("%s's recorded %s on %s %v is on %v in %s, which lacks those turns: %v", y, id, s, theirs[s], recAfter[id], x, after)
+				}
 			}
 		}
 		snap := snapshotArchive(t, ar[x].st)
