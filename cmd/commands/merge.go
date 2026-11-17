@@ -59,7 +59,7 @@ other archive is served to your agents through the MCP tools like your own.`),
 }
 
 // errMergeDeclined is returned when the user does not confirm. It is an ERROR, unlike the
-// abort in cleanup and backfill: those leave nothing for a following command to misread, but
+// abort in backfill: that leaves nothing for a following command to misread, but
 // `witness merge x && rm -rf x` would delete the only copy of an archive that was never merged.
 // A script with no one to answer reads EOF, which is a "no" — so it fails loudly, and says --yes.
 var errMergeDeclined = errors.New("not merged — nothing was written")

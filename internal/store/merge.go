@@ -22,8 +22,7 @@ import (
 // laptop, moving to a machine that already has its own archive), not a sync. Restoring by copying
 // a backup into the data dir replaces the destination; this keeps both.
 //
-// WHY IT IS NOT A SYNC. There are no tombstones that cross (cleanup leaves no record, and
-// delete_observation's lives in this archive's meta only until its next review), so a session or
+// WHY IT IS NOT A SYNC. There are no tombstones that cross (delete_observation's lives in this archive's meta only until its next review, and the cleanup command witness had through v0.13 left none), so a session or
 // observation deleted on one side comes back from the other; and two machines
 // that keep capturing between merges each grow a genuinely diverged chain for every facet both
 // touched, which this resolves by archiving one copy — one more archived copy per facet per round.
@@ -642,7 +641,7 @@ func dropImporterKeys(ctx context.Context, tx *sql.Tx, sess string) error {
 //     and carries no source column. An IDENTICAL row (a restore) stays: the insert dedupes it, and
 //     it is the record that the incoming side already folded that observation.
 //  2. THEIR PROGRESS, wherever we mined the session: our watermark wins, and if their transcript is
-//     longer its tail is appended (mergeL0) and mined here. Where our cleanup reclaimed the
+//     longer its tail is appended (mergeL0) and mined here. Where the cleanup command witness had through v0.13 reclaimed our
 //     transcript but kept its observations, mergeL0 marks the returning transcript mined at its
 //     full length instead — NOT at their count, which may be partial: keeping a partial count of
 //     theirs left our tail pending, re-mined beside the observations we already hold.
@@ -651,7 +650,7 @@ func dropImporterKeys(ctx context.Context, tx *sql.Tx, sess string) error {
 //     would arrive with no progress beside our transcript, so the lens would mine it here and
 //     duplicate them; ours is mined instead.
 //
-// "Already mined here" is a progress mark OR mined rows (cleanup removes progress, keeps L1). It is
+// "Already mined here" is a progress mark OR mined rows (the cleanup command witness had through v0.13 removed progress and kept L1). It is
 // materialised ONCE into an indexed set: as a correlated subquery over observations, which has no
 // (session, lens) index, it scanned the whole lens per incoming row — quadratic, ~15 minutes at
 // 75k observations a side, with the archive's write lock held and every capture hook in that window
@@ -766,7 +765,7 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 	}
 	n, _ = res.RowsAffected()
 	rep.ProgressRows = int(n)
-	// A transcript that just arrived for a session we mined before our cleanup reclaimed it: our
+	// A transcript that just arrived for a session we mined before the cleanup command witness had through v0.13 reclaimed it here: our
 	// observations of it are still here, so mark it mined at its length. Left unmarked it would be
 	// mined a second time beside them.
 	res, err = tx.ExecContext(ctx, `INSERT INTO main.progress(session, lens, distilled)

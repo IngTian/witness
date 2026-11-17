@@ -5,7 +5,17 @@ import (
 	"testing"
 )
 
-// `witness cleanup` deliberately keeps L1 while reclaiming L0. A later `lens backfill
+// dropL0 recreates what the cleanup command witness had through v0.13 left behind: the session's L0, progress and session meta gone, its L1 kept.
+func dropL0(t *testing.T, s *Store, session string) {
+	t.Helper()
+	for _, table := range []string{"raw", "progress", "session_meta"} {
+		if _, err := s.db.Exec("DELETE FROM "+table+" WHERE session = ?", session); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// the cleanup command witness had through v0.13 kept L1 while reclaiming L0, and an archive it pruned still holds that state. A later `lens backfill
 // --fresh` then deletes those observations on the promise "Mined observations are
 // re-created from them" — but the re-mine enumerates candidate sessions FROM `raw`, so a
 // session with no raw left is never offered and its observations are destroyed
@@ -22,20 +32,18 @@ func TestOrphanedL0ObservationCount(t *testing.T) {
 		{ID: "o_other", Lens: "sibling", Session: "pruned", Observation: "another lens", Source: "mined"},
 	})
 
-	// Before any cleanup every mined obs still has its L0.
+	// Before dropL0 every mined obs still has its L0.
 	if got := s.OrphanedL0ObservationCount(LensDefault); got != 0 {
-		t.Fatalf("before cleanup: want 0 orphaned, got %d", got)
+		t.Fatalf("before dropL0: want 0 orphaned, got %d", got)
 	}
 
-	// `witness cleanup` reclaims the idle session's raw, keeping L1.
-	if _, _, err := s.PruneSessionsBefore("2025-01-01T00:00:00Z"); err != nil {
-		t.Fatal(err)
-	}
+	// Drop the session's L0 the way the cleanup command witness had through v0.13 did, keeping L1.
+	dropL0(t, s, "pruned")
 
 	// Exactly the MINED obs of the pruned session counts. The 'active' one is already
 	// covered by ActiveObservationCount (don't double-warn), and a sibling lens is separate.
 	if got := s.OrphanedL0ObservationCount(LensDefault); got != 1 {
-		t.Fatalf("after cleanup: want 1 orphaned mined obs for %q, got %d", LensDefault, got)
+		t.Fatalf("after dropL0: want 1 orphaned mined obs for %q, got %d", LensDefault, got)
 	}
 	if got := s.OrphanedL0ObservationCount("sibling"); got != 1 {
 		t.Fatalf("sibling lens is counted independently: got %d, want 1", got)
@@ -87,7 +95,7 @@ func TestConfidenceLogCount(t *testing.T) {
 // SQLITE_BUSY_SNAPSHOT (517) — a conflict busy_timeout CANNOT retry, because there is no
 // lock to wait for; the snapshot is simply stale. witness is multi-process (a capture hook
 // per user turn, a draining worker, an MCP server), so these must survive a concurrent
-// commit. The read-then-write sites are StampReview, PruneSessionsBefore and the facet write
+// commit. The read-then-write sites are StampReview and the facet write
 // (WriteFacetsPruned, under WriteFacets/WriteFacetsLogged: it reads user_version before its
 // REPLACE); the other transactions in this package write first, which takes the lock
 // immediately, so they are already safe. (DeleteObservation was one until it stopped reading the
@@ -99,7 +107,6 @@ func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 		run  func(*Store) error
 	}{
 		{"StampReview", func(s *Store) error { return s.StampReview() }},
-		{"PruneSessionsBefore", func(s *Store) error { _, _, err := s.PruneSessionsBefore("2025-01-01T00:00:00Z"); return err }},
 		{"WriteFacetsPruned", func(s *Store) error {
 			return s.WriteFacetsPruned([]Facet{{Lens: LensDefault, Dimension: "d", Key: "k",
 				Versions: []FacetVersion{{Value: "v", BecauseOf: []string{"o1"}}}}}, nil, nil)

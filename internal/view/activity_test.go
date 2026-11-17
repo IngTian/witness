@@ -399,7 +399,7 @@ func windowByLabel(t *testing.T, m *Model, label string) Window {
 	return Window{}
 }
 
-// P9: `witness cleanup` reclaims transcripts (raw) but keeps notes, so notes can outlive their
+// P9: the cleanup command witness had through v0.13 reclaimed transcripts (raw) but kept notes, so notes can outlive their
 // turns. First must reach back to them, or they fall before every window.
 func TestActivityFirstCountsNotes(t *testing.T) {
 	loc := time.FixedZone("EST", -5*3600)

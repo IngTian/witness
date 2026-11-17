@@ -136,8 +136,7 @@ func (q *queue) MarkDistilled(session, lens string, count int) error {
 // Why this exists (issue #49 C2): MarkDistilled is a blind upsert of a COUNT
 // captured at the start of a mine. That count assumes raw is append-only. It isn't
 // always: an OpenCode history rewrite/edit takes the replace path (DELETE raw +
-// DELETE progress + re-INSERT the new turns), and `witness cleanup` deletes raw too
-// — both under a DIFFERENT lock than the worker. If such a delete lands mid-mine,
+// DELETE progress + re-INSERT the new turns), under a DIFFERENT lock than the worker. If such a delete lands mid-mine,
 // a trailing blind MarkDistilled would RESURRECT the just-deleted progress row with
 // a stale count, silently marking never-mined turns as done. The guard closes that:
 // after a replace the old rawHighID no longer exists, the UPDATE/INSERT matches no
@@ -147,8 +146,7 @@ func (q *queue) MarkDistilled(session, lens string, count int) error {
 //
 // Runtime-agnostic: it guards EVERY session (Claude Code + OpenCode) with one code
 // path. On the append-only Claude path the mined rawHighID always still exists, so
-// the guard always passes — free insurance there, an active fix on the OpenCode/
-// cleanup paths that can delete raw under a mine.
+// the guard always passes — free insurance there, an active fix on the replace paths that can delete raw under a mine.
 //
 // It is CommitLensDistillation with no observations and one lens, so the NothingToDo path
 // and the mining commit share ONE generation guard: a second copy of that SQL would let a
@@ -392,9 +390,8 @@ func (q *queue) ActiveObservationCount(lens string) int {
 }
 
 // OrphanedL0ObservationCount reports how many of a lens's MINED observations belong to a
-// session whose raw transcript (L0) no longer exists — because `witness cleanup` reclaimed
-// it. Cleanup deliberately keeps L1 ("your observations and profile are kept, only raw
-// transcripts are removed"), so these are perfectly good observations whose SOURCE is gone.
+// session whose raw transcript (L0) no longer exists — because the cleanup command witness had through v0.13 reclaimed
+// it (in this archive, or in one merged into it). That command kept L1, so these are perfectly good observations whose SOURCE is gone.
 //
 // They are the second class of obs a `lens backfill --fresh` destroys irrecoverably, and
 // the more surprising one: the re-mine enumerates candidate sessions FROM `raw`

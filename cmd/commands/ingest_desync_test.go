@@ -11,7 +11,7 @@ import (
 // update's index points past the rows that actually exist.
 //
 // This is not a contrived state: the replace path exists precisely BECAUSE the key list and
-// raw can desynchronize (rawCount != len(oldKeys)) — a `cleanup` reclaiming rows, an
+// raw can desynchronize (rawCount != len(oldKeys)) — an
 // interrupted write, a crash between the two.
 func desyncKeys(t *testing.T, session, keysJSON string) {
 	t.Helper()
@@ -119,7 +119,7 @@ func TestIngestUpdateNeverOverwritesADifferentRecord(t *testing.T) {
 
 	// Misalign the key list: rotate it so "c"'s key sits at index 0, where raw holds "body a".
 	// The hashes are recordKey's own, so each entry stays individually well-formed — only the
-	// POSITIONS lie, which is what a cleanup/crash that rewrote raw would leave behind.
+	// POSITIONS lie, which is what a crash that rewrote raw would leave behind.
 	desyncKeys(t, "file:s",
 		`["c:e15041ea78cf7294","a:68d3a6450cfc8466","b:c1c02f812f485815"]`)
 

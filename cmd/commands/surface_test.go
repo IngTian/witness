@@ -42,13 +42,13 @@ func TestRootSurface(t *testing.T) {
 		}
 	}
 	// present:
-	for _, want := range []string{"profile", "status", "lens", "config", "ingest", "install", "wire", "unwire", "doctor", "export", "merge", "cleanup", "worker"} {
+	for _, want := range []string{"profile", "status", "lens", "config", "ingest", "install", "wire", "unwire", "doctor", "export", "merge", "worker"} {
 		if !visible[want] {
 			t.Errorf("expected visible command %q", want)
 		}
 	}
 	// gone from the visible front door:
-	for _, gone := range []string{"distill", "review", "version", "import"} {
+	for _, gone := range []string{"distill", "review", "version", "import", "cleanup"} {
 		if visible[gone] {
 			t.Errorf("%q must NOT be a visible top-level command anymore", gone)
 		}

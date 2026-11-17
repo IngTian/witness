@@ -742,3 +742,12 @@ func TestMergeRefusesInvalidLensNames(t *testing.T) {
 		}
 	}
 }
+
+// Every importer's namespace must be on the list: merge carries and drops a session's importer state only through it.
+func TestPerSessionMetaNamespacesListsEveryImporter(t *testing.T) {
+	for _, ns := range []string{CodexImportStateNS, OpenCodeImportKeysNS, FileImportKeysNS} {
+		if !slices.Contains(PerSessionMetaNamespaces, ns) {
+			t.Errorf("%q dropped out of PerSessionMetaNamespaces — a merge drops that importer's state, so the next import replaces and re-mines the session", ns)
+		}
+	}
+}

@@ -226,7 +226,7 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 func (w *Worker) MineSession(ctx context.Context, session string, stop func() bool) (*SessionMining, error) {
 	// Read the delta AND its raw "generation" (highest raw.id) as ONE atomic snapshot.
 	// CommitMining advances each lens's watermark only if this id still exists, so a
-	// replace-import/cleanup that deletes raw mid-mine can't have a stale count blind-
+	// replace-import that deletes raw mid-mine can't have a stale count blind-
 	// written over it (#49 C2). The generation is session-level (a property of raw),
 	// shared by all lenses.
 	//
@@ -452,7 +452,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 func (w *Worker) CommitMining(m *SessionMining) error {
 	if m.NothingToDo {
 		// Every lens is already at the watermark; the stamp is idempotent. Advance each
-		// lens (CAS-guarded per #49 C2 so a raw replace/cleanup mid-mine can't blind-
+		// lens (CAS-guarded per #49 C2 so a raw replace mid-mine can't blind-
 		// advance a generation we didn't see — not advancing leaves the pair pending).
 		for _, lm := range m.Lenses {
 			if _, err := w.Store.MarkDistilledIfCurrent(m.Session, lm.Lens, m.Total, m.RawHighID); err != nil {
@@ -600,7 +600,7 @@ func (w *Worker) CommitMining(m *SessionMining) error {
 
 	// Clear the staged rows we drained — LAST, so a crash before it just re-drains
 	// harmlessly (obsID dedup absorbs the re-write). Gate on generationCurrent: if a
-	// replace-import/cleanup deleted raw mid-mine, hold staged so the re-mine of the
+	// replace-import deleted raw mid-mine, hold staged so the re-mine of the
 	// new generation re-drains them. If EVERY lens failed (generationCurrent stays
 	// false with no CAS), staged is likewise held and re-drains next attempt.
 	if generationCurrent {

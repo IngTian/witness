@@ -13,8 +13,7 @@ intentionally unused — the profile sits directly on the facets).
 ## raw — ground-truth transcript (L0)
 
 Table `raw`, append-only. One row per captured turn-half or ingested record, verbatim; never
-LLM-touched. Reclaim old rows with `witness cleanup` (there is no automatic retention — pruning is
-an explicit, confirmed action).
+LLM-touched, and never pruned: `lens backfill` and `lens try` re-mine from it.
 
 ## observations — derived, append-only (L1)
 

@@ -12,7 +12,7 @@ The visible front door, exactly as `witness --help` groups it:
 | Lenses | `lens` |
 | Configure | `config` |
 | Setup | `doctor` · `install` · `model` · `wire` · `unwire` |
-| Maintenance | `cleanup` · `export` · `merge` · `compact` · `worker` |
+| Maintenance | `export` · `merge` · `compact` · `worker` |
 
 Capture, the automatic worker runs, and the MCP server are **internal** entry points invoked by
 Claude Code, OpenCode and Codex, not typed by hand. `witness worker …` is the operator side of
@@ -61,7 +61,6 @@ that worker, and `witness import` is hidden plugin and hook plumbing. Two jobs h
   select pending sessions by their latest raw timestamp — for example
   `witness worker run --detach --since 7d` distills sessions updated in the last seven days. Bounds also accept RFC3339 timestamps or UTC dates
   (`YYYY-MM-DD`) and do not discard sessions outside the selected range.
-- `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness export <path>` — write a consistent single-file snapshot of the **database** (safe to back
   up / cloud-sync). Add `--all` and `<path>` becomes a **directory** holding the complete archive:
   that snapshot plus `config.toml`, `lenses/`, `summarize/` (your own portrait prompts, if any)
@@ -157,8 +156,7 @@ lines, each naming a registered lens that runs on every session:
 lens = math
 ```
 
-There is no automatic retention knob: raw transcripts are kept until you deliberately reclaim
-them with `witness cleanup` (which never touches your observations or profile).
+Raw transcripts are kept for good: `lens backfill` and `lens try` re-mine from them, so there is no retention setting and no prune command.
 
 ---
 

@@ -20,7 +20,7 @@ import (
 )
 
 // The screens of the commands that change something (wire/unwire, the worker, compact, merge,
-// import, ingest, export, cleanup, install --path). Each test here pins a behaviour a pty audit
+// import, ingest, export, install --path). Each test here pins a behaviour a pty audit
 // found wrong — a false claim, a suggested command that does not exist, a typo that exited 0, a
 // cause that reached only witness.log. Tests run with stdout piped, so they see the plain form.
 
@@ -598,69 +598,6 @@ func TestStatusRowsAndTheNextStep(t *testing.T) {
 	}
 	if got := behind("2026-11-02T06:34:00Z", "2026-11-02T05:29:00Z"); got != "1h05m behind" {
 		t.Errorf("behind = %q", got)
-	}
-}
-
-// cleanup's confirmation goes through the shared prompt, and reading the day count must not
-// swallow the answer that follows it on a pipe.
-func TestCleanupAsksThroughTheSharedPrompt(t *testing.T) {
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st := openBase(t)
-	if err := st.AppendRaw(store.RawRecord{TS: "2025-01-01T00:00:00Z", Session: "old", Seq: 0, Role: "user", Text: "hi"}); err != nil {
-		t.Fatal(err)
-	}
-	st.Close()
-
-	var asked bool
-	var err error
-	out := captureStdout(t, func() { err = cmdCleanup(strings.NewReader("30\n"), answer(false, &asked)) })
-	if err != nil || !asked || !strings.Contains(out, "deletes       1 raw message from 1 session") ||
-		!strings.HasSuffix(out, "not deleted — nothing written\n") {
-		t.Fatalf("decline (%v, asked=%v):\n%s", err, asked, out)
-	}
-	out = captureStdout(t, func() { err = cmdCleanup(strings.NewReader("30\n"), answer(true, nil)) })
-	if err != nil || !strings.HasSuffix(out, "[ok] removed 1 raw message from 1 session\n") {
-		t.Fatalf("accept (%v):\n%s", err, out)
-	}
-	out = captureStdout(t, func() { err = cmdCleanup(strings.NewReader("30\n"), answer(true, nil)) })
-	if err != nil || !strings.HasSuffix(out, "[-] nothing to clean — no session idle for 30 days\n") {
-		t.Fatalf("nothing left (%v):\n%s", err, out)
-	}
-
-	in := strings.NewReader("30\ny\n")
-	if got, eof := readLine(in); got != "30" || eof {
-		t.Fatalf("readLine = %q, eof %v", got, eof)
-	}
-	if rest, _ := readLine(in); rest != "y" {
-		t.Fatalf("readLine consumed past its newline; the next reader got %q", rest)
-	}
-	if _, eof := readLine(in); !eof {
-		t.Fatal("an exhausted input must report EOF")
-	}
-
-	// The production confirmation, on a pipe that ends before any answer (cron, /dev/null): a no —
-	// and NOT askYesNo's "pass --yes to skip this question", because cleanup has no --yes
-	// (`witness cleanup --yes` is an unknown flag). It used to print exactly that.
-	st = openBase(t)
-	if err := st.AppendRaw(store.RawRecord{TS: "2025-01-01T00:00:00Z", Session: "old2", Seq: 0, Role: "user", Text: "hi"}); err != nil {
-		t.Fatal(err)
-	}
-	st.Close()
-	r, w, perr := os.Pipe() // the real command, reading a real (non-terminal) stdin
-	if perr != nil {
-		t.Fatal(perr)
-	}
-	_, _ = w.WriteString("30\n")
-	_ = w.Close()
-	prevStdin := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = prevStdin; _ = r.Close() })
-	out = captureStdout(t, func() { err = newCleanupCmd().RunE(nil, nil) })
-	if err != nil || strings.Contains(out, "--yes") || !strings.HasSuffix(out, "[y/N]: \nnot deleted — nothing written\n") {
-		t.Fatalf("an unanswered prune (%v):\n%s", err, out)
-	}
-	if newCleanupCmd().Flags().Lookup("yes") != nil {
-		t.Fatal("cleanup grew a --yes: confirmFrom exists only because it has none")
 	}
 }
 

@@ -76,7 +76,7 @@ func buildActivity(in *store.ViewInput, now time.Time, loc *time.Location, tally
 
 	// First is the earliest day with a conversation turn OR note — every dayMap key, since both
 	// loops above already dropped file: sessions and bad ts. Turns alone are not enough:
-	// `witness cleanup` reclaims transcripts (raw) but keeps notes, so an archive can hold notes
+	// the cleanup command witness had through v0.13 reclaimed transcripts (raw) but kept notes, so an archive can hold notes
 	// whose turns are gone, and a turns-only First would leave them before every window.
 	first := ""
 	for date := range dayMap {
@@ -232,7 +232,7 @@ func buildWindow(kind string, start time.Time, first, last string, days []Day, d
 	}
 
 	// Notes come from dayMap, not Days: Days holds only turn days, and a note can land on a
-	// day with no turns (or whose turns `witness cleanup` reclaimed).
+	// day with no turns (or whose turns the cleanup command witness had through v0.13 reclaimed).
 	notesCount := 0
 	for date, db := range dayMap {
 		if date >= startStr && date <= endStr {

@@ -41,3 +41,17 @@ func TestAskYesNo(t *testing.T) {
 		}
 	}
 }
+
+// readLine stops at its newline, so the next prompt on the same reader still gets its answer.
+func TestReadLineStopsAtItsNewline(t *testing.T) {
+	in := strings.NewReader("30\ny\n")
+	if got, eof := readLine(in); got != "30" || eof {
+		t.Fatalf("readLine = %q, eof %v", got, eof)
+	}
+	if rest, _ := readLine(in); rest != "y" {
+		t.Fatalf("readLine consumed past its newline; the next reader got %q", rest)
+	}
+	if _, eof := readLine(in); !eof {
+		t.Fatal("an exhausted input must report EOF")
+	}
+}

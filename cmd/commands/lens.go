@@ -381,7 +381,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 	}
 	if fresh {
 		// --fresh is DESTRUCTIVE and #102 folded it in behind a safe-sounding flag, so
-		// gate it like every other irreversible op (mirror `witness cleanup`): (1) fail
+		// gate it like every other irreversible op: (1) fail
 		// FAST if a worker is live, BEFORE dropping anything — otherwise we delete this
 		// lens's obs+facets and then discover we can't re-mine (runWorker returns ran=false),
 		// leaving the lens gutted; (2) warn that ACTIVE (hand-recorded) observations are NOT
@@ -415,8 +415,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		defer releaseFresh() // safety net for the error/abort returns below
 		obsAll, facetsN := st.LensDataCounts(minedName)
 		active := st.ActiveObservationCount(minedName)
-		// The SECOND non-reproducible class: mined obs whose session's L0 was reclaimed by
-		// `witness cleanup` (which keeps L1 on purpose). The re-mine enumerates candidates
+		// The SECOND non-reproducible class: mined obs whose session's L0 is gone (the cleanup command witness had through v0.13 reclaimed L0 and kept L1). The re-mine enumerates candidates
 		// from `raw`, so those sessions are never offered and their obs never come back.
 		orphaned := st.OrphanedL0ObservationCount(minedName)
 		confLog := st.ConfidenceLogCount(minedName)
@@ -430,7 +429,7 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 				fmt.Printf("  %s %s recorded in-session, not mined — no re-mine can re-create them\n", warnGlyph(), humanCount(active))
 			}
 			if orphaned > 0 {
-				fmt.Printf("  %s %s from sessions `witness cleanup` reclaimed — no transcript is left to re-mine\n", warnGlyph(), humanCount(orphaned))
+				fmt.Printf("  %s %s from sessions with no transcript left — nothing to re-mine them from\n", warnGlyph(), humanCount(orphaned))
 			}
 			if confLog > 0 {
 				fmt.Printf("  %s %s recorded confidence changes — that history starts over and cannot be re-created\n", warnGlyph(), humanCount(confLog))

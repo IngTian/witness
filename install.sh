@@ -66,7 +66,7 @@ step 4 "Wiring $LABEL"
 "$BIN" wire "$TARGET"
 
 # --- optional: put `witness` on PATH for the human subcommands ----------------
-# (profile, doctor, lens, cleanup). Hooks + MCP invoke the shim directly and don't
+# (profile, doctor, lens). Hooks + MCP invoke the shim directly and don't
 # need this; the launcher execs the shim by its real path so CLAUDE_PLUGIN_ROOT
 # resolves. Skipped non-interactively / when already on PATH.
 ROOT="$PWD"

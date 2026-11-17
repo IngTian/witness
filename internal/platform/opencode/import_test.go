@@ -344,7 +344,7 @@ func TestImporterMirrorsOpenCodeTextParts(t *testing.T) {
 	if raw[1].Role != "assistant" || raw[1].Text != "first note\n\nfinal answer" {
 		t.Fatalf("assistant text parts not merged: %+v", raw[1])
 	}
-	// The dedup state must land in the namespace the store reaps and merges
+	// The dedup state must land in the namespace the store merges
 	if st.MetaString(store.OpenCodeImportKeysNS+":"+SessionPrefix+"ses_test") == "" {
 		t.Fatalf("import state is not under the store's %q namespace", store.OpenCodeImportKeysNS)
 	}
