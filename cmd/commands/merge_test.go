@@ -161,6 +161,51 @@ func TestMergeCommandYesSkipsThePrompt(t *testing.T) {
 	}
 }
 
+// An export from before a lens had one name can hold a lens whose data is tagged with the `name`
+// its lens.json carries. It arrives under that name, so the merged data stays its own and nothing
+// asks for a re-mine; a lens whose `name` holds no incoming data keeps its folder's name. A re-run
+// finds the lens already here and changes nothing.
+func TestMergeRegistersAnOldExportsLensUnderItsDataName(t *testing.T) {
+	export := mergeFixture(t, func(st *store.Store) {
+		for name, data := range map[string]string{"corpus-example": "regime", "probe": "other"} {
+			if err := st.RegisterLens(name, writeLensDir(t, "", "mine", "rev", "name", data)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.AppendObservations([]store.Observation{{ID: "o1", Session: "theirs", Lens: "regime", Dimension: "d",
+			Observation: "x", Source: "mined", TS: "2026-03-01T00:00:00Z"}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.MarkDistilled("theirs", "regime", 1); err != nil {
+			t.Fatal(err)
+		}
+	})
+	merge := func() string {
+		return captureStdout(t, func() {
+			if err := cmdMerge(export, true, answer(true, nil)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	out := merge()
+	st := openBase(t)
+	if got := st.RegisteredLenses(); !slices.Equal(got, []string{"probe", "regime"}) {
+		t.Fatalf("registered = %v, want [probe regime]\n%s", got, out)
+	}
+	if pending, err := st.PendingSessions([]string{"regime"}); err != nil || len(pending) != 0 {
+		t.Errorf("regime mined the merged session already: pending = %v, %v", pending, err)
+	}
+	if strings.Contains(out, "corpus-example") || strings.Contains(out, "no definition for it here") {
+		t.Errorf("merge must neither offer the folder's name nor call regime undefined:\n%s", out)
+	}
+	if again := merge(); !strings.Contains(again, "nothing to merge") {
+		t.Errorf("a re-run must find everything here:\n%s", again)
+	}
+	if got := st.RegisteredLenses(); !slices.Equal(got, []string{"probe", "regime"}) {
+		t.Fatalf("after a re-run registered = %v, want [probe regime]", got)
+	}
+}
+
 // While a worker holds the archive, merge refuses with an ERROR — not exit 0 as compact does — so
 // `witness merge x --yes && rm -rf x` cannot delete the only copy after merging nothing.
 func TestMergeCommandRefusesWhileTheWorkerRuns(t *testing.T) {

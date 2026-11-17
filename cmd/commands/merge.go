@@ -210,6 +210,7 @@ func planMergeFiles(st *store.Store, dir string, rep *store.MergeReport) *mergeF
 				continue
 			}
 			l := mergeLens{name: e.Name(), path: filepath.Join(dir, "lenses", e.Name())}
+			l.name = incomingLensName(st, registered, rep, l)
 			inExport[l.name] = true
 			switch {
 			case slices.Contains(registered, l.name):
@@ -254,6 +255,28 @@ func planMergeFiles(st *store.Store, dir string, rep *store.MergeReport) *mergeF
 		}
 	}
 	return f
+}
+
+// incomingLensName is the name an exported lens arrives under: its folder's, unless the export
+// predates a lens having one name and its data is tagged with the `name` its lens.json still
+// carries. Then it arrives under that name, by the rule every archive applied once at Open
+// (store.LensRenameTarget), checked against both registries. Only where the incoming data proves
+// it, holding that name and not the folder's: an export made since keeps a lens the rule could not
+// rename under its folder, data and all.
+func incomingLensName(st *store.Store, registered []string, rep *store.MergeReport, l mergeLens) string {
+	data, skip, err := store.LensRenameTarget(l.path, l.name, filepath.Dir(l.path))
+	if data == "" || skip != nil || err != nil || !slices.Contains(rep.Lenses, data) || slices.Contains(rep.Lenses, l.name) {
+		return l.name
+	}
+	// Registered here already (renamed at this archive's upgrade, or by an earlier run of this
+	// merge): it is that lens, compared with ours, so a re-run converges.
+	if slices.Contains(registered, data) {
+		return data
+	}
+	if _, skip, err := store.LensRenameTarget(l.path, l.name, st.LensesDir()); skip != nil || err != nil {
+		return l.name
+	}
+	return data
 }
 
 // sameLensDef compares the files a lens definition consists of (store.LensFiles, so a new
