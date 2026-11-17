@@ -144,7 +144,7 @@ export default {
     })().catch(() => {})
     // No `worker stop` here: cleanup gets ~5 s before `opencode service stop` (or a version
     // replace) SIGKILLs the server, it runs on every hot reload and once per instance, and
-    // `worker stop --auto-only` latches worker_stop_requested, so auto workers would stay stopped
+    // `worker stop` latches worker_stop_requested, so auto workers would stay stopped
     // after every `wire` or upgrade. It must never throw: on 2.2.7 that can stall a reload.
     return () => {
       try {

@@ -2,7 +2,6 @@ package distill
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,9 +105,6 @@ type Worker struct {
 	// instead of the default one. nil → every lens uses Run (the single-runner path, and
 	// what every test that injects only Run relies on). See runFor.
 	RunFor func(ln *lens.Lens) MineFunc
-	// NativeFor reports whether this lens's selected runner supports the optional
-	// retained OpenCode-fork protocol. Nil keeps injected/test MineFuncs ordinary.
-	NativeFor func(ln *lens.Lens) bool
 }
 
 // runFor returns the MineFunc for a lens: the per-lens runner via RunFor when wired,
@@ -198,9 +194,6 @@ type LensMining struct {
 	// uneventful history. It is NOT a MineFailed: drift never backs off (that would
 	// re-hammer a deterministically-drifting model forever and wedge the backfill queue).
 	Drifted bool
-	// Native holds retained OpenCode fork finalizers for this lens's rendered
-	// inputs. They run only after the generation-gated L1 commit succeeds.
-	Native []*platform.NativeSession
 }
 
 // Process runs a full fast-path pass for one session: MineSession then CommitMining.
@@ -226,7 +219,7 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 func (w *Worker) MineSession(ctx context.Context, session string, stop func() bool) (*SessionMining, error) {
 	// Read the delta AND its raw "generation" (highest raw.id) as ONE atomic snapshot.
 	// CommitMining advances each lens's watermark only if this id still exists, so a
-	// replace-import/cleanup that deletes raw mid-mine can't have a stale count blind-
+	// replace-import that deletes raw mid-mine can't have a stale count blind-
 	// written over it (#49 C2). The generation is session-level (a property of raw),
 	// shared by all lenses.
 	//
@@ -291,30 +284,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 			// anywhere AND at least one input drifted — so a long session where one chunk
 			// extracts fine is never miscounted as drift (see LensMining.Drifted).
 			producedObs, sawDrift := false, false
-			// Ask the platform whether its sessions can host a retained scratch context, rather
-			// than comparing its NAME. Both halves of this decision are now capabilities: the
-			// session owner via SupportsNativeSessionSource, and the runner via w.NativeFor
-			// (which asserts platform.NativeSessionSupport). The name compare that used to be
-			// here was the engine's only piece of hardcoded platform knowledge, and the
-			// acceptance guard that forbids exactly that could not see it.
-			isNative := platform.SupportsNativeSessionSource(platform.ForSession(w.Store, session)) &&
-				w.NativeFor != nil && w.NativeFor(ln)
-			var nativeDigest string
-			if isNative {
-				entries := make([]platform.TranscriptEntry, len(raw))
-				for i, record := range raw {
-					entries[i] = platform.TranscriptEntry{Role: record.Role, Text: record.Text}
-				}
-				nativeDigest = platform.TranscriptDigest(entries)
-			}
 			for chunkIndex, transcript := range distillInputs(w.Store, w.Config, session, raw[done:]) {
-				callCtx := ctx
-				var native *platform.NativeSession
-				if isNative {
-					h := sha256.Sum256([]byte(transcript))
-					native = &platform.NativeSession{Session: session, RawHigh: rawHighID, Total: total, Lens: ln.Name, Input: fmt.Sprintf("%d:%x", chunkIndex, h[:]), Digest: nativeDigest}
-					callCtx = platform.WithNativeSession(callCtx, native)
-				}
 				// Log the SIZE of what we are about to send, and how long it took.
 				//
 				// This was a blind spot with real cost: a mine that times out reported only
@@ -330,14 +300,11 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 				slog.Info("mine: sending", "session", session, "lens", ln.Name,
 					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
 					"input_bytes", len(transcript), "records", len(raw[done:]))
-				obs, err := w.mine(callCtx, ln, session, transcript)
+				obs, err := w.mine(ctx, ln, session, transcript)
 				slog.Info("mine: returned", "session", session, "lens", ln.Name,
 					"chunk", chunkIndex, "input_chars", utf8.RuneCountInString(transcript),
 					"took", time.Since(started).String(), "observations", len(obs),
 					"err", errText(err))
-				if native != nil {
-					lm.Native = append(lm.Native, native)
-				}
 				if err != nil {
 					// The drain itself was stopped (`worker stop`, or a Ctrl-C reached NotifyStop):
 					// interrupted, not failed, so it skips like a refusal below. A backoff here charged
@@ -414,15 +381,15 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 	// Done in the map phase so the serial commit stays cheap; the embedder's own mutex
 	// makes this concurrency-safe. An obs whose embedding FAILS (an embedder error, or a
 	// tokenizer panic Embed recovers into one) is KEPT with no vector — "keep full L1 to
-	// preserve expensive mining work" — but such a row is left out of vector search and of
-	// long-arc clustering, and NOTHING re-embeds it later. So each failure is logged: that
-	// warning is the only trace. (A doctor count and a re-embed pass wait until it shows up.)
+	// preserve expensive mining work" — but such a row is left out of vector search, and
+	// NOTHING re-embeds it later. So each failure is logged: that warning is the only trace.
+	// (A doctor count and a re-embed pass wait until it shows up.)
 	for i := range m.Active {
 		if len(m.Active[i].Embedding) == 0 {
 			if v, err := w.Embedder.Embed(m.Active[i].Observation); err == nil {
 				m.Active[i].Embedding = v
 			} else {
-				slog.Warn("embed: active observation kept without a vector; search and long-arc clustering will skip it",
+				slog.Warn("embed: active observation kept without a vector; search will skip it",
 					"session", session, "obs", m.Active[i].ID, "err", err)
 			}
 		}
@@ -432,7 +399,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 			if v, err := w.Embedder.Embed(m.Lenses[li].Mined[i].Observation); err == nil {
 				m.Lenses[li].Mined[i].Embedding = v
 			} else {
-				slog.Warn("embed: mined observation kept without a vector; search and long-arc clustering will skip it",
+				slog.Warn("embed: mined observation kept without a vector; search will skip it",
 					"session", session, "lens", m.Lenses[li].Lens, "obs", m.Lenses[li].Mined[i].ID, "err", err)
 			}
 		}
@@ -452,7 +419,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 func (w *Worker) CommitMining(m *SessionMining) error {
 	if m.NothingToDo {
 		// Every lens is already at the watermark; the stamp is idempotent. Advance each
-		// lens (CAS-guarded per #49 C2 so a raw replace/cleanup mid-mine can't blind-
+		// lens (CAS-guarded per #49 C2 so a raw replace mid-mine can't blind-
 		// advance a generation we didn't see — not advancing leaves the pair pending).
 		for _, lm := range m.Lenses {
 			if _, err := w.Store.MarkDistilledIfCurrent(m.Session, lm.Lens, m.Total, m.RawHighID); err != nil {
@@ -568,19 +535,6 @@ func (w *Worker) CommitMining(m *SessionMining) error {
 	// session re-mines the new one). Best-effort — a stamp hiccup must never fail a commit
 	// whose L1/watermark writes already landed.
 	if generationCurrent {
-		// L1 is durable before a native fork is finalized. A finalizer failure is
-		// deliberately non-fatal: its manifest has already been marked committed and
-		// OpenCode retries that cleanup on the next runner Open.
-		for _, lm := range m.Lenses {
-			if lm.MineFailed {
-				continue
-			}
-			for _, native := range lm.Native {
-				if err := native.Finalize(); err != nil {
-					slog.Warn("distill: retain native cleanup for retry", "session", m.Session, "lens", lm.Lens, "err", err)
-				}
-			}
-		}
 		for _, ln := range driftedLenses {
 			if err := w.Store.SetDrift(m.Session, ln); err != nil {
 				slog.Warn("distill: could not stamp per-lens drift", "session", m.Session, "lens", ln, "err", err)
@@ -600,7 +554,7 @@ func (w *Worker) CommitMining(m *SessionMining) error {
 
 	// Clear the staged rows we drained — LAST, so a crash before it just re-drains
 	// harmlessly (obsID dedup absorbs the re-write). Gate on generationCurrent: if a
-	// replace-import/cleanup deleted raw mid-mine, hold staged so the re-mine of the
+	// replace-import deleted raw mid-mine, hold staged so the re-mine of the
 	// new generation re-drains them. If EVERY lens failed (generationCurrent stays
 	// false with no CAS), staged is likewise held and re-drains next attempt.
 	if generationCurrent {

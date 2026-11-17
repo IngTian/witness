@@ -22,7 +22,6 @@ func (Platform) NewRunner(cfg store.Config) platform.Runner {
 type runner struct {
 	cfg    store.Config
 	server *OpenCodeServer
-	native *nativeRuntime
 }
 
 func (r *runner) Open(ctx context.Context) error {
@@ -30,15 +29,11 @@ func (r *runner) Open(ctx context.Context) error {
 		return fmt.Errorf("opencode runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
 	// <root>/xdg/opencode/auth.json was a stale secret witness copied; plus a v1 DB and pid file
-	// nothing reads. An empty root removes nothing, and StartOpenCodeServerIn refuses it.
-	removeV1Runtime(r.cfg.RuntimeRoot)
+	// nothing reads, and the removed native-session cache's manifests. An empty root removes
+	// nothing, and StartOpenCodeServerIn refuses it.
+	removeRetiredRuntime(r.cfg.RuntimeRoot)
 	srv, err := StartOpenCodeServerIn(ctx, r.cfg.RuntimeRoot, r.cfg.RunnerModels)
 	if err != nil {
-		return err
-	}
-	r.native = newNativeRuntime(r.cfg.RuntimeRoot, srv)
-	if err := r.native.reconcile(); err != nil {
-		_ = srv.Close() // runnerSet keeps no runner whose Open failed, so no Close would ever end it
 		return err
 	}
 	r.server = srv
@@ -48,14 +43,6 @@ func (r *runner) Open(ctx context.Context) error {
 func (r *runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
 	if r.server == nil {
 		return "", errRunBeforeOpen
-	}
-	if n := platform.NativeSessionFromContext(ctx); n != nil {
-		// Same generation deadline the legacy path gets inside OpenCodeServer.Run: the
-		// native path bypasses that method, and the caller's ctx has no deadline, so
-		// without this wrap a stalled serve process polls forever holding WorkerLock.
-		ctx, cancel := context.WithTimeout(ctx, requestLifetimeBudget())
-		defer cancel()
-		return r.native.run(ctx, n, model, systemPrompt, input)
 	}
 	return r.server.Run(ctx, model, systemPrompt, input)
 }
@@ -85,13 +72,9 @@ func isFreeModel(model string) bool { return strings.HasPrefix(strings.TrimSpace
 func (*runner) OnFreeModel(model string) bool { return isFreeModel(model) }
 
 // Discovered by type assertion like the platform capabilities; pinned the same way.
-var (
-	_ platform.NativeSessionSupport = (*runner)(nil)
-	_ platform.FreeAllowance        = (*runner)(nil)
-)
+var _ platform.FreeAllowance = (*runner)(nil)
 
-func (*runner) InvocationHint() string      { return "opencode serve --stdio" }
-func (*runner) SupportsNativeSession() bool { return true }
+func (*runner) InvocationHint() string { return "opencode serve --stdio" }
 
 // (SweepsOnClose() false used to be here. The capability is gone from the port — see
 // platform.Runner — because this was its only implementation and the shared-DB sweep it reported on

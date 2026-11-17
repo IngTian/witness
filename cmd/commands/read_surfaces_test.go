@@ -29,8 +29,8 @@ func readFixture(t *testing.T) *store.Store {
 	return st
 }
 
-// registerRenamedLens registers a lens under `name` whose lens.json mines it as `mined` — the
-// shape the shipped corpus-example lens had until F153 (registered corpus-example, mines as "regime").
+// registerRenamedLens registers `name` with a lens.json that still carries `name: mined`, the
+// leftover key a lens has ignored since F3.
 func registerRenamedLens(t *testing.T, st *store.Store, name, mined string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -92,8 +92,8 @@ func TestLensShowSuggestsTheRegisteredNameAndTheCommandWorks(t *testing.T) {
 	if !strings.Contains(out, "witness lens show corpus-example --prompts") || strings.Contains(out, "show regime") {
 		t.Fatalf("the suggested command must use the registered name:\n%s", out)
 	}
-	if !strings.Contains(out, `mines as "regime"`) {
-		t.Errorf("the mined name should still be visible when it differs:\n%s", out)
+	if strings.Contains(out, "mines as") {
+		t.Errorf("lens show must not name a second identity:\n%s", out)
 	}
 	if _, err := runCLI(t, "lens", "show", "corpus-example", "--prompts"); err != nil {
 		t.Errorf("the command the card suggests must work: %v", err)
@@ -286,25 +286,6 @@ func TestObservationSearchOnAnUnregisteredLensSuggestsACommandThatWorks(t *testi
 	})
 	if i, j := strings.Index(out, "witness lens enable math"), strings.Index(out, "witness lens backfill math"); i < 0 || j < i {
 		t.Errorf("a disabled lens must be enabled before it is backfilled:\n%s", out)
-	}
-}
-
-// Facets and profiles are tagged with the MINED name, so `witness facets corpus-example` found
-// nothing for a lens that had facets under "regime".
-func TestFacetsReadsALensByItsRegisteredName(t *testing.T) {
-	st := readFixture(t)
-	registerRenamedLens(t, st, "corpus-example", "regime")
-	if err := st.WriteFacets([]store.Facet{{Lens: "regime", Dimension: "regimes", Key: "flips_on_rates",
-		Versions: []store.FacetVersion{{Value: "turns when rates move", Confidence: 0.7}}}}); err != nil {
-		t.Fatal(err)
-	}
-	out := captureStdout(t, func() {
-		if err := cmdFacets([]string{"corpus-example"}, false, false); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if !strings.Contains(out, "flips_on_rates") || !strings.Contains(out, "witness facets · corpus-example  1 active") {
-		t.Errorf("the registered name must reach the lens's facets:\n%s", out)
 	}
 }
 

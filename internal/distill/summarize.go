@@ -95,13 +95,12 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 	// Reap summaries whose lens no longer has facets, BEFORE the early return below.
 	//
-	// This loop only ever visits lenses that HAVE facets, so a lens whose facets were
-	// dropped — `lens backfill --fresh`, `lens deregister`, a cleanup that reclaimed its
-	// source — was never visited and its profile/<lens>.md stayed on disk forever. That file
-	// is what `witness profile <lens>` and the MCP get_profile tool read, so an agent was
-	// served a narrative built from facets that no longer exist, with nothing marking it
-	// stale. Verified before this fix: dropping a lens's facets and re-running Summarize left
-	// the old summary readable and unchanged.
+	// This loop only ever visits lenses that HAVE facets, so a lens whose facets were dropped —
+	// `lens backfill --fresh`, `lens deregister` — was never visited and its profile/<lens>.md
+	// stayed on disk forever. That file is what `witness profile <lens>` and the MCP get_profile
+	// tool read, so an agent was served a narrative built from facets that no longer exist, with
+	// nothing marking it stale. Verified before this fix: dropping a lens's facets and re-running
+	// Summarize left the old summary readable and unchanged.
 	//
 	// Deleting (not blank-writing) is deliberate and matches what the unified portrait
 	// already does below: readers then show the friendly "not generated yet" message instead
@@ -468,17 +467,10 @@ func approxCount(n int) string {
 // "regeneration failed" with no cause. Compaction is not the lever: merged facets absorb the
 // merged text, which cuts the count, not the characters. ln is the lens whose review_model made
 // the call; nil (the unified portrait, an orphan lens) means the default review_model.
-//
-// --lens takes the REGISTERED name, which a lens whose lens.json `name` differs from it (one
-// registered from a pre-F153 corpus-example mines as "regime") does not share with its data name.
 func withInputSize(err error, input string, ln *lens.Lens) error {
 	lever := "witness config set review_model <model>"
 	if ln != nil {
-		name := ln.Registered
-		if name == "" {
-			name = ln.Name // built in code, not loaded from the registry
-		}
-		lever += " --lens " + name
+		lever += " --lens " + ln.Name
 	}
 	return &InputSizeError{Err: err, Size: InputSize(utf8.RuneCountInString(input)), Lever: lever}
 }

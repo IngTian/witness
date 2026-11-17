@@ -76,7 +76,7 @@ func TestDistillStopClearsTheKillTarget(t *testing.T) {
 			_ = st.SetMetaString(k, "4242")
 		}
 		procCtl = &proc.Fake{TerminateErr: tc.err}
-		if err := cmdDistillStop(false); err != nil {
+		if err := cmdDistillStop(); err != nil {
 			t.Fatal(err)
 		}
 		for _, k := range []string{metaWorkerPID, metaWorkerMode, metaWorkerCurrent} {

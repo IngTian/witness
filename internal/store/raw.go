@@ -5,7 +5,7 @@ import (
 )
 
 // rawIO is the L0 ground-truth concern: the append-only `raw` transcript plus the
-// read-side size/sampling/pruning helpers over it. A DB leaf — holds only the shared
+// read-side size/sampling helpers over it. A DB leaf — holds only the shared
 // *sql.DB. The distillation watermark that COUNTS raw records lives on the queue
 // concern; rawIO owns the transcript itself and the raw-generation id (ReadRawSnapshot's
 // high id) the watermark CAS gates on.
@@ -101,7 +101,7 @@ func (r *rawIO) ReadRaw(session string) ([]RawRecord, error) {
 // generation id via MaxRawID as TWO separate statements. MaxOpenConns(1) serializes
 // each statement but NOT the pair — the connection is released between them. A replace-
 // import (ApplyRawImport replace=true: DELETE raw + re-INSERT, under a DIFFERENT lock
-// than the worker) or `witness cleanup` committing in that gap pairs an OLD-generation
+// than the worker) committing in that gap pairs an OLD-generation
 // count/content with the NEW generation's high id. The CAS in MarkDistilledIfCurrent
 // then finds that new id live, passes its guard, and blind-advances the watermark over
 // turns that were never mined — a silent lost delta. Reading both from one result set
@@ -235,31 +235,18 @@ func (r *rawIO) LastDistilledRawTS() string {
 // NextSeq returns the next per-session ordinal (== current record count).
 func (r *rawIO) NextSeq(session string) int { return r.RawCount(session) }
 
-// RawPruneStats reports how many sessions and raw records PruneSessionsBefore
-// would remove for the given cutoff (an RFC3339 timestamp): every session whose
-// most recent L0 record predates it. Read-only — for the cleanup preview.
-func (r *rawIO) RawPruneStats(cutoff string) (sessions, records int, err error) {
-	err = r.db.QueryRow(`
-		SELECT COUNT(DISTINCT session), COUNT(*)
-		  FROM raw
-		 WHERE session IN (SELECT session FROM raw GROUP BY session HAVING MAX(ts) < ?)`,
-		cutoff).Scan(&sessions, &records)
-	return
-}
-
-// PerSessionMetaNamespaces lists the `meta` namespaces whose key is "<namespace>:<session>",
-// i.e. the rows PruneSessionsBefore must reclaim when a session's L0 is purged.
+// PerSessionMetaNamespaces lists the `meta` namespaces whose key is "<namespace>:<session>": the
+// importer state a merge carries with a session (mergeL0's importer-keys loop) and drops with it
+// (dropImporterKeys).
 //
 // It is an explicit ALLOWLIST rather than a positional match on the key, because `meta` also
-// holds namespaces of the same shape that key on a LENS (review_rowid, profile_sig,
-// emerge_seen). A positional predicate cannot tell them apart, and deleting the wrong one is
-// silently destructive — a wiped review watermark re-folds the whole L1 history into L2 —
-// whereas a namespace this list forgets merely leaks one dead row. Fail safe, not destructive.
+// holds namespaces of the same shape that key on a LENS (review_rowid, profile_sig). A
+// positional predicate cannot tell them apart.
 //
 // The store OWNS these spellings and every producer (the codex and opencode importers, `witness
 // ingest`) builds its key from the constants below, so a rename moves both sides at once. They
 // used to be duplicated literals checked against a third literal, so renaming a producer passed
-// every test while its rows silently stopped being reaped and merged — and a merge that drops a
+// every test while its rows silently stopped being merged — and a merge that drops a
 // session's import state makes the next import replace and re-mine it, appending its L1 twice.
 const (
 	CodexImportStateNS   = "codex_import_state"   // Codex source revisions and message keys
@@ -268,94 +255,3 @@ const (
 )
 
 var PerSessionMetaNamespaces = []string{CodexImportStateNS, OpenCodeImportKeysNS, FileImportKeysNS}
-
-// PruneSessionsBefore deletes the raw transcript (L0) plus the queue/meta rows of
-// every session whose most recent L0 record predates cutoff (RFC3339). Derived
-// L1/L2 (observations, facets) are deliberately KEPT — they're the durable
-// archive; only the bulky raw logs are reclaimed. Purging the whole session
-// (raw + progress) is watermark-safe: the count-based distill watermark can never
-// point at deleted rows. Returns sessions and records removed.
-func (r *rawIO) PruneSessionsBefore(cutoff string) (sessions, records int, err error) {
-	tx, err := beginImmediate(r.db)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// Collect eligible sessions first (then close the cursor) — with MaxOpenConns(1)
-	// we must not hold a read cursor open while issuing the DELETEs on the same tx.
-	rows, err := tx.Query(`SELECT session FROM raw GROUP BY session HAVING MAX(ts) < ?`, cutoff)
-	if err != nil {
-		return 0, 0, err
-	}
-	var stale []string
-	for rows.Next() {
-		var sess string
-		if err = rows.Scan(&sess); err != nil {
-			rows.Close()
-			return 0, 0, err
-		}
-		stale = append(stale, sess)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return 0, 0, err
-	}
-
-	for _, sess := range stale {
-		res, e := tx.Exec(`DELETE FROM raw WHERE session = ?`, sess)
-		if e != nil {
-			err = e
-			return 0, 0, err
-		}
-		n, _ := res.RowsAffected()
-		records += int(n)
-		if _, e := tx.Exec(`DELETE FROM progress WHERE session = ?`, sess); e != nil {
-			err = e
-			return 0, 0, err
-		}
-		if _, e := tx.Exec(`DELETE FROM session_meta WHERE session = ?`, sess); e != nil {
-			err = e
-			return 0, 0, err
-		}
-		// Per-session state parked in `meta` under a "<namespace>:<session>" key would
-		// otherwise be orphaned when the session's raw/progress rows go — a slow leak of dead
-		// meta rows. Not LIKE: opencode session ids contain "_", a LIKE wildcard.
-		//
-		// Two independent traps, so this predicate is deliberately narrow on BOTH axes.
-		//
-		// The SESSION axis: anchor on the namespace's first colon, do NOT suffix-match
-		// ":"+session. Session ids may themselves contain colons ("file:" + a caller-supplied
-		// id, which is an arbitrary string — a path, a URL, an arxiv id), so a bare suffix
-		// match also hits a DIFFERENT, LIVE session whose id happens to end in ":"+sess.
-		// Verified: with sessions "file:x" (stale) and "file:notes:file:x" (live), pruning the
-		// former deleted the LATTER's file_import_keys row. The live session then looks
-		// never-ingested, so the next `witness ingest` re-appends every already-durable record.
-		//
-		// The NAMESPACE axis: match only the per-session namespaces, by name. A positional
-		// `substr(key, instr(key,':')+1) = ?` is namespace-BLIND, and three live namespaces
-		// share the same "<ns>:<x>" shape while keying on a LENS: review_rowid:<lens>,
-		// profile_sig:<lens>, emerge_seen:<lens>:<sig>. Nothing constrains a session id to a
-		// UUID (capture takes it from the hook payload, ingest from the caller), so a session
-		// named like a lens wiped that lens's review watermark — re-folding the entire L1
-		// history into L2 on the next review. Verified: pruning a session "default" deleted
-		// review_rowid:default and profile_sig:default.
-		//
-		// Adding a per-session namespace means adding it here. That coupling is the point: an
-		// allowlist fails safe (a leaked row) where a positional match fails destructively.
-		for _, ns := range PerSessionMetaNamespaces {
-			if _, e := tx.Exec(`DELETE FROM meta WHERE key = ?`, ns+":"+sess); e != nil {
-				err = e
-				return 0, 0, err
-			}
-		}
-	}
-	if err = tx.Commit(); err != nil {
-		return 0, 0, err
-	}
-	return len(stale), records, nil
-}

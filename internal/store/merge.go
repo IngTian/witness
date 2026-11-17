@@ -22,14 +22,14 @@ import (
 // laptop, moving to a machine that already has its own archive), not a sync. Restoring by copying
 // a backup into the data dir replaces the destination; this keeps both.
 //
-// WHY IT IS NOT A SYNC. There are no tombstones that cross (cleanup leaves no record, and
-// delete_observation's lives in this archive's meta only until its next review), so a session or
-// observation deleted on one side comes back from the other; and two machines
-// that keep capturing between merges each grow a genuinely diverged chain for every facet both
-// touched, which this resolves by archiving one copy — one more archived copy per facet per round.
-// Re-merging the same source, and merging back, are handled (every rule below is idempotent on
-// natural keys and recognises its own earlier output), but a real two-way sync needs tombstones
-// and a three-way facet merge, which this deliberately is not.
+// WHY IT IS NOT A SYNC. There are no tombstones that cross (delete_observation's lives in this
+// archive's meta only until its next review, and the cleanup command witness had through v0.13
+// left none), so a session or observation deleted on one side comes back from the other; and two
+// machines that keep capturing between merges each grow a genuinely diverged chain for every
+// facet both touched, which this resolves by archiving one copy — one more archived copy per
+// facet per round. Re-merging the same source, and merging back, are handled (every rule below is
+// idempotent on natural keys and recognises its own earlier output), but a real two-way sync
+// needs tombstones and a three-way facet merge, which this deliberately is not.
 //
 // THE SHAPE. The incoming database is never opened in place: Open writes into a data dir (config,
 // the default-lens seed), and a backup must stay a backup. It is copied to a
@@ -107,7 +107,7 @@ type MergeReport struct {
 	Sessions     MergeSessions
 	RawRows      int
 	ProgressRows int // mining-progress rows added or upgraded
-	MetaKeys     int // importer keys and emergent marks written
+	MetaKeys     int // importer keys written
 	Observations MergeObservations
 	Staged       int
 	Facets       MergeFacets
@@ -641,21 +641,22 @@ func dropImporterKeys(ctx context.Context, tx *sql.Tx, sess string) error {
 //     moments we already have; a union would count each twice, permanently, since L1 is append-only
 //     and carries no source column. An IDENTICAL row (a restore) stays: the insert dedupes it, and
 //     it is the record that the incoming side already folded that observation.
-//  2. THEIR PROGRESS, wherever we mined the session: our watermark wins, and if their transcript is
-//     longer its tail is appended (mergeL0) and mined here. Where our cleanup reclaimed the
-//     transcript but kept its observations, mergeL0 marks the returning transcript mined at its
-//     full length instead — NOT at their count, which may be partial: keeping a partial count of
-//     theirs left our tail pending, re-mined beside the observations we already hold.
+//  2. THEIR PROGRESS, wherever we mined the session: our watermark wins, and if their transcript
+//     is longer its tail is appended (mergeL0) and mined here. Where the cleanup command witness
+//     had through v0.13 reclaimed our transcript but kept its observations, mergeL0 marks the
+//     returning transcript mined at its full length instead — NOT at their count, which may be
+//     partial: keeping a partial count of theirs left our tail pending, re-mined beside the
+//     observations we already hold.
 //  3. THEIR ORPHANS. Mined rows from a transcript the other side has since cleaned up (no raw, no
 //     progress there), of a session whose transcript we hold and never mined for that lens. They
 //     would arrive with no progress beside our transcript, so the lens would mine it here and
 //     duplicate them; ours is mined instead.
 //
-// "Already mined here" is a progress mark OR mined rows (cleanup removes progress, keeps L1). It is
-// materialised ONCE into an indexed set: as a correlated subquery over observations, which has no
-// (session, lens) index, it scanned the whole lens per incoming row — quadratic, ~15 minutes at
-// 75k observations a side, with the archive's write lock held and every capture hook in that window
-// losing its turn to SQLITE_BUSY.
+// "Already mined here" is a progress mark OR mined rows (the cleanup command witness had through
+// v0.13 removed progress and kept L1). It is materialised ONCE into an indexed set: as a
+// correlated subquery over observations, which has no (session, lens) index, it scanned the whole
+// lens per incoming row — quadratic, ~15 minutes at 75k observations a side, with the archive's
+// write lock held and every capture hook in that window losing its turn to SQLITE_BUSY.
 func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 	for _, q := range []string{
 		`CREATE TEMP TABLE merge_mined(session TEXT NOT NULL, lens TEXT NOT NULL, PRIMARY KEY(session, lens)) WITHOUT ROWID`,
@@ -696,11 +697,10 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 	return nil
 }
 
-// mergeL0 merges transcripts, session metadata, mining progress, importer keys, the staged buffer
-// and the content-keyed emergent marks.
+// mergeL0 merges transcripts, session metadata, mining progress, importer keys and the staged buffer.
 //
-// The meta table is an ALLOW-list: only the per-session importer keys and emerge_seen marks cross
-// over. Everything else there is the other machine's state, and copying it does damage:
+// The meta table is an ALLOW-list: only the per-session importer keys cross over. Everything else
+// there is the other machine's state, and copying it does damage:
 //
 //	review_rowid:*                 recomputed by mergeObservations; incoming values are only read
 //	review_ts, review_obs_rowid    this archive's own review trigger
@@ -713,7 +713,7 @@ func dropSharedMined(ctx context.Context, tx *sql.Tx, rep *MergeReport) error {
 //	                               the staleness check measure against the other machine's activity
 //	worker_*                       a live process: a copied worker_stop_requested stops our worker,
 //	                               a copied worker_pid is what `distill stop` would signal
-//	mine_drift_*, default_lens_migrated_v1a, profile_sig:*  local bookkeeping; profile_sig is stale
+//	mine_drift_*, default_lens_migrated_v1a, lens_names_adopted, profile_sig:*  local bookkeeping; profile_sig is stale
 //	                               anyway once the facets change, so the portrait regenerates
 //	deleted_obs_pending            the other side's unreviewed deletes: a merge is not a sync, so its
 //	                               facets arrive citing them, as they stood there
@@ -767,9 +767,9 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 	}
 	n, _ = res.RowsAffected()
 	rep.ProgressRows = int(n)
-	// A transcript that just arrived for a session we mined before our cleanup reclaimed it: our
-	// observations of it are still here, so mark it mined at its length. Left unmarked it would be
-	// mined a second time beside them.
+	// A transcript that just arrived for a session we mined before the cleanup command witness had
+	// through v0.13 reclaimed it here: our observations of it are still here, so mark it mined at
+	// its length. Left unmarked it would be mined a second time beside them.
 	res, err = tx.ExecContext(ctx, `INSERT INTO main.progress(session, lens, distilled)
 		SELECT k.session, k.lens, (SELECT COUNT(*) FROM main.raw r WHERE r.session = k.session)
 		FROM temp.merge_mined k JOIN temp.merge_kind mk ON mk.session = k.session AND mk.kind = ?
@@ -831,15 +831,6 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 	n, _ = res.RowsAffected()
 	rep.Staged = int(n)
 
-	// emerge_seen marks are keyed by a hash of member obs_ids — content, not position — so a
-	// union is exact. Dropping one would only cost a re-verification.
-	res, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.meta(key, value)
-		SELECT key, value FROM inc.meta WHERE key LIKE 'emerge\_seen:%' ESCAPE '\'`)
-	if err != nil {
-		return err
-	}
-	n, _ = res.RowsAffected()
-	rep.MetaKeys += int(n)
 	return nil
 }
 

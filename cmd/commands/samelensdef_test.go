@@ -9,7 +9,7 @@ import (
 )
 
 // sameLensDef must look at EVERY lens file: one it skipped would compare equal while differing,
-// and merge would drop the incoming copy — the emerge.md loss store.LensFiles exists to prevent.
+// and merge would drop the incoming copy — the loss store.LensFiles exists to prevent.
 func TestSameLensDefComparesEveryLensFile(t *testing.T) {
 	write := func(dir, skip, changed string) {
 		for _, f := range store.LensFiles {

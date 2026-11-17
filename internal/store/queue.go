@@ -133,55 +133,25 @@ func (q *queue) MarkDistilled(session, lens string, count int) error {
 // the exact generation the worker mined — proven by the highest raw.id it read
 // (rawHighID) still being present. It reports whether the write happened.
 //
-// Why this exists (issue #49 C2): MarkDistilled is a blind upsert of a COUNT
-// captured at the start of a mine. That count assumes raw is append-only. It isn't
-// always: an OpenCode history rewrite/edit takes the replace path (DELETE raw +
-// DELETE progress + re-INSERT the new turns), and `witness cleanup` deletes raw too
-// — both under a DIFFERENT lock than the worker. If such a delete lands mid-mine,
-// a trailing blind MarkDistilled would RESURRECT the just-deleted progress row with
-// a stale count, silently marking never-mined turns as done. The guard closes that:
-// after a replace the old rawHighID no longer exists, the UPDATE/INSERT matches no
-// row, nothing is written, progress stays absent, and the pending query re-offers
-// the session so it re-mines the new generation from scratch. The wasted mine is
-// discarded — correctness over the (rare, racy) wasted work.
+// Why this exists (issue #49 C2): MarkDistilled is a blind upsert of a COUNT captured at the
+// start of a mine. That count assumes raw is append-only. It isn't always: an OpenCode history
+// rewrite/edit takes the replace path (DELETE raw + DELETE progress + re-INSERT the new
+// turns), under a DIFFERENT lock than the worker. If such a delete lands mid-mine, a trailing
+// blind MarkDistilled would RESURRECT the just-deleted progress row with a stale count,
+// silently marking never-mined turns as done. The guard closes that: after a replace the old
+// rawHighID no longer exists, the UPDATE/INSERT matches no row, nothing is written, progress
+// stays absent, and the pending query re-offers the session so it re-mines the new generation
+// from scratch. The wasted mine is discarded — correctness over the (rare, racy) wasted work.
 //
-// Runtime-agnostic: it guards EVERY session (Claude Code + OpenCode) with one code
-// path. On the append-only Claude path the mined rawHighID always still exists, so
-// the guard always passes — free insurance there, an active fix on the OpenCode/
-// cleanup paths that can delete raw under a mine.
+// Runtime-agnostic: it guards EVERY session (Claude Code + OpenCode) with one code path. On the
+// append-only Claude path the mined rawHighID always still exists, so the guard always passes —
+// free insurance there, an active fix on the replace paths that can delete raw under a mine.
 //
 // It is CommitLensDistillation with no observations and one lens, so the NothingToDo path
 // and the mining commit share ONE generation guard: a second copy of that SQL would let a
 // tightened CAS land on only one of them.
 func (q *queue) MarkDistilledIfCurrent(session, lens string, count int, rawHighID int64) (bool, error) {
 	return q.CommitLensDistillation(nil, session, count, rawHighID, []string{lens})
-}
-
-// GenerationStatus reports whether a generation (identified by session, lens, rawHigh,
-// total) is still the one a commit could land for (current) and whether it already
-// landed (committed).
-//
-// "Current" requires the manifest's raw high id to still exist AND to still be the
-// session's high-water mark. The `id > rawHigh` clause is what bounds accumulation: a
-// mine always reads the session's present max(raw.id), so once a later turn arrives the
-// older generation can never be the one that commits. This is STRICTER than
-// CommitLensDistillation's predicate, which only checks `id=rawHigh` exists — the
-// stricter check is deliberate, as it prevents a lens that keeps failing (or one later
-// disabled) from stranding one manifest per drain forever.
-func GenerationStatus(db *sql.DB, session, lens string, rawHigh int64, total int) (current, committed bool, err error) {
-	var currentValue, committedValue int
-	err = db.QueryRow(`SELECT
-		CASE WHEN (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
-		       OR (EXISTS (SELECT 1 FROM raw WHERE session = ? AND id = ?)
-		           AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ? AND id > ?)) THEN 1 ELSE 0 END,
-		CASE WHEN COALESCE((SELECT distilled >= ? FROM progress WHERE session = ? AND lens = ?), 0)
-		     THEN 1 ELSE 0 END`,
-		rawHigh, session, session, rawHigh, session, rawHigh, total, session, lens,
-	).Scan(&currentValue, &committedValue)
-	if err != nil {
-		return false, false, err
-	}
-	return currentValue != 0, committedValue != 0, nil
 }
 
 // CommitLensDistillation is the ATOMIC write for issue #67-2: it writes the lens-
@@ -392,9 +362,9 @@ func (q *queue) ActiveObservationCount(lens string) int {
 }
 
 // OrphanedL0ObservationCount reports how many of a lens's MINED observations belong to a
-// session whose raw transcript (L0) no longer exists — because `witness cleanup` reclaimed
-// it. Cleanup deliberately keeps L1 ("your observations and profile are kept, only raw
-// transcripts are removed"), so these are perfectly good observations whose SOURCE is gone.
+// session whose raw transcript (L0) no longer exists — because the cleanup command witness had
+// through v0.13 reclaimed it (in this archive, or in one merged into it). That command kept
+// L1, so these are perfectly good observations whose SOURCE is gone.
 //
 // They are the second class of obs a `lens backfill --fresh` destroys irrecoverably, and
 // the more surprising one: the re-mine enumerates candidate sessions FROM `raw`
@@ -457,11 +427,6 @@ func (q *queue) SessionsWithNoUsableTimestamp() int {
 // It also clears the lens's DERIVED bookkeeping in `meta`, in the same transaction. Those
 // keys are caches ABOUT the data being deleted, so leaving them behind makes a rebuilt
 // lens look already-processed:
-//   - emerge_seen:<lens>:<sig> — "this emergent cluster was already verified". The
-//     signature hashes the member obs_ids, and obs_id is sha1(session|lens|text), a pure
-//     CONTENT hash — so a re-mine of unchanged text regenerates identical ids and thus an
-//     identical signature. The emergent pass would skip re-verifying an arc whose facets
-//     --fresh just deleted, and nothing would ever restore them.
 //   - profile_sig:<lens> — "the L4 narrative is current for this facet set", which would
 //     otherwise vouch for a profile derived from facets that no longer exist.
 //
@@ -493,30 +458,14 @@ func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
 	if _, err = tx.Exec(`DELETE FROM confidence_log WHERE lens = ?`, lens); err != nil {
 		return 0, 0, err
 	}
-	// Derived caches about the data just deleted. Exact key for profile_sig; prefix match
-	// for emerge_seen (one row per cluster signature). A sibling lens is untouched — the
-	// prefix ends with ':' so "emerge_seen:math:" can never match "emerge_seen:mathsy:".
+	// Derived caches about the data just deleted, by exact key; a sibling lens is untouched.
 	if _, err = tx.Exec(`DELETE FROM meta WHERE key IN (?, ?)`, ProfileSigKey(lens), CompactBaselineKey(lens)); err != nil {
-		return 0, 0, err
-	}
-	if _, err = tx.Exec(
-		`DELETE FROM meta WHERE key LIKE ? ESCAPE '\'`, escapeMetaLike(EmergeSeenPrefix(lens))+"%"); err != nil {
 		return 0, 0, err
 	}
 	if err = tx.Commit(); err != nil {
 		return 0, 0, err
 	}
 	return int(no), int(nf), nil
-}
-
-// escapeMetaLike escapes the LIKE wildcards in a literal meta-key prefix so a lens name
-// containing '%' or '_' (both legal in a lens name) matches literally instead of acting
-// as a wildcard — '_' in particular would otherwise match ANY character and could reach a
-// sibling lens's rows.
-func escapeMetaLike(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, "%", `\%`)
-	return strings.ReplaceAll(s, "_", `\_`)
 }
 
 // NextBackoffAttempt returns the earliest future retry time among ACTIVE lenses, if

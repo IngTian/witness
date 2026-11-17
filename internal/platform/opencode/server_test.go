@@ -282,49 +282,23 @@ func TestRunInterruptsThenDeletesOnAProviderError(t *testing.T) {
 	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
 }
 
+// A failed prompt POST may still have reached the serve, so it must interrupt too: that aborts the
+// upstream generation instead of leaving it billing (spec 7.5).
+func TestRunInterruptsItsSessionWhenThePromptFails(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	fake.promptStatus = http.StatusInternalServerError
+	if _, err := srv.Run(context.Background(), "openai/gpt-5.5", "P", "D"); err == nil {
+		t.Fatal("Run succeeded with a failing prompt POST")
+	}
+	assertInterruptedThenDeleted(t, fake.seen(), "ses_1")
+}
+
 // assertInterruptedThenDeleted checks a failed job's last two requests.
 func assertInterruptedThenDeleted(t *testing.T, calls []string, id string) {
 	t.Helper()
 	want := []string{"POST /api/session/" + id + "/interrupt", "DELETE /api/session/" + id}
 	if tail := calls[max(len(calls)-3, 0):]; len(calls) < 2 || !slices.Equal(calls[len(calls)-2:], want) {
 		t.Errorf("calls end with %v (of %d), want %v", tail, len(calls), want)
-	}
-}
-
-// replyForMessage is the native resume's harvest: a reply counts only once its turn is idle
-// `succeeded`. A dead turn (a SIGKILLed serve leaves [user, assistant] with no idle) or a failed
-// one yields "", so the caller re-prompts instead of committing a partial or empty reply.
-func TestReplyForMessageHarvestsOnlyASucceededTurn(t *testing.T) {
-	fake, srv := newFakeV2(t)
-	agent, err := srv.ensureAgent(context.Background(), "P")
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := srv.createSession(context.Background(), "openai/gpt-5.5", agent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := srv.doJSON(context.Background(), http.MethodPost, "/api/session/"+id+"/prompt",
-		map[string]string{"id": "msg_r", "text": "D"}, http.StatusOK); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name string
-		turn func(*fakeSession) []map[string]any
-		want string
-	}{
-		{"succeeded", okTurn("[1]"), "[1]"},
-		{"dead", func(s *fakeSession) []map[string]any { return []map[string]any{s.user(), assistantRec("partial", nil)} }, ""},
-		{"failed", func(s *fakeSession) []map[string]any {
-			return []map[string]any{s.user(), assistantRec("partial", nil), idleRec("failed", nil)}
-		}, ""},
-	} {
-		fake.mu.Lock()
-		fake.turn = tc.turn
-		fake.mu.Unlock()
-		if got, err := srv.replyForMessage(context.Background(), id, "msg_r"); err != nil || got != tc.want {
-			t.Errorf("%s: replyForMessage = %q, %v; want %q", tc.name, got, err, tc.want)
-		}
 	}
 }
 

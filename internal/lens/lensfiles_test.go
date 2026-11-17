@@ -12,9 +12,9 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// Every file the loader reads from a lens directory must be in store.LensFiles, because that
-// list is what RegisterLens copies and merge compares. A file the loader reads but the list
-// omits is silently dropped on register — exactly how emerge.md was lost from v0.6.0 to
+// Every file the loader reads from a lens directory must be in store.LensFiles, because that list
+// is what RegisterLens copies and merge compares. A file the loader reads but the list omits is
+// silently dropped on register — exactly how an optional prompt file was lost from v0.6.0 to
 // v0.7.3. A source scan, because the property is "no other read exists".
 func TestLoadDirReadsOnlyLensFiles(t *testing.T) {
 	src, err := os.ReadFile("lens.go")
@@ -27,7 +27,7 @@ func TestLoadDirReadsOnlyLensFiles(t *testing.T) {
 	}
 	// The aliases lens.go may name a file by. A new one fails below until it is added here
 	// AND to store.LensFiles.
-	aliases := map[string]string{"ConfigFile": ConfigFile, "ExtractFile": ExtractFile, "ReviewFile": ReviewFile, "EmergeFile": EmergeFile}
+	aliases := map[string]string{"ConfigFile": ConfigFile, "ExtractFile": ExtractFile, "ReviewFile": ReviewFile}
 	reads := regexp.MustCompile(`filepath\.Join\(dir, ([^)]+)\)`).FindAllStringSubmatch(string(src), -1)
 	if len(reads) == 0 {
 		t.Fatal("found no lens-directory reads in lens.go — the scan is vacuous")
@@ -54,7 +54,9 @@ func TestLensConfigTagsMatchStoreKeys(t *testing.T) {
 			got = append(got, name)
 		}
 	}
-	want := slices.Clone(store.LensKeys)
+	// Since F3 `name` is a known but ignored key: LensKeys keeps it, so doctor does not flag it
+	// as unknown, and LensConfig has no field for it.
+	want := slices.DeleteFunc(slices.Clone(store.LensKeys), func(k string) bool { return k == store.LensKeyName })
 	sort.Strings(got)
 	sort.Strings(want)
 	if !slices.Equal(got, want) {

@@ -1,75 +1,91 @@
 package commands
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
-
-	"github.com/IngTian/witness/internal/platform"
-	"github.com/IngTian/witness/internal/store"
 )
 
-// A lens registered as corpus-example mines as "regime" (its lens.json name). Every command takes
-// the registered name, so each one must map it to the mined name before touching data: these
-// two used the registered name as given, and so refused or found nothing.
+// Since F3 a lens has one name; a `name` left in lens.json is ignored, and `lens register` and
+// `doctor` say so.
 
-// compact --lens corpus-example said "not enabled" and exited 1 for an enabled lens.
-func TestCompactTakesTheRegisteredName(t *testing.T) {
-	registerCompactFake.Do(func() { platform.Register(compactFakePlatform{}) })
-	t.Setenv(noDefaultLensEnv, "1")
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st := openBase(t)
-	registerRenamedLens(t, st, "corpus-example", "regime")
+// cmd injects the wire command the CLI prints and a refresh.
+func TestMCPGetsTheWireCommand(t *testing.T) {
+	st := readFixture(t)
+	opts := mcpOptions(st)
+	if opts.Wire != wireCommand() || opts.Refresh == nil {
+		t.Errorf("wire %q (want %q), refresh set %v", opts.Wire, wireCommand(), opts.Refresh != nil)
+	}
+}
+
+// A lens.json `name` that once renamed a lens is now ignored, so registering one under a name of
+// its own succeeds even when another lens holds that name; both commands that show it say so.
+func TestAnIgnoredLensJSONNameIsWarned(t *testing.T) {
+	st := readFixture(t)
+	t.Setenv("WITNESS_ASSETS", t.TempDir()) // no model: doctor's embedder check fails fast
+	if err := st.RegisterLens("regime", writeLensDir(t, "", "mine", "rev")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCLI(t, "lens", "register", "corpus-example", writeLensDir(t, "", "mine", "rev", "name", "regime"))
+	if err != nil || !strings.Contains(out, `ignored lens.json name "regime"`) || strings.Contains(out, "mines as") {
+		t.Fatalf("lens register: %v\n%s", err, out)
+	}
+	if got := st.RegisteredLenses(); !slices.Equal(got, []string{"corpus-example", "default", "regime"}) {
+		t.Fatalf("registered = %v", got)
+	}
 	if err := st.EnableLens("corpus-example"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetConfigString("runner", "fakecompact"); err != nil {
+	if err := st.RegisterLens("spaced", writeLensDir(t, "", "mine", "rev", "name", "my lens")); err != nil {
 		t.Fatal(err)
 	}
-	var fs []store.Facet
-	for _, k := range []string{"a", "b", "c"} {
-		fs = append(fs, store.Facet{Lens: "regime", Dimension: "thinking", Key: k, LastSeen: "2026-10-01T00:00:00Z",
-			Versions: []store.FacetVersion{{Value: "value " + k, Confidence: 0.7, RecordedAt: "2026-10-01T00:00:00Z",
-				ValidFrom: "2026-10-01T00:00:00Z", BecauseOf: []string{"obs-" + k}}}})
+	doc, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	flat := strings.Join(strings.Fields(doc), " ") // because-lines wrap
+	for _, want := range []string{
+		`lens corpus-example: lens.json name "regime" is ignored`,
+		`lens regime already exists, so it keeps its registered name: it now mines its history again under corpus-example (one model call per session), and anything an older witness mined as "regime" stays under "regime"`,
+		"stop it witness lens disable corpus-example",
+		`clear this remove "name" from ` + tildePath(filepath.Join(st.LensesDir(), "corpus-example", "lens.json")),
+		`lens spaced: lens.json name "my lens" is ignored`,
+		`only (no spaces or special characters), so it keeps its registered name: enabled, it would mine its history again under spaced`,
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("doctor lacks %q:\n%s", want, doc)
+		}
 	}
-	if err := st.WriteFacets(fs); err != nil {
-		t.Fatal(err)
-	}
-	var err error
-	out := captureStdout(t, func() { err = cmdCompact(true, "corpus-example", nil) })
-	if err != nil {
-		t.Fatalf("compact --lens corpus-example: %v\n%s", err, out)
-	}
-	if a, ar := st.LensFacetCounts("regime"); a != 1 || ar != 2 {
-		t.Fatalf("the plan must run over the lens's facets: %d active, %d archived\n%s", a, ar, out)
+	if strings.Contains(flat, "witness lens disable spaced") {
+		t.Errorf("a disabled lens needs no stop hint:\n%s", doc)
 	}
 }
 
-// worker candidates corpus-example reported "0 observations" for a lens that had them.
-func TestCandidatesTakesTheRegisteredName(t *testing.T) {
+// While the one-time rename keeps failing, the config already enables the lens under its data
+// name, so the lens is paused, not mining under its old one: doctor says the rename is pending.
+func TestDoctorSaysALensRenameIsPending(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a read-only directory (not Windows, not root)")
+	}
 	st := readFixture(t)
-	registerRenamedLens(t, st, "corpus-example", "regime")
-	if err := st.AppendObservations([]store.Observation{
-		{ID: "o1", Session: "s1", Lens: "regime", Dimension: "regimes", Observation: "one"},
-		{ID: "o2", Session: "s2", Lens: "regime", Dimension: "regimes", Observation: "two"},
-	}); err != nil {
+	t.Setenv("WITNESS_ASSETS", t.TempDir()) // no model: doctor's embedder check fails fast
+	if err := st.RegisterLens("corpus-example", writeLensDir(t, "", "mine", "rev", "name", "regime")); err != nil {
 		t.Fatal(err)
 	}
-	out, _, err := captureBoth(t, func() error { return cmdCandidates("corpus-example") })
-	if err != nil || !strings.Contains(out, "lens corpus-example: 2 observations") {
-		t.Fatalf("candidates must cluster the lens's own observations (err %v):\n%s", err, out)
+	if err := st.EnableLens("corpus-example"); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// The MCP tools apply whatever mapping cmd injects (internal/mcp tests drive that with a fake);
-// this pins that cmd injects the real one, and the wire command the CLI prints.
-func TestMCPGetsTheLensMappingAndTheWireCommand(t *testing.T) {
-	st := readFixture(t)
-	registerRenamedLens(t, st, "corpus-example", "regime")
-	opts := mcpOptions(st)
-	if got := opts.DataName("corpus-example"); got != "regime" {
-		t.Errorf("DataName(corpus-example) = %q, want regime", got)
+	if err := st.SetMetaString("lens_names_adopted", ""); err != nil { // as on the first Open after the upgrade
+		t.Fatal(err)
 	}
-	if opts.Wire != wireCommand() || opts.Refresh == nil {
-		t.Errorf("wire %q (want %q), refresh set %v", opts.Wire, wireCommand(), opts.Refresh != nil)
+	if err := os.Chmod(st.LensesDir(), 0o500); err != nil { // the folder rename fails
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(st.LensesDir(), 0o700) })
+	doc, _ := captureStdoutErr(t, func() error { return cmdDoctor(false) })
+	flat := strings.Join(strings.Fields(doc), " ")
+	if !strings.Contains(flat, "the rename to regime is pending; witness retries it each time it opens the archive, and the lens is paused until it succeeds") ||
+		strings.Contains(flat, "mines its history again") {
+		t.Errorf("doctor must call the rename pending:\n%s", doc)
 	}
 }

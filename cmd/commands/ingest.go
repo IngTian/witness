@@ -104,18 +104,13 @@ var ingestTSLayouts = []string{
 // normalizeIngestTS converts a record's caller-supplied ts into CANONICAL RFC3339 UTC,
 // falling back to now for anything it cannot parse.
 //
-// This is a data-integrity guard, not politeness. raw.ts was stored VERBATIM, and
-// `witness cleanup` selects what to delete with `MAX(ts) < cutoff` — a STRING compare
-// against an RFC3339 cutoff. So an unvalidated ts in any other shape sorts wrong: a
-// US-style "07/26/2026" or an epoch "1754300000" both compare BELOW "2026-…" (because
-// '0' and '1' < '2'), making a document ingested seconds ago immediately eligible for
-// irreversible L0 deletion — while the cleanup prompt promises only idle transcripts go.
-// Reproduced before this fix: two of three just-ingested docs were destroyed by the
-// DEFAULT 90-day cutoff.
+// raw.ts was stored VERBATIM, and the store compares it as a STRING: SampleRecentSessions
+// orders sessions by MAX(ts) and LastRawTS takes MAX(ts). So a ts in any other shape sorts
+// wrong: a US-style "07/26/2026" or an epoch "1754300000" both compare BELOW "2026-…"
+// (because '0' and '1' < '2'), and a document ingested seconds ago reads as the oldest.
 //
 // Normalizing at the boundary (rather than hardening every query) keeps the invariant in
-// one place: everything in raw.ts is comparable RFC3339, which is what the rest of the
-// engine — cleanup, the sample/prune previews, the newest-session ordering — assumes.
+// one place: everything in raw.ts is comparable RFC3339, which the rest of the engine assumes.
 func normalizeIngestTS(raw, fallback string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -289,7 +284,7 @@ func ingestInput(reader io.Reader, quiet bool) (res ingestResult, err error) {
 	// Serialize the whole read-modify-write, the same way the OpenCode importer does for
 	// the same hazard. applyIngestSession reads the session's stored key list and raw row
 	// count, then writes both back — so a concurrent raw mutation (a second `witness
-	// ingest`, or `witness cleanup` reclaiming rows) desynchronizes oldKeys[i] from
+	// ingest`) desynchronizes oldKeys[i] from
 	// ReadRaw()[i], and the positional update then writes one record's text over a
 	// DIFFERENT record's row. Corrupting an already-durable record is worse than declining
 	// the batch, and `ingest` is a deliberate user action that can simply be re-run.

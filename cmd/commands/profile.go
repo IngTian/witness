@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -59,8 +58,7 @@ func cmdProfile(args []string, asJSON bool) error {
 		fmt.Fprintln(os.Stderr, errLine("!", "[!]", ansiYellow, "could not refresh the profile — showing the last one"))
 		fmt.Fprintln(os.Stderr, "  "+styledErr(ansiDim, err.Error()))
 	}
-	// A profile is written under the lens's MINED name, which a registered lens may override.
-	md, ok, err := st.ReadProfile(lens.DataName(st, lensName))
+	md, ok, err := st.ReadProfile(lensName)
 	if err != nil {
 		return err
 	}

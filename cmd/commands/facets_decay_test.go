@@ -18,7 +18,7 @@ func TestFacetsListingShowsDecayedConfidence(t *testing.T) {
 	f := store.Facet{Lens: "default", Dimension: "traits", Key: "satisfices",
 		Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9, ConfidenceSeq: 100}}}
 	out := captureStdout(t, func() {
-		renderCurrentFacets("default", "default", []store.Facet{f}, store.ContiguousClock(100+int64(store.FacetDecayHalfLifeObs)),
+		renderCurrentFacets("default", []store.Facet{f}, store.ContiguousClock(100+int64(store.FacetDecayHalfLifeObs)),
 			true, true, func() store.EmptyReason { return store.NoCapture })
 	})
 	// The confidence column leads each facet row: "    0.45  satisfices  …".

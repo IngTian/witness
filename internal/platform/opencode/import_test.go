@@ -344,7 +344,7 @@ func TestImporterMirrorsOpenCodeTextParts(t *testing.T) {
 	if raw[1].Role != "assistant" || raw[1].Text != "first note\n\nfinal answer" {
 		t.Fatalf("assistant text parts not merged: %+v", raw[1])
 	}
-	// The dedup state must land in the namespace the store reaps and merges
+	// The dedup state must land in the namespace the store merges
 	if st.MetaString(store.OpenCodeImportKeysNS+":"+SessionPrefix+"ses_test") == "" {
 		t.Fatalf("import state is not under the store's %q namespace", store.OpenCodeImportKeysNS)
 	}
@@ -545,24 +545,6 @@ func TestImportReadsAWALDatabaseCopiedWithoutItsSidecars(t *testing.T) {
 	}
 	if stats := mustImport(t, newFakeImportStore(), dbPath); stats.Sessions != 1 {
 		t.Fatalf("import after WAL sidecars removed: stats = %+v, want 1 session", stats)
-	}
-}
-
-func TestTranscriptDigestMatchesTheImportedL0(t *testing.T) {
-	dbPath := seedOpenCodeDB(t)
-	fake := newFakeImportStore()
-	mustImport(t, fake, dbPath)
-	if len(fake.imports) == 0 || len(fake.imports[0].records) == 0 {
-		t.Fatal("no records were imported")
-	}
-
-	var entries []platform.TranscriptEntry
-	for _, r := range fake.imports[0].records {
-		entries = append(entries, platform.TranscriptEntry{Role: r.Role, Text: r.Text})
-	}
-	fromImport, fromRead := platform.TranscriptDigest(entries), TranscriptDigest(readTurns(t, dbPath, "ses_test"))
-	if fromImport != fromRead {
-		t.Fatalf("digest from import = %q, from ReadTurns = %q, want equal", fromImport, fromRead)
 	}
 }
 
@@ -804,12 +786,6 @@ func TestReadersNeverWriteTheSourceDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close() // before hashing: a writer would checkpoint on the last close
-	// The native runner's drift check reads the same DB.
-	t.Setenv("WITNESS_OPENCODE_DB", dbPath)
-	w := &platform.NativeSession{Session: SessionPrefix + "ses_test", Digest: "captured earlier"}
-	if err := newNativeRuntime(t.TempDir(), nil).checkDigest(context.Background(), w); !errors.Is(err, errNativeSessionChanged) {
-		t.Fatalf("checkDigest = %v, want errNativeSessionChanged", err)
-	}
 
 	if after := sum(); before != after {
 		t.Fatalf("opencode.db was modified: before=%x after=%x", before, after)

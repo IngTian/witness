@@ -82,9 +82,10 @@ func TestReviewMergeIsNotQuadratic(t *testing.T) {
 	}
 }
 
-// Our cleanup reclaimed a session's transcript and progress but kept its observations. Merging a
-// copy that still has the transcript must not leave it pending — it would be mined a second time
-// beside the observations we kept, the permanent duplication the shared-mined rule exists to stop.
+// The cleanup command witness had through v0.13 reclaimed a session's transcript and progress but
+// kept its observations. Merging a copy that still has the transcript must not leave it pending —
+// it would be mined a second time beside the observations we kept, the permanent duplication the
+// shared-mined rule exists to stop.
 func TestReviewCleanedUpSessionDoesNotComeBackPending(t *testing.T) {
 	// theirs = how much of the transcript the other side had mined: all of it, none of it, or
 	// only the first turn. The partial case is the one a "keep their progress" rule got wrong: it
@@ -98,9 +99,7 @@ func TestReviewCleanedUpSessionDoesNotComeBackPending(t *testing.T) {
 			if err := base.st.MarkDistilled("old", "default", 2); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := base.st.PruneSessionsBefore("2030-01-01T00:00:00Z"); err != nil {
-				t.Fatal(err)
-			}
+			dropL0(t, base.st, "old")
 			inc.raw("old", "user:a", "assistant:b")
 			if theyMined {
 				inc.obs("io", "old", "default", "2026-01-01T00:00:00Z")

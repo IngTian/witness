@@ -147,7 +147,6 @@ The profile is collect-only and pull-only: witness never injects content into se
 		newExportCmd(),
 		newMergeCmd(),
 		newCompactCmd(),
-		newCleanupCmd(),
 		newWorkerCmd(),
 		newImportCmd(),
 		newInternalCaptureCmd(),

@@ -348,7 +348,7 @@ func TestWorkerStopStaleClearAtomic(t *testing.T) {
 		// A new worker takes the lock and stamps its own pid before the clear runs.
 		_ = st.SetMetaString(metaWorkerPID, "5678")
 	}}
-	if err := cmdDistillStop(false); err != nil {
+	if err := cmdDistillStop(); err != nil {
 		t.Fatalf("cmdDistillStop: %v", err)
 	}
 	// The new pid 5678 must survive (cleared=false means the guard worked).

@@ -38,8 +38,9 @@ witness lens backfill regime             # optional: re-mine your whole history 
 ```
 
 `register` stores a **copy**, so editing `./regime` afterwards changes nothing until you
-re-register. `enable` is a separate switch. `backfill` is what you want if you care about the
-history you already have — a newly enabled lens otherwise only sees new sessions.
+re-register. `enable` is a separate switch. A newly enabled lens mines all sessions without a
+progress row for it — which is your whole history if it's the first time. `backfill` is for
+re-mining sessions a lens already saw.
 
 ## The three files
 
@@ -47,18 +48,25 @@ A lens is a **directory** of three files:
 
 ```
 math/
-  lens.json     settings: name, dimensions, optional per-lens models
+  lens.json     settings: dimensions, optional per-lens models
   extract.md    per-session — mines observations (the whole file is the prompt)
   review.md     periodic — synthesizes observations into facets (the whole file is the prompt)
 ```
 
 ```json
 // math/lens.json
-{ "name": "math", "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
+{ "dimensions": ["speed", "independence", "proof_rigor", "abstraction", "confusion_tolerance"] }
 ```
 
-`name` is the key your data is stored under; omit it and the registered name is used. Changing it
-later strands existing data (a re-register that would do so is refused).
+A lens's only name is the one it is registered under. Every observation, facet and profile it
+produces is stored under that name, and every command and MCP tool takes it. `lens.json` has no
+`name`; one left in an older file is ignored, and `lens register` and `witness doctor` say so.
+An older witness stored a lens's data under its `lens.json` `name` instead, when it had one.
+After you upgrade, the next witness command that opens the archive renames each such lens to its
+`lens.json` name, once, so the lens keeps its data; use the new name from then on. A lens witness
+cannot rename (another lens already has the name, or the name is not a valid lens name) keeps
+its registered name and mines its sessions again under it, one model call per session, while its
+old data stays under the old name. `witness doctor` names that lens and how to stop it.
 
 ```markdown
 <!-- math/extract.md -->
@@ -72,12 +80,6 @@ The one rule to remember: each prompt file is used **verbatim as the system prom
 the built-in `default` prompts — it doesn't extend them — so each must be **self-contained,
 including its output JSON schema** (the tool appends the transcript / observations as the user
 message, but injects no schema for you).
-
-**An optional fourth file, `emerge.md`.** `witness worker review --full` also runs a long-arc pass:
-it clusters observations that recur across sessions and asks a judge whether each cluster is a
-pattern the facets have missed. `emerge.md` is that judge's prompt; without it, `review.md` is
-used. The judge gets one cluster at a time and returns one facet in `review.md`'s output shape,
-or `[]` to decline. [`prompts/default/emerge.md`](../prompts/default/emerge.md) is a working one.
 
 Two **complete, copy-paste-ready** lenses ship as starting points. Copy the directory and rewrite the
 dimensions and prose for your domain:
@@ -95,7 +97,7 @@ without paying for it on every session — by adding `extract_model` / `review_m
 `lens.json`:
 
 ```json
-{ "name": "math", "dimensions": ["proof_rigor"], "extract_model": "claude-sonnet-5" }
+{ "dimensions": ["proof_rigor"], "extract_model": "claude-sonnet-5" }
 ```
 
 Omit a field (or leave it empty) to ride the default. Since `register` stores a snapshot, edit the

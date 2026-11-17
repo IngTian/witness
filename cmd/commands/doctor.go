@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
-	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/IngTian/witness/internal/vector"
@@ -235,7 +236,8 @@ func cmdDoctor(asJSON bool) error {
 			ignoredKeys = append(ignoredKeys, fmt.Sprintf("lens %s: unknown lens.json key %q is ignored", name, k))
 		}
 	}
-	if len(ignoredKeys) > 0 && overall == okGlyph() {
+	ignoredNames := st.IgnoredLensNames() // warned under Archive
+	if (len(ignoredKeys) > 0 || len(ignoredNames) > 0) && overall == okGlyph() {
 		overall = warnGlyph()
 	}
 	fmt.Printf("%s  %s\n", overall, title("doctor", tildePath(st.Root), ""))
@@ -249,8 +251,6 @@ func cmdDoctor(asJSON bool) error {
 		}
 	}
 	fix := func(label, command string) { fmt.Println("  " + hint(label, command)) }
-	// Lenses are named by what the user registered them as; the stats key on the mined name.
-	shown := func(mined string) string { return lens.RegisteredName(st, mined) }
 
 	// Runner block. This is the DEFAULT runner: one process distills every session
 	// regardless of source (Claude Code and OpenCode both feed the same L0), and it
@@ -299,7 +299,7 @@ func cmdDoctor(asJSON bool) error {
 		}
 		lensFlag, backfill := "", "witness lens backfill <lens> --fresh"
 		if driftLastLens != "" {
-			name := shown(driftLastLens)
+			name := driftLastLens
 			headline += " (lens " + name + ")"
 			lensFlag, backfill = " --lens "+name, "witness lens backfill "+name+" --fresh"
 		}
@@ -339,6 +339,39 @@ func cmdDoctor(asJSON bool) error {
 		warn("lens " + name + ": " + oldLensFormat)
 		fix("re-register", reRegisterOldLens(st, name))
 	}
+	// A lens.json `name` once tagged a lens's data; it is ignored now. The upgrade renames each such
+	// lens to it once, so one still here is waiting for that rename, could not be renamed, or was
+	// registered since. The last two mine under the registered name, where they have no progress:
+	// every session is paid for again, and the user must hear that from somewhere.
+	for _, reg := range st.RegisteredLenses() {
+		data, ok := ignoredNames[reg]
+		if !ok {
+			continue
+		}
+		warn(fmt.Sprintf("lens %s: lens.json name %q is ignored", reg, data))
+		_, skip, _ := store.LensRenameTarget(filepath.Join(st.LensesDir(), reg), reg, st.LensesDir())
+		if skip == nil && !st.LensNamesAdopted() {
+			pending := fmt.Sprintf("the rename to %s is pending; witness retries it each time it opens the archive", data)
+			if slices.Contains(cfg.EnabledLenses, data) {
+				pending += ", and the lens is paused until it succeeds"
+			}
+			because(pending)
+			continue
+		}
+		why, mines := "it was registered after the one-time rename", "enabled, it would mine its history again"
+		if skip != nil {
+			why = skip.Error()
+		}
+		if slices.Contains(cfg.EnabledLenses, reg) {
+			mines = "it now mines its history again"
+		}
+		because(fmt.Sprintf("%s, so it keeps its registered name: %s under %s (one model call per session), and anything an older witness mined as %q stays under %q",
+			why, mines, reg, data, data))
+		if slices.Contains(cfg.EnabledLenses, reg) {
+			fix("stop it", "witness lens disable "+reg)
+		}
+		fix("clear this", `remove "name" from `+tildePath(filepath.Join(st.LensesDir(), reg, store.LensConfigFile)))
+	}
 	if defaultLensStale(st) {
 		warn(defaultLensStaleMsg)
 	}
@@ -372,7 +405,7 @@ func cmdDoctor(asJSON bool) error {
 		sizes := distill.PortraitInputChars(facets)
 		for _, ln := range activeLensNames(st) {
 			if n := sizes[ln]; n > 0 {
-				row("portrait input", shown(ln)+": "+distill.InputSize(n), "")
+				row("portrait input", ln+": "+distill.InputSize(n), "")
 			}
 		}
 	}
@@ -384,7 +417,7 @@ func cmdDoctor(asJSON bool) error {
 	// witness.log for a per-lens review error.
 	for _, ln := range activeLensNames(st) {
 		if d := st.UnreviewedDelta(ln); d > 0 {
-			line := fmt.Sprintf("%s: %s not yet folded into facets", shown(ln), countOf(d, "observation", "observations"))
+			line := fmt.Sprintf("%s: %s not yet folded into facets", ln, countOf(d, "observation", "observations"))
 			if d > cfg.ReviewMaxChars/200 { // ~more than one window's worth of obs pending — nudge
 				warn(line)
 				because("review is behind; it folds in windows")

@@ -21,10 +21,9 @@ func init() { platform.Register(Platform{}) }
 // drop one (an Import that no longer matches imports nothing and reports "up to date").
 // These make that a compile error instead.
 var (
-	_ platform.AutoImporter        = Platform{}
-	_ platform.RunnerProvider      = Platform{}
-	_ platform.NativeSessionSource = Platform{}
-	_ platform.ModelRequirer       = Platform{}
+	_ platform.AutoImporter   = Platform{}
+	_ platform.RunnerProvider = Platform{}
+	_ platform.ModelRequirer  = Platform{}
 )
 
 func (Platform) Name() string { return "opencode" }
@@ -35,12 +34,6 @@ func (Platform) Name() string { return "opencode" }
 func (Platform) RequiresModel() bool { return true }
 
 func (Platform) SessionPrefix() string { return SessionPrefix }
-
-// SupportsNativeSessions marks OpenCode as a platform whose sessions live in its own conversation
-// store, so a runner may retain a scratch context keyed to one and resume it after a crash. This is
-// the platform.NativeSessionSource capability — it replaces an `== platform.AgentOpenCode` name
-// comparison the engine used to make on its own.
-func (Platform) SupportsNativeSessions() bool { return true }
 
 // Import reconciles OpenCode's SQLite store into L0. It takes the sync lock INSIDE
 // the method (so cmd need not know about it). A held lock means another import is

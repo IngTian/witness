@@ -10,8 +10,8 @@ import (
 )
 
 // Each phase gets its own line, and so its own clock: a line estimates time left from when it
-// started, so one carried from lens to lens (or from clustering into verifying) would compute the
-// second phase's estimate from the first phase's elapsed time.
+// started, so one carried from lens to lens (or from claims into folding) would compute the second
+// phase's estimate from the first phase's elapsed time.
 func TestPhaseProgressStartsALinePerPhase(t *testing.T) {
 	var bufs []*bytes.Buffer
 	p := &phaseProgress{start: func() *progressLine {
@@ -22,17 +22,18 @@ func TestPhaseProgressStartsALinePerPhase(t *testing.T) {
 	fold := func(where string, done int) distill.Progress {
 		return distill.Progress{Where: where, Stages: []distill.Stage{{Name: "folding windows", Done: done, Total: 3}}}
 	}
+	claims := func(where string, done int) distill.Progress {
+		return distill.Progress{Where: where, Stages: []distill.Stage{{Name: "writing claims", Done: done, Total: 2}}}
+	}
+	p.update(claims("default", 0))
+	p.update(claims("default", 1))
 	p.update(fold("default", 0))
 	p.update(fold("default", 1))
+	p.update(claims("career", 0))
 	p.update(fold("career", 0))
-	p.update(distill.Progress{Where: "career", Stages: []distill.Stage{
-		{Name: "clustering", Done: 0, Total: 14}, {Name: "verifying arcs", Open: true}}})
-	p.update(distill.Progress{Where: "career", Stages: []distill.Stage{
-		{Name: "clustering", Done: 1, Total: 14}, {Name: "verifying arcs", Open: true}}})
-	p.update(distill.Progress{Where: "career", Stages: []distill.Stage{{Name: "verifying arcs", Done: 0, Total: 5}}})
 	p.finish()
 
-	want := []string{"default · folding windows 0/3", "career · folding windows 0/3", "career · clustering 0/14", "career · verifying arcs 0/5"}
+	want := []string{"default · writing claims 0/2", "default · folding windows 0/3", "career · writing claims 0/2", "career · folding windows 0/3"}
 	if len(bufs) != len(want) {
 		t.Fatalf("want %d lines (one per lens and phase), started %d", len(want), len(bufs))
 	}

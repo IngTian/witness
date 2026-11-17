@@ -1,4 +1,3 @@
 {
-  "name": "trump-market",
   "dimensions": ["objective_function", "trade_actions", "monetary_pressure", "market_reaction", "policy_uncertainty"]
 }

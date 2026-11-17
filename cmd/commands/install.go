@@ -714,6 +714,53 @@ func chooseRunner(st *store.Store, target string, in io.Reader) error {
 	return nil
 }
 
+// confirmFrom is wire's y/N, read from in (wireAnswers): only y/yes is a yes, and EOF is a no.
+// It is not askYesNo, which reads os.Stdin itself and answers EOF with a --yes hint that wire
+// has no flag for.
+func confirmFrom(in io.Reader) func(prompt string) bool {
+	return func(prompt string) bool {
+		a := strings.ToLower(promptLine(in, prompt))
+		return a == "y" || a == "yes"
+	}
+}
+
+// promptLine prints prompt, reads one answer from in, and ends the prompt's line whenever the
+// terminal did not: piped input is never echoed, and Ctrl-D echoes nothing, which left the next
+// line glued to the prompt.
+func promptLine(in io.Reader, prompt string) string {
+	fmt.Print(prompt)
+	line, eof := readLine(in)
+	if f, ok := in.(*os.File); !ok || !isatty.IsTerminal(f.Fd()) {
+		fmt.Println(line) // a terminal echoes what was typed; piped input would leave the line open
+	} else if eof {
+		fmt.Println()
+	}
+	return strings.TrimSpace(line)
+}
+
+// readLine reads one line, a byte at a time, so nothing past the newline is buffered away from
+// the next reader: wire reads up to three answers (the runner y/N, then the mine and review
+// models) from one reader, and a bufio.Reader here would swallow the later answers along with
+// the first. eof reports that the input ended before a newline.
+func readLine(in io.Reader) (line string, eof bool) {
+	var b strings.Builder
+	buf := make([]byte, 1)
+	for {
+		n, err := in.Read(buf)
+		if n == 1 {
+			if buf[0] == '\n' {
+				break
+			}
+			b.WriteByte(buf[0])
+		}
+		if err != nil {
+			eof = true
+			break
+		}
+	}
+	return strings.TrimRight(b.String(), "\r"), eof
+}
+
 // askForModels prompts for mine_model and review_model when the runner requires a model
 // (platform.ModelRequirer.RequiresModel() == true) and the effective mine model is empty.
 // At a terminal it prompts (an answer without "/", mine or review, refuses both and re-prints the

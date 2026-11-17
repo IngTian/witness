@@ -10,21 +10,14 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// raw.ts must always be canonical RFC3339, because `witness cleanup` decides what to
-// delete with `MAX(ts) < cutoff` — a STRING compare. An unvalidated caller ts in any other
-// shape sorts wrong: "07/26/2026" and "1754300000" both compare BELOW "2026-…", so a
-// document ingested seconds ago was immediately eligible for irreversible L0 deletion while
-// the cleanup prompt promised only idle transcripts would go. (Reproduced before the fix:
-// 2 of 3 just-ingested docs destroyed by the DEFAULT 90-day cutoff.)
-func TestIngestNormalizesTimestampsSoCleanupCannotEatFreshDocs(t *testing.T) {
+// raw.ts must always be canonical RFC3339, because the store compares it as a STRING
+// (SampleRecentSessions orders by MAX(ts), LastRawTS takes MAX(ts)). An unvalidated caller ts
+// in any other shape sorts wrong: "07/26/2026" and "1754300000" both compare BELOW "2026-…".
+func TestIngestNormalizesTimestamps(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WITNESS_HOME", home)
 	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
 
-	// The two VALID shapes are dated TODAY, not a fixed day. They are honored as given — that is
-	// the point of the date-only assertion below — so a literal date here ages in real time. It
-	// did: written with "2026-08-04", the suite went red at 2026-11-02T00:00Z, exactly 90 days
-	// later, on every branch at once, because the cutoff below is "now minus 90 days".
 	today := time.Now().UTC().Format("2006-01-02")
 	batch := fmt.Sprintf(`{"text":"us style","id":"d1","session":"US","ts":"07/26/2026"}
 {"text":"epoch","id":"d2","session":"EPOCH","ts":"1754300000"}
@@ -40,16 +33,6 @@ func TestIngestNormalizesTimestampsSoCleanupCannotEatFreshDocs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-
-	// A 90-day-ago cutoff must select NOTHING: every record was ingested just now.
-	cutoff := time.Now().AddDate(0, 0, -90).UTC().Format(time.RFC3339)
-	sess, recs, err := st.RawPruneStats(cutoff)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sess != 0 || recs != 0 {
-		t.Fatalf("no freshly-ingested record may be prunable, got sessions=%d records=%d", sess, recs)
-	}
 
 	// Every stored ts parses as RFC3339 — the invariant the rest of the engine assumes.
 	for _, s := range []string{"file:US", "file:EPOCH", "file:DATEONLY", "file:GOOD", "file:NOTS"} {
@@ -81,7 +64,7 @@ func TestNormalizeIngestTS(t *testing.T) {
 		"2026-08-04 12:30:00":  "2026-08-04T12:30:00Z",
 		"":                     fallback,
 		"   ":                  fallback,
-		"07/26/2026":           fallback, // US style: would sort below an RFC3339 cutoff
+		"07/26/2026":           fallback, // US style: would sort below an RFC3339 ts
 		"1754300000":           fallback, // epoch seconds: same hazard
 		"yesterday":            fallback,
 	} {

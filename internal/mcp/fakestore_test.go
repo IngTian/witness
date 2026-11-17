@@ -36,7 +36,7 @@ type fakeMCPStore struct {
 	// which is deliberate: an archive nothing is feeding is the case that used to be
 	// misreported as "the reviewer may not have run yet".
 	whyEmpty store.EmptyReason
-	// whyLens is the lens the last WhyEmpty asked about: the mined name, never the registered one.
+	// whyLens is the lens the last WhyEmpty asked about: the lens the tool was given.
 	whyLens string
 	clocks  map[string]store.LensClock // each lens's decay clock; nil leaves every confidence as stored
 }

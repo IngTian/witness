@@ -12,15 +12,14 @@ import (
 // point: it runs the SAME gate the capture hooks use (maybeSpawnAutoWorker), rather
 // than spawning `worker-run --auto` directly.
 //
-// Why it exists: `worker stop` (and its hidden --auto-only form) latches a DURABLE
-// `worker_stop_requested` meta flag, and an auto worker refuses to run while it is set
-// (cmdWorker) — only maybeSpawnAutoWorker and a MANUAL run clear it. A caller that spawns
-// `worker-run --auto` itself therefore no-ops forever after the first stop, silently freezing
-// automatic distillation for an OpenCode-only user (a Claude Code user is rescued incidentally
-// by their capture hook clearing it). The v1 plugin ran `worker stop --auto-only` on every
-// dispose, which is how this was found; the v2 plugin stops no worker, but a manual stop still
-// latches. Routing the plugin's quiet-period start through this command keeps the flag's
-// clear-on-intentional-start contract in ONE place.
+// Why it exists: `worker stop` latches a DURABLE `worker_stop_requested` meta flag, and an
+// auto worker refuses to run while it is set (cmdWorker) — only maybeSpawnAutoWorker and a
+// MANUAL run clear it. A caller that spawns `worker-run --auto` itself therefore no-ops
+// forever after the first stop, silently freezing automatic distillation for an OpenCode-only
+// user (a Claude Code user is rescued incidentally by their capture hook clearing it). The v1
+// plugin stopped the worker on every dispose, which is how this was found; the v2 plugin stops
+// no worker, but a manual stop still latches. Routing the plugin's quiet-period start through
+// this command keeps the flag's clear-on-intentional-start contract in ONE place.
 func newInternalWorkerKickCmd() *cobra.Command {
 	return &cobra.Command{Use: "worker-kick", Hidden: true, Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -43,7 +42,7 @@ func newInternalWorkerKickCmd() *cobra.Command {
 // so throttling WHEN workers start bought nothing but the 1 Hz wakeup cascade it
 // used to need. A ready embedding model is required for mining, but not for
 // review-only work.
-func maybeSpawnAutoWorker(st *store.Store) bool {
+func maybeSpawnAutoWorker(st *store.Store) {
 	cfg := st.LoadConfig()
 	// Clear the durable stop flag FIRST, before the should-start gate. `worker stop`
 	// latches it (a manual stop; the v1 plugin also did on every dispose), and an auto worker
@@ -61,11 +60,9 @@ func maybeSpawnAutoWorker(st *store.Store) bool {
 		if len(pending) > 0 && !modelReady {
 			slog.Info("distill: auto-start skipped; embedding model is not ready", "dir", embed.AssetsDir())
 		}
-		return false
+		return
 	}
-	_ = st.SetMetaString(metaWorkerMode, workerModeAutoPending)
 	spawnDetached("worker-run", "--auto")
-	return true
 }
 
 // autoWorkerShouldStart decides whether an automatic worker should be kicked now.

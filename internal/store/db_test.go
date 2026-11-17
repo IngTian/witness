@@ -160,61 +160,6 @@ func TestMigrateProgressToPerLens(t *testing.T) {
 	}
 }
 
-// hasIndex reports whether a named index exists in sqlite_master.
-func hasIndex(t *testing.T, s *Store, name string) bool {
-	t.Helper()
-	var n int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil {
-		t.Fatalf("probe index %q: %v", name, err)
-	}
-	return n > 0
-}
-
-// v6 (issue #73-S3) adds two hot-path progress indexes. Because they live in
-// schemaV1 as CREATE INDEX IF NOT EXISTS, a fresh DB has them AND a stored-v5 DB
-// re-runs the (idempotent) schema apply on the version bump to gain them — the
-// whole point of bumping schemaVersion 5->6. A stored-v6 DB would early-return, so
-// the version bump is load-bearing: without it these never reach existing archives.
-func TestMigrateAddsProgressIndexes(t *testing.T) {
-	s := tempStore(t) // fully migrated
-	for _, idx := range []string{"idx_progress_lens_next", "idx_progress_distilled_at"} {
-		if !hasIndex(t, s, idx) {
-			t.Fatalf("fresh DB missing hot-path index %q", idx)
-		}
-	}
-
-	// Simulate a stored-v5 archive: drop the indexes and force the version back. A
-	// re-migrate must recreate them (proving the version bump lands the additive
-	// schema on existing archives, not just fresh ones).
-	for _, stmt := range []string{
-		`DROP INDEX idx_progress_lens_next`,
-		`DROP INDEX idx_progress_distilled_at`,
-		`PRAGMA user_version=5`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil {
-			t.Fatalf("seed v5 (%q): %v", stmt, err)
-		}
-	}
-	if hasIndex(t, s, "idx_progress_lens_next") {
-		t.Fatal("precondition: index should be dropped before re-migrate")
-	}
-
-	if err := migrate(s.db); err != nil {
-		t.Fatalf("v5->v6 migrate: %v", err)
-	}
-	for _, idx := range []string{"idx_progress_lens_next", "idx_progress_distilled_at"} {
-		if !hasIndex(t, s, idx) {
-			t.Fatalf("v5->v6 migrate did not create %q", idx)
-		}
-	}
-	var v int
-	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
-	if v != schemaVersion {
-		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
-	}
-}
-
 // hasColumn reports whether a named column exists on a table.
 func hasColumn(t *testing.T, s *Store, table, col string) bool {
 	t.Helper()
@@ -909,77 +854,6 @@ func TestDeleteObservation(t *testing.T) {
 	}
 	if deleted {
 		t.Fatalf("deleting a missing id must report deleted=false")
-	}
-}
-
-// `witness cleanup` reclaims bulky raw transcripts (L0) for sessions with no
-// activity since a cutoff, while KEEPING the derived L1/L2 (observations and
-// facets are the durable archive). Pruning the whole session (raw + progress +
-// meta) keeps the count-based distill watermark from ever referencing deleted
-// rows.
-func TestPruneSessionsBefore(t *testing.T) {
-	s := tempStore(t)
-	// An old, fully-distilled session with a derived observation.
-	_ = s.AppendRaw(RawRecord{Session: "old", Seq: 0, TS: "2020-01-01T00:00:00Z", Role: "user", Text: "a"})
-	_ = s.AppendRaw(RawRecord{Session: "old", Seq: 1, TS: "2020-01-01T00:01:00Z", Role: "assistant", Text: "b"})
-	_ = s.MarkDistilled("old", LensDefault, 2)
-	_ = s.AppendObservations([]Observation{{ID: "obs_old", Lens: LensDefault, Session: "old", Observation: "x"}})
-	// A recent session that must survive.
-	_ = s.AppendRaw(RawRecord{Session: "new", Seq: 0, TS: "2030-06-01T00:00:00Z", Role: "user", Text: "c"})
-
-	// Per-session state parked in `meta` under "<namespace>:<session>" (as opencode's
-	// import bookkeeping does) must be reclaimed with the session — otherwise it leaks
-	// (issue #54 minor). A global meta row and another session's row must survive.
-	_ = s.SetMetaString("opencode_import_keys:old", `["k1","k2"]`)
-	_ = s.SetMetaString("opencode_import_keys:new", `["k3"]`)
-	_ = s.SetMetaString("review_ts", "2024-01-01T00:00:00Z")
-
-	cutoff := "2025-01-01T00:00:00Z"
-
-	// Preview matches what the prune will do.
-	sess, recs, err := s.RawPruneStats(cutoff)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sess != 1 || recs != 2 {
-		t.Fatalf("preview: want 1 session / 2 records, got %d / %d", sess, recs)
-	}
-
-	sess, recs, err = s.PruneSessionsBefore(cutoff)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sess != 1 || recs != 2 {
-		t.Fatalf("prune: want 1 session / 2 records, got %d / %d", sess, recs)
-	}
-
-	// Old session's raw L0 + watermark are gone...
-	if raw, _ := s.ReadRaw("old"); len(raw) != 0 {
-		t.Fatalf("old L0 should be pruned, got %d records", len(raw))
-	}
-	if d := s.DistilledCount("old", LensDefault); d != 0 {
-		t.Fatalf("old session watermark should be removed, got %d", d)
-	}
-	// ...but its derived observation (L1) is KEPT.
-	obs, _ := s.ReadObservations("")
-	if len(obs) != 1 || obs[0].ID != "obs_old" {
-		t.Fatalf("L1 must survive a cleanup, got %+v", obs)
-	}
-	// The recent session is untouched.
-	if raw, _ := s.ReadRaw("new"); len(raw) != 1 {
-		t.Fatalf("recent session must survive, got %d records", len(raw))
-	}
-
-	// The pruned session's per-session meta row is reclaimed; the surviving
-	// session's row and the global row are untouched.
-	if got := s.MetaString("opencode_import_keys:old"); got != "" {
-		t.Fatalf("pruned session's per-session meta row should be removed, got %q", got)
-	}
-	if got := s.MetaString("opencode_import_keys:new"); got != `["k3"]` {
-		t.Fatalf("surviving session's meta row must be kept, got %q", got)
-	}
-	if got := s.MetaString("review_ts"); got != "2024-01-01T00:00:00Z" {
-		t.Fatalf("a global meta row must never be touched by prune, got %q", got)
 	}
 }
 

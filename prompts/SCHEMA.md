@@ -13,24 +13,23 @@ intentionally unused — the profile sits directly on the facets).
 ## raw — ground-truth transcript (L0)
 
 Table `raw`, append-only. One row per captured turn-half or ingested record, verbatim; never
-LLM-touched. Reclaim old rows with `witness cleanup` (there is no automatic retention — pruning is
-an explicit, confirmed action).
+LLM-touched, and never pruned: `lens backfill` and `lens try` re-mine from it.
 
 ## observations — derived, append-only (L1)
 
 Table `observations`. Atomic, evidence-anchored noticings, tagged by lens. Written by the worker
 (`source` is `mined`, or `active` for one an agent recorded mid-session) and by `witness merge`.
 `obs_id` hashes session + lens + text, so an identical re-mine is ignored; near-duplicates are
-kept. Each row carries a 384-d embedding for semantic search and the long-arc clustering.
+kept. Each row carries a 384-d embedding for semantic search.
 
 ## facets — derived, bi-temporal (L2)
 
 Tables `facets` + `facet_versions`. Evolving named attributes within a lens+dimension, written by
-the review fold, the long-arc pass, compaction, the claim pass and `witness merge`. A facet's
-ordered `facet_versions` rows ARE its change history; the version with `valid_to == ''` is current.
-Old versions are kept, never deleted — they are the trajectory. A facet is in the live profile only
-while `archived_at == ''`: compaction and `merge` archive a facet into another (`merged_into`)
-rather than delete it. How confidence moves and decays is in
+the review fold, compaction, the claim pass and `witness merge`. A facet's ordered `facet_versions`
+rows ARE its change history; the version with `valid_to == ''` is current. Old versions are kept,
+never deleted — they are the trajectory. A facet is in the live profile only while
+`archived_at == ''`: compaction and `merge` archive a facet into another (`merged_into`) rather than
+delete it. How confidence moves and decays is in
 [how it works](../docs/how-it-works.md#confidence-and-why-it-moves-on-its-own).
 
 ### The invalidation rule (why this stays honest)
@@ -55,7 +54,7 @@ Every observation/facet carries a `lens` tag. What the `default` and registered 
 they run is in [how it works](../docs/how-it-works.md#lenses); definitions live in the central
 registry (`<root>/lenses/<name>/`), never in a repo.
 
-A lens is a **directory** of `lens.json` (settings: `name`, `dimensions`, optional per-lens models)
+A lens is a **directory** of `lens.json` (settings: `dimensions`, optional per-lens models)
 plus `extract.md` and `review.md` (each whole file is the prompt for its pass). See
 `prompts/lens/example/`. Mining uses the default model by default, but a lens may pin its own with
 `witness config set --lens <name> mine_model|review_model <model>` (or `extract_model` /

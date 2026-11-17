@@ -6,18 +6,20 @@ import (
 	"testing"
 )
 
-// LoadFromDirUnchecked reads an arbitrary directory and honors the lens.json name.
-func TestLoadFromDirUncheckedHonorsConfigName(t *testing.T) {
+// LoadFromDirUnchecked reads an arbitrary directory and names the lens after it: a `name` in
+// its lens.json is ignored, as it is for a registered lens.
+func TestLoadFromDirUncheckedIgnoresConfigName(t *testing.T) {
 	root := t.TempDir()
-	dir := writeLensDir(t, root, "whatever",
-		&LensConfig{Name: "codereview", Dimensions: []string{"rigor", "taste"}},
-		"mine code review", "synth")
+	dir := writeLensDir(t, root, "whatever", nil, "mine code review", "synth")
+	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte(`{"name":"codereview","dimensions":["rigor","taste"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	l, err := LoadFromDirUnchecked(dir)
 	if err != nil {
 		t.Fatalf("LoadFromDirUnchecked: %v", err)
 	}
-	if l.Name != "codereview" {
-		t.Fatalf("name should come from lens.json, got %q", l.Name)
+	if l.Name != "whatever" {
+		t.Fatalf("name should be the directory's, got %q", l.Name)
 	}
 	if len(l.Dimensions) != 2 || l.Extract == "" {
 		t.Fatalf("loaded lens wrong: %+v", l)

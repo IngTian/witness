@@ -10,10 +10,9 @@
 //
 // On-disk shape (issue #75). A lens is a DIRECTORY, not one parsed file:
 //
-//	<name>/lens.json    structured settings (name, dimensions, per-lens models)
+//	<name>/lens.json    structured settings (dimensions, per-lens models)
 //	<name>/extract.md   the mining (L0→L1) prompt — read whole, no parsing
 //	<name>/review.md    the review (L1→L2) prompt — read whole, no parsing
-//	<name>/emerge.md    OPTIONAL long-arc verify prompt; absent → review.md is used
 //
 // Settings live in JSON (mutated safely by `witness config set --lens` via a map
 // round-trip that keeps every other key — no text surgery, unlike the old `# key:`
@@ -30,7 +29,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/IngTian/witness/internal/bundle"
@@ -47,12 +45,10 @@ import (
 //     resolved by distill.ModelFor. A model name is only valid on its runtime, so these
 //     are meaningful only together with (or under a matching) Runner.
 type Lens struct {
-	Name         string // tag written onto observations/facets
-	Registered   string // the registry name a command takes (`config set --lens`); "" when not loaded from the registry
+	Name         string // the registered name; tags observations/facets/profile
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
-	Emerge       string // prompt for the S3 long-arc VERIFY step -> facets; "" = fall back to Review
 	Runner       string // per-lens runtime ("claude"/"opencode"); "" = default runner
 	ExtractModel string // per-lens override for the mine (L0→L1) model; "" = runner default
 	ReviewModel  string // per-lens override for the review (L1→L2) model; "" = runner default
@@ -64,7 +60,6 @@ type Lens struct {
 // omitempty keeps a freshly-scaffolded file terse and a model-less lens from carrying
 // empty model keys.
 type LensConfig struct {
-	Name         string   `json:"name,omitempty"`
 	Dimensions   []string `json:"dimensions,omitempty"`
 	Runner       string   `json:"runner,omitempty"`
 	ExtractModel string   `json:"extract_model,omitempty"`
@@ -77,7 +72,6 @@ const (
 	ConfigFile  = store.LensConfigFile
 	ExtractFile = store.LensExtractFile
 	ReviewFile  = store.LensReviewFile
-	EmergeFile  = store.LensEmergeFile // S3 long-arc verify prompt; OPTIONAL (absent → fall back to review.md)
 )
 
 // promptsDir resolves the bundled prompts directory. Resolution (bundle.Dir):
@@ -190,50 +184,39 @@ func LoadResolvePrompts() (lensPrompt, unifiedPrompt string, err error) {
 // silently empty from a mis-parse: a missing extract.md is a hard, named error. review.md
 // is allowed to be absent/empty (a lens may mine without a custom review prompt), but
 // extract.md is required — it is the mining prompt, the reason the lens exists.
-func readPromptPair(dir string) (extract, review, emerge string, err error) {
+func readPromptPair(dir string) (extract, review string, err error) {
 	e, err := store.ReadLensExtract(dir)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	// review.md may not exist; treat absence as an empty review prompt rather than an error.
 	r, rerr := os.ReadFile(filepath.Join(dir, ReviewFile))
 	if rerr != nil && !os.IsNotExist(rerr) {
-		return "", "", "", fmt.Errorf("read %s: %w", ReviewFile, rerr)
+		return "", "", fmt.Errorf("read %s: %w", ReviewFile, rerr)
 	}
-	// emerge.md is OPTIONAL (S3 long-arc verify); absence → empty, and the reviewer falls
-	// back to the review prompt.
-	m, merr := os.ReadFile(filepath.Join(dir, EmergeFile))
-	if merr != nil && !os.IsNotExist(merr) {
-		return "", "", "", fmt.Errorf("read %s: %w", EmergeFile, merr)
-	}
-	return string(e), string(r), string(m), nil
+	return string(e), string(r), nil
 }
 
 // loadDir loads a lens from a directory in the new format: lens.json (settings) +
-// extract.md + review.md (prompts). The lens.json is OPTIONAL — a lens with none rides
-// the defaults (name from the caller, no dimensions, no per-lens models) so a minimal
-// two-prompt directory still loads. But a legacy directory holding ONLY a single
-// lens.md (the pre-#75 sectioned format) is rejected with an actionable error rather
-// than silently mis-loaded: the format changed, and re-registering is the fix.
-func loadDir(dir, fallbackName string) (*Lens, error) {
-	extract, review, emerge, err := readPromptPair(dir)
+// extract.md + review.md (prompts). The name always comes from the caller: a `name` left
+// in lens.json is ignored. The lens.json is OPTIONAL — a lens with none rides the defaults
+// (no dimensions, no per-lens models) so a minimal two-prompt directory still loads. But a
+// legacy directory holding ONLY a single lens.md (the pre-#75 sectioned format) is
+// rejected with an actionable error rather than silently mis-loaded: the format changed,
+// and re-registering is the fix.
+func loadDir(dir, name string) (*Lens, error) {
+	extract, review, err := readPromptPair(dir)
 	if err != nil {
 		// Distinguish "old sectioned lens.md, no new prompt files" from a genuinely broken
 		// directory so the message tells the user exactly what to do.
 		if _, statErr := os.Stat(filepath.Join(dir, ExtractFile)); os.IsNotExist(statErr) {
 			if _, mdErr := os.Stat(filepath.Join(dir, "lens.md")); mdErr == nil {
-				return nil, fmt.Errorf("lens %q is in the old single-file format (lens.md); the format changed to %s + %s + %s — re-register it with `witness lens register %s <dir>`", fallbackName, ConfigFile, ExtractFile, ReviewFile, fallbackName)
+				return nil, fmt.Errorf("lens %q is in the old single-file format (lens.md); the format changed to %s + %s + %s — re-register it with `witness lens register %s <dir>`", name, ConfigFile, ExtractFile, ReviewFile, name)
 			}
 		}
 		return nil, err
 	}
-	// The name resolves by the registry's own rule, so loader and registry never disagree on
-	// a lens's identity.
-	name, err := store.ResolveLensName(dir, fallbackName)
-	if err != nil {
-		return nil, err
-	}
-	l := &Lens{Name: name, Extract: extract, Review: review, Emerge: emerge}
+	l := &Lens{Name: name, Extract: extract, Review: review}
 	// lens.json is optional; when present it supplies dimensions/runner/models.
 	if data, jerr := os.ReadFile(filepath.Join(dir, ConfigFile)); jerr == nil {
 		var cfg LensConfig
@@ -258,28 +241,22 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Backstop the reserved-name guard at the RESOLVED name. RegisterLens/EnableLens
-	// reject the registry name, but a lens.json `name` field can override that name
-	// (loadDir above) — so a lens registered under an innocent name could still resolve
-	// to the reserved "unified" identity and collide with the cross-lens profile portrait
-	// (profile/unified.md). This is the ultimate boundary where the resolved name is
-	// known, so enforce it here too rather than trust every caller to re-check. ("default"
-	// is NOT reserved since #44 slice 1a — it is an ordinary registered lens.)
-	if store.ReservedLensName(l.Name) {
-		return nil, fmt.Errorf("lens %q resolves to reserved name %q (its lens.json name impersonates the cross-lens 'unified' profile); rename it", name, l.Name)
+	// Backstop the reserved-name guard here, where every load passes: RegisterLens and
+	// EnableLens refuse the name, but a registry dir hand-made under it would otherwise
+	// write over the cross-lens portrait (profile/unified.md).
+	if store.ReservedLensName(name) {
+		return nil, fmt.Errorf("lens %q: that name is reserved (the cross-lens 'unified' profile); rename it", name)
 	}
-	l.Registered = name
 	return l, nil
 }
 
 // LoadFromDirUnchecked loads a candidate lens from an ARBITRARY directory path (not the
 // registry) for preview/testing — the `witness lens try` path. It parses the directory
-// the same way as a registered lens, but is intentionally LENIENT about identity: the
-// name falls back to the directory's basename, then the literal "candidate", so a
-// work-in-progress lens missing a lens.json name still previews. It does NOT apply the
-// reserved-name gate — a preview never writes to the archive, so an impersonating name
-// can't collide with anything (`lens try` displays a reserved one as "candidate"). It still
-// requires a non-empty extract.md (that is the prompt being previewed).
+// the same way as a registered lens; the name is the directory's basename, else the
+// literal "candidate". It does NOT apply the reserved-name gate — a preview never writes
+// to the archive, so a reserved name can't collide with anything (`lens try` displays one
+// as "candidate"). It still requires a non-empty extract.md (that is the prompt being
+// previewed).
 func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	base := strings.TrimSpace(filepath.Base(strings.TrimRight(dir, string(filepath.Separator))))
 	l, err := loadDir(dir, base)
@@ -290,35 +267,4 @@ func LoadFromDirUnchecked(dir string) (*Lens, error) {
 		l.Name = "candidate"
 	}
 	return l, nil
-}
-
-// DataName maps the name a lens is registered under (the one every command and MCP tool takes)
-// to the name the worker tags its observations, facets and profile with — the lens.json `name`,
-// which may differ (a corpus-example registered from a pre-F153 checkout mines as "regime").
-// Every surface that takes a lens name must pass it through here before touching data, or it
-// reads an empty lens — and a writer files rows under a name no review reads. A name that is not registered, or does not load, is returned as
-// given, so data that outlived its lens's registration stays readable by its own name.
-func DataName(st *store.Store, name string) string {
-	if !slices.Contains(st.RegisteredLenses(), name) {
-		return name
-	}
-	if l, err := LoadRegistered(name, st.LensesDir()); err == nil {
-		return l.Name
-	}
-	return name
-}
-
-// RegisteredName is DataName in reverse, for display: the registered name of the lens that
-// mines under `mined`, or `mined` itself when no registered lens does.
-func RegisteredName(st *store.Store, mined string) string {
-	reg := st.RegisteredLenses()
-	if slices.Contains(reg, mined) && DataName(st, mined) == mined {
-		return mined
-	}
-	for _, name := range reg {
-		if l, err := LoadRegistered(name, st.LensesDir()); err == nil && l.Name == mined {
-			return name
-		}
-	}
-	return mined
 }

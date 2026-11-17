@@ -16,8 +16,8 @@ import (
 )
 
 // Reviewer is the slow path: synthesize L1 observations into L2 facets, detecting
-// durable change across sessions. It is L2's main writer; the long-arc pass, the claim
-// pass, compaction and merge write it too (store.WriteFacets lists them).
+// durable change across sessions. It is L2's main writer; the claim pass, compaction
+// and merge write it too (store.WriteFacets lists them).
 //
 // Division of labor: the LLM judges *what is true now* and *what changed* (it sees
 // the observations + the current profile and proposes facet states). Deterministic
@@ -403,8 +403,8 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 
 // logEvent records the confidence change just applied to f, read off the version as WRITTEN:
 // its identity is f's (after resolveArchived, the survivor's — never the name the model used),
-// and To/ClockSeq are what that version now holds, so a seq-0 caller logs the clock knownClock
-// kept rather than the 0 it passed.
+// and To/ClockSeq are what that version now holds, so a caller whose seq is below the facet's
+// clock logs the clock knownClock kept rather than the seq it passed.
 func (r *Reviewer) logEvent(f *store.Facet, kind string, from float64, nowStr string) {
 	r.events = append(r.events, confidenceEvent(f, kind, from, nowStr))
 }
@@ -412,17 +412,10 @@ func (r *Reviewer) logEvent(f *store.Facet, kind string, from float64, nowStr st
 // knownClock is the decay clock a version should carry after an assertion at seq, given the
 // clock it (or the version it supersedes) already had.
 //
-// seq 0 means the CALLER has no clock information — the emergent long-arc pass, which has no
-// honest observation seq to stamp (see emergent.go). That is a reason not to START a clock,
-// never a reason to ERASE one: every branch of applyFacet used to write `ConfidenceSeq: seq`
-// unconditionally, so an arc landing on an established facet overwrote its real clock with 0,
-// which DecayedConfidence reads as "never decays". A new facet asserted with seq 0 still starts
-// at 0, exactly as the emergent comment documents; only an existing clock is protected.
-//
-// A real seq never moves the clock BACKWARDS either: an early window, or a non-fresh `lens
-// backfill` refolding from seq 0, re-reads observations older than the facet's last
-// confirmation, and stamping that lower seq would make DecayedConfidence charge the facet for
-// observations it had already been confirmed past.
+// An assertion never moves the clock BACKWARDS: an early window, or a non-fresh `lens backfill`
+// refolding from seq 0, re-reads observations older than the facet's last confirmation, and
+// stamping that lower seq would make DecayedConfidence charge the facet for observations it had
+// already been confirmed past.
 func knownClock(seq, prior int64) int64 {
 	return max(seq, prior)
 }
@@ -441,10 +434,8 @@ func knownClock(seq, prior int64) int64 {
 //     forever.
 //
 // Dimension and key are the facet's IDENTITY and value is its entire content, so an empty
-// one is not a weak assertion — it is not an assertion. The emergent path already applied
-// exactly this check on its own verify replies (emergent.go); this moves the rule to where
-// BOTH paths pass through. Confidence is deliberately NOT screened: 0 is a meaningful
-// "asserted but unsure", and clampConf already bounds it.
+// one is not a weak assertion — it is not an assertion. Confidence is deliberately NOT screened:
+// 0 is a meaningful "asserted but unsure", and clampConf already bounds it.
 //
 // Scope, stated plainly because the first bullet above invites the wrong inference: this guard
 // stops the L2 CORRUPTION, not the watermark advance. foldLensWindowed still stamps through the
@@ -452,9 +443,7 @@ func knownClock(seq, prior int64) int64 {
 // That is deliberate — withholding the stamp would make one bad review prompt re-fold the same
 // window forever, the wedge the drift-advances rule exists to prevent — and it is why the drop is
 // logged at WARN rather than swallowed: the log is the only signal that a prompt regression is
-// eating a lens's assertions. The emergent path chooses the opposite tradeoff (it withholds
-// markSeen until after WriteFacets, so an unwritten arc is re-proposed) because a re-proposed arc
-// costs one verify call, while a re-folded window costs a full review of the whole window.
+// eating a lens's assertions.
 func wellFormed(rf reviewedFacet) bool {
 	return strings.TrimSpace(rf.Dimension) != "" &&
 		strings.TrimSpace(rf.Key) != "" &&

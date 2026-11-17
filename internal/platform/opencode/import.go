@@ -452,15 +452,6 @@ func ReadTurns(ctx context.Context, db *sql.DB, sessionID string) ([]Turn, error
 	return out, rows.Err()
 }
 
-// TranscriptDigest computes a digest of the turn sequence, matching the import's L0 shape.
-func TranscriptDigest(turns []Turn) string {
-	entries := make([]platform.TranscriptEntry, len(turns))
-	for i, t := range turns {
-		entries[i] = platform.TranscriptEntry{Role: t.Role, Text: t.Text}
-	}
-	return platform.TranscriptDigest(entries)
-}
-
 // NewestActivity returns the newest COMPLETED turn (an `idle` record) over importable sessions.
 // `idle` marks a turn's end (storage §3) and does not touch `time_updated` (storage §4), so it is
 // never newer than what the turn-end import saw by more than the idle write; `time_updated` moves

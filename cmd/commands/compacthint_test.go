@@ -10,9 +10,9 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// hintArchive is an archive with one enabled lens, registered as `registered`, that mines under
-// `data` (its lens.json name), holding `active` active facets and `archived` archived ones.
-func hintArchive(t *testing.T, registered, data string, active, archived int) *store.Store {
+// hintArchive is an archive with one enabled lens `name` holding `active` active and `archived`
+// archived facets.
+func hintArchive(t *testing.T, name string, active, archived int) *store.Store {
 	t.Helper()
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
@@ -21,15 +21,15 @@ func hintArchive(t *testing.T, registered, data string, active, archived int) *s
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	if err := st.RegisterLens(registered, writeLensDir(t, data, "Extract prompt.", "Review prompt.")); err != nil {
+	if err := st.RegisterLens(name, writeLensDir(t, name, "Extract prompt.", "Review prompt.")); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnableLens(registered); err != nil {
+	if err := st.EnableLens(name); err != nil {
 		t.Fatal(err)
 	}
 	var fs []store.Facet
 	for i := 0; i < active+archived; i++ {
-		f := store.Facet{Lens: data, Dimension: "traits", Key: fmt.Sprintf("k%d", i),
+		f := store.Facet{Lens: name, Dimension: "traits", Key: fmt.Sprintf("k%d", i),
 			Versions: []store.FacetVersion{{Value: "v", Confidence: 0.5}}}
 		if i >= active {
 			f.ArchivedAt = "2026-11-01T00:00:00Z"
@@ -58,7 +58,7 @@ func TestCompactionNudges(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			st := hintArchive(t, "lens", "lens", tc.active, tc.archived)
+			st := hintArchive(t, "lens", tc.active, tc.archived)
 			if tc.baseline > 0 {
 				if err := st.SetMetaString(store.CompactBaselineKey("lens"), strconv.Itoa(tc.baseline)); err != nil {
 					t.Fatal(err)
@@ -78,20 +78,10 @@ func TestCompactionNudges(t *testing.T) {
 	}
 }
 
-// A lens can mine under a different name than it is registered as (corpus-example → regime): the
-// counts come from the data name, and the hint names the registered one, which compact --lens takes.
-func TestCompactionNudgeUsesTheRegisteredName(t *testing.T) {
-	st := hintArchive(t, "corpus", "regime", compactHintMin, 0)
-	got := compactionNudges(st)
-	if len(got) != 1 || got[0].Lens != "corpus" || got[0].command() != "witness compact --lens corpus" {
-		t.Fatalf("got %+v, want a hint for the registered name corpus", got)
-	}
-}
-
 // After a compaction the baseline is the active count it left, so the hint goes quiet until the
 // lens grows again; `lens backfill --fresh` (DeleteLensData) clears it with the lens's data.
 func TestCompactBaselineIsStampedAndClearedWithTheLensData(t *testing.T) {
-	st := hintArchive(t, "lens", "lens", 900, 0)
+	st := hintArchive(t, "lens", 900, 0)
 	stampCompactBaselines(st, activeLenses(st))
 	if got := st.MetaString(store.CompactBaselineKey("lens")); got != "900" {
 		t.Fatalf("baseline = %q, want 900", got)
@@ -108,7 +98,7 @@ func TestCompactBaselineIsStampedAndClearedWithTheLensData(t *testing.T) {
 }
 
 func TestStatusShowsTheCompactionHint(t *testing.T) {
-	hintArchive(t, "lens", "lens", 879, 0)
+	hintArchive(t, "lens", 879, 0)
 	out := captureStdout(t, func() {
 		if err := cmdDistillStatus(false); err != nil {
 			t.Fatal(err)

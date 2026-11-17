@@ -62,7 +62,7 @@ func TestForegroundReviewWritesMissingClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+	if ran, _, err := forceReviewTapped(st, &causeTap{}); err != nil || !ran {
 		t.Fatalf("review: ran=%v err=%v", ran, err)
 	}
 	fs, err := st.ReadFacets()

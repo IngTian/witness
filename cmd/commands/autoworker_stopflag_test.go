@@ -3,12 +3,12 @@ package commands
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/store"
 )
 
-// `worker stop --auto-only` (what the v1 OpenCode plugin ran on every dispose; a manual
-// `worker stop` latches the same flag) sets a DURABLE worker_stop_requested meta flag, and
+// A manual `worker stop` sets a DURABLE worker_stop_requested meta flag, and
 // cmdWorker refuses to run an AUTO worker while it is set. Only maybeSpawnAutoWorker (the
 // shared kick gate) and a MANUAL run clear it — so any caller that spawns `worker-run --auto`
 // itself no-ops forever after the first stop, silently freezing automatic distillation for
@@ -16,7 +16,7 @@ import (
 // clearing it).
 //
 // This locks the clear: the kick gate must reset the flag so a post-stop start works.
-func TestAutoWorkerKickClearsStopFlagAfterDispose(t *testing.T) {
+func TestAutoWorkerKickClearsStopFlagAfterStop(t *testing.T) {
 	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
 	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
 	t.Setenv("WITNESS_ASSETS", t.TempDir())
@@ -32,13 +32,22 @@ func TestAutoWorkerKickClearsStopFlagAfterDispose(t *testing.T) {
 	if err := st.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
 		t.Fatal(err)
 	}
+	// An armed wakeup of each mode: the stop must cancel both, or one resumes the stopped drain (G2).
+	for _, mode := range []string{"auto", "manual"} {
+		_ = st.SetMetaString(workerWakeupKey(mode), time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano))
+	}
 
-	// Dispose (OpenCode close) latches the durable stop flag.
-	if err := cmdDistillStop(true); err != nil {
-		t.Fatalf("stop --auto-only: %v", err)
+	// A plain `worker stop` latches the durable stop flag.
+	if err := cmdDistillStop(); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
 	if got := st.MetaString("worker_stop_requested"); got != "1" {
-		t.Fatalf("precondition: dispose should latch the stop flag, got %q", got)
+		t.Fatalf("precondition: a stop should latch the stop flag, got %q", got)
+	}
+	for _, mode := range []string{"auto", "manual"} {
+		if got := st.MetaString(workerWakeupKey(mode)); got != "" {
+			t.Fatalf("worker stop left the %s wakeup armed: %q", mode, got)
+		}
 	}
 
 	// The plugin's quiet-period start routes through the kick gate, which must CLEAR the

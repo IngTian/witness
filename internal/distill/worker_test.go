@@ -496,8 +496,8 @@ type failingEmbedder struct{}
 
 func (failingEmbedder) Embed(string) ([]float32, error) { return nil, fmt.Errorf("tokenizer panic") }
 
-// An observation that fails to embed is kept (mining is expensive) but is invisible to search and
-// long-arc clustering, and nothing re-embeds it — so the failure must at least reach witness.log.
+// An observation that fails to embed is kept (mining is expensive) but is invisible to search,
+// and nothing re-embeds it — so the failure must at least reach witness.log.
 func TestEmbedFailureIsLoggedForActiveAndMinedObs(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()

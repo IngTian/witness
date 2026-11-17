@@ -12,8 +12,8 @@ func TestPlumbingCommandsHidden(t *testing.T) {
 		t.Error("import must be hidden (plugin/hook plumbing, not a user verb)")
 	}
 	// But a person running it for Codex history must see --no-kick: codex-capture.md tells
-	// them to use it (#199 F046). --hook and --auto are the hooks' and plugin's plumbing.
-	for flag, hidden := range map[string]bool{"no-kick": false, "hook": true, "auto": true} {
+	// them to use it (#199 F046). --hook is the hooks' plumbing.
+	for flag, hidden := range map[string]bool{"no-kick": false, "hook": true} {
 		if f := imp.Flags().Lookup(flag); f == nil || f.Hidden != hidden {
 			t.Errorf("import --%s: want hidden=%v (flag %v)", flag, hidden, f)
 		}
@@ -42,13 +42,13 @@ func TestRootSurface(t *testing.T) {
 		}
 	}
 	// present:
-	for _, want := range []string{"profile", "status", "lens", "config", "ingest", "install", "wire", "unwire", "doctor", "export", "merge", "cleanup", "worker"} {
+	for _, want := range []string{"profile", "status", "lens", "config", "ingest", "install", "wire", "unwire", "doctor", "export", "merge", "worker"} {
 		if !visible[want] {
 			t.Errorf("expected visible command %q", want)
 		}
 	}
 	// gone from the visible front door:
-	for _, gone := range []string{"distill", "review", "version", "import"} {
+	for _, gone := range []string{"distill", "review", "version", "import", "cleanup"} {
 		if visible[gone] {
 			t.Errorf("%q must NOT be a visible top-level command anymore", gone)
 		}

@@ -150,9 +150,7 @@ type Compactor struct {
 	Runner    MineFunc
 	RunnerFor func(ln *lens.Lens) MineFunc
 
-	// BatchChars is the test seam for batch size; 0 → compactBatchChars, and production sets
-	// none. A per-lens override, if one is ever needed, goes in an optional lens file the way
-	// Emerge does.
+	// BatchChars is the test seam for batch size; 0 → compactBatchChars, and production sets none.
 	BatchChars int
 
 	// Progress, when set, is called as Plan's model calls complete. nil is silent.

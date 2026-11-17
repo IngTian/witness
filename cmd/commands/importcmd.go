@@ -21,7 +21,6 @@ func newImportCmd() *cobra.Command {
 	var agent string
 	var sessions []string
 	var quiet bool
-	var auto bool
 	var noKick bool
 	var hook bool
 	c := &cobra.Command{
@@ -34,7 +33,7 @@ func newImportCmd() *cobra.Command {
 			if hook {
 				return cmdImportHook(agent, os.Stdin)
 			}
-			return cmdImport(importOpts{agent: agent, sessions: sessions, quiet: quiet, auto: auto, noKick: noKick})
+			return cmdImport(importOpts{agent: agent, sessions: sessions, quiet: quiet, noKick: noKick})
 		},
 	}
 	c.Flags().StringVar(&agent, "agent", "", "agent to import from: "+importAgents(", "))
@@ -42,19 +41,17 @@ func newImportCmd() *cobra.Command {
 	_ = c.Flags().MarkHidden("hook")
 	c.Flags().StringArrayVar(&sessions, "session", nil, "native session id to import (repeatable)")
 	c.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
-	c.Flags().BoolVar(&auto, "auto", false, "use the automatic worker gate (only start if auto_distill is on and no worker is running)")
-	_ = c.Flags().MarkHidden("auto")
 	// --no-kick stays visible: docs/codex-capture.md tells people to use it for a capture-only
-	// history import, and `import --help` hid it (#199 F046). --hook/--auto are plumbing.
+	// history import, and `import --help` hid it (#199 F046). --hook is plumbing.
 	c.Flags().BoolVar(&noKick, "no-kick", false, "import L0 without starting a worker")
 	return c
 }
 
 // importOpts is `witness import`'s flags, as cobra parsed them.
 type importOpts struct {
-	agent               string
-	sessions            []string
-	quiet, auto, noKick bool
+	agent         string
+	sessions      []string
+	quiet, noKick bool
 }
 
 func cmdImport(o importOpts) error {
@@ -73,7 +70,7 @@ func cmdImport(o importOpts) error {
 	if !o.quiet { // --quiet is how the OpenCode plugin imports in the background: it stays silent
 		ctx, finish = importProgress(ctx, agent)
 	}
-	stats, kicked, err := runImport(ctx, agent, sessions, !o.noKick, o.auto)
+	stats, kicked, err := runImport(ctx, agent, sessions, !o.noKick)
 	finish()
 	if err != nil {
 		return err
@@ -143,7 +140,7 @@ var startImportProgress = startProgress
 
 var importWorkerSpawner = func() { spawnDetached("worker-run") }
 
-func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorker, auto bool) (platform.ImportStats, bool, error) {
+func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorker bool) (platform.ImportStats, bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return platform.ImportStats{}, false, err
@@ -167,9 +164,6 @@ func runImport(ctx context.Context, agent string, sessionIDs []string, kickWorke
 	pending, _ := st.PendingSessions(activeLensNames(st))
 	shouldRunWorker := len(pending) > 0 || st.ReviewDue(cfg)
 	if kickWorker && shouldRunWorker {
-		if auto {
-			return stats, maybeSpawnAutoWorker(st), nil
-		}
 		importWorkerSpawner()
 		return stats, true, nil
 	}

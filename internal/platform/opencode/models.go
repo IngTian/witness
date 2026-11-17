@@ -121,11 +121,15 @@ func (s *OpenCodeServer) providerEnvVars(ctx context.Context, provider string) [
 	return nil
 }
 
-// removeV1Runtime removes the v1 artifacts from <root>: a stale secret witness copied
-// (xdg/opencode/auth.json), plus a v1 DB and pid file nothing reads (opencode.db, opencode.db-wal,
-// opencode.db-shm, .witness-serve.pid). It keeps opencode-v2.db and everything else. An empty root
-// removes nothing: joined to "", those paths are the cwd's, and the worker's cwd is a user repo.
-func removeV1Runtime(runtimeRoot string) {
+// removeRetiredRuntime removes the runtime state no current witness reads from <root>: the v1
+// artifacts — a stale secret witness copied (xdg/opencode/auth.json), plus a v1 DB and pid file
+// (opencode.db, opencode.db-wal, opencode.db-shm, .witness-serve.pid) — and opencode-native, the
+// removed native-session cache: its manifests, plus any v0.13-era .snapshot.json exports and the
+// source-* copies of the user's opencode.db they were exported from. Its scratch sessions stay in
+// opencode-v2.db, unseen: reaping them needs the removed machinery. It keeps opencode-v2.db and
+// everything else. An empty root removes nothing: joined to "", those paths are the cwd's, and the
+// worker's cwd is a user repo.
+func removeRetiredRuntime(runtimeRoot string) {
 	if runtimeRoot == "" {
 		return
 	}
@@ -134,4 +138,5 @@ func removeV1Runtime(runtimeRoot string) {
 	_ = os.Remove(filepath.Join(runtimeRoot, "opencode.db-wal"))
 	_ = os.Remove(filepath.Join(runtimeRoot, "opencode.db-shm"))
 	_ = os.Remove(filepath.Join(runtimeRoot, ".witness-serve.pid"))
+	_ = os.RemoveAll(filepath.Join(runtimeRoot, "opencode-native"))
 }

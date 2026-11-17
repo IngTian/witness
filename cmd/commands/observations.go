@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/IngTian/witness/internal/embed"
-	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/IngTian/witness/internal/vector"
 	"github.com/spf13/cobra"
@@ -71,10 +70,9 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 		return err
 	}
 	defer st.Close()
-	// Observations carry the lens's mined name, which a registered lens may override. Read only
-	// that lens: Search filters by it anyway, and every other lens's embeddings cost ~5x the memory.
-	dataName := lens.DataName(st, lensName)
-	obs, err := st.ReadObservations(dataName)
+	// Read only that lens: Search filters by it anyway, and every other lens's embeddings cost
+	// ~5x the memory.
+	obs, err := st.ReadObservations(lensName)
 	if err != nil {
 		return err
 	}
@@ -86,7 +84,7 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	hits := vector.Search(obs, qv, dataName, k)
+	hits := vector.Search(obs, qv, lensName, k)
 	if asJSON {
 		out := observationSearchJSON{Lens: lensName, Query: query, Limit: k, Hits: []observationHitJSON{}}
 		for _, h := range hits {
@@ -107,7 +105,7 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 	}
 	renderObservationHits(lensName, query, hits,
 		slices.Contains(st.RegisteredLenses(), lensName), slices.Contains(st.LoadConfig().EnabledLenses, lensName),
-		func() store.EmptyReason { return st.WhyEmpty(dataName) })
+		func() store.EmptyReason { return st.WhyEmpty(lensName) })
 	return nil
 }
 

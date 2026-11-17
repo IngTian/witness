@@ -383,26 +383,6 @@ func tempStore(t *testing.T) *Store {
 	return s
 }
 
-func TestDistilledCountRoundTrip(t *testing.T) {
-	s := tempStore(t)
-	if got := s.DistilledCount("sess", LensDefault); got != 0 {
-		t.Fatalf("absent marker: want 0, got %d", got)
-	}
-	if err := s.MarkDistilled("sess", LensDefault, 7); err != nil {
-		t.Fatalf("MarkDistilled: %v", err)
-	}
-	if got := s.DistilledCount("sess", LensDefault); got != 7 {
-		t.Fatalf("after mark 7: want 7, got %d", got)
-	}
-	// Advancing the watermark overwrites, not appends.
-	if err := s.MarkDistilled("sess", LensDefault, 12); err != nil {
-		t.Fatalf("MarkDistilled advance: %v", err)
-	}
-	if got := s.DistilledCount("sess", LensDefault); got != 12 {
-		t.Fatalf("after advance: want 12, got %d", got)
-	}
-}
-
 // TestMarkDistilledIfCurrentGuardsStaleGeneration is the CAS primitive behind the
 // #49 C2 fix: the watermark advances only if the raw generation the caller mined
 // (its high raw.id) still exists.

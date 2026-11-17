@@ -3,10 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -197,45 +194,6 @@ func TestReadViewInputNeverReadsText(t *testing.T) {
 		field := noteType.Field(i)
 		if field.Name != expected {
 			t.Errorf("field %d: name = %q, want %q", i, field.Name, expected)
-		}
-	}
-}
-
-// TestWriteFileAtomicMode verifies that the written file is mode 0600 and replaces an
-// existing 0644 file's contents. On Windows, skip the mode check.
-func TestWriteFileAtomicMode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.txt")
-
-	// Create existing file with 0644
-	if err := os.WriteFile(path, []byte("old content"), 0644); err != nil {
-		t.Fatalf("create existing file: %v", err)
-	}
-
-	// Write new content atomically
-	newContent := []byte("new content")
-	if err := WriteFileAtomic(path, newContent); err != nil {
-		t.Fatalf("WriteFileAtomic: %v", err)
-	}
-
-	// Check content was replaced
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if string(got) != string(newContent) {
-		t.Errorf("content = %q, want %q", got, newContent)
-	}
-
-	// Check mode is 0600 (skip on Windows)
-	if runtime.GOOS != "windows" {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat: %v", err)
-		}
-		mode := info.Mode().Perm()
-		if mode != 0600 {
-			t.Errorf("mode = %o, want 0600", mode)
 		}
 	}
 }

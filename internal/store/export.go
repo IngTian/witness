@@ -19,10 +19,10 @@ import (
 //
 //   - config.toml — enabled lenses, runner binding, models. Restore without it and
 //     distillation is silently OFF until the user reconfigures.
-//   - lenses/ — the lens DEFINITIONS (lens.json + extract.md/review.md/emerge.md).
-//     Prompt text appears NOWHERE in the database, so a lens the user AUTHORED is
-//     simply gone. A bundled lens can be re-seeded from prompts/; a hand-written one
-//     cannot, and for a non-person corpus it is the most valuable thing in the install.
+//   - lenses/ — the lens DEFINITIONS (lens.json + extract.md/review.md). Prompt text appears
+//     NOWHERE in the database, so a lens the user AUTHORED is simply gone. A bundled lens can be
+//     re-seeded from prompts/; a hand-written one cannot, and for a non-person corpus it is the
+//     most valuable thing in the install.
 //   - profile/ — the L4 narrative. Derived from L2 facets and rebuilt whenever they
 //     change, so it is included only so a restored archive has a readable portrait
 //     before its next rebuild. A hand edit to profile/unified.md does NOT survive that

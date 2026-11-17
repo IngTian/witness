@@ -57,9 +57,9 @@ type openedRunner struct {
 //
 // The plumbing (store.Config.RunnerModels, a slice) already existed; this task fills it.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
-	// Every model call opens through here (worker, review + emergent, compact + claims, profile
-	// regeneration), so this is the one place to refuse an archive a newer witness wrote — before
-	// a call is paid for, not at the facet write after it (see store.ErrArchiveNewer).
+	// Every model call opens through here (worker, review, compact + claims, profile regeneration),
+	// so this is the one place to refuse an archive a newer witness wrote — before a call is paid
+	// for, not at the facet write after it (see store.ErrArchiveNewer).
 	if err := st.ArchiveNewer(); err != nil {
 		return nil, err
 	}
@@ -144,15 +144,6 @@ func (rs *runnerSet) RunFor(ln *lens.Lens) distill.MineFunc {
 	return brokenRun(name, or.err)
 }
 
-func (rs *runnerSet) NativeFor(ln *lens.Lens) bool {
-	or := rs.byName[distill.RunnerFor(rs.cfg, ln)]
-	if or == nil || or.runner == nil {
-		return false
-	}
-	s, ok := or.runner.(platform.NativeSessionSupport)
-	return ok && s.SupportsNativeSession()
-}
-
 // Close tears down every opened runner (each Close runs its own post-cleanup sweep). A
 // broken runtime (never opened) has nothing to close.
 func (rs *runnerSet) Close() {
@@ -186,11 +177,6 @@ func (e *runnerDownError) Error() string {
 // Claude-side default to an OpenCode runner would make its Open-time validation reject a name that
 // was never meant for it. The runner then falls back to its own default, and per-lens models are
 // supplied per call.
-//
-// Renamed from applyModelUnion, which took a `lenses []*lens.Lens` parameter it never referenced
-// (#148). The name and signature both advertised a union this function has never computed; nothing
-// is lost by dropping them, and a caller can no longer believe passing lenses here achieves
-// anything.
 func clearCrossRuntimeModels(rcfg *store.Config, name, defaultRunner string) {
 	if strings.TrimSpace(name) == strings.TrimSpace(defaultRunner) {
 		return // keep the configured default models; they belong to this runtime

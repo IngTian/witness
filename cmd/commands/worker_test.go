@@ -482,45 +482,17 @@ func TestManualWakeupRunsWhenAutoDistillIsDisabled(t *testing.T) {
 	}
 }
 
-func TestDistillStopAutoOnlyCancelsPendingAutoWakeupWithoutStoppingManual(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
+// The sole producer, scheduleWorkerWakeupWith, has passed <seconds> <stamp> <mode> since #18;
+// the shorter forms were compatibility for a pre-#18 producer.
+func TestWorkerWakeupTakesExactlyThreeArgs(t *testing.T) {
+	c := newInternalWorkerWakeupCmd()
+	for _, args := range [][]string{{"0"}, {"0", "stamp"}} {
+		if err := c.Args(c, args); err == nil || !strings.Contains(err.Error(), "accepts 3 arg(s)") {
+			t.Errorf("worker-wakeup %v: got %v, want the 3-argument refusal", args, err)
+		}
 	}
-	defer st.Close()
-	_ = st.SetMetaString("worker_mode", "manual")
-	_ = st.SetMetaString(workerWakeupKey("auto"), time.Now().UTC().Format(time.RFC3339))
-	if err := cmdDistillStop(true); err != nil {
-		t.Fatal(err)
-	}
-	if got := st.MetaString(workerWakeupKey("auto")); got != "" {
-		t.Fatalf("pending auto wakeup not cleared: %q", got)
-	}
-	if got := st.MetaString("worker_stop_requested"); got != "" {
-		t.Fatalf("manual worker should not receive stop request, got %q", got)
-	}
-}
-
-func TestDistillStopAutoOnlyCancelsWorkerBeforeItStarts(t *testing.T) {
-	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = st.SetMetaString("worker_mode", "auto-pending")
-	st.Close()
-
-	if err := cmdDistillStop(true); err != nil {
-		t.Fatal(err)
-	}
-	st, err = store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	if got := st.MetaString("worker_stop_requested"); got != "1" {
-		t.Fatalf("pending auto worker stop request = %q, want 1", got)
+	if err := c.Args(c, []string{"1", "2026-11-16T00:00:00Z", "auto"}); err != nil {
+		t.Errorf("the producer's 3-argument form was refused: %v", err)
 	}
 }
 
@@ -537,7 +509,7 @@ func TestDistillStopWhenNoWorkerRunning(t *testing.T) {
 	_ = st.SetMetaString("worker_pid", "999999") // crash residue: a dead worker's stale pid
 	st.Close()
 
-	if err := cmdDistillStop(false); err != nil {
+	if err := cmdDistillStop(); err != nil {
 		t.Fatalf("distill stop with no live worker must not error, got %v", err)
 	}
 }
@@ -781,7 +753,7 @@ func TestForegroundReviewClearsTheSourcesBackoff(t *testing.T) {
 	if err := st.SetMetaString("sources_retry_after", time.Now().Add(6*time.Hour).UTC().Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
-	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+	if ran, _, err := forceReviewTapped(st, &causeTap{}); err != nil || !ran {
 		t.Fatalf("review: ran=%v err=%v", ran, err)
 	}
 	if got := st.MetaString("sources_retry_after"); got != "" {
@@ -798,7 +770,7 @@ func TestForegroundReviewIgnoresAndClearsTheReviewBackoff(t *testing.T) {
 	defer st.Close()
 	_ = st.SetReviewRetryAfter(time.Now().Add(6 * time.Hour))
 	_ = st.SetMetaString("review_retries", "3")
-	if ran, _, err := forceReviewTapped(st, false, &causeTap{}); err != nil || !ran {
+	if ran, _, err := forceReviewTapped(st, &causeTap{}); err != nil || !ran {
 		t.Fatalf("review: ran=%v err=%v", ran, err)
 	}
 	if st.MetaString("review_ts") == "" {

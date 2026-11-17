@@ -55,9 +55,8 @@ const (
 	metaWorkerHeartbeat     = "worker_heartbeat"
 	metaWorkerCurrent       = "worker_current"
 
-	workerModeAuto        = "auto"
-	workerModeManual      = "manual"
-	workerModeAutoPending = "auto-pending" // spawned by the auto gate, lock not yet claimed
+	workerModeAuto   = "auto"
+	workerModeManual = "manual"
 )
 
 // workerEmbedder loads the worker's embedder. A var only so a test can build the miner without the
@@ -117,7 +116,6 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 		slog.Warn("worker: could not contain children in a job; a Windows `worker stop` may orphan them", "err", err)
 	}
 	if auto && st.MetaString(metaWorkerStopRequested) == "1" {
-		_ = st.SetMetaString(metaWorkerMode, "")
 		return true, nil
 	}
 	if !auto {
@@ -128,7 +126,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// running/stopping sub-state is DERIVED (see cmdDistillStatus) from the flock plus
 	// worker_stop_requested — storing it too was the redundant third source. The keys
 	// below are the ones still doing work: worker_pid is `worker stop`'s kill target,
-	// worker_mode drives `worker stop --auto-only`, and worker_current/heartbeat are
+	// worker_mode picks the retry wakeup's mode (workerWakeMode), and worker_current/heartbeat are
 	// diagnostic display (read only while the flock says a worker is live).
 	_ = st.SetMetaString(metaWorkerPID, strconv.Itoa(os.Getpid()))
 	if auto {
@@ -336,7 +334,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 				return nil
 			}
 			slog.Info("worker startup: embedding model ready", "took", time.Since(t1).String())
-			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens, NativeFor: rs.NativeFor}
+			miner = &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn, RunFor: runForLens}
 		}
 		return miner
 	}

@@ -38,7 +38,7 @@ allow a growing transcript to append only its new tail; edits to earlier message
 rebuild that session's raw rows and reset its mining watermark. Import state and
 raw rows commit in one transaction. A complete final JSONL record is accepted
 even without a trailing newline; an incomplete live tail is deferred until the
-file changes. Cleanup removes the corresponding importer state as well.
+file changes.
 
 A malformed header or terminated row is isolated to its source file. Its existing
 raw rows and watermark remain intact, and other sessions continue importing.

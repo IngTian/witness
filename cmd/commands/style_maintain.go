@@ -14,7 +14,7 @@ import (
 )
 
 // Screen helpers for the commands that CHANGE something — wire/unwire, the worker, compact, merge,
-// import, ingest, export, cleanup. They build on style.go's vocabulary; nothing here decides color
+// import, ingest, export. They build on style.go's vocabulary; nothing here decides color
 // on its own except the stderr variants, which follow useColorErr because errors go to stderr.
 
 // resultRow is one part of a multi-part result: "  <glyph> " + kvRow(name, value, note). Without

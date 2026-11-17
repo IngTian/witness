@@ -128,54 +128,6 @@ func TestPortraitSourcesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMigrateV13CreatesPortraitSources(t *testing.T) {
-	s := tempStore(t) // fully migrated to current
-	// Simulate a v13 DB by dropping the table and rolling back the version
-	for _, stmt := range []string{
-		`DROP TABLE IF EXISTS portrait_sources`,
-		`PRAGMA user_version=13`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil {
-			t.Fatalf("seed v13 schema (%q): %v", stmt, err)
-		}
-	}
-
-	// Open (via migrate) brings it to current (portrait_sources added in v14)
-	if err := migrate(s.db); err != nil {
-		t.Fatalf("migrate v13->current: %v", err)
-	}
-
-	// Verify user_version=current
-	var v int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
-		t.Fatal(err)
-	}
-	if v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	// Verify the table exists
-	var hasTable int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='portrait_sources'`).Scan(&hasTable); err != nil {
-		t.Fatal(err)
-	}
-	if hasTable != 1 {
-		t.Errorf("portrait_sources table exists = %d, want 1", hasTable)
-	}
-
-	// A second open is a no-op
-	if err := migrate(s.db); err != nil {
-		t.Fatalf("second migrate: %v", err)
-	}
-	var v2 int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&v2); err != nil {
-		t.Fatal(err)
-	}
-	if v2 != schemaVersion {
-		t.Errorf("after second migrate: user_version = %d, want %d", v2, schemaVersion)
-	}
-}
-
 func TestMergeDoesNotCopyPortraitSources(t *testing.T) {
 	base := newArch(t)
 	inc := newArch(t)

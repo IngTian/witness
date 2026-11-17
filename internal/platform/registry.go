@@ -68,8 +68,8 @@ func ValidateRunnerName(name string) error {
 // first-class type, replacing the bare "claude"/"opencode" strings that were re-parsed
 // across the engine (issue #21). Identity is all a platform must supply; everything else
 // is an optional capability found by type assertion — InputRenderer, Importer, Capturer,
-// RunnerProvider, NativeSessionSource — because Go has no default methods, and a required
-// method every adapter answers with the same one-liner is the boilerplate this replaces.
+// RunnerProvider — because Go has no default methods, and a required method every adapter
+// answers with the same one-liner is the boilerplate this replaces.
 //
 // Two axes, deliberately kept separate (see the two registry lookups below):
 //   - PER-SESSION owner: which platform PRODUCED a session (by id prefix / the

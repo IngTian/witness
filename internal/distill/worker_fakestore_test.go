@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
-	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -21,7 +20,6 @@ type fakeQueue struct {
 	staged    map[string][]store.Observation
 	obs       []store.Observation       // appended L1
 	distilled map[string]map[string]int // session -> lens -> watermark
-	platform  map[string]string         // session -> owning platform ("" = unknown)
 
 	appendCalls int
 	readObs     int // ReadObservations calls: a tripwire, the Worker must never load L1
@@ -34,7 +32,6 @@ func newFakeQueue() *fakeQueue {
 		rawHigh:   map[string]int64{},
 		staged:    map[string][]store.Observation{},
 		distilled: map[string]map[string]int{},
-		platform:  map[string]string{},
 	}
 }
 
@@ -51,7 +48,7 @@ func (q *fakeQueue) DrainStaged(session string) ([]store.Observation, int64, err
 	s := q.staged[session]
 	return s, int64(len(s)), nil
 }
-func (q *fakeQueue) SessionPlatform(session string) string { return q.platform[session] }
+func (q *fakeQueue) SessionPlatform(session string) string { return "" }
 
 // --- watermark / readiness ---
 func (q *fakeQueue) DistilledCount(session, lens string) int {
@@ -220,80 +217,5 @@ func TestDrainDoesNotReadTheObservationCorpus(t *testing.T) {
 	}
 	if len(q.obs) != n {
 		t.Errorf("a re-commit wrote %d observations, want %d (obs_id is unique)", len(q.obs), n)
-	}
-}
-
-func TestCommitMiningFinalizesNativeForksOnlyForCurrentGeneration(t *testing.T) {
-	q := newFakeQueue()
-	q.rawHigh["current"] = 7
-	q.rawHigh["stale"] = 9
-	w := &Worker{Store: q}
-	finalized := 0
-	native := func(session string) *platform.NativeSession {
-		n := &platform.NativeSession{Session: session, RawHigh: 7, Total: 1, Lens: "default", Input: "chunk"}
-		n.SetFinalizer(func() error {
-			finalized++
-			return nil
-		})
-		return n
-	}
-	result := func(session string) *SessionMining {
-		return &SessionMining{
-			Session:   session,
-			Total:     1,
-			RawHighID: 7,
-			Lenses: []LensMining{{
-				Lens:   "default",
-				Native: []*platform.NativeSession{native(session)},
-			}},
-		}
-	}
-	if err := w.CommitMining(result("current")); err != nil {
-		t.Fatal(err)
-	}
-	if finalized != 1 {
-		t.Fatalf("current generation finalizers=%d, want 1", finalized)
-	}
-	if err := w.CommitMining(result("stale")); err != nil {
-		t.Fatal(err)
-	}
-	if finalized != 1 {
-		t.Fatalf("stale generation finalized retained fork: %d", finalized)
-	}
-}
-
-func TestMineSessionPassesCapturedTranscriptDigestToNativeRunner(t *testing.T) {
-	q := newFakeQueue()
-	const session = "opencode:native"
-	q.platform[session] = platform.AgentOpenCode
-	q.rawHigh[session] = 2
-	q.raw[session] = []store.RawRecord{
-		{Session: session, Seq: 0, Role: "user", Text: "hello"},
-		{Session: session, Seq: 1, Role: "assistant", Text: "answer"},
-	}
-	want := platform.TranscriptDigest([]platform.TranscriptEntry{{Role: "user", Text: "hello"}, {Role: "assistant", Text: "answer"}})
-	seen := ""
-	w := &Worker{
-		Store:    q,
-		Embedder: fakeEmbedder{},
-		Lenses:   []*lens.Lens{{Name: "default", Extract: "mine", Dimensions: []string{"thinking"}}},
-		Config:   store.Config{},
-		NativeFor: func(*lens.Lens) bool {
-			return true
-		},
-		Run: func(ctx context.Context, _, _, _ string) (string, error) {
-			native := platform.NativeSessionFromContext(ctx)
-			if native == nil {
-				t.Fatal("native context missing")
-			}
-			seen = native.Digest
-			return "[]", nil
-		},
-	}
-	if _, err := w.MineSession(context.Background(), session, nil); err != nil {
-		t.Fatal(err)
-	}
-	if seen != want {
-		t.Fatalf("native digest=%s, want %s", seen, want)
 	}
 }

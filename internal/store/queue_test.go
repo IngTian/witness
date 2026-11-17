@@ -5,12 +5,24 @@ import (
 	"testing"
 )
 
-// `witness cleanup` deliberately keeps L1 while reclaiming L0. A later `lens backfill
-// --fresh` then deletes those observations on the promise "Mined observations are
-// re-created from them" — but the re-mine enumerates candidate sessions FROM `raw`, so a
-// session with no raw left is never offered and its observations are destroyed
-// permanently. OrphanedL0ObservationCount lets the CLI warn about that class BEFORE the
-// irreversible delete (mirroring the existing warning for hand-recorded 'active' obs).
+// dropL0 recreates what the cleanup command witness had through v0.13 left behind: the session's
+// L0, progress and session meta gone, its L1 kept.
+func dropL0(t *testing.T, s *Store, session string) {
+	t.Helper()
+	for _, table := range []string{"raw", "progress", "session_meta"} {
+		if _, err := s.db.Exec("DELETE FROM "+table+" WHERE session = ?", session); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The cleanup command witness had through v0.13 kept L1 while reclaiming L0, and an archive
+// it pruned still holds that state. A later `lens backfill --fresh` then deletes those
+// observations on the promise "Mined observations are re-created from them" — but the
+// re-mine enumerates candidate sessions FROM `raw`, so a session with no raw left is never
+// offered and its observations are destroyed permanently. OrphanedL0ObservationCount lets
+// the CLI warn about that class BEFORE the irreversible delete (mirroring the existing
+// warning for hand-recorded 'active' obs).
 func TestOrphanedL0ObservationCount(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AppendRaw(RawRecord{Session: "kept", Seq: 0, TS: "2030-01-01T00:00:00Z", Role: "user", Text: "recent"})
@@ -22,20 +34,18 @@ func TestOrphanedL0ObservationCount(t *testing.T) {
 		{ID: "o_other", Lens: "sibling", Session: "pruned", Observation: "another lens", Source: "mined"},
 	})
 
-	// Before any cleanup every mined obs still has its L0.
+	// Before dropL0 every mined obs still has its L0.
 	if got := s.OrphanedL0ObservationCount(LensDefault); got != 0 {
-		t.Fatalf("before cleanup: want 0 orphaned, got %d", got)
+		t.Fatalf("before dropL0: want 0 orphaned, got %d", got)
 	}
 
-	// `witness cleanup` reclaims the idle session's raw, keeping L1.
-	if _, _, err := s.PruneSessionsBefore("2025-01-01T00:00:00Z"); err != nil {
-		t.Fatal(err)
-	}
+	// Drop the session's L0 the way the cleanup command witness had through v0.13 did, keeping L1.
+	dropL0(t, s, "pruned")
 
 	// Exactly the MINED obs of the pruned session counts. The 'active' one is already
 	// covered by ActiveObservationCount (don't double-warn), and a sibling lens is separate.
 	if got := s.OrphanedL0ObservationCount(LensDefault); got != 1 {
-		t.Fatalf("after cleanup: want 1 orphaned mined obs for %q, got %d", LensDefault, got)
+		t.Fatalf("after dropL0: want 1 orphaned mined obs for %q, got %d", LensDefault, got)
 	}
 	if got := s.OrphanedL0ObservationCount("sibling"); got != 1 {
 		t.Fatalf("sibling lens is counted independently: got %d, want 1", got)
@@ -87,7 +97,7 @@ func TestConfidenceLogCount(t *testing.T) {
 // SQLITE_BUSY_SNAPSHOT (517) — a conflict busy_timeout CANNOT retry, because there is no
 // lock to wait for; the snapshot is simply stale. witness is multi-process (a capture hook
 // per user turn, a draining worker, an MCP server), so these must survive a concurrent
-// commit. The read-then-write sites are StampReview, PruneSessionsBefore and the facet write
+// commit. The read-then-write sites are StampReview and the facet write
 // (WriteFacetsPruned, under WriteFacets/WriteFacetsLogged: it reads user_version before its
 // REPLACE); the other transactions in this package write first, which takes the lock
 // immediately, so they are already safe. (DeleteObservation was one until it stopped reading the
@@ -99,7 +109,6 @@ func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 		run  func(*Store) error
 	}{
 		{"StampReview", func(s *Store) error { return s.StampReview() }},
-		{"PruneSessionsBefore", func(s *Store) error { _, _, err := s.PruneSessionsBefore("2025-01-01T00:00:00Z"); return err }},
 		{"WriteFacetsPruned", func(s *Store) error {
 			return s.WriteFacetsPruned([]Facet{{Lens: LensDefault, Dimension: "d", Key: "k",
 				Versions: []FacetVersion{{Value: "v", BecauseOf: []string{"o1"}}}}}, nil, nil)
@@ -140,10 +149,6 @@ func TestReadThenWriteTxSurvivesConcurrentWriter(t *testing.T) {
 // DeleteLensData (the `lens backfill --fresh` drop) must clear the lens's DERIVED
 // bookkeeping too, not just its observations and facets. Those meta keys are caches ABOUT
 // the deleted data, so leaving them makes a rebuilt lens look already-processed:
-//   - emerge_seen:<lens>:<sig> keys a cluster by its member obs_ids, and obs_id is
-//     sha1(session|lens|text) — a CONTENT hash — so a re-mine of unchanged text
-//     regenerates identical ids and an identical signature. The emergent pass would skip
-//     re-verifying an arc whose facets --fresh just deleted, and nothing would restore them.
 //   - profile_sig:<lens> would vouch for an L4 narrative derived from facets that are gone.
 //
 // A SIBLING lens's state must survive untouched.
@@ -157,10 +162,7 @@ func TestDeleteLensDataClearsDerivedState(t *testing.T) {
 		{Lens: LensDefault, Dimension: "d", Key: "k", Versions: []FacetVersion{{Value: "v", ValidFrom: "t"}}},
 		{Lens: "sibling", Dimension: "d", Key: "k", Versions: []FacetVersion{{Value: "v", ValidFrom: "t"}}},
 	})
-	_ = s.SetMetaString("emerge_seen:"+LensDefault+":sig1", `{"outcome":"accepted","members":9}`)
-	_ = s.SetMetaString("emerge_seen:"+LensDefault+":sig2", `{"outcome":"rejected","members":4}`)
 	_ = s.SetMetaString("profile_sig:"+LensDefault, "old-facet-signature")
-	_ = s.SetMetaString("emerge_seen:sibling:sigX", `{"outcome":"accepted","members":3}`)
 	_ = s.SetMetaString("profile_sig:sibling", "sibling-signature")
 	_ = s.SetMetaString("review_ts", "2026-01-01T00:00:00Z") // a GLOBAL key, must survive
 
@@ -169,43 +171,15 @@ func TestDeleteLensDataClearsDerivedState(t *testing.T) {
 	}
 
 	for _, gone := range []string{
-		"emerge_seen:" + LensDefault + ":sig1",
-		"emerge_seen:" + LensDefault + ":sig2",
 		"profile_sig:" + LensDefault,
 	} {
 		if got := s.MetaString(gone); got != "" {
 			t.Errorf("--fresh must clear derived key %q, still %q", gone, got)
 		}
 	}
-	for _, kept := range []string{"emerge_seen:sibling:sigX", "profile_sig:sibling", "review_ts"} {
+	for _, kept := range []string{"profile_sig:sibling", "review_ts"} {
 		if got := s.MetaString(kept); got == "" {
 			t.Errorf("must NOT touch %q", kept)
 		}
-	}
-}
-
-// A lens name containing a LIKE wildcard must be escaped, or '_' (which matches ANY
-// character) would let one lens's --fresh delete a sibling's emergent bookkeeping.
-func TestDeleteLensDataEscapesLikeWildcardsInLensName(t *testing.T) {
-	s := tempStore(t)
-	_ = s.SetMetaString("emerge_seen:my_lens:sig", "target")
-	_ = s.SetMetaString("emerge_seen:myXlens:sig", "innocent bystander")
-	_ = s.SetMetaString("emerge_seen:my%lens:sig", "percent lens")
-
-	if _, _, err := s.DeleteLensData("my_lens"); err != nil {
-		t.Fatal(err)
-	}
-	if got := s.MetaString("emerge_seen:my_lens:sig"); got != "" {
-		t.Errorf("the named lens's key must be cleared, still %q", got)
-	}
-	if got := s.MetaString("emerge_seen:myXlens:sig"); got == "" {
-		t.Error("'_' must be escaped: a lens whose name merely matches the wildcard was wiped")
-	}
-	// And a '%' in the name must not turn into "match everything".
-	if _, _, err := s.DeleteLensData("my%lens"); err != nil {
-		t.Fatal(err)
-	}
-	if got := s.MetaString("emerge_seen:my%lens:sig"); got != "" {
-		t.Errorf("the percent-named lens's key must be cleared, still %q", got)
 	}
 }
