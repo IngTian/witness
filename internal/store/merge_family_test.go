@@ -78,6 +78,36 @@ func recorded(t *testing.T, a *arch, id, session string) {
 	}
 }
 
+// minedState is each mined observation's session, and each session's watermark for the lens
+// "default".
+func minedState(t *testing.T, a *arch) (mined map[string]string, progress map[string]int) {
+	t.Helper()
+	mined, progress = map[string]string{}, map[string]int{}
+	ids, err := queryStrings(context.Background(), a.st.db, `SELECT obs_id || '|' || session FROM observations WHERE source <> 'active'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range ids {
+		id, sess, _ := strings.Cut(s, "|")
+		mined[id] = sess
+	}
+	for _, sess := range heldSessions(t, a) {
+		if n := a.st.DistilledCount(sess, "default"); n > 0 {
+			progress[sess] = n
+		}
+	}
+	return mined, progress
+}
+
+func heldSessions(t *testing.T, a *arch) []string {
+	t.Helper()
+	s, err := queryStrings(context.Background(), a.st.db, `SELECT DISTINCT session FROM raw ORDER BY session`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 // recordedOn maps each active observation and staged row to the sessions it is filed under. A
 // staged row whose payload names another session than its column (DrainStaged trusts the payload)
 // reads "column|payload".
@@ -101,11 +131,11 @@ func recordedOn(t *testing.T, a *arch) map[string][]string {
 	return out
 }
 
-// A duplicate's transcript, and what was mined from it, can go: ours holds the turns and mining
-// re-derives the rest. What it recorded in-session cannot: its active observations and staged rows
-// are re-filed to the session holding its turns. Here that is OURS, under an id the incoming
-// archive occupies with another transcript, which the merge moves on to a minted id; rows
-// re-filed to that id in the copy would have gone with it, onto turns they were never recorded on.
+// A duplicate's transcript can go, since ours holds the turns; what it carries cannot, and is
+// re-filed to the session holding its turns, here its in-session (active) observations and staged
+// rows, the only copies there are. That session is OURS, under an id the incoming archive occupies
+// with another transcript, which the merge moves on to a minted id; rows re-filed to that id in
+// the copy would have gone with it, onto turns they were never recorded on.
 func TestMergeRefilesWhatADuplicateRecordedOntoOurCopy(t *testing.T) {
 	base, inc := newArch(t), newArch(t)
 	base.raw("file:feed@11111111", "user:X1", "user:X2")
@@ -133,7 +163,8 @@ func TestMergeRefilesWhatADuplicateRecordedOntoOurCopy(t *testing.T) {
 }
 
 // The same when the duplicate is a second incoming copy: what it recorded arrives on the twin that
-// is kept.
+// is kept, and so does its watermark where it is the higher one (the turns are the same: the
+// lower one would mine the rest again, beside what the dropped twin mined of them).
 func TestMergeRefilesWhatADuplicateRecordedOntoItsTwin(t *testing.T) {
 	base, inc := newArch(t), newArch(t)
 	base.raw("file:feed", "user:a")
@@ -146,6 +177,11 @@ func TestMergeRefilesWhatADuplicateRecordedOntoItsTwin(t *testing.T) {
 	inc.raw(copyID, "user:a", "assistant:c")
 	inc.raw(twin, "user:a", "assistant:c")
 	recorded(t, inc, "twin", twin)
+	for s, n := range map[string]int{copyID: 1, twin: 2} {
+		if err := inc.st.MarkDistilled(s, "default", n); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	rep := base.merge(inc.export(), true)
 	if rep.Sessions.Duplicates != 1 {
@@ -154,6 +190,9 @@ func TestMergeRefilesWhatADuplicateRecordedOntoItsTwin(t *testing.T) {
 	want := map[string][]string{"twin": {copyID}, "twin-staged": {copyID}}
 	if got := recordedOn(t, base); !reflect.DeepEqual(got, want) {
 		t.Errorf("recorded rows filed as %v, want %v", got, want)
+	}
+	if n := base.st.DistilledCount(copyID, "default"); n != 2 {
+		t.Errorf("%s has progress %d, want the twin's 2", copyID, n)
 	}
 }
 
@@ -176,6 +215,196 @@ func TestMergeDropsACopyWeAlreadyHoldWhenItsIDIsClaimed(t *testing.T) {
 	}
 	if rep.Sessions.Duplicates != 1 {
 		t.Errorf("want the copy of [X1 X2] counted as a duplicate, got %+v", rep.Sessions)
+	}
+}
+
+// A native incoming session whose transcript is a prefix of an incoming copy that grew from it is
+// not a duplicate: a prefix is not a copy. Both arrive, even into an empty archive. Dropping the
+// native as a "duplicate" of the longer copy lost what was mined from it, its progress and its
+// importer keys, so a facet cited an observation that existed nowhere and the next ingest
+// re-created the session and mined it again.
+func TestMergeKeepsANativeSessionNextToALongerCopy(t *testing.T) {
+	t.Run("into an empty archive", func(t *testing.T) {
+		base, inc := newArch(t), newArch(t)
+		inc.raw("file:feed", "user:a")
+		inc.raw(mintedID("file:feed", "user:a"), "user:a", "user:b")
+		inc.obs("n1", "file:feed", "default", "2026-03-01T00:00:00Z")
+		if err := inc.st.MarkDistilled("file:feed", "default", 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := inc.st.SetMetaString(FileImportKeysNS+":file:feed", `["r1:h"]`); err != nil {
+			t.Fatal(err)
+		}
+		inc.cursor("default", inc.highWater())
+		inc.facets(mf("d", "k", "v", 0.9, 1, "n1"))
+
+		rep := base.merge(inc.export(), true)
+		if got, want := heldTranscripts(t, base), heldTranscripts(t, inc); !reflect.DeepEqual(got, want) {
+			t.Errorf("a merge into an empty archive holds %v, the archive merged %v (%+v)", got, want, rep.Sessions)
+		}
+		if rep.Sessions.New != 2 || rep.Sessions.Duplicates != 0 {
+			t.Errorf("want both sessions new and no duplicate, got %+v", rep.Sessions)
+		}
+		obs, _ := base.st.ReadObservations("default")
+		if !slices.ContainsFunc(obs, func(o Observation) bool { return o.ID == "n1" && o.Session == "file:feed" }) {
+			t.Errorf("mined n1 lost while a facet cites it: %v", idsOf(obs))
+		}
+		if n := base.st.DistilledCount("file:feed", "default"); n != 1 {
+			t.Errorf("file:feed progress %d, want 1", n)
+		}
+		if base.st.MetaString(FileImportKeysNS+":file:feed") == "" {
+			t.Errorf("file:feed's importer keys lost")
+		}
+	})
+	// Y ingests record 1 as [q], merges Z's [a] (minted as a copy) and Z's growth [a b], then
+	// re-ingests record 1, edited to a: Y holds [a] natively beside the copy [a b].
+	t.Run("after a real history", func(t *testing.T) {
+		y, z, b := newArch(t), newArch(t), newArch(t)
+		y.raw("file:feed", "user:q")
+		z.raw("file:feed", "user:a")
+		y.merge(z.export(), true)
+		z.raw("file:feed", "user:b")
+		y.merge(z.export(), true)
+		editLast(t, y, "file:feed", "a")
+		y.obs("y-mined", "file:feed", "default", "2026-03-01T00:00:00Z")
+		if err := y.st.MarkDistilled("file:feed", "default", 1); err != nil {
+			t.Fatal(err)
+		}
+
+		rep := b.merge(y.export(), true)
+		if got, want := heldTranscripts(t, b), heldTranscripts(t, y); !reflect.DeepEqual(got, want) {
+			t.Errorf("B holds %v after taking Y's archive into an empty one, Y holds %v (%+v)", got, want, rep.Sessions)
+		}
+		obs, _ := b.st.ReadObservations("default")
+		if !slices.ContainsFunc(obs, func(o Observation) bool { return o.ID == "y-mined" }) {
+			t.Errorf("y-mined lost: %v", idsOf(obs))
+		}
+	})
+}
+
+// The same transcript under two incoming ids is one transcript, whatever ours holds: here ours
+// holds a prefix of it, so the first twin is appended to ours and, with that member claimed, the
+// second arrived beside it as a session of its own. What the dropped twin recorded in-session
+// lands where the kept one does.
+func TestMergeHoldsAnExactTwinOnceEvenWhenAppended(t *testing.T) {
+	for _, other := range []string{"file:feed@ffffffff", "file:feed@00000000"} { // after, before the minted id
+		t.Run(other, func(t *testing.T) {
+			base, inc := newArch(t), newArch(t)
+			base.raw("file:feed", "user:a")
+			inc.raw(mintedID("file:feed", "user:a", "user:b"), "user:a", "user:b")
+			inc.raw(other, "user:a", "user:b")
+			recorded(t, inc, "r-other", other)
+
+			rep := base.merge(inc.export(), true)
+			held := heldTranscripts(t, base)
+			if !reflect.DeepEqual(held, map[string][]string{"file:feed": {"a", "b"}}) || rep.Sessions.Duplicates != 1 {
+				t.Errorf("want [a b] held once, appended to file:feed, and one duplicate; got %v (%+v)", held, rep.Sessions)
+			}
+			if got, want := recordedOn(t, base), map[string][]string{"r-other": {"file:feed"}, "r-other-staged": {"file:feed"}}; !reflect.DeepEqual(got, want) {
+				t.Errorf("recorded rows filed as %v, want %v", got, want)
+			}
+		})
+	}
+	// Y's [a x] diverges from Z's [a b], which Y mints as a copy; Y then edits record 2 to b.
+	t.Run("after a real history", func(t *testing.T) {
+		y, z, base := newArch(t), newArch(t), newArch(t)
+		y.raw("file:feed", "user:a", "user:x")
+		z.raw("file:feed", "user:a", "user:b")
+		y.merge(z.export(), true)
+		editLast(t, y, "file:feed", "b")
+		base.raw("file:feed", "user:a")
+
+		rep := base.merge(y.export(), true)
+		if n := copiesOf(heldTranscripts(t, base))["a b"]; n != 1 {
+			t.Errorf("[a b] held %d times: %v (%+v)", n, heldTranscripts(t, base), rep.Sessions)
+		}
+	})
+}
+
+// Of two incoming twins the native one is kept, even when ours holds the other's id: keeping that id
+// (with another transcript here) re-minted the twin under its hash, so the native session, the id
+// its importer knows, was gone with its importer keys and the next ingest would re-create it.
+func TestMergeKeepsTheNativeOfTwoTwins(t *testing.T) {
+	base, inc := newArch(t), newArch(t)
+	base.raw("file:feed@11111111", "user:x")
+	inc.raw("file:feed", "user:a")
+	inc.raw("file:feed@11111111", "user:a")
+	if err := inc.st.SetMetaString(FileImportKeysNS+":file:feed", `["r1:h"]`); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := base.merge(inc.export(), true)
+	want := map[string][]string{"file:feed": {"a"}, "file:feed@11111111": {"x"}}
+	if got := heldTranscripts(t, base); !reflect.DeepEqual(got, want) || rep.Sessions.Duplicates != 1 {
+		t.Errorf("want %v and one duplicate, got %v (%+v)", want, got, rep.Sessions)
+	}
+	if base.st.MetaString(FileImportKeysNS+":file:feed") == "" {
+		t.Errorf("file:feed's importer keys lost")
+	}
+}
+
+// Ours holds the incoming [X1 X2] under X, an id the incoming archive claims with another
+// transcript, so the incoming copy is a duplicate. The other side mined and reviewed it, and we
+// never mined X: its observation and progress must arrive on X, as they do when nothing claims X,
+// or the facet citing it dangles and X is mined again (its evidence counted twice). If we mined
+// X too, theirs is the second wording of what we hold and stays behind.
+func TestMergeKeepsTheOtherSidesMiningWhenWeHoldTheTurns(t *testing.T) {
+	const x = "file:feed@11111111"
+	for _, c := range []struct {
+		name             string
+		claimed, oursToo bool
+	}{{"available", false, false}, {"claimed", true, false}, {"claimed and mined here", true, true}} {
+		t.Run(c.name, func(t *testing.T) {
+			base, inc := newArch(t), newArch(t)
+			base.raw(x, "user:X1", "user:X2")
+			want := []string{"m1"}
+			if c.oursToo {
+				base.obs("o1", x, "default", "2026-02-01T00:00:00Z")
+				if err := base.st.MarkDistilled(x, "default", 2); err != nil {
+					t.Fatal(err)
+				}
+				want = []string{"o1"}
+			}
+			if c.claimed {
+				inc.raw(x, "user:X1", "user:X3")
+			}
+			inc.raw("file:feed@00000000", "user:X1", "user:X2")
+			inc.obs("m1", "file:feed@00000000", "default", "2026-03-01T00:00:00Z")
+			if err := inc.st.MarkDistilled("file:feed@00000000", "default", 2); err != nil {
+				t.Fatal(err)
+			}
+			inc.cursor("default", inc.highWater())
+			inc.facets(mf("d", "k", "v", 0.9, 1, "m1"))
+
+			rep := base.merge(inc.export(), true)
+			var onX []string
+			obs, _ := base.st.ReadObservations("default")
+			for _, o := range obs {
+				if o.Session == x {
+					onX = append(onX, o.ID)
+				}
+			}
+			if !reflect.DeepEqual(onX, want) {
+				t.Errorf("observations on %s: %v, want %v; all here: %v (%+v)", x, onX, want, idsOf(obs), rep.Sessions)
+			}
+			if !c.oursToo {
+				if f := base.facet("default", "d", "k"); f == nil || !slices.ContainsFunc(obs, func(o Observation) bool { return o.ID == f.Versions[0].BecauseOf[0] }) {
+					t.Errorf("the facet's citation does not resolve: %v; observations %v", f, idsOf(obs))
+				}
+				if o := rep.Observations; o.Reviewed != 1 || o.Unreviewed != 0 {
+					t.Errorf("m1 was reviewed on the incoming side and must arrive below the cursor: %+v", o)
+				}
+			}
+			if n := base.st.DistilledCount(x, "default"); n != 2 {
+				t.Errorf("%s has progress %d, want 2", x, n)
+			}
+			if pending, _ := base.st.PendingSessions([]string{"default"}); slices.Contains(pending, x) {
+				t.Errorf("%s is pending again: %v", x, pending)
+			}
+			if again := base.merge(inc.export(), true); !again.Empty() {
+				t.Errorf("merging the same export again: %+v observations=%+v", again.Sessions, again.Observations)
+			}
+		})
 	}
 }
 
@@ -331,30 +560,38 @@ func TestMergeRefusesAMintedIDTheIncomingArchiveHoldsDifferently(t *testing.T) {
 
 // TestMergeFamilyInvariants plays fixed random histories of three and four machines that ingest one
 // named file feed (sharing its first record, starting their own, or starting empty), append to it,
-// edit its last record in place (as `witness ingest` does) or not, record active observations and
-// staged rows on it now and then, and merge each other in random order. After every merge: no
-// transcript of either side is lost (each is a prefix of a session afterwards); none is held twice
-// (appends and edits write fresh text, so only a merge can make a second copy); none is folded
-// (every session is a prefix of a state some feed really had); every recorded row of ours stays
-// where it was, and every one of theirs arrives on a session holding the turns of the session it
-// was on; the dry run reported exactly what the merge did; and merging the same export again is
-// empty and changes nothing.
+// edit its last record in place (as `witness ingest` does) or not, with fresh text or, with reuse,
+// as another copy there has it, record active observations and staged rows on it, mine one of their
+// sessions now and then, and merge each other in random order. After every merge: no transcript of
+// either side is lost (each is a prefix of a session afterwards); the merge adds no second copy of
+// one; none is folded (every session is a prefix of a state some feed really had); a native
+// session of theirs is gone only for a session holding exactly its turns, or one of ours that held
+// them already; every recorded row and mined observation of ours stays where it was, and every one
+// of theirs arrives on a session holding the turns of the session it was on (a mined one may stay
+// behind only where ours mined such a session itself), as does their progress; the dry run
+// reported exactly what the merge did; and merging the same export again is empty and changes
+// nothing.
 func TestMergeFamilyInvariants(t *testing.T) {
 	// 30 ops a history. Besides seed 1 of each kind, the first seeds whose history broke an earlier
 	// classifySessions: the one before #223's fix lost a minted copy as its own duplicate in
 	// 3/plain 32, 3/edits 16, 4/plain 8 and 4/edits 7; the first fix appended a re-merged transcript
 	// to itself in 3/edits 37 and held a copy twice in 4/edits 57; the second lost what a dropped
-	// duplicate recorded in 3/edits 145 and 4/plain 156. A seed names a history only for this
-	// mergeHistory: change how it draws and the seeds name others.
+	// duplicate recorded in 3/edits 145 and 4/plain 156; the third lost what one had mined in
+	// 3/reuse 75. A seed names a history only for this mergeHistory: change how it draws and the
+	// seeds name others.
 	const steps = 30
 	for _, c := range []struct {
-		machines int
-		edits    bool
-		seeds    []int64
-	}{{3, false, []int64{1, 32}}, {3, true, []int64{1, 16, 37, 145}}, {4, false, []int64{1, 8, 156}}, {4, true, []int64{1, 7, 57}}} {
+		machines     int
+		edits, reuse bool
+		seeds        []int64
+	}{
+		{3, false, false, []int64{1, 32}}, {3, true, false, []int64{1, 16, 37, 145}},
+		{4, false, false, []int64{1, 8, 156}}, {4, true, false, []int64{1, 7, 57}},
+		{3, true, true, []int64{75}}, {4, true, true, []int64{1}},
+	} {
 		for _, seed := range c.seeds {
-			t.Run(fmt.Sprintf("machines=%d/edits=%v/seed=%d", c.machines, c.edits, seed), func(t *testing.T) {
-				if broke := mergeHistory(t, seed, c.machines, steps, c.edits); broke != "" {
+			t.Run(fmt.Sprintf("machines=%d/edits=%v/reuse=%v/seed=%d", c.machines, c.edits, c.reuse, seed), func(t *testing.T) {
+				if broke := mergeHistory(t, seed, c.machines, steps, c.edits, c.reuse); broke != "" {
 					t.Error(broke)
 				}
 			})
@@ -364,10 +601,12 @@ func TestMergeFamilyInvariants(t *testing.T) {
 
 // mergeHistory plays one history and returns the first broken invariant, with the ops that led to
 // it, or "".
-func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) string {
+func mergeHistory(t *testing.T, seed int64, machines, steps int, edits, reuse bool) string {
 	ctx := context.Background()
 	r := rand.New(rand.NewSource(seed))
-	rec := rand.New(rand.NewSource(-seed)) // its own stream, so a seed's ops are the same with or without it
+	// Recording, mining and reusing a text draw from streams of their own, so a seed's other ops are
+	// the same with or without them.
+	rec, mine, pick := rand.New(rand.NewSource(-seed)), rand.New(rand.NewSource(seed+1<<40)), rand.New(rand.NewSource(seed+2<<40))
 	names := []string{"A", "B", "C", "D"}[:machines]
 	ar := map[string]*arch{}
 	legit := [][]string{{"a"}} // every state some machine's feed really had
@@ -398,10 +637,38 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) str
 			recorded(t, ar[m], id, "file:feed")
 			ops = append(ops, m+".feed records "+id)
 		}
+		// And some machine's worker mines one of its sessions, copies included, up to its end: so a
+		// session can arrive mined on one side and unmined on the other.
+		m := names[mine.Intn(machines)]
+		if sessions := heldSessions(t, ar[m]); len(sessions) > 0 {
+			s := sessions[mine.Intn(len(sessions))]
+			if n := ar[m].st.RawCount(s); ar[m].st.DistilledCount(s, "default") < n {
+				id := fmt.Sprintf("%s%d-mined", m, step)
+				ar[m].obs(id, s, "default", "2026-03-01T00:00:00Z")
+				if err := ar[m].st.MarkDistilled(s, "default", n); err != nil {
+					t.Fatal(err)
+				}
+				ops = append(ops, m+" mines "+s+" as "+id)
+			}
+		}
 		if r.Intn(3) == 0 {
 			m := names[r.Intn(machines)]
 			text := fmt.Sprintf("%s%d", m, step)
 			if edits && ar[m].st.RawCount("file:feed") > 1 && r.Intn(3) == 0 {
+				if reuse && pick.Intn(2) == 0 {
+					// The record edited the way another copy here has it (two machines made the same
+					// edit): the feed can now equal a copy, or be a prefix of one.
+					n := ar[m].st.RawCount("file:feed")
+					var alt []string
+					for _, s := range heldSessions(t, ar[m]) {
+						if turns := rawTexts(t, ar[m].st, s); s != "file:feed" && len(turns) >= n {
+							alt = append(alt, turns[n-1])
+						}
+					}
+					if len(alt) > 0 {
+						text = alt[pick.Intn(len(alt))]
+					}
+				}
 				editLast(t, ar[m], "file:feed", text)
 				ops = append(ops, m+".feed edit-last "+text)
 			} else {
@@ -416,6 +683,8 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) str
 		ops = append(ops, x+" <- "+y)
 		ours, theirs := heldTranscripts(t, ar[x]), heldTranscripts(t, ar[y])
 		recOurs, recTheirs := recordedOn(t, ar[x]), recordedOn(t, ar[y])
+		minedOurs, progOurs := minedState(t, ar[x])
+		minedTheirs, progTheirs := minedState(t, ar[y])
 		export := ar[y].export()
 		dry, err := ar[x].st.Merge(ctx, export, false, mergeNow)
 		if err != nil {
@@ -436,8 +705,9 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) str
 				}
 			}
 		}
+		// Only an edit that writes a text back can make a second copy locally; a merge never adds one.
 		for k, n := range copiesOf(after) {
-			if n > 1 {
+			if n > max(1, copiesOf(ours)[k]) {
 				return broke("%s holds [%s] %d times: %v", x, k, n, after)
 			}
 		}
@@ -462,6 +732,50 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits bool) str
 				if !slices.ContainsFunc(recAfter[id], func(on string) bool { return isPrefix(theirs[s], after[on]) }) {
 					return broke("%s's recorded %s on %s %v is on %v in %s, which lacks those turns: %v", y, id, s, theirs[s], recAfter[id], x, after)
 				}
+			}
+		}
+		// What the other side mined arrives on a session holding those turns, or stays behind only
+		// because ours mined such a session itself (dropSharedMined: it is a second wording of what
+		// ours holds, and ours's watermark wins).
+		minedAfter, progAfter := minedState(t, ar[x])
+		oursMined := map[string]bool{}
+		for _, s := range minedOurs {
+			oursMined[s] = true
+		}
+		for s := range progOurs {
+			oursMined[s] = true
+		}
+		holding := func(turns []string, ok func(on string) bool) bool {
+			for on, h := range after {
+				if isPrefix(turns, h) && ok(on) {
+					return true
+				}
+			}
+			return false
+		}
+		for id, s := range minedOurs {
+			if minedAfter[id] != s {
+				return broke("%s's mined %s left %s: now on %q", x, id, s, minedAfter[id])
+			}
+		}
+		for id, s := range minedTheirs {
+			if _, ok := minedOurs[id]; ok {
+				continue
+			}
+			if on, ok := minedAfter[id]; ok && !isPrefix(theirs[s], after[on]) || !ok && !holding(theirs[s], func(on string) bool { return oursMined[on] }) {
+				return broke("%s's mined %s on %s %v is on %q in %s, which lacks those turns or never mined them: %v", y, id, s, theirs[s], on, x, after)
+			}
+		}
+		for s, n := range progTheirs {
+			if !holding(theirs[s], func(on string) bool { return progAfter[on] >= n || oursMined[on] }) {
+				return broke("%s's progress %d on %s %v is on no session of %s holding those turns: %v %v", y, n, s, theirs[s], x, progAfter, after)
+			}
+		}
+		// A native session leaves only for a session that holds it exactly, or one of ours that
+		// held its turns already.
+		for s, turns := range theirs {
+			if s == sessionFamily(s) && after[s] == nil && copiesOf(after)[strings.Join(turns, " ")] == 0 && !heldIn(turns, ours) {
+				return broke("%s's native %s %v was removed from %s, which holds no copy of it: %v", y, s, turns, x, after)
 			}
 		}
 		snap := snapshotArchive(t, ar[x].st)
