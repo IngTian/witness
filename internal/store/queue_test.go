@@ -5,7 +5,8 @@ import (
 	"testing"
 )
 
-// dropL0 recreates what the cleanup command witness had through v0.13 left behind: the session's L0, progress and session meta gone, its L1 kept.
+// dropL0 recreates what the cleanup command witness had through v0.13 left behind: the session's
+// L0, progress and session meta gone, its L1 kept.
 func dropL0(t *testing.T, s *Store, session string) {
 	t.Helper()
 	for _, table := range []string{"raw", "progress", "session_meta"} {
@@ -15,12 +16,13 @@ func dropL0(t *testing.T, s *Store, session string) {
 	}
 }
 
-// the cleanup command witness had through v0.13 kept L1 while reclaiming L0, and an archive it pruned still holds that state. A later `lens backfill
-// --fresh` then deletes those observations on the promise "Mined observations are
-// re-created from them" — but the re-mine enumerates candidate sessions FROM `raw`, so a
-// session with no raw left is never offered and its observations are destroyed
-// permanently. OrphanedL0ObservationCount lets the CLI warn about that class BEFORE the
-// irreversible delete (mirroring the existing warning for hand-recorded 'active' obs).
+// The cleanup command witness had through v0.13 kept L1 while reclaiming L0, and an archive
+// it pruned still holds that state. A later `lens backfill --fresh` then deletes those
+// observations on the promise "Mined observations are re-created from them" — but the
+// re-mine enumerates candidate sessions FROM `raw`, so a session with no raw left is never
+// offered and its observations are destroyed permanently. OrphanedL0ObservationCount lets
+// the CLI warn about that class BEFORE the irreversible delete (mirroring the existing
+// warning for hand-recorded 'active' obs).
 func TestOrphanedL0ObservationCount(t *testing.T) {
 	s := tempStore(t)
 	_ = s.AppendRaw(RawRecord{Session: "kept", Seq: 0, TS: "2030-01-01T00:00:00Z", Role: "user", Text: "recent"})

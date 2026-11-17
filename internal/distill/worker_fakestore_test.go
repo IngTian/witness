@@ -20,7 +20,6 @@ type fakeQueue struct {
 	staged    map[string][]store.Observation
 	obs       []store.Observation       // appended L1
 	distilled map[string]map[string]int // session -> lens -> watermark
-	platform  map[string]string         // session -> owning platform ("" = unknown)
 
 	appendCalls int
 	readObs     int // ReadObservations calls: a tripwire, the Worker must never load L1
@@ -33,7 +32,6 @@ func newFakeQueue() *fakeQueue {
 		rawHigh:   map[string]int64{},
 		staged:    map[string][]store.Observation{},
 		distilled: map[string]map[string]int{},
-		platform:  map[string]string{},
 	}
 }
 
@@ -50,7 +48,7 @@ func (q *fakeQueue) DrainStaged(session string) ([]store.Observation, int64, err
 	s := q.staged[session]
 	return s, int64(len(s)), nil
 }
-func (q *fakeQueue) SessionPlatform(session string) string { return q.platform[session] }
+func (q *fakeQueue) SessionPlatform(session string) string { return "" }
 
 // --- watermark / readiness ---
 func (q *fakeQueue) DistilledCount(session, lens string) int {

@@ -9,7 +9,8 @@ import (
 	"testing"
 )
 
-// Since F3 a lens has one name; a `name` left in lens.json is ignored, and `lens register` and `doctor` say so.
+// Since F3 a lens has one name; a `name` left in lens.json is ignored, and `lens register` and
+// `doctor` say so.
 
 // cmd injects the wire command the CLI prints and a refresh.
 func TestMCPGetsTheWireCommand(t *testing.T) {

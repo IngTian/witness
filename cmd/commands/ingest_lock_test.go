@@ -8,12 +8,12 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// applyIngestSession reads a session's stored key list AND its raw row count, then writes
-// both back. Unserialized, a concurrent raw mutation (a second `witness ingest`) desynchronizes oldKeys[i] from ReadRaw()[i], and the
-// positional update then writes one record's text over a DIFFERENT record's row —
-// corrupting an already-durable record. cmdIngest therefore holds ImportLock("file")
-// across the whole read-modify-write, mirroring the OpenCode importer's use of the same
-// primitive for the same hazard.
+// applyIngestSession reads a session's stored key list AND its raw row count, then writes both
+// back. Unserialized, a concurrent raw mutation (a second `witness ingest`) desynchronizes
+// oldKeys[i] from ReadRaw()[i], and the positional update then writes one record's text over a
+// DIFFERENT record's row — corrupting an already-durable record. cmdIngest therefore holds
+// ImportLock("file") across the whole read-modify-write, mirroring the OpenCode importer's use
+// of the same primitive for the same hazard.
 //
 // This asserts the WIRING: with the lock already held (as a concurrent witness process
 // would hold it), cmdIngest must DECLINE rather than proceed unserialized. Corrupting an

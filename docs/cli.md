@@ -16,7 +16,9 @@ The visible front door, exactly as `witness --help` groups it:
 
 Capture, the automatic worker runs, and the MCP server are **internal** entry points invoked by
 Claude Code, OpenCode and Codex, not typed by hand. `witness worker …` is the operator side of
-that worker, and `witness import` is hidden plugin and hook plumbing. Two jobs happen only when you run them: distilling while `auto_distill = false` (`witness worker run`) and importing Codex history from before you wired it (`witness import --agent codex`).
+that worker, and `witness import` is hidden plugin and hook plumbing. Two jobs happen only when
+you run them: distilling while `auto_distill = false` (`witness worker run`) and importing Codex
+history from before you wired it (`witness import --agent codex`).
 
 - `witness profile [lens]` — print the narrative profile (default: the unified portrait).
 - `witness view [--no-open] [--out <path>]` — write the archive as one self-contained HTML page
@@ -40,7 +42,11 @@ that worker, and `witness import` is hidden plugin and hook plumbing. Two jobs h
 - `witness observations search <query> [--lens <lens>] [-k N]` — semantic search over observations.
 - `witness observations delete <obs_id>` — prune a wrong observation. It is removed now; facets that rested only on it
   are retired at the next review, and nothing is re-read.
-- `witness worker review` — force an L2 review and regenerate L4 profiles from existing observations. Review normally runs on its own schedule (`review_every` / `review_poignancy`), so reaching for this by hand is the exception. After a failed review the schedule waits before it tries again (5 min, doubling up to 6 h; the next successful review resets it). This command runs regardless.
+- `witness worker review` — force an L2 review and regenerate L4 profiles from existing
+  observations. Review normally runs on its own schedule (`review_every` / `review_poignancy`),
+  so reaching for this by hand is the exception. After a failed review the schedule waits before
+  it tries again (5 min, doubling up to 6 h; the next successful review resets it). This command
+  runs regardless.
 - `witness lens register|deregister|enable|disable|list` — manage lenses.
 - `witness lens show <name>` — print one lens's settings and a prompt excerpt (`--prompts` prints
   both prompts in full).
@@ -156,7 +162,8 @@ lines, each naming a registered lens that runs on every session:
 lens = math
 ```
 
-Raw transcripts are kept for good: `lens backfill` and `lens try` re-mine from them, so there is no retention setting and no prune command.
+Raw transcripts are kept for good: `lens backfill` and `lens try` re-mine from them, so there is
+no retention setting and no prune command.
 
 ---
 

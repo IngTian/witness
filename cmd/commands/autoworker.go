@@ -12,14 +12,14 @@ import (
 // point: it runs the SAME gate the capture hooks use (maybeSpawnAutoWorker), rather
 // than spawning `worker-run --auto` directly.
 //
-// Why it exists: `worker stop` latches a DURABLE
-// `worker_stop_requested` meta flag, and an auto worker refuses to run while it is set
-// (cmdWorker) — only maybeSpawnAutoWorker and a MANUAL run clear it. A caller that spawns
-// `worker-run --auto` itself therefore no-ops forever after the first stop, silently freezing
-// automatic distillation for an OpenCode-only user (a Claude Code user is rescued incidentally
-// by their capture hook clearing it). The v1 plugin stopped the worker on every dispose, which is how this was found; the v2 plugin stops no worker, but a manual stop still
-// latches. Routing the plugin's quiet-period start through this command keeps the flag's
-// clear-on-intentional-start contract in ONE place.
+// Why it exists: `worker stop` latches a DURABLE `worker_stop_requested` meta flag, and an
+// auto worker refuses to run while it is set (cmdWorker) — only maybeSpawnAutoWorker and a
+// MANUAL run clear it. A caller that spawns `worker-run --auto` itself therefore no-ops
+// forever after the first stop, silently freezing automatic distillation for an OpenCode-only
+// user (a Claude Code user is rescued incidentally by their capture hook clearing it). The v1
+// plugin stopped the worker on every dispose, which is how this was found; the v2 plugin stops
+// no worker, but a manual stop still latches. Routing the plugin's quiet-period start through
+// this command keeps the flag's clear-on-intentional-start contract in ONE place.
 func newInternalWorkerKickCmd() *cobra.Command {
 	return &cobra.Command{Use: "worker-kick", Hidden: true, Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {

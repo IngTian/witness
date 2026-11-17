@@ -24,12 +24,12 @@ kept. Each row carries a 384-d embedding for semantic search.
 
 ## facets — derived, bi-temporal (L2)
 
-Tables `facets` + `facet_versions`. Evolving named attributes within a lens+dimension,
-written by the review fold, compaction, the claim pass and `witness merge`. A facet's
-ordered `facet_versions` rows ARE its change history; the version with `valid_to == ''` is current.
-Old versions are kept, never deleted — they are the trajectory. A facet is in the live profile only
-while `archived_at == ''`: compaction and `merge` archive a facet into another (`merged_into`)
-rather than delete it. How confidence moves and decays is in
+Tables `facets` + `facet_versions`. Evolving named attributes within a lens+dimension, written by
+the review fold, compaction, the claim pass and `witness merge`. A facet's ordered `facet_versions`
+rows ARE its change history; the version with `valid_to == ''` is current. Old versions are kept,
+never deleted — they are the trajectory. A facet is in the live profile only while
+`archived_at == ''`: compaction and `merge` archive a facet into another (`merged_into`) rather than
+delete it. How confidence moves and decays is in
 [how it works](../docs/how-it-works.md#confidence-and-why-it-moves-on-its-own).
 
 ### The invalidation rule (why this stays honest)

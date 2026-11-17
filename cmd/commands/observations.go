@@ -70,7 +70,8 @@ func cmdObservationSearch(query, lensName string, k int, asJSON bool) error {
 		return err
 	}
 	defer st.Close()
-	// Read only that lens: Search filters by it anyway, and every other lens's embeddings cost ~5x the memory.
+	// Read only that lens: Search filters by it anyway, and every other lens's embeddings cost
+	// ~5x the memory.
 	obs, err := st.ReadObservations(lensName)
 	if err != nil {
 		return err

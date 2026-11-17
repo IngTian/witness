@@ -743,7 +743,8 @@ func TestMergeRefusesInvalidLensNames(t *testing.T) {
 	}
 }
 
-// Every importer's namespace must be on the list: merge carries and drops a session's importer state only through it.
+// Every importer's namespace must be on the list: merge carries and
+// drops a session's importer state only through it.
 func TestPerSessionMetaNamespacesListsEveryImporter(t *testing.T) {
 	for _, ns := range []string{CodexImportStateNS, OpenCodeImportKeysNS, FileImportKeysNS} {
 		if !slices.Contains(PerSessionMetaNamespaces, ns) {

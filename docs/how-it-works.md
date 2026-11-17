@@ -48,12 +48,13 @@ correctly. Every place that shows a confidence shows this current value: `witnes
 <lens>`, the agent-facing `get_facets` tool, and the portrait. Only `--json` reports the stored
 value as of the facet's last confirmation, because that is the record the decay is computed from.
 `witness facets <lens> --expand <dimension/key>` unfolds everything that was merged into a facet.
+
 Every confidence change to a facet — a review that raised, lowered or rewrote it, or a compaction
-that merged it with other facets — is recorded with the date and what caused it. The history starts
-at the upgrade (earlier changes were overwritten in
-place and cannot be recovered), lives in the archive, and travels with `witness export <path>
---all`. `witness merge` does not carry the other archive's history: facets that arrive from it
-start without one, and confidence it adopts from them is not recorded.
+that merged it with other facets — is recorded with the date and what caused it. The history
+starts at the upgrade (earlier changes were overwritten in place and cannot be recovered), lives
+in the archive, and travels with `witness export <path> --all`. `witness merge` does not carry the
+other archive's history: facets that arrive from it start without one, and confidence it adopts
+from them is not recorded.
 
 ### Lenses
 

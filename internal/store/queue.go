@@ -133,20 +133,19 @@ func (q *queue) MarkDistilled(session, lens string, count int) error {
 // the exact generation the worker mined — proven by the highest raw.id it read
 // (rawHighID) still being present. It reports whether the write happened.
 //
-// Why this exists (issue #49 C2): MarkDistilled is a blind upsert of a COUNT
-// captured at the start of a mine. That count assumes raw is append-only. It isn't
-// always: an OpenCode history rewrite/edit takes the replace path (DELETE raw +
-// DELETE progress + re-INSERT the new turns), under a DIFFERENT lock than the worker. If such a delete lands mid-mine,
-// a trailing blind MarkDistilled would RESURRECT the just-deleted progress row with
-// a stale count, silently marking never-mined turns as done. The guard closes that:
-// after a replace the old rawHighID no longer exists, the UPDATE/INSERT matches no
-// row, nothing is written, progress stays absent, and the pending query re-offers
-// the session so it re-mines the new generation from scratch. The wasted mine is
-// discarded — correctness over the (rare, racy) wasted work.
+// Why this exists (issue #49 C2): MarkDistilled is a blind upsert of a COUNT captured at the
+// start of a mine. That count assumes raw is append-only. It isn't always: an OpenCode history
+// rewrite/edit takes the replace path (DELETE raw + DELETE progress + re-INSERT the new
+// turns), under a DIFFERENT lock than the worker. If such a delete lands mid-mine, a trailing
+// blind MarkDistilled would RESURRECT the just-deleted progress row with a stale count,
+// silently marking never-mined turns as done. The guard closes that: after a replace the old
+// rawHighID no longer exists, the UPDATE/INSERT matches no row, nothing is written, progress
+// stays absent, and the pending query re-offers the session so it re-mines the new generation
+// from scratch. The wasted mine is discarded — correctness over the (rare, racy) wasted work.
 //
-// Runtime-agnostic: it guards EVERY session (Claude Code + OpenCode) with one code
-// path. On the append-only Claude path the mined rawHighID always still exists, so
-// the guard always passes — free insurance there, an active fix on the replace paths that can delete raw under a mine.
+// Runtime-agnostic: it guards EVERY session (Claude Code + OpenCode) with one code path. On the
+// append-only Claude path the mined rawHighID always still exists, so the guard always passes —
+// free insurance there, an active fix on the replace paths that can delete raw under a mine.
 //
 // It is CommitLensDistillation with no observations and one lens, so the NothingToDo path
 // and the mining commit share ONE generation guard: a second copy of that SQL would let a
@@ -363,8 +362,9 @@ func (q *queue) ActiveObservationCount(lens string) int {
 }
 
 // OrphanedL0ObservationCount reports how many of a lens's MINED observations belong to a
-// session whose raw transcript (L0) no longer exists — because the cleanup command witness had through v0.13 reclaimed
-// it (in this archive, or in one merged into it). That command kept L1, so these are perfectly good observations whose SOURCE is gone.
+// session whose raw transcript (L0) no longer exists — because the cleanup command witness had
+// through v0.13 reclaimed it (in this archive, or in one merged into it). That command kept
+// L1, so these are perfectly good observations whose SOURCE is gone.
 //
 // They are the second class of obs a `lens backfill --fresh` destroys irrecoverably, and
 // the more surprising one: the re-mine enumerates candidate sessions FROM `raw`

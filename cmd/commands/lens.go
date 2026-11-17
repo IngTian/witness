@@ -406,8 +406,9 @@ func lensBackfill(st *store.Store, name string, fresh, assumeYes bool) error {
 		defer releaseFresh() // safety net for the error/abort returns below
 		obsAll, facetsN := st.LensDataCounts(name)
 		active := st.ActiveObservationCount(name)
-		// The SECOND non-reproducible class: mined obs whose session's L0 is gone (the cleanup command witness had through v0.13 reclaimed L0 and kept L1). The re-mine enumerates candidates
-		// from `raw`, so those sessions are never offered and their obs never come back.
+		// The SECOND non-reproducible class: mined obs whose session's L0 is gone (the cleanup command
+		// witness had through v0.13 reclaimed L0 and kept L1). The re-mine enumerates candidates from
+		// `raw`, so those sessions are never offered and their obs never come back.
 		orphaned := st.OrphanedL0ObservationCount(name)
 		confLog := st.ConfidenceLogCount(name)
 		if !assumeYes {
@@ -591,7 +592,8 @@ func lensShow(name string, full bool) error {
 // excerpt and line count for each prompt, so a glance fits on screen. The full text is
 // one flag away (`--prompts`), pointed to on the hint line.
 //
-// The settings rows are config list --lens's rows, so the same data reads the same way, effective values included.
+// The settings rows are config list --lens's rows, so the same data reads the same way,
+// effective values included.
 func renderLensCard(name string, l *lens.Lens, enabled bool, settings []setting, stale bool) string {
 	var b strings.Builder
 	state := "disabled"
