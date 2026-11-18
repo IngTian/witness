@@ -61,7 +61,10 @@ history from before you wired it (`witness import --agent codex`).
   and kick background distillation without waiting.
 - `witness import --agent codex` — import Codex sessions; see [Codex capture](codex-capture.md).
 - `witness status` — what has been captured, whether the worker is running, and how fresh the
-  distilled data is (`--json` for scripts).
+  distilled data is (`--json` for scripts). Claude now pauses on a usage-limit refusal, like Codex
+  and OpenCode, and a weekly limit can pause it for days; `status` shows the pause and its reset. A
+  manual `witness worker run` skips the paused-run pre-check and calls anyway, and a refusal re-arms
+  the pause.
 - `witness worker run` / `witness worker stop` — the operator escape hatch for the background
   distillation worker (normally it runs off editor hooks). `run` drains in
   the foreground, `--detach` backgrounds it. With `--detach` it accepts `--since`/`--until` to
