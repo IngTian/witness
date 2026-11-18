@@ -491,7 +491,10 @@ func transcriptHash8(turns []rawTurn) string {
 //
 // THEN each incoming transcript T is placed against our sessions in its family, its MEMBERS. A
 // member is AVAILABLE unless another incoming session sits under its id (renaming onto it would
-// fold two incoming transcripts together in the copy). The first rule that applies wins:
+// fold two incoming transcripts together in the copy). Claims are settled first, so no placement
+// depends on the order of ids: a claimant leaving its id is moved aside before any session is
+// placed, and the sessions that add turns are placed before those that add none. The first rule
+// that applies wins:
 //
 //  1. our session of its own id if it equals or extends T, else an available member equal to T,
 //     else 2. one extending T: the session goes there. Its own id comes first: when an exact copy
@@ -598,26 +601,26 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	}
 	incoming = slices.DeleteFunc(incoming, func(s string) bool { return !held[s] })
 
-	kinds := map[string]string{}
+	// How each incoming transcript relates to each member it is related to: our exact id first, then
+	// the family root, then its other copies, in a stable order, so the first available member in
+	// each relation is that relation's match. Every member is read, not just up to the first match:
+	// an exact copy later in the order outranks an earlier member theirs merely extends, and a
+	// claimed member says ours holds the turns already.
+	type member struct{ id, rel string }
+	related := map[string][]member{}
 	for _, s := range incoming {
+		fam := sessionFamily(s)
+		if len(family[fam]) == 0 {
+			continue
+		}
 		theirs, err := readTurns(ctx, tx, "inc", s)
 		if err != nil {
 			return nil, err
 		}
-		fam := sessionFamily(s)
-		// Our exact id first, then the family root, then its other copies, in a stable order: the
-		// first available member in each relation is that relation's match. Every member is read,
-		// not just up to the first match: an exact copy later in the order outranks an earlier
-		// member theirs merely extends, and a claimed member says ours holds the turns already.
-		cands := []string{s, fam}
 		rest := append([]string{}, family[fam]...)
 		sort.Strings(rest)
-		cands = append(cands, rest...)
-
-		match := map[string]string{} // relation -> first available member in it
-		heldBy := ""                 // the first member another incoming session claims that equals or extends theirs
 		seen := map[string]bool{}
-		for _, c := range cands {
+		for _, c := range append([]string{s, fam}, rest...) {
 			if seen[c] {
 				continue
 			}
@@ -626,14 +629,65 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			if err != nil {
 				return nil, err
 			}
-			switch k := turnRelation(mine, theirs); {
-			case k == "":
-			case c != s && held[c]:
-				if k != kindLongerThere && heldBy == "" {
-					heldBy = c
+			if k := turnRelation(mine, theirs); k != "" {
+				related[s] = append(related[s], member{c, k})
+			}
+		}
+	}
+
+	// Claims are settled before anything is matched against them. Placed in id order, a session found
+	// a member claimed by an incoming session that was about to leave it: a growth of our copy that
+	// sorted before the copy's claimant arrived beside the copy, so its turns were held, and mined,
+	// twice. Whether a claimant keeps its id depends on nothing placed before it (rule 1, or rule 4
+	// onto its own id when no other member holds its turns), so every claimant that leaves is first
+	// moved aside, to an id no session holds or is placed on, and its id is free for the rest. Then
+	// the sessions that add turns are placed before those a member holds already: a copy of what a
+	// member held took it, and a growth of that member sorting after the copy arrived beside it;
+	// placed after the growth, the copy is dropped into it (rule 3).
+	at := map[string]string{} // where a session moved aside sits in the copy
+	covered := map[string]bool{}
+	for _, s := range incoming {
+		own := ""
+		for _, m := range related[s] {
+			if m.id == s {
+				own = m.rel
+			} else if m.rel == kindEqual || m.rel == kindLongerHere {
+				covered[s] = true
+			}
+		}
+		if !slices.Contains(family[sessionFamily(s)], s) || own == kindEqual || own == kindLongerHere || own == kindLongerThere && !covered[s] {
+			continue
+		}
+		aside := s + " (moved aside)"
+		for held[aside] || slices.Contains(family[aside], aside) {
+			aside += "'"
+		}
+		if err := renameIncomingSession(ctx, tx, s, aside); err != nil {
+			return nil, err
+		}
+		delete(held, s)
+		at[s] = aside
+	}
+	order := slices.DeleteFunc(slices.Clone(incoming), func(s string) bool { return covered[s] })
+	order = append(order, slices.DeleteFunc(incoming, func(s string) bool { return !covered[s] })...)
+
+	kinds := map[string]string{}
+	for _, s := range order {
+		fam := sessionFamily(s)
+		cur := s // where s sits in the copy
+		if a, ok := at[s]; ok {
+			cur = a
+		}
+		match := map[string]string{} // relation -> first available member in it
+		heldBy := ""                 // the first member another incoming session claims that equals or extends theirs
+		for _, m := range related[s] {
+			switch {
+			case m.id != cur && held[m.id]:
+				if m.rel != kindLongerThere && heldBy == "" {
+					heldBy = m.id
 				}
-			case match[k] == "":
-				match[k] = c
+			case match[m.rel] == "":
+				match[m.rel] = m.id
 			}
 		}
 
@@ -652,9 +706,13 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		case match[kindLongerThere] != "":
 			target, kind = match[kindLongerThere], kindLongerThere
 		case slices.Contains(family[fam], s):
-			// Ours holds s with another transcript (s is never claimed, so a related s matched above).
+			// Ours holds s with another transcript: related to T, it would have met a rule above.
 			// A minted copy we do not hold keeps its own id under rule 5, although it is the id it
 			// would be minted again: taking that id for a second copy dropped it (#223).
+			theirs, err := readTurns(ctx, tx, "inc", cur)
+			if err != nil {
+				return nil, err
+			}
 			id := fam + "@" + transcriptHash8(theirs)
 			oursHasID := slices.Contains(family[fam], id) // a member, so it matched none of rules 1-4
 			theirsHasID := !oursHasID && held[id]
@@ -687,18 +745,18 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			target, minted = id, true
 		}
 		if holder != "" {
-			if err := dropIncomingSession(ctx, tx, s, holder, later); err != nil {
+			if err := dropIncomingSession(ctx, tx, cur, holder, later); err != nil {
 				return nil, err
 			}
-			delete(held, s)
+			delete(held, cur)
 			rep.Sessions.Duplicates++
 			continue
 		}
-		if target != s {
-			if err := renameIncomingSession(ctx, tx, s, target); err != nil {
+		if target != cur {
+			if err := renameIncomingSession(ctx, tx, cur, target); err != nil {
 				return nil, err
 			}
-			delete(held, s)
+			delete(held, cur)
 			held[target] = true
 		}
 		kinds[target] = kind
