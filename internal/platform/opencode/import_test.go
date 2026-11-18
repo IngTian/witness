@@ -434,8 +434,8 @@ func TestImporterRebuildsWhenCompletedAssistantAppearsMidSession(t *testing.T) {
 	if !reflect.DeepEqual(rolesAndText, want) {
 		t.Fatalf("raw = %#v, want %#v", rolesAndText, want)
 	}
-	if got := st.DistilledCount(SessionPrefix+"ses_mutable", store.LensDefault); got != 0 {
-		t.Fatalf("rebuild should reset distill progress, got %d", got)
+	if got := st.DistilledCount(SessionPrefix+"ses_mutable", store.LensDefault); got != 1 {
+		t.Fatalf("an edit at turn 2 keeps turn 1 mined, got %d", got)
 	}
 }
 
@@ -463,8 +463,8 @@ func TestImporterRebuildsWhenImportedTextChanges(t *testing.T) {
 	if raw[1].Text != "first note\n\nupdated answer" {
 		t.Fatalf("assistant text was not rebuilt: %+v", raw[1])
 	}
-	if got := st.DistilledCount(SessionPrefix+"ses_test", store.LensDefault); got != 0 {
-		t.Fatalf("changed text should reset distill progress, got %d", got)
+	if got := st.DistilledCount(SessionPrefix+"ses_test", store.LensDefault); got != 1 {
+		t.Fatalf("an edit at turn 2 keeps turn 1 mined, got %d", got)
 	}
 }
 

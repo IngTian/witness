@@ -1,19 +1,26 @@
 package store
 
 import (
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
-// replaceGen simulates a replace-import (ApplyRawImport replace=true): DELETE the
-// session's raw + progress and re-INSERT a fresh generation of n turns. raw.id is
-// AUTOINCREMENT, so the new rows always get strictly higher ids than any prior
-// generation. Returns the error (no *testing.T) so it is safe to call from a
-// spawned goroutine, where t.Fatalf must not be used.
+// replaceGenN numbers replaceGen's generations, so each one's text is new.
+var replaceGenN atomic.Int64
+
+// replaceGen simulates a replace-import (ApplyRawImport replace=true) of a fresh
+// generation of n turns. Their text ("genN") matches no earlier generation and never
+// appendN's "x", so the replace keeps no prefix: it DELETEs all the session's raw,
+// clamps progress to 0 and re-INSERTs. raw.id is AUTOINCREMENT, so the new rows always
+// get strictly higher ids than any prior generation. Returns the error (no *testing.T)
+// so it is safe to call from a spawned goroutine, where t.Fatalf must not be used.
 func replaceGen(s *Store, session string, n int) error {
+	text := fmt.Sprintf("gen%d", replaceGenN.Add(1))
 	recs := make([]RawRecord, n)
 	for i := range recs {
-		recs[i] = RawRecord{Session: session, Seq: i, Role: "user", Text: "x"}
+		recs[i] = RawRecord{Session: session, Seq: i, Role: "user", Text: text}
 	}
 	return s.ApplyRawImport(SessionMeta{Session: session}, recs, "", "", true)
 }

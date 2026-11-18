@@ -168,10 +168,10 @@ func TestPositiveBudgetChunksSourceAgnostic(t *testing.T) {
 	}
 }
 
-// replaceRaw simulates an OpenCode replace-import landing mid-mine: it DELETEs the
-// session's raw + progress (the reset ApplyRawImport(replace=true) does) and
-// re-INSERTs a fresh generation of turns. Because raw.id is AUTOINCREMENT, the new
-// rows get strictly higher ids than anything a prior mine read.
+// replaceRaw simulates an OpenCode replace-import landing mid-mine. Its first turn differs
+// from the session's, so ApplyRawImport(replace=true) keeps nothing: it DELETEs all the
+// session's raw, clamps progress to 0 and re-INSERTs a fresh generation of turns. Because
+// raw.id is AUTOINCREMENT, the new rows get strictly higher ids than anything a prior mine read.
 func replaceRaw(t *testing.T, s *store.Store, session string, turns []string) {
 	t.Helper()
 	meta := store.SessionMeta{Session: session}
