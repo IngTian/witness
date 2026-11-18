@@ -668,11 +668,21 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 				}
 			}
 			if holder == "" && (oursHasID || theirsHasID) {
-				where := "this archive"
+				side := "this archive's"
 				if theirsHasID {
-					where = "the incoming archive"
+					side = "the incoming archive's"
 				}
-				return nil, fmt.Errorf("session %s must arrive under the id minted from its transcript, %s, which %s holds with a different transcript; refusing to merge rather than fold the two into one session or lose one", s, id, where)
+				why := fmt.Sprintf("the incoming %s differs from this archive's %s, so it must arrive as a copy under %s, the id minted from its transcript, and %s %s holds another transcript",
+					s, s, id, side, id)
+				if s == id { // ours holds the incoming copy's own id: theirsHasID is false here
+					why = fmt.Sprintf("this archive's %s and the incoming archive's %s hold different transcripts, and %s is the id minted from the incoming one, so it has no other id to take",
+						id, id, id)
+				}
+				// No command renames or removes a session, so the user cannot clear the way; the report
+				// is the next step, and it takes an 8-hex collision or a hand-written minted-looking id.
+				return nil, fmt.Errorf("refusing to merge: %s; holding both would fold two transcripts into one session, and keeping one would lose the other, so nothing was merged. "+
+					"This takes an 8-hex hash collision or a session id written by hand to end in @ and 8 hex digits, and no witness command renames or removes a session: "+
+					"report it at https://github.com/IngTian/witness/issues with these ids, and keep both archives as they are until then", why)
 			}
 			target, minted = id, true
 		}

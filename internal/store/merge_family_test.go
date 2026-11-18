@@ -777,8 +777,8 @@ func TestMergeRefusesAMintedIDTheIncomingArchiveHoldsDifferently(t *testing.T) {
 
 	before := snapshotArchive(t, base.st)
 	_, err := base.st.Merge(context.Background(), inc.export(), true, mergeNow)
-	if err == nil || !strings.Contains(err.Error(), copyID) {
-		t.Fatalf("want a refusal naming %s, got %v; this archive holds %v", copyID, err, heldTranscripts(t, base))
+	if err == nil || !strings.Contains(err.Error(), "the incoming archive's "+copyID+" holds another transcript") {
+		t.Fatalf("want a refusal naming the incoming archive's %s, got %v; this archive holds %v", copyID, err, heldTranscripts(t, base))
 	}
 	if !reflect.DeepEqual(before, snapshotArchive(t, base.st)) {
 		t.Errorf("a refused merge changed the archive")

@@ -831,7 +831,8 @@ func TestMergeKeepsOneOfTwoCopiesOfAMintedTranscript(t *testing.T) {
 
 // Our archive holding that very id with a DIFFERENT transcript takes an 8-hex hash collision.
 // Keeping the copy under it would fold two transcripts into one session, and dropping it loses one:
-// the merge refuses and writes nothing.
+// the merge refuses and writes nothing. The refusal names each side's session once, says why, and
+// gives the user the one next step there is: no command can move either session.
 func TestMergeRefusesAMintedIDThatCollidesWithOurs(t *testing.T) {
 	base, inc := newArch(t), newArch(t)
 	copyID := mintedID("file:feed", "user:a", "assistant:c")
@@ -842,8 +843,18 @@ func TestMergeRefusesAMintedIDThatCollidesWithOurs(t *testing.T) {
 
 	before := snapshotArchive(t, base.st)
 	_, err := base.st.Merge(context.Background(), inc.export(), true, mergeNow)
-	if err == nil || !strings.Contains(err.Error(), copyID) {
-		t.Fatalf("want a refusal naming %s, got %v", copyID, err)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	for _, part := range []string{
+		"classify sessions: refusing to merge",
+		"this archive's " + copyID + " and the incoming archive's " + copyID + " hold different transcripts",
+		"fold two transcripts into one session", "nothing was merged",
+		"no witness command renames or removes a session", "https://github.com/IngTian/witness/issues",
+	} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("the refusal lacks %q:\n%v", part, err)
+		}
 	}
 	if after := snapshotArchive(t, base.st); !reflect.DeepEqual(before, after) {
 		t.Errorf("a refused merge changed the archive")
