@@ -409,6 +409,73 @@ func TestMergeAppendsAGrowthOverAClaimantThatAddsNoTurns(t *testing.T) {
 	})
 }
 
+// Ours holds a prefix pair, mined: [a] and [a p]. A growth [a p r] under an id ours lacks is appended
+// to the longest member it extends, so only r is mined here, whatever the ids. Rule 4 took the first
+// in the order, the root: p was held twice and mined again there. Which of two copies it took hung on
+// how our ids sorted, and beside a second growth, [a q] of the root, on how the incoming ids sorted.
+func TestMergeAppendsAGrowthToTheLongestMemberItExtends(t *testing.T) {
+	const root = "file:feed"
+	pair := map[string][]string{root: {"a"}, "file:feed@11111111": {"a", "p"}}
+	for _, c := range []struct {
+		name               string
+		ours, theirs, want map[string][]string
+	}{
+		{"onto the copy, not the root", pair, map[string][]string{"file:feed@99999999": {"a", "p", "r"}},
+			map[string][]string{root: {"a"}, "file:feed@11111111": {"a", "p", "r"}}},
+		{"onto the copy sorting after the growth", map[string][]string{root: {"a"}, "file:feed@eeeeeeee": {"a", "p"}},
+			map[string][]string{"file:feed@99999999": {"a", "p", "r"}},
+			map[string][]string{root: {"a"}, "file:feed@eeeeeeee": {"a", "p", "r"}}},
+		{"onto the longer copy sorting first", map[string][]string{root: {"w"}, "file:feed@22222222": {"a"}, "file:feed@11111111": {"a", "p"}},
+			map[string][]string{"file:feed@99999999": {"a", "p", "r"}},
+			map[string][]string{root: {"w"}, "file:feed@22222222": {"a"}, "file:feed@11111111": {"a", "p", "r"}}},
+		{"onto the longer copy sorting last", map[string][]string{root: {"w"}, "file:feed@11111111": {"a"}, "file:feed@22222222": {"a", "p"}},
+			map[string][]string{"file:feed@99999999": {"a", "p", "r"}},
+			map[string][]string{root: {"w"}, "file:feed@11111111": {"a"}, "file:feed@22222222": {"a", "p", "r"}}},
+		{"beside a growth of the root sorting after it", pair,
+			map[string][]string{"file:feed@00000001": {"a", "p", "r"}, "file:feed@00000002": {"a", "q"}},
+			map[string][]string{root: {"a", "q"}, "file:feed@11111111": {"a", "p", "r"}}},
+		{"beside a growth of the root sorting before it", pair,
+			map[string][]string{"file:feed@00000002": {"a", "p", "r"}, "file:feed@00000001": {"a", "q"}},
+			map[string][]string{root: {"a", "q"}, "file:feed@11111111": {"a", "p", "r"}}},
+		// Settling the claims counts on it: a claimant that extends its own id stays there.
+		{"onto its own id first", pair, map[string][]string{root: {"a", "p", "r"}},
+			map[string][]string{root: {"a", "p", "r"}, "file:feed@11111111": {"a", "p"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			base, inc := newArch(t), newArch(t)
+			for s, turns := range c.ours {
+				for _, turn := range turns {
+					base.raw(s, "user:"+turn)
+				}
+				mineWhole(t, base, "m"+s, s)
+			}
+			for s, turns := range c.theirs {
+				for _, turn := range turns {
+					inc.raw(s, "user:"+turn)
+				}
+			}
+
+			export := inc.export()
+			rep := base.merge(export, true)
+			if got := heldTranscripts(t, base); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("holds %v, want %v (%+v)", got, c.want, rep.Sessions)
+			}
+			wantPending := map[string][]string{}
+			for s, turns := range c.want {
+				if n := len(c.ours[s]); n < len(turns) {
+					wantPending[s] = turns[n:]
+				}
+			}
+			if got := pendingTurns(t, base); !reflect.DeepEqual(got, wantPending) {
+				t.Errorf("pending %v, want %v", got, wantPending)
+			}
+			if again := base.merge(export, true); !again.Empty() {
+				t.Errorf("merging the same export again: %+v rawRows=%d", again.Sessions, again.RawRows)
+			}
+		})
+	}
+}
+
 // A native incoming session whose transcript is a prefix of an incoming copy that grew from it is
 // not a duplicate: a prefix is not a copy. Both arrive, even into an empty archive. Dropping the
 // native as a "duplicate" of the longer copy lost what was mined from it, its progress and its
@@ -982,8 +1049,9 @@ func TestMergeRefusesAMintedIDTheIncomingArchiveHoldsDifferently(t *testing.T) {
 // as another copy there has it, record active observations and staged rows on it, mine one of their
 // sessions now and then, and merge each other in random order. After every merge: no transcript of
 // either side is lost (each is a prefix of a session afterwards); the merge adds no second copy of
-// one, nor a session beside one of its family that it extends (unless the other archive keeps
-// that prefix apart too), and into an empty archive holds exactly what the other one does; none is folded (every
+// one, nor a session beside one of its family that it extends, nor grows one beside one that held
+// more of the growth (unless the other archive keeps that prefix apart too), and into an empty
+// archive holds exactly what the other one does; none is folded (every
 // session is a prefix of a state some feed really had); a native session of theirs is gone only
 // for a session holding exactly its turns, or one of ours that held them already; every recorded row and mined observation of ours stays where it was, and every one
 // of theirs arrives on a session holding the turns of the session it was on (a mined one may stay
@@ -1145,18 +1213,20 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits, reuse bo
 			return broke("%s was empty and holds %v after taking %s, which holds %v", x, after, y, theirs)
 		}
 		// Nor does it add a session beside one of its family that it extends (a branch that diverged
-		// from a session is no extension of it): the growth goes onto that session. One exception
-		// keeps a prefix apart: the other archive holds those turns exactly, as a session of its own
-		// beside the growth. (A session of theirs that stays on that id adding no turns does not: it
-		// goes into the growth.)
+		// from a session is no extension of it), or grow one of ours beside one that held more of the
+		// growth: the growth goes onto that session. One exception keeps a prefix apart: the other
+		// archive holds those turns exactly, as a session of its own beside the growth. (A session of
+		// theirs that stays on that id adding no turns does not: it goes into the growth.) A session
+		// of ours grown to what theirs holds under its id took the growth by its own id, which comes
+		// first.
 		theirCopies := copiesOf(theirs)
 		for n, nt := range after {
-			if ours[n] != nil {
+			if len(ours[n]) == len(nt) || ours[n] != nil && slices.Equal(theirs[n], nt) {
 				continue
 			}
 			for p, pt := range after {
 				if p == n || sessionFamily(p) != sessionFamily(n) || len(pt) == len(nt) || !isPrefix(pt, nt) ||
-					theirCopies[strings.Join(pt, " ")] > 0 {
+					isPrefix(pt, ours[n]) || theirCopies[strings.Join(pt, " ")] > 0 {
 					continue
 				}
 				return broke("%s holds %s %v beside %s %v, a session it extends: %v\n  ours %v\n  theirs %v", x, n, nt, p, pt, after, ours, theirs)

@@ -491,10 +491,10 @@ func transcriptHash8(turns []rawTurn) string {
 //
 // THEN each incoming transcript T is placed against our sessions in its family, its MEMBERS. A
 // member is AVAILABLE unless another incoming session sits under its id (renaming onto it would
-// fold two incoming transcripts together in the copy). Claims are settled first, so no placement
-// depends on the order of ids: a claimant leaving its id is moved aside before any session is
-// placed, and the sessions that add turns are placed before those that add none. The first rule
-// that applies wins:
+// fold two incoming transcripts together in the copy). Claims are settled first, so only a true tie,
+// two sessions for one member, depends on the order of ids (the first takes it): a claimant leaving
+// its id is moved aside before any session is placed, and the sessions that add turns are placed
+// before those that add none. The first rule that applies wins:
 //
 //  1. our session of its own id if it equals or extends T, else an available member equal to T,
 //     else 2. one extending T: the session goes there. Its own id comes first: when an exact copy
@@ -502,9 +502,12 @@ func transcriptHash8(turns []rawTurn) string {
 //     as a second wording of it and our session of T's id, never mined, was mined again;
 //  3. else, if a claimed member equals or extends T, ours already holds every turn: the session is
 //     dropped from the copy, and everything it carries is filed under that member;
-//  4. else an available member T extends: T's tail is appended to it. A member is available here
-//     also under an incoming session that stays on it by rule 1, adding no turns: that session is
-//     dropped into T, and everything it carries is filed under the member;
+//  4. else an available member T extends, its own id first (the claims are settled on it), else the
+//     longest: T's tail is appended to it. Every shorter one is a prefix of the longest, so the
+//     longest holds the most of T; taking the first in the order, the root, held what a longer member
+//     held past it twice, and which session claimed which member hung on how the ids sorted. A member
+//     is available here also under an incoming session that stays on it by rule 1, adding no turns:
+//     that session is dropped into T, and everything it carries is filed under the member;
 //  5. else T arrives as its own session, under its own id;
 //  6. unless ours holds that id with another transcript: then under the id minted from T's hash.
 //     If another incoming session sits there with T and more, T is dropped into it. If either
@@ -605,10 +608,13 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 
 	// How each incoming transcript relates to each member it is related to: our exact id first, then
 	// the family root, then its other copies, in a stable order, so the first available member in
-	// each relation is that relation's match. Every member is read, not just up to the first match:
-	// an exact copy later in the order outranks an earlier member theirs merely extends, and a
-	// claimed member says ours holds the turns already.
-	type member struct{ id, rel string }
+	// each relation is that relation's match (of the members T extends, the longest: rule 4). Every
+	// member is read, not just up to the first match: an exact copy later in the order outranks an
+	// earlier member theirs merely extends, and a claimed member says ours holds the turns already.
+	type member struct {
+		id, rel string
+		n       int // turns ours holds under id
+	}
 	related := map[string][]member{}
 	for _, s := range incoming {
 		fam := sessionFamily(s)
@@ -632,7 +638,7 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 				return nil, err
 			}
 			if k := turnRelation(mine, theirs); k != "" {
-				related[s] = append(related[s], member{c, k})
+				related[s] = append(related[s], member{c, k, len(mine)})
 			}
 		}
 	}
@@ -694,14 +700,17 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		if a, ok := at[s]; ok {
 			cur = a
 		}
-		match := map[string]string{} // relation -> first available member in it
+		match := map[string]string{} // relation -> first available member in it (rule 4: own id, else longest)
 		heldBy := ""                 // the first member another incoming session claims that equals or extends theirs
+		longest := 0                 // turns of match[kindLongerThere]
 		for _, m := range related[s] {
 			switch {
 			case m.id != cur && held[m.id] && !(m.rel == kindLongerThere && stays[m.id]):
 				if m.rel != kindLongerThere && heldBy == "" {
 					heldBy = m.id
 				}
+			case m.rel == kindLongerThere && match[m.rel] != s && m.n > longest:
+				match[m.rel], longest = m.id, m.n
 			case match[m.rel] == "":
 				match[m.rel] = m.id
 			}
@@ -872,10 +881,11 @@ var refiled = []struct{ table, cols, moved, join string }{
 // the holder, they are a second wording of what we hold. Only the transcript and importer keys go,
 // which describe sess under its own id.
 //
-// An incoming holder takes the rows at once, so they go wherever it is placed. One of OURS may
-// still be occupied in the copy by an incoming session that a later rename carries off, taking
-// whatever sits under that id with it: for ours (later) the rows wait outside the copy, in
-// temp.merge_refile_*, until classifySessions has placed every session and calls refileHeld.
+// An incoming holder takes the rows at once, so they go wherever it is placed. For one of OURS
+// (later) the rows wait outside the copy, in temp.merge_refile_*, until classifySessions has placed
+// every session and calls refileHeld. Once claims are settled, the incoming session on such a member
+// in the copy no longer moves (one that stays leaves only into a growth that takes its id), so rows
+// filed at once would land in the same place; waiting does not depend on that.
 func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess, holder string, later bool) error {
 	if holder == "" || holder == sess {
 		return fmt.Errorf("drop %s: no session to file what it carries under", sess)
