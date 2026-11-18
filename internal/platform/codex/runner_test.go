@@ -235,6 +235,36 @@ func TestRunAcceptsAReplyWhileAGrandchildHoldsStdout(t *testing.T) {
 	}
 }
 
+// The preflight's `--version` and `debug models` follow the same rule: exit 0 with a grandchild still
+// holding stdout is their output, not a failed preflight. Each `sleep 3` ends on its own.
+func TestOpenAcceptsPreflightOutputWhileAGrandchildHoldsStdout(t *testing.T) {
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("spawns shells that leave `sleep 3` grandchildren holding their stdout")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no `sh` to stand in for codex: %v", err)
+	}
+	r := setUpChild(t)
+	helper := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		var out string
+		switch joined := strings.Join(args, " "); {
+		case joined == "--version":
+			out = "codex-cli 0.169.0-alpha.11.1"
+		case strings.HasSuffix(joined, "debug models"):
+			out = `{"models":[{"slug":"test"}]}`
+		default:
+			return helper(ctx, bin, args...)
+		}
+		return exec.CommandContext(ctx, sh, "-c", "echo '"+out+"'; sleep 3 &")
+	}
+	t.Cleanup(func() { commandContext = helper })
+	if err := r.Open(context.Background()); err != nil {
+		t.Fatalf("Open = %v; want nil (ErrWaitDelay after exit 0 is the preflight's output)", err)
+	}
+}
+
 // A plan login's usage-limit refusal is a pause (cmd's gate arms it); with CODEX_API_KEY the same
 // refusal is API credit, an ordinary failure that backs off like any other.
 func TestRunReportsAPlanRefusalAsAPause(t *testing.T) {

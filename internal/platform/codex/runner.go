@@ -374,7 +374,7 @@ func cliVersion(ctx context.Context, bin, dir string, env []string) (string, err
 	cmd.Dir, cmd.Env = dir, env
 	cmd.WaitDelay = time.Second
 	v, err := cmd.Output()
-	if err != nil {
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) { // a clean exit; only a grandchild held stdout (see Run)
 		return "", childError(ctx, "version", err, "")
 	}
 	return strings.TrimSpace(strings.TrimPrefix(string(v), "codex-cli ")), nil
@@ -429,7 +429,7 @@ func prepareCatalog(ctx context.Context, bin, dir string, env []string) ([]byte,
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
-	if err != nil {
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) { // a clean exit; only a grandchild held stdout (see Run)
 		return nil, childError(ctx, "catalog", err, stderr.String())
 	}
 	return raw, nil
