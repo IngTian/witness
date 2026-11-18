@@ -372,7 +372,8 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 		}{i, key}
 	}
 
-	// Partition incoming records: skip (identical key), update (same id, changed key), append (new id).
+	// Partition incoming records: skip (identical key), update (same id, changed key), append (new id;
+	// or take over a row of its text, below).
 	// We also track which old indices are touched by updates, so we know what to preserve.
 	type updateOp struct {
 		oldIdx    int
@@ -397,6 +398,23 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	// Guard against a duplicate WITHIN one batch too (the same body twice in one file), which
 	// oldKeySet cannot see because nothing is written until the end.
 	seenThisBatch := make(map[string]bool, len(s.Keys))
+	// Rows keyed by content only, by key: the rows a merge appended, and id-less records' rows. A
+	// merge appends another machine's copy of this feed, so its next ingest sends those very records
+	// under their ids: an id'd record new by id takes over a row of its text instead of adding the
+	// text again, held twice and mined twice. Each row once, and never one an id-less record of this
+	// batch still matches: that record keeps it (taken over, it was appended again next time).
+	byContent := map[string][]int{}
+	for i, k := range oldKeys {
+		if strings.HasPrefix(k, "h:") {
+			byContent[k] = append(byContent[k], i)
+		}
+	}
+	for i, id := range s.IDs {
+		if strings.TrimSpace(id) == "" {
+			delete(byContent, s.Keys[i])
+		}
+	}
+	tookOver := false
 
 	for i, id := range s.IDs {
 		key := s.Keys[i]
@@ -433,6 +451,10 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 			// Update: same id, but key changed (text edited).
 			updates = append(updates, updateOp{old.idx, i, old.key, key})
 			updatedIndices[old.idx] = true
+		} else if ck := recordKey("", s.Records[i].Text); len(byContent[ck]) > 0 {
+			// Take over: the row holds this record already, now under its id.
+			oldKeys[byContent[ck][0]], tookOver = key, true
+			byContent[ck] = byContent[ck][1:]
 		} else {
 			// Append: new id.
 			appends = append(appends, i)
@@ -440,9 +462,14 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	}
 
 	// Fast path: if nothing changed (all incoming keys already exist with same content),
-	// and the stored count matches the key count (no orphans), then skip.
+	// and the stored count matches the key count (no orphans), then skip. A row taken over
+	// changes only its key.
 	if len(updates) == 0 && len(appends) == 0 && rawCount == len(oldKeys) {
-		return 0, nil
+		if !tookOver {
+			return 0, nil
+		}
+		stateValue, _ := json.Marshal(oldKeys)
+		return 0, st.SetMetaString(stateKey, string(stateValue))
 	}
 
 	// If we only have pure appends (no updates) AND the stored state is consistent,
