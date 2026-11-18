@@ -147,32 +147,21 @@ func Serve(ctx context.Context, st store.MCPStore, emb Embedder, opts Options) e
 }
 
 // Options is what cmd knows and this leaf package must not import: the ldflags-injected version,
-// a model runner, the install targets. Every zero value works, so the
+// a portrait staleness check, the install targets. Every zero value works, so the
 // fake-driven tests set only what they exercise.
 type Options struct {
 	// Version is reported in the MCP initialize handshake; "" → "dev".
 	Version string
-	// Refresh regenerates stale profiles before get_profile reads one; nil serves what is on disk.
-	Refresh RefreshProfiles
+	// ProfileStale reports whether `witness profile` would rewrite or remove this portrait;
+	// nil = never stale.
+	ProfileStale func(lens string) bool
 	// Wire is the copyable "connect an editor" command, built from the install targets so it
 	// names every editor `witness wire` accepts.
 	Wire string
 }
 
-// RefreshProfiles regenerates stale L4 summaries before get_profile reads one (issue #100,
-// read-time generation). nil disables it — the tool then serves whatever is on disk, which is
-// exactly the pre-#100 behavior.
-//
-// It is a CALLBACK rather than a widening of store.MCPStore on purpose. Regenerating needs a
-// model runner, the lens registry, and the machine-wide WorkerLock — none of which belong in a
-// store interface, and all of which live in cmd. Injecting one function keeps this package's
-// dependency surface as it was (a read interface plus an embedder) and keeps the fake-driven
-// tests working unchanged with nil.
-//
-// The implementation is expected to be non-fatal and lock-guarded: it must serve cached rather
-// than queue behind a running drain (see cmd/commands/profilepull.go). An error here is
-// reported to the agent alongside the cached profile, never in place of it.
-type RefreshProfiles func() error
+// refreshHint names both ways to a new portrait, for get_profile's staleness note.
+const refreshHint = "The background worker writes a new one after its next review; `witness profile` in a terminal writes it now."
 
 // newServer builds the MCP server with all tools registered. Split from Serve so
 // tests can drive it over an in-memory transport.
@@ -185,7 +174,7 @@ type RefreshProfiles func() error
 // returned `{}` even though the real payload was in Content. Returning `any`/nil
 // suppresses the output schema so clients use Content. (See TestNoStructuredOutput.)
 func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
-	version, refresh := opts.Version, opts.Refresh
+	version := opts.Version
 	if strings.TrimSpace(version) == "" {
 		version = "dev"
 	}
@@ -334,7 +323,8 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 	// 'unified' portrait (an AGGREGATE VIEW blending every lens — not a lens itself).
 	// Note the asymmetry vs search/get_facets, which default to the 'default' LENS.
 	// Regenerated in the background after each review; may not exist yet on a brand-
-	// new archive.
+	// new archive. Served as written, never regenerated here; a note says when the facets
+	// moved on.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "get_profile",
 		Description: "Read the narrative growth profile (readable prose) for a lens. " +
@@ -347,28 +337,23 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		if lensName == "" {
 			lensName = store.ProfileUnified
 		}
-		// Regenerate on read if stale (#100). Measured ~13s for a real regeneration and ~0.02s
-		// when the signature already matches, so blocking the tool call is acceptable; the worker also
-		// rebuilds stale portraits after each review, so a read usually finds one current. NON-FATAL: a refresh failure still serves what is on
-		// disk — a stale narrative is strictly better than none — and the note is appended to
-		// the reply so the agent knows what it is holding rather than being misled.
-		var stale string
-		if refresh != nil {
-			if err := refresh(); err != nil {
-				stale = "\n\n---\n(note: this profile could not be refreshed just now — " +
-					err.Error() + " — so it may not reflect the newest facets.)"
-			}
-		}
 		md, ok, err := st.ReadProfile(lensName)
 		if err != nil {
 			return errResult(fmt.Sprintf("read profile: %v", err)), nil, nil
 		}
-		if !ok {
-			// stale rides along: when a refresh failed, it is the actual reason there is no profile.
-			return textResult(fmt.Sprintf("No narrative profile for '%s' yet. %s Use get_facets for the current structured attributes.%s",
-				lensName, emptyHint(st, lensName, wire, false), stale)), nil, nil
+		stale := opts.ProfileStale != nil && opts.ProfileStale(lensName)
+		switch {
+		case !ok && stale:
+			return textResult(fmt.Sprintf("No narrative profile for '%s' has been written yet, though its facets exist. "+
+				refreshHint+" Use get_facets for the current structured attributes.", lensName)), nil, nil
+		case !ok:
+			return textResult(fmt.Sprintf("No narrative profile for '%s' yet. %s Use get_facets for the current structured attributes.",
+				lensName, emptyHint(st, lensName, wire, false))), nil, nil
+		case stale:
+			return textResult(md + "\n\n---\n(note: the facets have changed since this portrait was written. " +
+				refreshHint + " get_facets has the current attributes.)"), nil, nil
 		}
-		return textResult(md + stale), nil, nil
+		return textResult(md), nil, nil
 	})
 
 	// delete_observation: prune one L1 observation by id. Facets are reviewer-owned

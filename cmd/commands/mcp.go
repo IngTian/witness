@@ -35,12 +35,24 @@ func cmdMCP() error {
 func mcpOptions(st *store.Store) mcp.Options {
 	return mcp.Options{
 		Version: version,
-		// Pull-based L4 (#100): get_profile regenerates a stale summary before serving it.
-		// ensureProfileFresh is lock-guarded and non-fatal: it serves cached rather than queueing
-		// behind a running drain.
-		Refresh: func() error {
-			_, err := ensureProfileFresh(st)
-			return err
+		// MCP never regenerates; the closure is Summarize's own skip test. It takes no lock,
+		// opens no runner and writes nothing; when staleness cannot be computed the portrait
+		// reads as current, as in `witness view`.
+		ProfileStale: func(name string) bool {
+			sm, err := profileSummarizer(st)
+			if err != nil || sm == nil {
+				return false
+			}
+			stale, err := sm.Stale()
+			if err != nil {
+				return false
+			}
+			if s, ok := stale[name]; ok {
+				return s
+			}
+			// Absent from Stale = no facets: a portrait still on disk is one Summarize reaps (#100).
+			_, onDisk, _ := st.ReadProfile(name)
+			return onDisk
 		},
 		Wire: wireCommand(),
 	}

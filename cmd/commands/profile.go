@@ -50,7 +50,7 @@ func cmdProfile(args []string, asJSON bool) error {
 	// disk, because a stale narrative beats no narrative. The notice goes to stderr so `witness
 	// profile > file` still captures only the markdown.
 	refreshErr := ""
-	if _, err := ensureProfileFresh(st); err != nil && asJSON {
+	if err := ensureProfileFresh(st); err != nil && asJSON {
 		refreshErr = err.Error()
 	} else if err != nil {
 		// Headline + cause on its own line: the cause is a runner error of any length, and it is

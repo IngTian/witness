@@ -12,12 +12,12 @@ import (
 // Since F3 a lens has one name; a `name` left in lens.json is ignored, and `lens register` and
 // `doctor` say so.
 
-// cmd injects the wire command the CLI prints and a refresh.
+// cmd injects the wire command the CLI prints and the portrait staleness check.
 func TestMCPGetsTheWireCommand(t *testing.T) {
 	st := readFixture(t)
 	opts := mcpOptions(st)
-	if opts.Wire != wireCommand() || opts.Refresh == nil {
-		t.Errorf("wire %q (want %q), refresh set %v", opts.Wire, wireCommand(), opts.Refresh != nil)
+	if opts.Wire != wireCommand() || opts.ProfileStale == nil {
+		t.Errorf("wire %q (want %q), staleness check set %v", opts.Wire, wireCommand(), opts.ProfileStale != nil)
 	}
 }
 
