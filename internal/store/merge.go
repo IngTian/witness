@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,7 +121,7 @@ type MergeSessions struct {
 	LongerThere int // the incoming transcript extends ours: its tail is appended
 	LongerHere  int // ours extends the incoming one: nothing to do
 	Appended    int // raw rows appended across the LongerThere sessions
-	Duplicates  int // incoming sessions that were a second copy of one transcript (a merge back)
+	Duplicates  int // incoming sessions whose every turn another session holds (a twin, a merge back): filed under it
 	// Diverged sessions share an id but not a transcript — two machines ingesting the same named
 	// `file:` feed, typically. Ours keeps the id; the incoming one gets an id of its own so its
 	// transcript AND what was mined from it arrive together, instead of its observations landing
@@ -474,11 +475,44 @@ func transcriptHash8(turns []rawTurn) string {
 //   - merging back carried our own transcript home under its renamed id, so we held it twice, and
 //     a third round folded two transcripts into one session.
 //
-// So: if any member of the family is equal to, a prefix of, or extended by the incoming transcript,
-// that member is the match and the incoming session is renamed to it in the copy. Only when nothing
-// matches and our exact id is taken by a different transcript is a fresh id minted. An incoming
-// session that turns out to be a second copy of one already claimed (a merge back can carry both)
-// is dropped from the copy.
+// Two jobs, in this order, because mixing them lost and doubled transcripts:
+//
+// FIRST, exact twins within the incoming archive (one family, one transcript under two ids) are
+// collapsed into one, before anything is matched against ours: placed one by one, the second found
+// its match claimed by the first and arrived beside it. Two are left alone: a twin whose id ours
+// holds with its turns or more, which rule 1 places on that session of ours (collapsing it filed
+// what it carried under the other twin, so merging an archive into itself was not empty, and the
+// other side's mining of our copy was skipped as a paraphrase of our twin); and the twins of a
+// family ours lacks, which arrive as the other archive holds them, as a restore must. The id kept
+// is the native one, else one of ours, else the one minted from the transcript's hash, else the
+// lowest; everything the others carry is filed under it (dropIncomingSession). Only an IDENTICAL transcript is a twin: a prefix
+// of another incoming session is a session of its own, and dropping it as a "duplicate" lost what
+// was mined from it.
+//
+// THEN each incoming transcript T is placed against our sessions in its family, its MEMBERS. A
+// member is AVAILABLE unless another incoming session sits under its id (renaming onto it would
+// fold two incoming transcripts together in the copy). The first rule that applies wins:
+//
+//  1. our session of its own id if it equals or extends T, else an available member equal to T,
+//     else 2. one extending T: the session goes there. Its own id comes first: when an exact copy
+//     elsewhere outranked it, T went there, and where we had mined that copy, T's mining was skipped
+//     as a second wording of it and our session of T's id, never mined, was mined again;
+//  3. else, if a claimed member equals or extends T, ours already holds every turn: the session is
+//     dropped from the copy, and everything it carries is filed under that member;
+//  4. else an available member T extends: T's tail is appended to it;
+//  5. else T arrives as its own session, under its own id;
+//  6. unless ours holds that id with another transcript: then under the id minted from T's hash.
+//     If another incoming session sits there with T and more, T is dropped into it. If either
+//     archive holds a different transcript there, the merge refuses: that takes an 8-hex collision
+//     or a write into a minted id, and both ways out (folding two transcripts into one session,
+//     dropping one) lose data.
+//
+// The first-match loop this replaced held transcripts twice and folded them, through three habits:
+// it took the first match even when another incoming session claimed it, so a copy of what ours
+// held was re-minted beside it; it took "same hash" for "same transcript", but a minted copy keeps
+// its id while it grows; and it never asked what ours held under the id it minted, so every
+// re-merge appended the transcript again. Its duplicate check also found a minted copy as its own
+// duplicate and dropped it (#223).
 func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[string]string, error) {
 	incoming, err := queryStrings(ctx, tx, `SELECT DISTINCT session FROM inc.raw ORDER BY session`)
 	if err != nil {
@@ -496,6 +530,73 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	for _, s := range incoming {
 		held[s] = true
 	}
+	for _, r := range refiled {
+		if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE merge_refile_`+r.table+` AS SELECT 0 AS later, `+r.cols+` FROM inc.`+r.table+` WHERE 0`); err != nil {
+			return nil, err
+		}
+	}
+
+	// Twins. Only a family with two incoming sessions, and a member here, is read: into a family
+	// ours lacks, every session arrives under its own id as the other archive holds it (rule 5), so
+	// collapsing its twins only made a merge into an empty archive unfaithful, and merging back from
+	// it not empty. kept is one id per distinct transcript so far, and a twin ranking higher takes
+	// the id over (incoming is sorted, so a tie keeps the lowest).
+	perFam := map[string]int{}
+	for _, s := range incoming {
+		perFam[sessionFamily(s)]++
+	}
+	// The native id first: it is the id its importer knows, and keeping one of ours instead (its
+	// transcript there may differ) re-minted it and lost the native session and its importer keys.
+	rank := func(fam, id string, turns []rawTurn) int {
+		n := 0
+		if id == fam {
+			n += 4
+		}
+		if slices.Contains(family[fam], id) {
+			n += 2
+		}
+		if id == fam+"@"+transcriptHash8(turns) {
+			n++
+		}
+		return n
+	}
+	kept, turnsOf := map[string][]string{}, map[string][]rawTurn{}
+	for _, s := range incoming {
+		fam := sessionFamily(s)
+		if perFam[fam] < 2 || len(family[fam]) == 0 {
+			continue
+		}
+		turns, err := readTurns(ctx, tx, "inc", s)
+		if err != nil {
+			return nil, err
+		}
+		// Ours holds s's own id with these turns or more, so rule 1 places s on that session, and no
+		// copy is added: it is no twin to collapse.
+		mine, err := readTurns(ctx, tx, "main", s)
+		if err != nil {
+			return nil, err
+		}
+		if k := turnRelation(mine, turns); k == kindEqual || k == kindLongerHere {
+			continue
+		}
+		i := slices.IndexFunc(kept[fam], func(k string) bool { return slices.Equal(turnsOf[k], turns) })
+		if i < 0 {
+			kept[fam] = append(kept[fam], s)
+			turnsOf[s] = turns
+			continue
+		}
+		keep, twin := kept[fam][i], s
+		if rank(fam, s, turns) > rank(fam, keep, turns) {
+			keep, twin = s, keep
+			kept[fam][i], turnsOf[s] = s, turns
+		}
+		if err := dropIncomingSession(ctx, tx, twin, keep, false); err != nil {
+			return nil, err
+		}
+		delete(held, twin)
+		rep.Sessions.Duplicates++
+	}
+	incoming = slices.DeleteFunc(incoming, func(s string) bool { return !held[s] })
 
 	kinds := map[string]string{}
 	for _, s := range incoming {
@@ -503,13 +604,18 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		if err != nil {
 			return nil, err
 		}
-		// Our exact id first, then the family root, then its other copies, in a stable order.
-		cands := []string{s, sessionFamily(s)}
-		rest := append([]string{}, family[sessionFamily(s)]...)
+		fam := sessionFamily(s)
+		// Our exact id first, then the family root, then its other copies, in a stable order: the
+		// first available member in each relation is that relation's match. Every member is read,
+		// not just up to the first match: an exact copy later in the order outranks an earlier
+		// member theirs merely extends, and a claimed member says ours holds the turns already.
+		cands := []string{s, fam}
+		rest := append([]string{}, family[fam]...)
 		sort.Strings(rest)
 		cands = append(cands, rest...)
 
-		target, kind, oursHasS := "", "", false
+		match := map[string]string{} // relation -> first available member in it
+		heldBy := ""                 // the first member another incoming session claims that equals or extends theirs
 		seen := map[string]bool{}
 		for _, c := range cands {
 			if seen[c] {
@@ -520,45 +626,63 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			if err != nil {
 				return nil, err
 			}
-			if c == s && len(mine) > 0 {
-				oursHasS = true
-			}
-			if k := turnRelation(mine, theirs); k != "" {
-				target, kind = c, k
-				break
-			}
-		}
-		minted := false
-		if target == "" {
-			target, kind = s, kindNew
-			if oursHasS {
-				target, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), true
+			switch k := turnRelation(mine, theirs); {
+			case k == "":
+			case c != s && held[c]:
+				if k != kindLongerThere && heldBy == "" {
+					heldBy = c
+				}
+			case match[k] == "":
+				match[k] = c
 			}
 		}
-		if target != s && held[target] {
-			// The copy already holds that id. If it is the same transcript, this is a duplicate.
-			other, err := readTurns(ctx, tx, "inc", target)
-			if err != nil {
+
+		// holder, when set, holds every turn of s, which is dropped into it: one of ours (rule 3), or
+		// an incoming session (rule 6).
+		target, kind, minted, holder, later := s, kindNew, false, "", false
+		switch {
+		case match[kindLongerHere] == s: // rule 1, own id (s is the first candidate: equal to T, it is match[kindEqual])
+			target, kind = s, kindLongerHere
+		case match[kindEqual] != "":
+			target, kind = match[kindEqual], kindEqual
+		case match[kindLongerHere] != "":
+			target, kind = match[kindLongerHere], kindLongerHere
+		case heldBy != "":
+			holder, later = heldBy, true
+		case match[kindLongerThere] != "":
+			target, kind = match[kindLongerThere], kindLongerThere
+		case slices.Contains(family[fam], s):
+			// Ours holds s with another transcript (s is never claimed, so a related s matched above).
+			// A minted copy we do not hold keeps its own id under rule 5, although it is the id it
+			// would be minted again: taking that id for a second copy dropped it (#223).
+			id := fam + "@" + transcriptHash8(theirs)
+			oursHasID := slices.Contains(family[fam], id) // a member, so it matched none of rules 1-4
+			theirsHasID := !oursHasID && held[id]
+			if theirsHasID {
+				other, err := readTurns(ctx, tx, "inc", id)
+				if err != nil {
+					return nil, err
+				}
+				if k := turnRelation(other, theirs); k == kindEqual || k == kindLongerHere {
+					holder = id
+				}
+			}
+			if holder == "" && (oursHasID || theirsHasID) {
+				where := "this archive"
+				if theirsHasID {
+					where = "the incoming archive"
+				}
+				return nil, fmt.Errorf("session %s must arrive under the id minted from its transcript, %s, which %s holds with a different transcript; refusing to merge rather than fold the two into one session or lose one", s, id, where)
+			}
+			target, minted = id, true
+		}
+		if holder != "" {
+			if err := dropIncomingSession(ctx, tx, s, holder, later); err != nil {
 				return nil, err
 			}
-			if reflect.DeepEqual(other, theirs) {
-				if err := dropIncomingSession(ctx, tx, s); err != nil {
-					return nil, err
-				}
-				delete(held, s)
-				rep.Sessions.Duplicates++
-				continue
-			}
-			target, kind, minted = sessionFamily(s)+"@"+transcriptHash8(theirs), kindNew, true
-			// TODO(#223): target == s for a copy an earlier merge minted; it is dropped as its own duplicate.
-			if held[target] { // same hash: the same transcript under a third id
-				if err := dropIncomingSession(ctx, tx, s); err != nil {
-					return nil, err
-				}
-				delete(held, s)
-				rep.Sessions.Duplicates++
-				continue
-			}
+			delete(held, s)
+			rep.Sessions.Duplicates++
+			continue
 		}
 		if target != s {
 			if err := renameIncomingSession(ctx, tx, s, target); err != nil {
@@ -570,6 +694,18 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		kinds[target] = kind
 		if minted {
 			rep.Sessions.Diverged = append(rep.Sessions.Diverged, RenamedSession{From: s, To: target})
+		}
+	}
+	// Every session is placed, so no rename can carry them off any more: what the sessions dropped
+	// into ours carried rejoins the copy under the session of ours that holds their turns, and
+	// arrives with the rest, through the same rules (dropSharedMined, the obs_id and (session,
+	// obs_id) dedupes).
+	if err := refileHeld(ctx, tx, true); err != nil {
+		return nil, err
+	}
+	for _, r := range refiled {
+		if _, err := tx.ExecContext(ctx, `DROP TABLE temp.merge_refile_`+r.table); err != nil {
+			return nil, err
 		}
 	}
 	for _, k := range kinds {
@@ -615,13 +751,78 @@ func renameIncomingSession(ctx context.Context, tx *sql.Tx, from, to string) err
 	return dropImporterKeys(ctx, tx, from)
 }
 
-func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess string) error {
-	for _, table := range mergeSessionTables {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM inc.`+table+` WHERE session = ?`, sess); err != nil {
-			return fmt.Errorf("drop duplicate from %s: %w", table, err)
+const progressCols = "session, lens, distilled, retries, distilled_at, next_attempt, drift_at"
+
+// refiled is every table but raw that holds rows of a session: the columns the holding area keeps,
+// those columns read with the session moved to the holder (?1), and how a moved row joins the
+// holder's own.
+var refiled = []struct{ table, cols, moved, join string }{
+	// obs_id is unique across sessions, so nothing conflicts. The seq is kept, so a row the other
+	// side reviewed stays below its review cursor.
+	{"observations", "seq, " + obsCols, "seq, " + strings.Replace(obsCols, "session", "?1", 1), ""},
+	// The higher watermark: the dropped transcript is equal to or a prefix of the holder's, so both
+	// count the same turns from the first.
+	{"progress", progressCols, strings.Replace(progressCols, "session", "?1", 1), ` ON CONFLICT(session, lens) DO UPDATE SET
+	   distilled = excluded.distilled, retries = excluded.retries, distilled_at = excluded.distilled_at,
+	   next_attempt = excluded.next_attempt, drift_at = excluded.drift_at WHERE excluded.distilled > progress.distilled`},
+	// The holder's own staged row of an obs_id, and its own metadata, win. A staged payload names its
+	// session too, and DrainStaged trusts the payload.
+	{"staged", "id, session, obs_id, payload", "id, ?1, obs_id, json_set(payload, '$.session', ?1)", ` ON CONFLICT DO NOTHING`},
+	{"session_meta", "session, cwd, started, platform", "?1, cwd, started, platform", ` ON CONFLICT DO NOTHING`},
+}
+
+// dropIncomingSession removes sess from the copy and files everything it carries under holder, a
+// session holding every turn of it — the only way a session leaves the copy, so nothing it carries
+// is lost with it. Its transcript is equal to or a prefix of holder's, so its rows are as true
+// there: observations of every source, progress, staged rows, session metadata. Mined rows are not
+// "re-derivable" here: the other side folded them into facets that arrive citing them, and dropping
+// them with their progress left those citations dangling and the turns mined again, the evidence
+// counted twice. Whether they stay is dropSharedMined's call, as for any session: where we mined
+// the holder, they are a second wording of what we hold. Only the transcript and importer keys go,
+// which describe sess under its own id.
+//
+// An incoming holder takes the rows at once, so they go wherever it is placed. One of OURS may
+// still be occupied in the copy by an incoming session that a later rename carries off, taking
+// whatever sits under that id with it: for ours (later) the rows wait outside the copy, in
+// temp.merge_refile_*, until classifySessions has placed every session and calls refileHeld.
+func dropIncomingSession(ctx context.Context, tx *sql.Tx, sess, holder string, later bool) error {
+	if holder == "" || holder == sess {
+		return fmt.Errorf("drop %s: no session to file what it carries under", sess)
+	}
+	for _, r := range refiled {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO temp.merge_refile_`+r.table+`(later, `+r.cols+`)
+			SELECT ?3, `+r.moved+` FROM inc.`+r.table+` WHERE session = ?2`, holder, sess, later); err != nil {
+			return fmt.Errorf("file %s's %s under %s: %w", sess, r.table, holder, err)
 		}
 	}
-	return dropImporterKeys(ctx, tx, sess)
+	for _, table := range mergeSessionTables {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM inc.`+table+` WHERE session = ?`, sess); err != nil {
+			return fmt.Errorf("drop %s from %s: %w", sess, table, err)
+		}
+	}
+	if err := dropImporterKeys(ctx, tx, sess); err != nil {
+		return err
+	}
+	if later {
+		return nil
+	}
+	return refileHeld(ctx, tx, false)
+}
+
+// refileHeld puts the rows waiting in the holding area (those held for later, or those to file at
+// once) back into the copy under their holder.
+func refileHeld(ctx context.Context, tx *sql.Tx, later bool) error {
+	for _, r := range refiled {
+		for _, q := range []string{
+			`INSERT INTO inc.` + r.table + `(` + r.cols + `) SELECT ` + r.cols + ` FROM temp.merge_refile_` + r.table + ` WHERE later = ?` + r.join,
+			`DELETE FROM temp.merge_refile_` + r.table + ` WHERE later = ?`,
+		} {
+			if _, err := tx.ExecContext(ctx, q, later); err != nil {
+				return fmt.Errorf("file dropped sessions' %s under their holders: %w", r.table, err)
+			}
+		}
+	}
+	return nil
 }
 
 func dropImporterKeys(ctx context.Context, tx *sql.Tx, sess string) error {

@@ -345,7 +345,8 @@ func TestMergedFacetsOnSkippedObservationsSurviveTheNextReview(t *testing.T) {
 	obs(inc, "io1", "s1")  // their wording of bo1: skipped as a paraphrase
 	obs(inc, "x", "s1")    // the backup still holds what we deleted: skipped too
 	obs(inc, "orph", "s2") // mined from a transcript they cleaned up: skipped as an orphan
-	// An older witness held s1 twice, each copy mined: the second is dropped as a duplicate session.
+	// An older witness held s1 twice, each copy mined: the second is dropped as a duplicate session,
+	// and its observation, filed under s1, which we mined, is skipped as a paraphrase too.
 	mined(inc, "s1@0123abcd")
 	obs(inc, "idup", "s1@0123abcd")
 	writeFacets(t, inc, citing("paraphrase", "io1"), citing("orphan", "orph"), citing("duplicate", "idup"))
@@ -359,8 +360,8 @@ func TestMergedFacetsOnSkippedObservationsSurviveTheNextReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
-	if rep.Observations.SharedMined != 2 || rep.Observations.Orphaned != 1 || rep.Sessions.Duplicates != 1 || rep.Facets.New != 3 {
-		t.Fatalf("setup: want 2 paraphrases, 1 orphan and 1 duplicate session skipped, 3 facets new; got %+v %+v %+v",
+	if rep.Observations.SharedMined != 3 || rep.Observations.Orphaned != 1 || rep.Sessions.Duplicates != 1 || rep.Facets.New != 3 {
+		t.Fatalf("setup: want 3 paraphrases, 1 orphan and 1 duplicate session skipped, 3 facets new; got %+v %+v %+v",
 			rep.Observations, rep.Sessions, rep.Facets)
 	}
 	clock, err := base.LensClock("default")

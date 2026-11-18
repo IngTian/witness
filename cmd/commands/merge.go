@@ -352,7 +352,7 @@ func printMergePlan(src, root string, r *store.MergeReport, f *mergeFiles) {
 		fmt.Printf("                %s %s differs from yours — yours keeps the id, theirs arrives as %s\n", warnGlyph(), d.From, d.To)
 	}
 	if s.Duplicates > 0 {
-		fmt.Printf("                %s skipped: a second copy of a transcript already here\n", humanCount(s.Duplicates))
+		fmt.Printf("                %s skipped: another session holds all their turns and takes what they carried\n", humanCount(s.Duplicates))
 	}
 	o := r.Observations
 	fmt.Println(mergeRow("observations") + joinNonZero("none new", humanCount(o.Reviewed)+" reviewed there",
