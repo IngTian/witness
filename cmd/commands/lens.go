@@ -108,11 +108,12 @@ func groupRunE(c *cobra.Command, args []string) error {
 
 // newLensBackfillCmd builds `witness lens backfill <name> [--fresh]`, the single
 // catch-up command (issue #102 folded the former `rebuild` into `--fresh`). Plain
-// backfill resets the lens's watermark and re-mines its whole history; --fresh ALSO
-// drops the lens's existing L1 observations + L2 facets first, for when its prompt
-// changed and you want a clean slate rather than a merge. Either way it ends with a
-// forced review, so the lens's facets + profile never drift from the re-mined
-// observations — the consistency the old two-command split lacked.
+// backfill mines only this lens's pending sessions and never re-mines one it already
+// mined; --fresh drops the lens's L1 observations + L2 facets and resets its watermark
+// first, then re-mines its whole history, for when its prompt changed and you want a
+// clean slate rather than a merge. Either way it ends with a forced review, so the
+// lens's facets + profile never drift from the mined observations — the consistency
+// the old two-command split lacked.
 func newLensBackfillCmd() *cobra.Command {
 	var fresh, yes bool
 	c := &cobra.Command{
@@ -322,9 +323,9 @@ func lensDisable(st *store.Store, name string) error {
 // lensBackfill catches one lens up over the whole history (issue #55). Plain backfill
 // mines only this lens's pending sessions (raw past its watermark), drains the backlog
 // in the foreground, and ALWAYS ends with a forced review. --fresh alone drops L1/L2
-// and resets the watermark and the review cursor. Because only this lens's watermark
-// is cleared, the drain mines just this lens on already-distilled sessions — default
-// and every other lens keep their watermarks.
+// and resets the watermark and the review cursor. Under --fresh, because only this
+// lens's watermark is cleared, the drain mines just this lens on already-distilled
+// sessions — default and every other lens keep their watermarks.
 //
 // The forced review is unconditional (issue #102 folded the former `rebuild` into
 // `--fresh`): a plain backfill mines a lens's L1 observations, but facets are
