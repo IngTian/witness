@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        codex: ${{ fromJSON((github.event_name == 'schedule' || inputs.mode == 'latest') && '["latest"]' || '["0.169.0","0.169.0-alpha.11.1"]') }}
+        codex: ${{ fromJSON((github.event_name == 'schedule' || inputs.mode == 'latest') && '["latest"]' || '["0.169.0","0.169.0-alpha.11.1","0.170.0"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     env:

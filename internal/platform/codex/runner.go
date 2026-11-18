@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,8 +22,8 @@ import (
 // The tool policy is a versioned protocol, not a sandbox policy: transcripts are
 // untrusted and must never be offered tools, even read-only ones. New CLI versions
 // need the wire contract checked before this range is extended.
-const testedVersion = "0.169.0"
-const testedDesktopVersion = "0.169.0-alpha.11.1"
+var testedVersions = []string{"0.169.0", "0.169.0-alpha.11.1", "0.170.0"}
+
 const preflightTimeout = 45 * time.Second
 
 var runTimeout = 20 * time.Minute
@@ -352,14 +353,14 @@ func checkVersion(ctx context.Context, bin, dir string, env []string) error {
 		return err
 	}
 	if !supportsVersion(version) {
-		return fmt.Errorf("Codex CLI %s has no verified tool-free contract; install %s or %s and point WITNESS_CODEX_BINARY at it", version, testedVersion, testedDesktopVersion)
+		return fmt.Errorf("Codex CLI %s has no verified tool-free contract; install one of %s and point WITNESS_CODEX_BINARY at it", version, strings.Join(testedVersions, ", "))
 	}
 	return nil
 }
 
 // Contract tests can exercise the newest CLI without admitting its version in production.
 var supportsVersion = func(version string) bool {
-	return version == testedVersion || version == testedDesktopVersion
+	return slices.Contains(testedVersions, version)
 }
 
 func cliVersion(ctx context.Context, bin, dir string, env []string) (string, error) {
