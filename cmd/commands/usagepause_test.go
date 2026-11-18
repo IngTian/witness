@@ -18,8 +18,8 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// mapMeta is a map-backed store.MetaKV. The gate touches it only under its own mutex; this one
-// keeps the test's own reads race-free too.
+// mapMeta is a map-backed store.MetaKV. The gate reads the pause outside its own mutex, so this
+// lock keeps those reads race-free against the test's writes.
 type mapMeta struct {
 	mu sync.Mutex
 	m  map[string]string

@@ -140,8 +140,7 @@ OpenCode users can install from npm instead: `npm i -g @witness-ai/opencode` —
 
 ## Connect your tools
 
-witness captures from four sources at once, into one archive and one set of lenses. Sessions are
-namespaced per source, so none can corrupt another's data.
+witness captures from four sources at once. Your coding agents all feed one archive and one set of lenses, with sessions namespaced per source so none can corrupt another's data. A corpus that is not about you (articles, market notes, a knowledge base) goes in its own archive: `witness install --path <dir>`, then `WITNESS_HOME=<dir> witness ingest --file records.ndjson`.
 
 | source | setup |
 |---|---|
@@ -177,7 +176,7 @@ See [How it works](docs/how-it-works.md).
 ## Your data is yours
 
 - **Local by default.** One SQLite file plus markdown under your data dir (`witness doctor` prints
-  the path). Capture and local reads need no model account or cloud key.
+  the path). witness itself sends no telemetry; the agent CLIs it runs keep their own settings. Capture and local reads need no model account or cloud key.
 - **Local embeddings.** Multilingual (English and Chinese) embeddings run pure-Go on your machine.
 - **Distillation uses your own tooling** — your Claude Code login, a witness-owned Codex login, or OpenCode's free models,
   environment API keys and ambient cloud credentials. witness never copies a credential. Nothing goes

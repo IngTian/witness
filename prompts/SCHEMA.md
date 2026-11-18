@@ -95,7 +95,7 @@ Each record is a JSON object with these fields:
   namespaced with the `file:` prefix in L0.
 - **`ts`** (optional string) — the content timestamp in RFC3339 format (`YYYY-MM-DDTHH:MM:SSZ`) or
   UTC date (`YYYY-MM-DD`). Defaults to ingest-time if absent. This becomes the L0 row's `ts` and
-  propagates to observations. Used for temporal facets (valid_from) and profile narrative.
+  propagates to the observations mined from it. A facet's `valid_from` is when the review recorded the change, not this `ts`.
 - **`role`** (optional string) — defaults to `"document"`. May be any string; this becomes the L0
   `role` field. Reserved for future use (e.g., distinguishing user notes from assistant summaries).
 

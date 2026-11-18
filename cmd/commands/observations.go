@@ -43,7 +43,6 @@ func newObservationsCmd() *cobra.Command {
 		Short:  "Delete one observation.",
 		Long:   "Delete one L1 observation by obs_id. It is removed now; facets that rested only on it are retired at the next review, and nothing is re-read. This is the CLI equivalent of the MCP delete_observation tool.",
 		Args:   cobra.ExactArgs(1),
-		Hidden: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdObservationDelete(args[0])
 		},

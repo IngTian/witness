@@ -14,22 +14,23 @@ inside that folder in PowerShell:
 ```powershell
 .\witness.exe wire claude      # Claude Code
 .\witness.exe wire opencode    # OpenCode
+.\witness.exe wire codex       # Codex (then approve the hooks with /hooks)
 ```
 
-Either command copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user
+Each command copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user
 PATH, and provisions the archive. The zip carries the prompt templates and the ~448MB
-model alongside the exe; the binary resolves both relative to itself. Running both is
-fine — the copy is idempotent, and they wire different editors.
+model alongside the exe; the binary resolves both relative to itself. Running more than one is
+fine — the copy is idempotent, and each wires a different editor.
 
 What each wires, and why they differ: Claude Code spawns the hook itself, so `wire
 claude` writes **exec-form hooks** (`{command: witness.exe, args: [...]}`) into
 `settings.json`. OpenCode is the other way round — its *plugin* spawns witness, so
 `wire opencode` bakes the installed `witness.exe` path into the plugin and the MCP
-entry. Neither needs a shell or Git Bash.
+entry. Codex runs its hooks through PowerShell, so `wire codex` writes `commandWindows` entries (`& '…\witness.exe' …`) into Codex's `hooks.json`. None of the three needs Git Bash.
 
-To remove an editor integration: `witness.exe unwire claude` / `unwire opencode`
+To remove an editor integration: `witness.exe unwire claude` / `unwire opencode` / `unwire codex`
 (strips the hooks/plugin + MCP entry). The copied files and PATH entry are left in
-place, since the other integration may still be using them.
+place, since another integration may still be using them.
 
 ### OpenCode on Windows
 

@@ -13,9 +13,9 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// The usage pause keys on this capability, never on the runner's name: only OpenCode Zen's
-// own opencode/* models draw on the free allowance. The serve allows free models when any of its
-// models is one (allowsFree, the same predicate); otherwise it never falls back to one.
+// The usage pause is keyed per runner name, and gates calls based on this capability: only OpenCode
+// Zen's own opencode/* models draw on the free allowance. The serve allows free models when any of
+// its models is one (allowsFree, the same predicate); otherwise it never falls back to one.
 func TestOnSharedAllowanceMatchesOnlyOpenCodeModels(t *testing.T) {
 	var sa platform.SharedAllowance = &runner{}
 	for model, want := range map[string]bool{

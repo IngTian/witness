@@ -317,8 +317,8 @@ func TestLensBackfillCountsABackedOffSessionAsUnmined(t *testing.T) {
 }
 
 // An unfinished backfill must name its cause, and its recovery must not be "re-run the backfill":
-// that resets the watermark and re-mines everything already done. The two real steps are finish
-// the drain, then review — the backfill returned before its review (and --fresh emptied the facets).
+// re-running with --fresh resets the watermark and re-mines everything already done. The two real
+// steps are finish the drain, then review — the backfill returned before its review (and --fresh emptied the facets).
 // TestMain points WITNESS_ASSETS at an empty dir, so the embedder fails and s1 stays pending.
 func TestLensBackfillUnfinishedNamesTheCauseAndBothRecoverySteps(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())
@@ -342,7 +342,7 @@ func TestLensBackfillUnfinishedNamesTheCauseAndBothRecoverySteps(t *testing.T) {
 		}
 	}
 	if strings.Contains(msg, "lens backfill") {
-		t.Errorf("re-running the backfill re-mines everything; it is not a recovery step:\n%s", msg)
+		t.Errorf("re-running the backfill with --fresh re-mines everything; it is not a recovery step:\n%s", msg)
 	}
 	if !strings.Contains(out, "over the sessions it has not mined yet") {
 		t.Errorf("plain path must say it catches up:\n%s", out)
