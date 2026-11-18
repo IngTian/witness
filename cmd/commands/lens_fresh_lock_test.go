@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
@@ -270,6 +271,48 @@ func TestLensBackfillWithoutFreshDoesNotRequireTheLock(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// A session the lens has NOT finished but is sleeping on a retry backoff is still work: Stats
+// counts it in BackedOff, not Pending, so the "already mined" notice must add both. Otherwise a
+// lens whose only unmined session is backed off is told it has mined everything.
+func TestLensBackfillCountsABackedOffSessionAsUnmined(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seq := 0; seq < 2; seq++ {
+		if err := st.AppendRaw(store.RawRecord{
+			Session: "s1", Seq: seq, TS: "2026-08-01T00:00:00Z", Role: "user", Text: "turn",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.MarkDistilled("s1", "default", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetNextAttempt("s1", "default", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		t.Fatal("precondition: lock should be free")
+	}
+	defer unlock()
+
+	out := captureStdout(t, func() { err = lensBackfill(st, "default", false /*fresh*/, true /*assumeYes*/) })
+	if err != nil {
+		t.Fatalf("a plain backfill must not fail with the lock held: %v", err)
+	}
+	if !strings.Contains(out, "over the sessions it has not mined yet") {
+		t.Errorf("a backed-off unmined session must read as pending work:\n%s", out)
+	}
+	if strings.Contains(out, "already mined") {
+		t.Errorf("a backed-off unmined session must not read as already mined:\n%s", out)
 	}
 }
 
