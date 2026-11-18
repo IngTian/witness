@@ -204,9 +204,9 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 		return err
 	}
 	defer runner.Close()
-	// The same free-model gate a drain gets (freepause.go): a preview on a paused free model sends
-	// nothing, and a refusal here pauses the drain's free-model calls too.
-	runFn := newFreeGate(st).wrap(cfg.Runner, runner, distill.RunnerMine(runner))
+	// The same usage gate a drain gets (usagepause.go): a preview on a paused allowance sends
+	// nothing, and a refusal here pauses the drain's calls on that runtime's allowance too.
+	runFn := newUsageGate(st).wrap(cfg.Runner, runner, distill.RunnerMine(runner))
 
 	// Preview all sessions in parallel (bounded by the engine's concurrency policy), then
 	// render in sample order. Concurrency is clamped to the sample size (so to 1 for a

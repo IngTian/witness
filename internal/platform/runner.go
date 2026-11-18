@@ -39,8 +39,8 @@ func StderrExcerpt(s string) string {
 }
 
 // QuotaExhaustedError is returned when a shared usage limit is reached and will reset
-// at a known time. The drain recognises it via errors.As and pauses the affected allowance
-// until ResetAt, without incrementing per-session backoff.
+// at a known time. cmd's gate pauses that runtime's SharedAllowance calls until ResetAt;
+// the drain skips the lens without a backoff.
 type QuotaExhaustedError struct {
 	ResetAt time.Time
 	Runtime string
@@ -50,11 +50,11 @@ func (e *QuotaExhaustedError) Error() string {
 	return fmt.Sprintf("%s usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
 }
 
-// PlanAllowance identifies calls drawing on a runner login's shared plan quota.
-// It has a separate pause from OpenCode's network-wide free allowance.
-type PlanAllowance interface{ OnPlanAllowance(model string) bool }
-
-func UsagePauseKey(runtime string) string { return "runner_usage_paused_until:" + runtime }
+// SharedAllowance: this call draws on an allowance one QuotaExhaustedError refusal exhausts for every
+// such call on this runtime until its reset (OpenCode Zen's free models, counted per network; a Codex
+// plan login). cmd pauses exactly those calls, per runtime. NewRunner must stay side-effect free:
+// cmd mints runners without opening them to ask this.
+type SharedAllowance interface{ OnSharedAllowance(model string) bool }
 
 // RunnerLoginGate lets wire leave capture usable until the runner has a login.
 type RunnerLoginGate interface {
@@ -75,11 +75,6 @@ type ModelFormat interface {
 	ModelFormat() (placeholder, description string)
 	ValidModel(model string) bool
 }
-
-// FreeAllowance is the Runner capability "this model draws on a shared free allowance", which is
-// what a QuotaExhaustedError refusal exhausts. cmd's free-model gate asks it per call so it can
-// pause exactly those calls without naming a runtime; a runner without it has no free allowance.
-type FreeAllowance interface{ OnFreeModel(model string) bool }
 
 // Runner is the default distillation-engine lifecycle: one engine drains every
 // pending session regardless of which platform produced it. It is the whole of

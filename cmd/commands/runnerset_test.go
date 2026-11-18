@@ -134,7 +134,7 @@ var (
 	freeFakeRuns     atomic.Int32
 )
 
-// freeFakePlatform mints a runner with the FreeAllowance capability (freeRunner, freepause_test.go).
+// freeFakePlatform mints a runner with the SharedAllowance capability (freeRunner, usagepause_test.go).
 type freeFakePlatform struct{}
 
 func (freeFakePlatform) Name() string                           { return "fakefree" }
@@ -149,7 +149,7 @@ func (freeFakeRunner) Run(context.Context, string, string, string) (string, erro
 	return "[]", nil
 }
 
-// Every model call opens through the runnerSet, so its MineFuncs must carry the free-model gate:
+// Every model call opens through the runnerSet, so its MineFuncs must carry the usage gate:
 // with the pause armed, neither a lens's runner nor the default one (review, compaction, profile
 // ride RunFor(nil)) reaches a free model.
 func TestRunnerSetGatesFreeModelCalls(t *testing.T) {
@@ -160,7 +160,7 @@ func TestRunnerSetGatesFreeModelCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.SetMetaString(freeModelsPausedKey, time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
+	if err := st.SetMetaString(usagePauseKey("fakefree"), time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
 	lenses := []*lens.Lens{{Name: "default"}}

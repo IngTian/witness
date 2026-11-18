@@ -132,7 +132,7 @@ func (c stopCtl) NotifyStop(parent context.Context) (context.Context, context.Ca
 	return ctx, cancel
 }
 
-// A run that ends on a stop arms no wakeup, an older deferred need's (here the free-model pause)
+// A run that ends on a stop arms no wakeup, an older deferred need's (here OpenCode's usage pause)
 // included: `worker stop` clears every wakeup before its SIGTERM, and one re-armed by the dying
 // worker resumed the stopped drain minutes later (G2, reproduced). Both stop signals count — the
 // SIGTERM that cancels the drain ctx, and the flag a stop whose signal missed leaves behind.
@@ -150,7 +150,7 @@ func TestAStoppedWorkerArmsNoWakeup(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := openTestStore(t)
-			_ = st.SetMetaString(freeModelsPausedKey, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			_ = st.SetMetaString(usagePauseKey("opencode"), time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 			prev := procCtl
 			t.Cleanup(func() { procCtl = prev })
 			procCtl = stopCtl{&proc.Fake{}, func(cancel context.CancelFunc) { tc.stop(st, cancel) }}

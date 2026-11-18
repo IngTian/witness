@@ -321,7 +321,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 						skip = true
 						break
 					}
-					// The free allowance is used up: cmd's gate now holds every free-model call
+					// The runtime's shared allowance is used up: cmd's gate holds those calls
 					// until the reset, so this is not this session's failure. Skip the lens
 					// entirely (below) — no IncRetry/next_attempt, watermark kept — and it mines
 					// once the pause lifts. A backoff here would add hours per session on top.

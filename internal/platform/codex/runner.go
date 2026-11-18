@@ -34,14 +34,13 @@ type runner struct {
 	root, binary string
 	models       []string
 	plan         bool
-	meta         store.MetaKV
 }
 
 func (Platform) NewRunner(cfg store.Config) platform.Runner {
-	return &runner{root: cfg.RuntimeRoot, models: cfg.RunnerModels, meta: cfg.RuntimeMeta, plan: strings.TrimSpace(os.Getenv("CODEX_API_KEY")) == ""}
+	return &runner{root: cfg.RuntimeRoot, models: cfg.RunnerModels, plan: strings.TrimSpace(os.Getenv("CODEX_API_KEY")) == ""}
 }
 
-func (r *runner) OnPlanAllowance(string) bool { return r.plan }
+func (r *runner) OnSharedAllowance(string) bool { return r.plan }
 
 func (Platform) RequiresModel() bool   { return true }
 func (*runner) InvocationHint() string { return "codex exec (witness-owned login)" }
@@ -498,14 +497,6 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 		return "", err
 	}
 	defer unlock()
-	// Calls already admitted by cmd's gate can be waiting here when another
-	// process exhausts the login. Recheck the same durable pause under the login
-	// lock, and publish refusals before releasing it, so they send nothing.
-	if r.plan && r.meta != nil {
-		if reset, err := time.Parse(time.RFC3339, r.meta.MetaString(platform.UsagePauseKey("codex"))); err == nil && reset.After(time.Now()) {
-			return "", &platform.QuotaExhaustedError{Runtime: "codex", ResetAt: reset}
-		}
-	}
 	// Keep the refresh lock until the process has exited, including on cancellation.
 	dir, err := scratchDir()
 	if err != nil {
@@ -553,15 +544,8 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 	answer, eventErr := parseEvents(out.Bytes(), time.Now())
 	if eventErr != nil {
 		var quota *platform.QuotaExhaustedError
-		if errors.As(eventErr, &quota) {
-			if !r.plan {
-				return "", errors.New(eventErr.Error())
-			}
-			if r.meta != nil {
-				if err := r.meta.SetMetaString(platform.UsagePauseKey("codex"), quota.ResetAt.UTC().Format(time.RFC3339)); err != nil {
-					return "", fmt.Errorf("codex could not persist the usage pause: %w", err)
-				}
-			}
+		if errors.As(eventErr, &quota) && !r.plan {
+			return "", errors.New(eventErr.Error()) // API credit, not a plan allowance: no pause
 		}
 		if err != nil {
 			return "", fmt.Errorf("%w (codex exec: %v; %s)", eventErr, err, platform.StderrExcerpt(stderr.String()))

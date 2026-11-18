@@ -34,7 +34,6 @@ type Config struct {
 	// deliberately populated from Store.Root, not config.toml: OpenCode must never
 	// create distillation state in the user's database.
 	RuntimeRoot     string
-	RuntimeMeta     MetaKV // shared usage-pause state; runtime only, never persisted as config
 	Runner          string // registered headless runtime: claude (default), opencode or codex
 	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
 	DistillModel    string // model for the reviewer ("" = claude -p default)
@@ -130,7 +129,6 @@ func DefaultConfig() Config {
 func (c *configFile) loadConfig() (cfg Config, unknown []string) {
 	cfg = DefaultConfig()
 	cfg.RuntimeRoot = filepath.Join(c.root, "runtime")
-	cfg.RuntimeMeta = &metaKV{db: c.db}
 	data, err := os.ReadFile(c.configPath())
 	if err != nil {
 		return cfg, nil

@@ -57,7 +57,9 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   optional capabilities (rendering falls back to the shared `RenderChunks`, import to
   nothing), and so are `AutoImporter` (a wired source re-imported at every drain start,
   because it can go stale without a live trigger) and `ModelRequirer` (a runner that
-  refuses an empty stage model, so wire asks for one); `cmd/commands/root.go` imports
+  refuses an empty stage model, so wire asks for one), and a runner may implement
+  `SharedAllowance` (calls one usage-limit refusal pauses per runtime until its reset;
+  `cmd/commands/usagepause.go` is the only writer); `cmd/commands/root.go` imports
   the adapters. Installers register separately: a cmd-local wire-target map
   (`cmd/commands/installers.go`) with cmd-side implementations.
   `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS — the one source of

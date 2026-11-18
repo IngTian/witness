@@ -167,7 +167,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// port's signal-aware ctx (SIGINT+SIGTERM).
 	ctx, stopSignals := procCtl.NotifyStop(context.Background())
 	defer stopSignals()
-	// On exit, arm the one future wakeup a deferred need (a backoff, the free-model pause) asks
+	// On exit, arm the one future wakeup a deferred need (a backoff, a runtime's usage pause) asks
 	// for — unless the run ended on a stop: its ctx fired, or worker_stop_requested is set (a stop
 	// whose signal missed). `worker stop` clears every wakeup before its SIGTERM, and re-arming one
 	// here resumed the stopped drain 5 min later (G2, reproduced). A stopped worker waits for the

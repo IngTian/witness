@@ -207,28 +207,20 @@ func TestRunAttributesDeadlineAndCallerCancellation(t *testing.T) {
 	}
 }
 
-func TestRunPublishesAndRechecksPlanPauseUnderLoginLock(t *testing.T) {
+// A plan login's usage-limit refusal is a pause (cmd's gate arms it); with CODEX_API_KEY the same
+// refusal is API credit, an ordinary failure that backs off like any other.
+func TestRunReportsAPlanRefusalAsAPause(t *testing.T) {
 	r := helperRunner(t)
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st, err := store.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	r.meta, r.plan = st, true
 	t.Setenv("WITNESS_CODEX_HELPER_MODE", "quota")
+	ctx := context.Background()
 	var quota *platform.QuotaExhaustedError
-	if _, err := r.Run(context.Background(), "test", "witness-system", "corpus-only"); !errors.As(err, &quota) {
-		t.Fatalf("not a plan refusal: %v", err)
+	r.plan = true
+	if _, err := r.Run(ctx, "test", "p", "i"); !errors.As(err, &quota) || quota.Runtime != "codex" || !quota.ResetAt.After(time.Now()) {
+		t.Fatalf("a plan refusal must be QuotaExhausted{codex, future reset}: %v", err)
 	}
-	if st.MetaString(platform.UsagePauseKey("codex")) == "" {
-		t.Fatal("refusal was not published before unlock")
-	}
-	previous := commandContext
-	commandContext = func(context.Context, string, ...string) *exec.Cmd { t.Fatal("paused call spawned a child"); return nil }
-	defer func() { commandContext = previous }()
-	if _, err := r.Run(context.Background(), "test", "p", "i"); !errors.As(err, &quota) {
-		t.Fatalf("pause not rechecked: %v", err)
+	r.plan = false
+	if _, err := r.Run(ctx, "test", "p", "i"); err == nil || errors.As(err, &quota) {
+		t.Fatalf("with CODEX_API_KEY the refusal must be a plain error: %v", err)
 	}
 }
 

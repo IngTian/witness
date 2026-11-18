@@ -58,7 +58,7 @@ func TestCodexModelPromptAcceptsBareNames(t *testing.T) {
 
 type planRunner struct{ limitedPreviewRunner }
 
-func (planRunner) OnPlanAllowance(string) bool { return true }
+func (planRunner) OnSharedAllowance(string) bool { return true }
 
 func TestPlanPauseIsIndependentAndSurvivesNewGate(t *testing.T) {
 	meta := &mapMeta{}
@@ -72,22 +72,12 @@ func TestPlanPauseIsIndependentAndSurvivesNewGate(t *testing.T) {
 	if !errors.As(err, &quota) || calls.Load() != 1 {
 		t.Fatalf("pause lost: %d calls, %v", calls.Load(), err)
 	}
-	if meta.MetaString(freeModelsPausedKey) != "" {
+	if meta.MetaString(usagePauseKey("opencode")) != "" {
 		t.Fatal("Codex paused OpenCode")
 	}
 	_, err = gate.wrap("other-plan", planRunner{}, counted(&calls, ok))(context.Background(), "test", "p", "i")
 	if err != nil || calls.Load() != 2 {
 		t.Fatal("Codex paused a different plan")
-	}
-	if err := meta.SetMetaString(freeModelsPausedKey, reset.Format(time.RFC3339)); err != nil {
-		t.Fatal(err)
-	}
-	if err := meta.SetMetaString(runnerPauseKey("codex"), gateNow.Add(-time.Minute).Format(time.RFC3339)); err != nil {
-		t.Fatal(err)
-	}
-	_, err = testGate(meta).wrap("codex", planRunner{}, counted(&calls, ok))(context.Background(), "test", "p", "i")
-	if err != nil || meta.MetaString(runnerPauseKey("codex")) != "" || meta.MetaString(freeModelsPausedKey) == "" {
-		t.Fatal("probe cleared a different allowance", err)
 	}
 }
 
@@ -99,7 +89,7 @@ func TestPlanPauseSchedulesWakeupAndAppearsInStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	reset := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
-	if err := st.SetMetaString(runnerPauseKey("codex"), reset.Format(time.RFC3339)); err != nil {
+	if err := st.SetMetaString(usagePauseKey("codex"), reset.Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := retryWakeupAt(st, time.Now()); !ok || !got.Equal(reset) {

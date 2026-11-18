@@ -417,16 +417,9 @@ func cmdDistillStatus(asJSON bool) error {
 	}
 	lastRaw := st.LastRawTS()
 	lastDistilled := st.LastDistilledRawTS()
-	// The free-model pause holds every free-model call for hours, so a stalled queue needs its
-	// reason somewhere outside the worker log. A fact only: no warning, ranking or advice.
-	pausedUntil, paused := freeModelsPausedUntil(st)
-	paused = paused && pausedUntil.After(time.Now())
-	usagePauses := map[string]string{}
-	for runtime, until := range runnerUsagePauses(st) {
-		if until.After(time.Now()) {
-			usagePauses[runtime] = until.UTC().Format(time.RFC3339)
-		}
-	}
+	// A usage pause holds a runtime's shared-allowance calls for hours or days, so a stalled queue
+	// needs its reason somewhere outside the worker log. A fact only: no warning, ranking or advice.
+	pauses := usagePauses(st, time.Now())
 	if asJSON {
 		out := distillStatusJSON{
 			Worker: distillWorkerJSON{
@@ -449,10 +442,12 @@ func cmdDistillStatus(asJSON bool) error {
 			RawThrough:       valueOrNever(lastRaw),
 			DistilledThrough: valueOrNever(lastDistilled),
 		}
-		if paused {
-			out.FreeModelsPausedUntil = pausedUntil.UTC().Format(time.RFC3339)
+		if len(pauses) > 0 {
+			out.RunnerUsagePausedUntil = map[string]string{}
+			for rt, until := range pauses {
+				out.RunnerUsagePausedUntil[rt] = until.UTC().Format(time.RFC3339)
+			}
 		}
-		out.RunnerUsagePausedUntil = usagePauses
 		return emitJSON(out)
 	}
 	// Decorative rendering (same fields as --json above): the house title, then kvRow rows like
@@ -488,13 +483,9 @@ func cmdDistillStatus(asJSON bool) error {
 		queueLine = yellow(queueLine)
 	}
 	fmt.Println("  " + kvRow("queue", queueLine, ""))
-	if paused {
-		fmt.Println("  " + kvRow("free models", "paused until "+pausedUntil.Local().Format("2006-01-02 15:04"), "the free allowance resets then"))
-	}
-	for _, runtime := range platform.RunnerNames() {
-		if value := usagePauses[runtime]; value != "" {
-			until, _ := time.Parse(time.RFC3339, value)
-			fmt.Println("  " + kvRow(runtime+" allowance", "paused until "+until.Local().Format("2006-01-02 15:04"), "the plan allowance resets then"))
+	for _, rt := range platform.RunnerNames() {
+		if until, paused := pauses[rt]; paused {
+			fmt.Println("  " + kvRow(rt+" allowance", "paused until "+until.Local().Format("2006-01-02 15:04"), "the allowance resets then"))
 		}
 	}
 	fmt.Println("  " + kvRow("fresh", "raw "+timeOrNever(lastRaw)+" · distilled "+timeOrNever(lastDistilled), behind(lastRaw, lastDistilled)))
@@ -565,8 +556,7 @@ type distillStatusJSON struct {
 	Queue            distillQueueJSON   `json:"queue"`
 	RawThrough       string             `json:"raw_through"`
 	DistilledThrough string             `json:"distilled_through"`
-	// Set only while the free-model pause is armed and in the future (RFC3339 UTC).
-	FreeModelsPausedUntil  string            `json:"free_models_paused_until,omitempty"`
+	// Runtime → reset (RFC3339 UTC), only for a usage pause armed and in the future.
 	RunnerUsagePausedUntil map[string]string `json:"runner_usage_paused_until,omitempty"`
 }
 
