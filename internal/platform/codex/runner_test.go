@@ -73,8 +73,17 @@ func TestUnixNpmShimResolvesNativeBinary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, err := resolveUnixCLI(shim, "linux", "amd64"); err != nil || got != bin {
-		t.Fatal(got, err)
+	got, err := resolveUnixCLI(shim, "linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFile, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotFile, err := os.Stat(got)
+	if err != nil || !os.SameFile(gotFile, wantFile) {
+		t.Fatalf("resolved %q, want the file at %q: %v", got, bin, err)
 	}
 }
 
