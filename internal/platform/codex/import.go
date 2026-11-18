@@ -207,7 +207,7 @@ func (im *Importer) unchanged(id, source, revision string) bool {
 	if json.Unmarshal([]byte(im.Store.MetaString(statePrefix+SessionPrefix+id)), &old) != nil {
 		return false
 	}
-	return old.Version == 1 && old.Source == source && old.Revision == revision && im.Store.RawCount(SessionPrefix+id) == len(old.Keys)
+	return old.Version == 1 && old.Source == source && old.Revision == revision && im.Store.RawCount(SessionPrefix+id) >= len(old.Keys)
 }
 
 func (im *Importer) apply(meta store.SessionMeta, source, revision string, records []store.RawRecord, identities []string, stats *platform.ImportStats) error {
@@ -224,7 +224,12 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	var old importState
 	key := statePrefix + meta.Session
 	_ = json.Unmarshal([]byte(im.Store.MetaString(key)), &old)
-	prefix := old.Version == 1 && len(old.Keys) <= len(keys) && im.Store.RawCount(meta.Session) == len(old.Keys)
+	// Rows past the stored keys are turns `witness merge` appended from another machine's copy
+	// (that copy arrives under a minted id, so no key describes them). They stay, and so does the
+	// session's progress: what Codex added goes after them. Requiring the counts to be equal
+	// replaced the session, deleting them and re-mining it.
+	have := im.Store.RawCount(meta.Session)
+	prefix := old.Version == 1 && len(old.Keys) <= len(keys) && have >= len(old.Keys)
 	if prefix {
 		for i, k := range old.Keys {
 			if keys[i] != k {
@@ -236,6 +241,9 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	tail := records
 	if prefix {
 		tail = records[len(old.Keys):]
+		for i := range tail {
+			tail[i].Seq = have + i
+		}
 	}
 	state, _ := json.Marshal(importState{1, source, revision, keys})
 	if err := im.Store.ApplyRawImport(meta, tail, key, string(state), !prefix); err != nil {

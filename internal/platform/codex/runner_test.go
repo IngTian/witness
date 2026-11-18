@@ -401,8 +401,9 @@ func servePolicyFixture(mode string) {
 func TestPreflightReportsUnusableRuntime(t *testing.T) {
 	for _, tc := range []struct{ mode, version, model, want string }{
 		{"", "0.169.0-alpha.11", "test", "no verified tool-free contract"},
-		{"", "0.170.0", "test", "no verified tool-free contract"},
+		{"", "0.171.0", "test", "no verified tool-free contract"},
 		{"", "0.169.0", "test", ""},
+		{"", "0.170.0", "test", ""},
 		{"managed-config", "", "test", "mdm config layer"},
 		{"managed-requirements", "", "test", "managed requirements"},
 		{"missing-layers", "", "test", "did not report config layers"},
@@ -571,7 +572,7 @@ func TestOpenQueuesAndDiagnosticsReportBusy(t *testing.T) {
 
 func TestLoginAndReadinessRejectUnverifiedCLI(t *testing.T) {
 	r := setUpChild(t)
-	t.Setenv("WITNESS_CODEX_HELPER_VERSION", "0.170.0")
+	t.Setenv("WITNESS_CODEX_HELPER_VERSION", "0.171.0")
 	previous := commandContext
 	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
 		if len(args) != 1 || args[0] != "--version" {

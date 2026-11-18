@@ -254,3 +254,47 @@ func TestHomeAndReadOnlyURI(t *testing.T) {
 		t.Fatal("Codex runner capability missing")
 	}
 }
+
+// A merge can append another machine's turns after ours with no importer key for them (they come
+// from a copy under a minted id, which nothing imports into). They are the merge's, not a desync:
+// the next import keeps them and the session's progress, and appends only what Codex added.
+// Replacing the session deleted them and reset its progress, so its mined turns were mined again.
+func TestImportKeepsTurnsAMergeAppended(t *testing.T) {
+	im, st := testImporter(t)
+	path := rollout(t, im.Home, "s1", message("user", "turn one")+message("assistant", "turn two"))
+	if s := runImport(t, im); s.Records != 2 {
+		t.Fatalf("setup: %+v", s)
+	}
+	if err := st.AppendRaw(store.RawRecord{Session: "codex:s1", Seq: 2, Role: "user", Text: "merged turn"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDistilled("codex:s1", store.LensDefault, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	runImport(t, im) // the rollout is unchanged
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString(message("user", "turn three"))
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runImport(t, im)
+	recs, err := st.ReadRaw("codex:s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range recs {
+		got = append(got, fmt.Sprintf("%d %s:%s", r.Seq, r.Role, r.Text))
+	}
+	if want := "0 user:turn one|1 assistant:turn two|2 user:merged turn|3 user:turn three"; strings.Join(got, "|") != want {
+		t.Errorf("raw = %q, want %q", got, want)
+	}
+	if n := st.DistilledCount("codex:s1", store.LensDefault); n != 3 {
+		t.Errorf("progress %d, want 3: the mined turns are mined again", n)
+	}
+}
