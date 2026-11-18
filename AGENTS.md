@@ -59,6 +59,7 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   because it can go stale without a live trigger) and `ModelRequirer` (a runner that
   refuses an empty stage model, so wire asks for one), and a runner may implement
   `SharedAllowance` (calls one usage-limit refusal pauses per runtime until its reset;
+  Claude arms it only on the CLI's rejected `rate_limit_event`;
   `cmd/commands/usagepause.go` is the only writer); `cmd/commands/root.go` imports
   the adapters. Installers register separately: a cmd-local wire-target map
   (`cmd/commands/installers.go`) with cmd-side implementations.

@@ -19,8 +19,9 @@ func init() { platform.Register(Platform{}) }
 // drop one (an Import that no longer matches imports nothing and reports "up to date").
 // These make that a compile error instead.
 var (
-	_ platform.Capturer       = Platform{}
-	_ platform.RunnerProvider = Platform{}
+	_ platform.Capturer        = Platform{}
+	_ platform.RunnerProvider  = Platform{}
+	_ platform.SharedAllowance = runner{}
 )
 
 func (Platform) Name() string { return "claude" }

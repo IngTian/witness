@@ -52,7 +52,8 @@ func (e *QuotaExhaustedError) Error() string {
 
 // SharedAllowance: this call draws on an allowance one QuotaExhaustedError refusal exhausts for every
 // such call on this runtime until its reset (OpenCode Zen's free models, counted per network; a Codex
-// plan login). cmd pauses exactly those calls, per runtime. NewRunner must stay side-effect free:
+// plan login; a Claude login, armed only by the CLI's rejected rate_limit_event). cmd pauses exactly
+// those calls, per runtime. NewRunner must stay side-effect free:
 // cmd mints runners without opening them to ask this.
 type SharedAllowance interface{ OnSharedAllowance(model string) bool }
 

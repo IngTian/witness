@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -38,7 +39,7 @@ func (runner) InvocationHint() string { return "claude -p" }
 // is witness's own instruction (a lens extract/review prompt); input is the corpus
 // being analyzed (transcript, prior observations, or facets). They are kept in
 // separate turns — see buildRunCmd — so corpus text can't impersonate instructions.
-// Output is the final assistant message (plain text); callers parse JSON out of it.
+// Output is the `result` of the stream's last result event; callers parse JSON out of it.
 func (r runner) Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
 	if platform.ExternalRunnersDisabled() {
 		return "", fmt.Errorf("claude runner disabled by %s", platform.DisableExternalRunnersEnv)
@@ -56,7 +57,8 @@ func (r runner) Run(ctx context.Context, model, systemPrompt, input string) (str
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	if runErr != nil {
 		// A TIMEOUT must be reported as context.DeadlineExceeded, and os/exec does not do that
 		// for us. When CommandContext kills the child, Run returns *exec.ExitError "signal:
 		// killed" — errors.Is(err, context.DeadlineExceeded) is FALSE (verified directly). So
@@ -79,10 +81,68 @@ func (r runner) Run(ctx context.Context, model, systemPrompt, input string) (str
 			return "", fmt.Errorf("claude -p exceeded %s and was killed: %w (stderr: %s)",
 				claudeRunTimeout, de, childOutput(errb.String(), out.String()))
 		}
-		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", err, childOutput(errb.String(), out.String()))
 	}
-	return out.String(), nil
+	res, rejectedAt := readStream(out.Bytes())
+	if runErr == nil && res != nil && !res.IsError { // key on is_error, never subtype: a failed run says "success"
+		return res.Result, nil
+	}
+	if at, ok := usageReset(rejectedAt, time.Now()); ok {
+		return "", &platform.QuotaExhaustedError{Runtime: "claude", ResetAt: at}
+	}
+	switch {
+	case runErr != nil:
+		return "", fmt.Errorf("claude -p failed: %w (stderr: %s)", runErr, childOutput(errb.String(), out.String()))
+	case res == nil: // not an empty reply: that would read as drift
+		return "", fmt.Errorf("claude -p exited 0 with no result event (stderr: %s)", childOutput(errb.String(), out.String()))
+	default:
+		return "", fmt.Errorf("claude -p reported an error: %s", platform.StderrExcerpt(res.Result))
+	}
 }
+
+// streamEvent is the part of a stream-json line Run reads.
+type streamEvent struct {
+	Type          string `json:"type"`
+	IsError       bool   `json:"is_error"`
+	Result        string `json:"result"`
+	RateLimitInfo struct {
+		Status   string `json:"status"`
+		ResetsAt int64  `json:"resetsAt"`
+	} `json:"rate_limit_info"`
+}
+
+// readStream returns the last result event and the resetsAt of the last rejected rate_limit_event
+// (0 if none). A line that is not a JSON object (ANTHROPIC_LOG debug output, junk) is skipped.
+// Split, not bufio.Scanner, so a long result line has no token limit.
+func readStream(out []byte) (res *streamEvent, rejectedAt int64) {
+	for _, line := range bytes.Split(out, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		var ev streamEvent
+		if !bytes.HasPrefix(line, []byte{'{'}) || json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		switch {
+		case ev.Type == "result":
+			res = &ev
+		case ev.Type == "rate_limit_event" && ev.RateLimitInfo.Status == "rejected": // allowed, allowed_warning: not a refusal
+			rejectedAt = ev.RateLimitInfo.ResetsAt
+		}
+	}
+	return res, rejectedAt
+}
+
+// maxUsageReset is a weekly window plus a day of slack. resetsAt is undocumented; the bound stops a
+// ms-scale value from pausing for millennia.
+const maxUsageReset = 8 * 24 * time.Hour
+
+// usageReset reads epoch (seconds) as a reset, ok only inside (now, now+maxUsageReset].
+func usageReset(epoch int64, now time.Time) (time.Time, bool) {
+	t := time.Unix(epoch, 0)
+	return t, t.After(now) && !t.After(now.Add(maxUsageReset))
+}
+
+// OnSharedAllowance: every model shares the login's limit. Bedrock, Vertex and API keys never emit a
+// rejected rate_limit_event, so nothing arms there; witness never infers the plan.
+func (runner) OnSharedAllowance(string) bool { return true }
 
 // workDir is the one cwd every Run shares: <RuntimeRoot>/claude-cwd, 0700, never removed.
 //
@@ -146,13 +206,16 @@ func childOutput(stderr, stdout string) string {
 //     (D1) caught the model using tools; a tool that names no tools is still a tool
 //     (the model saw ["web_search"]). A CLI too old for the flag exits non-zero and
 //     Run reports its stdout and stderr (childOutput), so no doctor probe.
+//   - --output-format stream-json --verbose: NDJSON (-p needs --verbose for it), so Run reads the
+//     reply from the result event and a usage-limit refusal from a rejected `rate_limit_event`.
 //   - Run sets the cwd to witness's own empty <RuntimeRoot>/claude-cwd (workDir), never
 //     the user's project or os.TempDir(), so no foreign CLAUDE.md, .mcp.json or
 //     .claude/settings.json hook loads.
 //
 // model == "" omits --model so `claude -p` uses its environment default.
 func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
-	args := []string{"-p", "--no-session-persistence", "--strict-mcp-config", "--tools", ""}
+	args := []string{"-p", "--no-session-persistence", "--strict-mcp-config", "--tools", "",
+		"--output-format", "stream-json", "--verbose"}
 	if strings.TrimSpace(model) != "" {
 		args = append(args, "--model", model)
 	}

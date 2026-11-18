@@ -20,10 +20,13 @@ func TestBuildRunCmdRoleSeparation(t *testing.T) {
 	if sys := cmd.Args[i+1]; sys != "EXTRACT INSTRUCTIONS" {
 		t.Fatalf("system prompt not passed verbatim: %q", sys)
 	}
-	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config"} {
+	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config", "--verbose"} {
 		if !slices.Contains(cmd.Args, want) {
 			t.Errorf("isolation flag %q lost: %v", want, cmd.Args)
 		}
+	}
+	if i := slices.Index(cmd.Args, "--output-format"); i < 0 || i+1 >= len(cmd.Args) || cmd.Args[i+1] != "stream-json" {
+		t.Errorf("argv must carry --output-format stream-json (Run parses the stream): %v", cmd.Args)
 	}
 	// The corpus goes on stdin, not concatenated into the instructions.
 	if cmd.Stdin == nil {
