@@ -480,7 +480,7 @@ func transcriptHash8(turns []rawTurn) string {
 // FIRST, exact twins within the incoming archive (one family, one transcript under two ids) are
 // collapsed into one, before anything is matched against ours: placed one by one, the second found
 // its match claimed by the first and arrived beside it. Two are left alone: a twin whose id ours
-// holds with its turns or more, which rule 1 or 2 places on a session of ours (collapsing it filed
+// holds with its turns or more, which rule 1 places on that session of ours (collapsing it filed
 // what it carried under the other twin, so merging an archive into itself was not empty, and the
 // other side's mining of our copy was skipped as a paraphrase of our twin); and the twins of a
 // family ours lacks, which arrive as the other archive holds them, as a restore must. The id kept
@@ -493,7 +493,10 @@ func transcriptHash8(turns []rawTurn) string {
 // member is AVAILABLE unless another incoming session sits under its id (renaming onto it would
 // fold two incoming transcripts together in the copy). The first rule that applies wins:
 //
-//  1. an available member equal to T, else 2. one extending T: the session goes there;
+//  1. our session of its own id if it equals or extends T, else an available member equal to T,
+//     else 2. one extending T: the session goes there. Its own id comes first: when an exact copy
+//     elsewhere outranked it, T went there, and where we had mined that copy, T's mining was skipped
+//     as a second wording of it and our session of T's id, never mined, was mined again;
 //  3. else, if a claimed member equals or extends T, ours already holds every turn: the session is
 //     dropped from the copy, and everything it carries is filed under that member;
 //  4. else an available member T extends: T's tail is appended to it;
@@ -567,8 +570,8 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		if err != nil {
 			return nil, err
 		}
-		// Ours holds s's own id with these turns or more, so rule 1 or 2 places s on a session of
-		// ours, and no copy is added: it is no twin to collapse.
+		// Ours holds s's own id with these turns or more, so rule 1 places s on that session, and no
+		// copy is added: it is no twin to collapse.
 		mine, err := readTurns(ctx, tx, "main", s)
 		if err != nil {
 			return nil, err
@@ -638,6 +641,8 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		// an incoming session (rule 6).
 		target, kind, minted, holder, later := s, kindNew, false, "", false
 		switch {
+		case match[kindLongerHere] == s: // rule 1, own id (s is the first candidate: equal to T, it is match[kindEqual])
+			target, kind = s, kindLongerHere
 		case match[kindEqual] != "":
 			target, kind = match[kindEqual], kindEqual
 		case match[kindLongerHere] != "":

@@ -503,6 +503,44 @@ func TestMergeKeepsTheMiningOfACopyOursExtends(t *testing.T) {
 	}
 }
 
+// An incoming session goes on our session of its own id when that holds its turns or more, though
+// another of ours holds them exactly: ours holds the feed [a c], mined, and X [a c d], unmined, and
+// the incoming archive mined X [a c]. Placed on our feed, its mining was skipped as a second
+// wording of what we mined there, and our X stayed pending, to be mined again. So too beside an
+// incoming twin of X.
+func TestMergePlacesASessionOnOurOwnIDWhenItHoldsTheTurns(t *testing.T) {
+	for _, twin := range []bool{false, true} {
+		t.Run(map[bool]string{false: "alone", true: "beside an incoming twin"}[twin], func(t *testing.T) {
+			base, inc := newArch(t), newArch(t)
+			x := mintedID("file:feed", "user:a", "user:c")
+			base.raw("file:feed", "user:a", "user:c")
+			base.raw(x, "user:a", "user:c", "user:d")
+			mineWhole(t, base, "mB", "file:feed")
+			inc.raw(x, "user:a", "user:c")
+			if twin {
+				inc.raw("file:feed@ffffffff", "user:a", "user:c")
+			}
+			mineWhole(t, inc, "mX", x)
+
+			rep := base.merge(inc.export(), true)
+			if n := base.st.DistilledCount(x, "default"); n != 2 || rep.Sessions.LongerHere != 1 {
+				t.Errorf("our %s [a c d] has progress %d, want 2 from the incoming %s it holds (%+v %+v)", x, n, x, rep.Sessions, rep.Observations)
+			}
+			if m, _ := minedState(t, base); m["mX"] != x || m["mB"] != "file:feed" {
+				t.Errorf("mined %v, want mX on %s and mB on file:feed", m, x)
+			}
+			want := map[string][]string{"file:feed": {"a", "c"}, x: {"a", "c", "d"}}
+			if got := heldTranscripts(t, base); !reflect.DeepEqual(got, want) {
+				t.Errorf("holds %v, want %v", got, want)
+			}
+			snap := snapshotArchive(t, base.st)
+			if again := base.merge(inc.export(), true); !again.Empty() || !reflect.DeepEqual(snap, snapshotArchive(t, base.st)) {
+				t.Errorf("merging the same export again: %+v staged=%d progressRows=%d", again.Sessions, again.Staged, again.ProgressRows)
+			}
+		})
+	}
+}
+
 // A twin whose id ours holds with ANOTHER transcript has no place under that id here: it still goes,
 // with everything it carries, where its turns are held, and they are held once. Left out of the
 // collapse like a twin ours holds with its turns, it would arrive beside its twin under the id
@@ -713,7 +751,8 @@ func TestMergeRefusesAMintedIDTheIncomingArchiveHoldsDifferently(t *testing.T) {
 // session is a prefix of a state some feed really had); a native session of theirs is gone only
 // for a session holding exactly its turns, or one of ours that held them already; every recorded row and mined observation of ours stays where it was, and every one
 // of theirs arrives on a session holding the turns of the session it was on (a mined one may stay
-// behind only where ours mined such a session itself), as does their progress; the dry run
+// behind only where ours mined such a session itself), as does their progress, and on the session of
+// its own id where ours holds that with the turns or more; the dry run
 // reported exactly what the merge did; and merging the same export again is empty and changes
 // nothing. Merging an archive into itself, or back from a restore of it, changes nothing either:
 // checked after an edit that may have made the feed a twin of a copy, and at the end of a history.
@@ -926,6 +965,29 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits, reuse bo
 		for s, n := range progTheirs {
 			if !holding(theirs[s], func(on string) bool { return progAfter[on] >= n || oursMined[on] }) {
 				return broke("%s's progress %d on %s %v is on no session of %s holding those turns: %v %v", y, n, s, theirs[s], x, progAfter, after)
+			}
+		}
+		// Where ours holds a session's own id with its turns or more, what it carries lands on that id:
+		// on another copy of ours, mined there, its mining was skipped, and ours of its id was mined
+		// again.
+		for id, sessions := range recTheirs {
+			for _, s := range sessions {
+				if len(recOurs[id]) == 0 && isPrefix(theirs[s], ours[s]) && !slices.Contains(recAfter[id], s) {
+					return broke("%s's recorded %s on %s %v is on %v in %s, which holds %s with those turns: %v", y, id, s, theirs[s], recAfter[id], x, s, after)
+				}
+			}
+		}
+		for id, s := range minedTheirs {
+			if _, ok := minedOurs[id]; ok || !isPrefix(theirs[s], ours[s]) || oursMined[s] {
+				continue
+			}
+			if on := minedAfter[id]; on != s {
+				return broke("%s's mined %s on %s %v is on %q in %s, which holds %s with those turns: %v", y, id, s, theirs[s], on, x, s, after)
+			}
+		}
+		for s, n := range progTheirs {
+			if isPrefix(theirs[s], ours[s]) && !oursMined[s] && progAfter[s] < n {
+				return broke("%s's progress %d on %s %v is %d on %s in %s, which holds those turns: %v", y, n, s, theirs[s], progAfter[s], s, x, after)
 			}
 		}
 		// A native session leaves only for a session that holds it exactly, or one of ours that
