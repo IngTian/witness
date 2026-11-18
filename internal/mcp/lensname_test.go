@@ -84,3 +84,40 @@ func TestToolTextMakesNoFalseLensClaims(t *testing.T) {
 		}
 	}
 }
+
+// get_profile serves the saved portrait and never regenerates it; when Summarize's skip test
+// says the facets moved on, a note says so and names both ways to a new one.
+func TestGetProfileNotesAStalePortrait(t *testing.T) {
+	fake := &fakeMCPStore{profiles: map[string]string{"unified": "# whole", "math": "# math"}}
+	var asked []string
+	stale := true
+	opts := testOptions
+	opts.ProfileStale = func(lens string) bool { asked = append(asked, lens); return stale }
+
+	got := callText(t, fake, opts, "get_profile", map[string]any{})
+	if !strings.HasPrefix(got, "# whole\n\n---\n(note: the facets have changed") || !strings.Contains(got, "`witness profile`") || !strings.Contains(got, "get_facets") {
+		t.Errorf("a stale portrait must be served with the note:\n%s", got)
+	}
+	stale = false
+	if got := callText(t, fake, opts, "get_profile", map[string]any{}); got != "# whole" {
+		t.Errorf("a current portrait must be served as written, got:\n%s", got)
+	}
+	if asked[0] != store.ProfileUnified {
+		t.Errorf("omitting lens must ask about the unified portrait, asked %q", asked[0])
+	}
+	callText(t, fake, opts, "get_profile", map[string]any{"lens": "math"})
+	if asked[len(asked)-1] != "math" {
+		t.Errorf("get_profile must ask about the lens it was given, asked %q", asked[len(asked)-1])
+	}
+}
+
+// A portrait not written yet while its facets exist is the worker's next job, not a lens with no
+// facets: the reply says it has not been written and how to get one.
+func TestGetProfileMissingButStaleSaysNotWrittenYet(t *testing.T) {
+	opts := testOptions
+	opts.ProfileStale = func(string) bool { return true }
+	got := callText(t, &fakeMCPStore{whyEmpty: store.NoFacets}, opts, "get_profile", map[string]any{"lens": "math"})
+	if !strings.Contains(got, "has been written yet") || !strings.Contains(got, "`witness profile`") || strings.Contains(got, "no facets yet") {
+		t.Errorf("a due portrait must say it has not been written yet:\n%s", got)
+	}
+}

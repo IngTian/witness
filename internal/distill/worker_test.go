@@ -168,10 +168,10 @@ func TestPositiveBudgetChunksSourceAgnostic(t *testing.T) {
 	}
 }
 
-// replaceRaw simulates an OpenCode replace-import landing mid-mine: it DELETEs the
-// session's raw + progress (the reset ApplyRawImport(replace=true) does) and
-// re-INSERTs a fresh generation of turns. Because raw.id is AUTOINCREMENT, the new
-// rows get strictly higher ids than anything a prior mine read.
+// replaceRaw simulates an OpenCode replace-import landing mid-mine. Its first turn differs
+// from the session's, so ApplyRawImport(replace=true) keeps nothing: it DELETEs all the
+// session's raw, clamps progress to 0 and re-INSERTs a fresh generation of turns. Because
+// raw.id is AUTOINCREMENT, the new rows get strictly higher ids than anything a prior mine read.
 func replaceRaw(t *testing.T, s *store.Store, session string, turns []string) {
 	t.Helper()
 	meta := store.SessionMeta{Session: session}
@@ -551,6 +551,54 @@ func TestStagedRetainedAfterFailure(t *testing.T) {
 	drained, _, _ := s.DrainStaged("s")
 	if len(drained) != 1 {
 		t.Fatalf("staged rows must survive a failed pass for retry, got %d", len(drained))
+	}
+}
+
+// A staged-only session (rawHighID == 0, so anyDelta == false) must drain without a model call,
+// because there is no raw to mine. The test pins today's behavior that the early-exit guard at
+// :375 is `!anyDelta && len(active) == 0` — NOT `!anyDelta` alone, which would leave the staged
+// rows uncleared.
+func TestStagedOnlySessionDrainsWithoutAModelCall(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	m := &fakeMiner{}
+	w := testWorker(s, m)
+	sess := "mcp:2026-11-18"
+
+	// Stage one row; do not capture any raw.
+	_ = s.StageObservation(store.Observation{
+		ID:          store.ObservationID(sess, "default", "af"),
+		Session:     sess,
+		Lens:        "default",
+		Dimension:   "thinking",
+		Observation: "af",
+	})
+	// The session must be pending: staged alone is enough.
+	if p, _ := s.PendingSessions([]string{"default"}); !slices.Contains(p, sess) {
+		t.Fatal("staged alone must offer the session")
+	}
+	// Drain it.
+	if err := w.Process(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	// The staged row is now committed as L1.
+	obs, _ := s.ReadObservations("")
+	if len(obs) != 1 || obs[0].Session != sess || obs[0].Source != "active" ||
+		obs[0].ID != store.ObservationID(sess, "default", "af") {
+		t.Fatalf("want 1 obs (session=%q source=active id=%q); got %+v",
+			sess, store.ObservationID(sess, "default", "af"), obs)
+	}
+	// The staged buffer is empty.
+	if d, _, _ := s.DrainStaged(sess); len(d) != 0 {
+		t.Fatalf("staged buffer should be empty, got %d rows", len(d))
+	}
+	// The session is no longer pending.
+	if p, _ := s.PendingSessions([]string{"default"}); slices.Contains(p, sess) {
+		t.Fatal("a drained staged-only session should no longer be pending")
+	}
+	// The model was never called.
+	if len(m.inputs) != 0 {
+		t.Fatalf("model called %d times; want 0 (no raw to mine)", len(m.inputs))
 	}
 }
 

@@ -26,7 +26,7 @@ var (
 	_ platform.RunnerLoginGate     = Platform{}
 	_ platform.RunnerAuthenticator = Platform{}
 	_ platform.ModelFormat         = Platform{}
-	_ platform.PlanAllowance       = (*runner)(nil)
+	_ platform.SharedAllowance     = (*runner)(nil)
 )
 
 func (Platform) Name() string          { return "codex" }

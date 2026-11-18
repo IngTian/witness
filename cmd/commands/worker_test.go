@@ -268,6 +268,54 @@ func TestCtrlCEndsTheWorkerRun(t *testing.T) {
 	}
 }
 
+// M13: a hook-triggered run while every lens's calls are paused would only open the runtime (an
+// `opencode serve`, Codex's preflight) and load the ~448MB embedder to be refused by the gate. It
+// exits first, and the deferred wakeup arms the reset. Unpaused is the control.
+func TestAnAutoRunSkipsWhileEveryLensIsPaused(t *testing.T) {
+	registerFreeFake.Do(func() { platform.Register(freeFakePlatform{}) })
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	prev, prevEmb := procCtl, workerEmbedder
+	t.Cleanup(func() { procCtl, workerEmbedder = prev, prevEmb })
+	for _, paused := range []bool{true, false} {
+		st := openTestStore(t)
+		if err := seedDefaultLens(st); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetRunner("fakefree"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetConfigString("triage_model", freeModel); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
+			t.Fatal(err)
+		}
+		procCtl = &proc.Fake{}
+		var loads atomic.Int32
+		workerEmbedder = func() (distill.Embedder, error) { loads.Add(1); return fixedEmbedder{}, nil }
+		freeFakeOpens.Store(0)
+		reset := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		if paused {
+			if err := st.SetMetaString(usagePauseKey("fakefree"), reset.Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ran, err := runWorker(true); err != nil || !ran {
+			t.Fatalf("ran=%v err=%v", ran, err)
+		}
+		if paused {
+			if loads.Load() != 0 || freeFakeOpens.Load() != 0 {
+				t.Fatalf("paused auto run: %d embedder loads, %d runner opens; want 0, 0", loads.Load(), freeFakeOpens.Load())
+			}
+			if got, want := st.MetaString(workerWakeupKey("auto")), reset.Format(time.RFC3339Nano); got != want {
+				t.Fatalf("wakeup %q, want %q", got, want)
+			}
+		} else if loads.Load() != 1 || freeFakeOpens.Load() != 1 {
+			t.Fatalf("control: %d loads, %d opens; want 1, 1", loads.Load(), freeFakeOpens.Load())
+		}
+	}
+}
+
 func TestParseSessionTimeRangeAcceptsRelativeAgeAndDate(t *testing.T) {
 	now := time.Date(2026, 7, 12, 15, 0, 0, 0, time.UTC)
 	r, err := parseSessionTimeRange("7d", "2026-07-12", now)

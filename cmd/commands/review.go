@@ -84,7 +84,7 @@ func printProfileCause(profErr error) {
 
 // forceReviewTapped runs an L2 review from the current observations, updates facets, and
 // regenerates the L4 profiles — the unconditional review `worker review` exposes, shared with
-// `lens backfill` (a backfill re-mines a lens's observations and must force a review afterwards
+// `lens backfill` (a backfill mines a lens's observations and must force a review afterwards
 // to keep its facets from drifting — and `--fresh` DELETES the facets outright; the periodic
 // ReviewDue triggers may not fire on a small archive). It notes the first model error in tap —
 // a failed fold names it under its headline — and returns the profile regeneration's own failure

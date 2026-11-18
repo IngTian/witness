@@ -23,9 +23,10 @@ func TestStatusCmdShape(t *testing.T) {
 	}
 }
 
-// While the free-model pause is armed, status says so in one factual row and --json carries the
-// reset time; otherwise neither appears, so an archive that never used a free model reads as before.
-func TestStatusShowsAnArmedFreeModelPause(t *testing.T) {
+// While a runtime's usage pause is armed, status says so in one factual row and --json carries the
+// reset time under runner_usage_paused_until; otherwise neither appears, so an archive that never
+// hit a limit reads as before. v0.14.0's free_models_paused_until is stored too and stays unread.
+func TestStatusShowsAnArmedUsagePause(t *testing.T) {
 	until := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 	for name, tc := range map[string]struct {
 		stored string
@@ -41,23 +42,29 @@ func TestStatusShowsAnArmedFreeModelPause(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := st.SetMetaString(freeModelsPausedKey, tc.stored); err != nil {
-				t.Fatal(err)
+			for _, key := range []string{usagePauseKey("opencode"), "free_models_paused_until"} {
+				if err := st.SetMetaString(key, tc.stored); err != nil {
+					t.Fatal(err)
+				}
 			}
 			st.Close()
 
 			human := captureStdout(t, func() { _ = cmdDistillStatus(false) })
-			row := "paused until " + until.Local().Format("2006-01-02 15:04") + " (the free allowance resets then)"
-			if got := strings.Contains(human, "free models"); got != tc.armed || (tc.armed && !strings.Contains(human, row)) {
-				t.Errorf("free-models row shown = %v, want %v reading %q:\n%s", got, tc.armed, row, human)
+			row := "paused until " + until.Local().Format("2006-01-02 15:04") + " (the allowance resets then)"
+			if got := strings.Contains(human, "opencode allowance"); got != tc.armed || (tc.armed && !strings.Contains(human, row)) {
+				t.Errorf("opencode allowance row shown = %v, want %v reading %q:\n%s", got, tc.armed, row, human)
 			}
 			var out map[string]any
 			if err := json.Unmarshal([]byte(captureStdout(t, func() { _ = cmdDistillStatus(true) })), &out); err != nil {
 				t.Fatal(err)
 			}
-			got, present := out[freeModelsPausedKey]
+			if _, present := out["free_models_paused_until"]; present {
+				t.Error("status --json must no longer carry free_models_paused_until")
+			}
+			pauses, _ := out["runner_usage_paused_until"].(map[string]any) // nil when absent
+			got, present := pauses["opencode"]
 			if present != tc.armed || (tc.armed && got != until.Format(time.RFC3339)) {
-				t.Errorf("--json %s = %v (present %v), want present %v with %s", freeModelsPausedKey, got, present, tc.armed, until.Format(time.RFC3339))
+				t.Errorf("--json runner_usage_paused_until.opencode = %v (present %v), want present %v with %s", got, present, tc.armed, until.Format(time.RFC3339))
 			}
 		})
 	}

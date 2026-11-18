@@ -39,8 +39,8 @@ func StderrExcerpt(s string) string {
 }
 
 // QuotaExhaustedError is returned when a shared usage limit is reached and will reset
-// at a known time. The drain recognises it via errors.As and pauses the affected allowance
-// until ResetAt, without incrementing per-session backoff.
+// at a known time. cmd's gate pauses that runtime's SharedAllowance calls until ResetAt;
+// the drain skips the lens without a backoff.
 type QuotaExhaustedError struct {
 	ResetAt time.Time
 	Runtime string
@@ -50,11 +50,12 @@ func (e *QuotaExhaustedError) Error() string {
 	return fmt.Sprintf("%s usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
 }
 
-// PlanAllowance identifies calls drawing on a runner login's shared plan quota.
-// It has a separate pause from OpenCode's network-wide free allowance.
-type PlanAllowance interface{ OnPlanAllowance(model string) bool }
-
-func UsagePauseKey(runtime string) string { return "runner_usage_paused_until:" + runtime }
+// SharedAllowance: this call draws on an allowance one QuotaExhaustedError refusal exhausts for every
+// such call on this runtime until its reset (OpenCode Zen's free models, counted per network; a Codex
+// plan login; a Claude login, armed only by the CLI's rejected rate_limit_event). cmd pauses exactly
+// those calls, per runtime. NewRunner must stay side-effect free:
+// cmd mints runners without opening them to ask this.
+type SharedAllowance interface{ OnSharedAllowance(model string) bool }
 
 // RunnerLoginGate lets wire leave capture usable until the runner has a login.
 type RunnerLoginGate interface {
@@ -76,11 +77,6 @@ type ModelFormat interface {
 	ValidModel(model string) bool
 }
 
-// FreeAllowance is the Runner capability "this model draws on a shared free allowance", which is
-// what a QuotaExhaustedError refusal exhausts. cmd's free-model gate asks it per call so it can
-// pause exactly those calls without naming a runtime; a runner without it has no free allowance.
-type FreeAllowance interface{ OnFreeModel(model string) bool }
-
 // Runner is the default distillation-engine lifecycle: one engine drains every
 // pending session regardless of which platform produced it. It is the whole of
 // what the engine (internal/distill) knows about a runtime — distill calls Run and
@@ -99,7 +95,7 @@ type Runner interface {
 	// systemPrompt as the system/instruction channel and input as the user turn, and must not
 	// fence again.
 	//
-	// Two more rules every runner must follow, because nothing else enforces them:
+	// Three more rules every runner must follow, because nothing else enforces them:
 	//
 	//   - Its OWN timeout must surface as an error that errors.Is(err, context.DeadlineExceeded).
 	//     distill reads that as provider backpressure and narrows the drain window. os/exec does
@@ -108,6 +104,8 @@ type Runner interface {
 	//     the run context's Err() and wrap it (see the claude runner).
 	//   - It must refuse to spawn anything when ExternalRunnersDisabled() is true (`make test`
 	//     sets it), so a test can never start a real model CLI.
+	//   - On Windows every child goes through proc.HideWindow, because the hook-spawned worker is
+	//     DETACHED_PROCESS (spawnpolicy_test.go scans for it).
 	//
 	// FRESH-CONTEXT INVARIANT. The only turns witness puts into a Run are systemPrompt and the
 	// fenced corpus; a runtime may add its own framing (listed per runner below). A runner must
@@ -131,15 +129,14 @@ type Runner interface {
 	// Claude isolates: no prior or saved conversation (one-shot `-p --no-session-persistence`); no
 	// built-in tools (`--tools ""`); no MCP servers (`--strict-mcp-config`); not the user's
 	// project CLAUDE.md, .mcp.json or .claude/ settings (the cwd is witness's own empty
-	// <RuntimeRoot>/claude-cwd, shared by every Run, never under the world-writable temp dir).
+	// <RuntimeRoot>/claude-cwd, shared by every Run, never under the world-writable temp dir); and,
+	// through `--safe-mode` (2.1.169+), no user, ancestor or managed CLAUDE.md, auto memory, plugin,
+	// skill, output style or user/project/plugin hook.
 	//
 	// Claude does NOT isolate: Claude Code's own system prompt (witness's is appended via
-	// `--append-system-prompt`); the user-level CLAUDE.md; instruction files in the cwd's
-	// ANCESTORS (CLAUDE.md, .claude/CLAUDE.md, .claude/rules/, CLAUDE.local.md, AGENTS.md as a
-	// fallback), which Claude Code loads from every parent dir: the user's own, e.g. a ~/CLAUDE.md;
-	// user and plugin hooks, which fire and may add context. Those need `--bare`, which (claude 2.1.325 `--help`) limits Anthropic auth
-	// to ANTHROPIC_API_KEY/apiKeyHelper, no OAuth or keychain (Bedrock/Vertex keep theirs): a
-	// product call, not done.
+	// `--append-system-prompt`) and admin-managed policy settings and their hooks. `--safe-mode`, not
+	// `--bare`: bare limits Anthropic auth to ANTHROPIC_API_KEY/apiKeyHelper, dropping every claude.ai
+	// OAuth login.
 	//
 	// Codex: a fresh ephemeral exec with a witness-owned home, an empty cwd and no user
 	// or project instructions. The CLI's policy preflight rejects managed layers.
@@ -155,8 +152,14 @@ type Runner interface {
 	// Enforced by: `TestNoCodePathForksAConversation` (source scan, OpenCode no-fork);
 	// `TestContractToolFreeWire` (tag `codexcontract`, Codex wire contract);
 	// `TestContractRunnerRoundTrip` (tag `opencodecontract`, contract workflow: zero tools on real
-	// OpenCode); `TestBuildRunCmdOffersNoTools` pins the Claude argv, checked once on real claude
-	// 2.1.325 (stream-json init `tools: []`), not in CI.
+	// OpenCode); `TestBuildRunCmdRoleSeparation` and `TestBuildRunCmdOffersNoTools` pin the Claude
+	// argv, checked once on real claude 2.1.327 on Bedrock (2026-11-18, not in CI). With
+	// `--safe-mode`, the stream-json init showed `tools: []`, `mcp_servers: []`, no plugin or user
+	// skill, and 2 hook events from the one managed-policy UserPromptSubmit hook (safe mode keeps
+	// managed hooks by design); init.plugins listed 12 installed plugins but none loaded. The result
+	// had `is_error:false`, and the appended probe marker came back. The control without the flag
+	// showed 12 plugins, 39 skills, 20 hook events, saw_user_profile:true. That stream, scrubbed (the
+	// plugin list emptied, unused init fields dropped), is claude/testdata/success.stream.jsonl.
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
 	// Close releases engine resources.
 	Close() error

@@ -496,7 +496,8 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 
 	// Complex case: we have updates, or the stored state is inconsistent (rawCount != len(oldKeys)).
 	// We need to reconstruct the FULL merged record set (existing rows + updates + appends),
-	// then rewrite with replace=true. Read the existing L0 to get the current records.
+	// then rewrite with replace=true. Read the existing L0 to get the current records. The store
+	// keeps the rows up to the first updated record (and their progress) and rewrites from there.
 	existingRecs, err := st.ReadRaw(s.Session)
 	if err != nil {
 		return 0, err

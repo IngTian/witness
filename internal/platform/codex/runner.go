@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -28,20 +29,25 @@ const preflightTimeout = 45 * time.Second
 
 var runTimeout = 20 * time.Minute
 
-var commandContext = exec.CommandContext
+// commandContext builds every codex child. proc.HideWindow keeps each from opening a console
+// window under the DETACHED_PROCESS worker on Windows; tests swap the var for a stub.
+var commandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, arg...)
+	proc.HideWindow(cmd)
+	return cmd
+}
 
 type runner struct {
 	root, binary string
 	models       []string
 	plan         bool
-	meta         store.MetaKV
 }
 
 func (Platform) NewRunner(cfg store.Config) platform.Runner {
-	return &runner{root: cfg.RuntimeRoot, models: cfg.RunnerModels, meta: cfg.RuntimeMeta, plan: strings.TrimSpace(os.Getenv("CODEX_API_KEY")) == ""}
+	return &runner{root: cfg.RuntimeRoot, models: cfg.RunnerModels, plan: strings.TrimSpace(os.Getenv("CODEX_API_KEY")) == ""}
 }
 
-func (r *runner) OnPlanAllowance(string) bool { return r.plan }
+func (r *runner) OnSharedAllowance(string) bool { return r.plan }
 
 func (Platform) RequiresModel() bool   { return true }
 func (*runner) InvocationHint() string { return "codex exec (witness-owned login)" }
@@ -368,7 +374,7 @@ func cliVersion(ctx context.Context, bin, dir string, env []string) (string, err
 	cmd.Dir, cmd.Env = dir, env
 	cmd.WaitDelay = time.Second
 	v, err := cmd.Output()
-	if err != nil {
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) { // a clean exit; only a grandchild held stdout (see Run)
 		return "", childError(ctx, "version", err, "")
 	}
 	return strings.TrimSpace(strings.TrimPrefix(string(v), "codex-cli ")), nil
@@ -423,7 +429,7 @@ func prepareCatalog(ctx context.Context, bin, dir string, env []string) ([]byte,
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
-	if err != nil {
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) { // a clean exit; only a grandchild held stdout (see Run)
 		return nil, childError(ctx, "catalog", err, stderr.String())
 	}
 	return raw, nil
@@ -498,14 +504,6 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 		return "", err
 	}
 	defer unlock()
-	// Calls already admitted by cmd's gate can be waiting here when another
-	// process exhausts the login. Recheck the same durable pause under the login
-	// lock, and publish refusals before releasing it, so they send nothing.
-	if r.plan && r.meta != nil {
-		if reset, err := time.Parse(time.RFC3339, r.meta.MetaString(platform.UsagePauseKey("codex"))); err == nil && reset.After(time.Now()) {
-			return "", &platform.QuotaExhaustedError{Runtime: "codex", ResetAt: reset}
-		}
-	}
 	// Keep the refresh lock until the process has exited, including on cancellation.
 	dir, err := scratchDir()
 	if err != nil {
@@ -547,21 +545,19 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	err = cmd.Run()
+	// os/exec returns ErrWaitDelay only when the child itself exited 0 (an exit status or a kill
+	// wins), so the output is complete and only a grandchild held the pipe.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
 	if callCtx.Err() != nil {
 		return "", childError(callCtx, "exec", err, stderr.String())
 	}
 	answer, eventErr := parseEvents(out.Bytes(), time.Now())
 	if eventErr != nil {
 		var quota *platform.QuotaExhaustedError
-		if errors.As(eventErr, &quota) {
-			if !r.plan {
-				return "", errors.New(eventErr.Error())
-			}
-			if r.meta != nil {
-				if err := r.meta.SetMetaString(platform.UsagePauseKey("codex"), quota.ResetAt.UTC().Format(time.RFC3339)); err != nil {
-					return "", fmt.Errorf("codex could not persist the usage pause: %w", err)
-				}
-			}
+		if errors.As(eventErr, &quota) && !r.plan {
+			return "", errors.New(eventErr.Error()) // API credit, not a plan allowance: no pause
 		}
 		if err != nil {
 			return "", fmt.Errorf("%w (codex exec: %v; %s)", eventErr, err, platform.StderrExcerpt(stderr.String()))

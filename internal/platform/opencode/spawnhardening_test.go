@@ -82,17 +82,3 @@ func TestOpenCodeCommandUsesTheTestSeam(t *testing.T) {
 		t.Errorf("args were not passed through verbatim: %q", gotArgs)
 	}
 }
-
-// hideOpenCodeWindow must be safe to call on every platform and must not clobber an attr
-// another layer already set. Off Windows it is a no-op; on Windows it sets one field.
-// Asserted unconditionally so the call is exercised on the platform where it is developed.
-func TestHideOpenCodeWindowIsSafeEverywhere(t *testing.T) {
-	cmd := exec.Command("echo", "hi")
-	hideOpenCodeWindow(cmd)
-	// The command must remain runnable — i.e. we did not corrupt it.
-	if cmd.Path == "" || len(cmd.Args) != 2 {
-		t.Fatalf("hideOpenCodeWindow damaged the command: path=%q args=%q", cmd.Path, cmd.Args)
-	}
-	// A nil receiver must not panic: a caller may pass a nil from a failed construction.
-	hideOpenCodeWindow(nil)
-}

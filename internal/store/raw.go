@@ -24,11 +24,24 @@ func (r *rawIO) AppendRaw(rec RawRecord) error {
 }
 
 // ApplyRawImport atomically commits a raw import batch and its importer-owned
-// watermark. replace=true rebuilds the session's L0 and resets the distillation
-// progress, which is required for mutable sources that can insert or edit prior
-// turns after an earlier import.
+// watermark. replace=false appends records. replace=true is for mutable sources that can
+// edit, insert or drop earlier turns: records is then the session's whole current
+// transcript. The store keeps the leading rows whose (role, text) equal the incoming ones
+// and deletes the rest by id. That is an id suffix, so "the mined high id is alive ⇒ the
+// mined snapshot is alive" still holds for MarkDistilledIfCurrent. It clamps every lens's
+// watermark to the kept count, clears backoff only when rows were dropped (a re-key that
+// changes no turn leaves a parked lens parked), and appends records[keep:]. Before, it
+// deleted the whole session's raw and progress, so every lens re-mined the session beside
+// its old observations. The replace path reads before it writes, so it takes the write
+// lock up front (beginImmediate). The append path does not: that probe's CREATE/DROP
+// changes the schema cookie, on every turn-end import.
 func (r *rawIO) ApplyRawImport(meta SessionMeta, records []RawRecord, stateKey, stateValue string, replace bool) (err error) {
-	tx, err := r.db.Begin()
+	var tx *sql.Tx
+	if replace {
+		tx, err = beginImmediate(r.db)
+	} else {
+		tx, err = r.db.Begin()
+	}
 	if err != nil {
 		return err
 	}
@@ -39,12 +52,22 @@ func (r *rawIO) ApplyRawImport(meta SessionMeta, records []RawRecord, stateKey, 
 	}()
 
 	if replace {
-		if _, err = tx.Exec(`DELETE FROM raw WHERE session = ?`, meta.Session); err != nil {
+		var keep int
+		var cut int64
+		if keep, cut, err = keptPrefix(tx, meta.Session, records); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(`DELETE FROM progress WHERE session = ?`, meta.Session); err != nil {
-			return err
+		if cut > 0 {
+			if _, err = tx.Exec(`DELETE FROM raw WHERE session = ? AND id >= ?`, meta.Session, cut); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(
+				`UPDATE progress SET distilled = MIN(distilled, ?), retries = 0, next_attempt = '', drift_at = ''
+				 WHERE session = ?`, keep, meta.Session); err != nil {
+				return err
+			}
 		}
+		records = records[keep:]
 	}
 	if meta.Session != "" {
 		if _, err = tx.Exec(
@@ -74,6 +97,30 @@ func (r *rawIO) ApplyRawImport(meta SessionMeta, records []RawRecord, stateKey, 
 	return tx.Commit()
 }
 
+// keptPrefix counts the session's leading raw rows whose (role, text) equal records', in
+// order, and returns cut, the id of the first row that does not match (0 when every row
+// does).
+func keptPrefix(tx *sql.Tx, session string, records []RawRecord) (keep int, cut int64, err error) {
+	rows, err := tx.Query(`SELECT id, role, text FROM raw WHERE session = ? ORDER BY id`, session)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var role, text string
+		if err := rows.Scan(&id, &role, &text); err != nil {
+			return 0, 0, err
+		}
+		if keep < len(records) && records[keep].Role == role && records[keep].Text == text {
+			keep++
+			continue
+		}
+		return keep, id, nil
+	}
+	return keep, 0, rows.Err()
+}
+
 // ReadRaw returns a session's full raw log in capture order.
 func (r *rawIO) ReadRaw(session string) ([]RawRecord, error) {
 	rows, err := r.db.Query(
@@ -100,8 +147,8 @@ func (r *rawIO) ReadRaw(session string) ([]RawRecord, error) {
 // Why this exists (issue #67-1): the mine used to read content via ReadRaw and the
 // generation id via MaxRawID as TWO separate statements. MaxOpenConns(1) serializes
 // each statement but NOT the pair — the connection is released between them. A replace-
-// import (ApplyRawImport replace=true: DELETE raw + re-INSERT, under a DIFFERENT lock
-// than the worker) committing in that gap pairs an OLD-generation
+// import (ApplyRawImport replace=true: delete raw from the first changed turn + re-INSERT,
+// under a DIFFERENT lock than the worker) committing in that gap pairs an OLD-generation
 // count/content with the NEW generation's high id. The CAS in MarkDistilledIfCurrent
 // then finds that new id live, passes its guard, and blind-advances the watermark over
 // turns that were never mined — a silent lost delta. Reading both from one result set

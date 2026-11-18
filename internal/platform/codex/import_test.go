@@ -160,8 +160,8 @@ func TestSQLiteAppendEditMigration(t *testing.T) {
 	if _, err := db.Exec(`UPDATE thread_history_projection_state SET next_rollout_ordinal=14`); err != nil {
 		t.Fatal(err)
 	}
-	if s := runImport(t, im); s.Records != 3 || st.DistilledCount("codex:s1", "default") != 0 {
-		t.Fatalf("edit must reset: %+v", s)
+	if s := runImport(t, im); s.Records != 3 || st.DistilledCount("codex:s1", "default") != 1 {
+		t.Fatalf("an edit at turn 2 keeps turn 1 mined: %+v, progress %d", s, st.DistilledCount("codex:s1", "default"))
 	}
 	recs, _ = st.ReadRaw("codex:s1")
 	if len(recs) != 3 || recs[1].Text != "edited answer" {

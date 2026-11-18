@@ -167,7 +167,7 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// port's signal-aware ctx (SIGINT+SIGTERM).
 	ctx, stopSignals := procCtl.NotifyStop(context.Background())
 	defer stopSignals()
-	// On exit, arm the one future wakeup a deferred need (a backoff, the free-model pause) asks
+	// On exit, arm the one future wakeup a deferred need (a backoff, a runtime's usage pause) asks
 	// for — unless the run ended on a stop: its ctx fired, or worker_stop_requested is set (a stop
 	// whose signal missed). `worker stop` clears every wakeup before its SIGTERM, and re-arming one
 	// here resumed the stopped drain 5 min later (G2, reproduced). A stopped worker waits for the
@@ -186,6 +186,12 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// prevents concurrent writes), and makes Claude-kicked drains pick up sessions a
 	// rejected plugin missed (spec §7.2).
 	importAtDrainStart(ctx, st)
+	// M13: a hook-triggered run while every lens is paused would open the runtimes and load the
+	// embedder only to be refused; the deferred scheduleRetryWakeup above arms the earliest reset.
+	if auto && allLensesPaused(st, cfg, lenses, time.Now()) {
+		slog.Info("worker: every active lens's calls are paused until a reset; skipping this run")
+		return true, nil
+	}
 
 	pending := func() []string {
 		p, _ := st.PendingSessionsUpdatedBetween(lensNames, timeRange.since, timeRange.until)

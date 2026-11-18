@@ -91,7 +91,9 @@ type Capturer interface {
 // reconcile path). An empty session list performs the platform's global incremental import;
 // otherwise only the requested native session ids are reconciled. OpenCode and Codex read
 // their own stores; a hook-fed (Claude) or push-fed (file) source has nothing to pull, so it
-// does not implement this and ImportFor reports an empty import for it.
+// does not implement this and ImportFor reports an empty import for it. An importer whose source
+// can rewrite history decides append vs replace with AppendFrom; on replace, ApplyRawImport keeps
+// the session's unchanged (role, text) prefix.
 type Importer interface {
 	Import(ctx context.Context, st store.ImportStore, sessionIDs []string) (ImportStats, error)
 }

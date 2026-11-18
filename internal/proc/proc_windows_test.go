@@ -6,12 +6,29 @@ import (
 	"errors"
 	"os/exec"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// HideWindow must set one field on the attr already there: the first #143 fix assigned a fresh
+// SysProcAttr and dropped the flags another layer had set. A cmd with no attr gets one.
+func TestHideWindowKeepsExistingFlags(t *testing.T) {
+	cmd := exec.Command("cmd")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	HideWindow(cmd)
+	if !cmd.SysProcAttr.HideWindow || cmd.SysProcAttr.CreationFlags != windows.CREATE_NEW_PROCESS_GROUP {
+		t.Fatalf("HideWindow left %+v; want HideWindow plus the existing CREATE_NEW_PROCESS_GROUP", cmd.SysProcAttr)
+	}
+	bare := exec.Command("cmd")
+	HideWindow(bare)
+	if bare.SysProcAttr == nil || !bare.SysProcAttr.HideWindow {
+		t.Fatal("HideWindow on a cmd with no SysProcAttr must allocate one and set HideWindow")
+	}
+}
 
 // The flags must be EXACTLY kill-on-close + breakaway-ok. SILENT_BREAKAWAY_OK would let every
 // child (claude -p, the serve) leave the job without asking, so closing it would kill nothing.

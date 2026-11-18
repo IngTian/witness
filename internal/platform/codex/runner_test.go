@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -207,28 +208,77 @@ func TestRunAttributesDeadlineAndCallerCancellation(t *testing.T) {
 	}
 }
 
-func TestRunPublishesAndRechecksPlanPauseUnderLoginLock(t *testing.T) {
-	r := helperRunner(t)
-	t.Setenv("WITNESS_HOME", t.TempDir())
-	st, err := store.Open()
+// A `codex exec` that answered and exited 0 while a grandchild still holds its stdout is a reply:
+// WaitDelay closes the pipe and os/exec reports exec.ErrWaitDelay, which only follows a clean exit.
+// The preflight still runs through the helper; only the exec is a shell, whose `sleep 3` ends on
+// its own.
+func TestRunAcceptsAReplyWhileAGrandchildHoldsStdout(t *testing.T) {
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("spawns a shell that leaves a `sleep 3` grandchild holding its stdout")
+	}
+	sh, err := exec.LookPath("sh")
 	if err != nil {
-		t.Fatal(err)
+		t.Skipf("no `sh` to stand in for codex exec: %v", err)
 	}
-	defer st.Close()
-	r.meta, r.plan = st, true
+	r := helperRunner(t)
+	helper := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		if !slices.Contains(args, "exec") {
+			return helper(ctx, bin, args...)
+		}
+		return exec.CommandContext(ctx, sh, "-c", `echo '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}'; `+
+			`echo '{"type":"turn.completed"}'; sleep 3 &`)
+	}
+	t.Cleanup(func() { commandContext = helper })
+	if got, err := r.Run(context.Background(), "test", "witness-system", "corpus-only"); err != nil || got != "answer" {
+		t.Fatalf("Run = %q, %v; want the reply (ErrWaitDelay after exit 0 is success)", got, err)
+	}
+}
+
+// The preflight's `--version` and `debug models` follow the same rule: exit 0 with a grandchild still
+// holding stdout is their output, not a failed preflight. Each `sleep 3` ends on its own.
+func TestOpenAcceptsPreflightOutputWhileAGrandchildHoldsStdout(t *testing.T) {
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("spawns shells that leave `sleep 3` grandchildren holding their stdout")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no `sh` to stand in for codex: %v", err)
+	}
+	r := setUpChild(t)
+	helper := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		var out string
+		switch joined := strings.Join(args, " "); {
+		case joined == "--version":
+			out = "codex-cli 0.169.0-alpha.11.1"
+		case strings.HasSuffix(joined, "debug models"):
+			out = `{"models":[{"slug":"test"}]}`
+		default:
+			return helper(ctx, bin, args...)
+		}
+		return exec.CommandContext(ctx, sh, "-c", "echo '"+out+"'; sleep 3 &")
+	}
+	t.Cleanup(func() { commandContext = helper })
+	if err := r.Open(context.Background()); err != nil {
+		t.Fatalf("Open = %v; want nil (ErrWaitDelay after exit 0 is the preflight's output)", err)
+	}
+}
+
+// A plan login's usage-limit refusal is a pause (cmd's gate arms it); with CODEX_API_KEY the same
+// refusal is API credit, an ordinary failure that backs off like any other.
+func TestRunReportsAPlanRefusalAsAPause(t *testing.T) {
+	r := helperRunner(t)
 	t.Setenv("WITNESS_CODEX_HELPER_MODE", "quota")
+	ctx := context.Background()
 	var quota *platform.QuotaExhaustedError
-	if _, err := r.Run(context.Background(), "test", "witness-system", "corpus-only"); !errors.As(err, &quota) {
-		t.Fatalf("not a plan refusal: %v", err)
+	r.plan = true
+	if _, err := r.Run(ctx, "test", "p", "i"); !errors.As(err, &quota) || quota.Runtime != "codex" || !quota.ResetAt.After(time.Now()) {
+		t.Fatalf("a plan refusal must be QuotaExhausted{codex, future reset}: %v", err)
 	}
-	if st.MetaString(platform.UsagePauseKey("codex")) == "" {
-		t.Fatal("refusal was not published before unlock")
-	}
-	previous := commandContext
-	commandContext = func(context.Context, string, ...string) *exec.Cmd { t.Fatal("paused call spawned a child"); return nil }
-	defer func() { commandContext = previous }()
-	if _, err := r.Run(context.Background(), "test", "p", "i"); !errors.As(err, &quota) {
-		t.Fatalf("pause not rechecked: %v", err)
+	r.plan = false
+	if _, err := r.Run(ctx, "test", "p", "i"); err == nil || errors.As(err, &quota) {
+		t.Fatalf("with CODEX_API_KEY the refusal must be a plain error: %v", err)
 	}
 }
 

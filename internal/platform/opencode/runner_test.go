@@ -13,11 +13,11 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// The free-model pause keys on this capability, never on the runner's name: only OpenCode Zen's
+// The usage pause keys on this capability, never on the runner's name: only OpenCode Zen's
 // own opencode/* models draw on the free allowance. The serve allows free models when any of its
 // models is one (allowsFree, the same predicate); otherwise it never falls back to one.
-func TestOnFreeModelMatchesOnlyOpenCodeModels(t *testing.T) {
-	var fa platform.FreeAllowance = &runner{}
+func TestOnSharedAllowanceMatchesOnlyOpenCodeModels(t *testing.T) {
+	var sa platform.SharedAllowance = &runner{}
 	for model, want := range map[string]bool{
 		"opencode/glm-5.3-flash-free": true,
 		" opencode/x ":                true,
@@ -25,8 +25,8 @@ func TestOnFreeModelMatchesOnlyOpenCodeModels(t *testing.T) {
 		"opencode-go/x":               false,
 		"":                            false,
 	} {
-		if got := fa.OnFreeModel(model); got != want {
-			t.Errorf("OnFreeModel(%q) = %v, want %v", model, got, want)
+		if got := sa.OnSharedAllowance(model); got != want {
+			t.Errorf("OnSharedAllowance(%q) = %v, want %v", model, got, want)
 		}
 		if got := allowsFree([]string{"openai/x", model}); got != want {
 			t.Errorf("allowsFree([openai/x %q]) = %v, want %v", model, got, want)

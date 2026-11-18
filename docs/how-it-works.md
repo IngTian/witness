@@ -11,7 +11,7 @@ Four layers — one ground-truth, three derived and **regenerable** from it:
 | **raw (L0)** | ground truth | Every turn captured verbatim — from stable Claude Code hook fields (`UserPromptSubmit.prompt`, `Stop.last_assistant_message`) or OpenCode's local SQLite session DB (`message`/`part` text). Append-only, never LLM-touched. |
 | **observations (L1)** | derived | A cheap per-session worker mines atomic, evidence-anchored observations about *you*, tagged by lens. Append-only. |
 | **facets (L2)** | derived, bi-temporal | A periodic reviewer synthesizes observations into evolving *facets*, each keeping its **change history** (`valid_from`/`valid_to`) — so the archive answers "how did I change," not just "who am I now." Old values are never deleted. |
-| **profile (L4)** | derived narrative | A short, human-readable markdown summary distilled from the facets — one per lens plus a cross-lens `unified` portrait. Regenerated **after each review and on read**: the background worker rebuilds every portrait whose facets changed once a review finishes, and `witness profile` (or MCP `get_profile`) rebuilds a stale one before serving it. So portraits cost model calls after each review even when nobody reads them; in exchange a read is usually cached and instant. A rebuild takes seconds on a small archive and minutes on a large one. |
+| **profile (L4)** | derived narrative | A short, human-readable markdown summary distilled from the facets — one per lens plus a cross-lens `unified` portrait. Regenerated **after each review and on read**: the background worker rebuilds every portrait whose facets changed once a review finishes, and `witness profile` rebuilds a stale one before printing it. MCP `get_profile` serves the last portrait and says when it is behind the facets. So portraits cost model calls after each review even when nobody reads them; in exchange a read is usually cached and instant. A rebuild takes seconds on a small archive and minutes on a large one. |
 
 The archive is **collect-only**: witness captures and distills everywhere, but never injects
 anything into a session. Nothing is pushed into a session — you (or an agent) read the profile on
@@ -82,7 +82,8 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 - `get_facets(lens)` — the current structured facets.
 - `search_observations(query, lens)` — local vector search over observations.
 - `record_observation(...)` — an in-session agent writes a decision-aware observation directly
-  (passed through verbatim), capturing context a later reviewer would miss.
+  (passed through verbatim), capturing context a later reviewer would miss; with no `session`
+  label it is filed under `mcp:<UTC date>`.
 - `delete_observation(obs_id)` — prune a wrong observation.
 
 ## Seeing it

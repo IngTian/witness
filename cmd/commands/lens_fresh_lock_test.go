@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
@@ -237,6 +238,9 @@ func TestLensBackfillWithoutFreshDoesNotRequireTheLock(t *testing.T) {
 	if err := st.MarkDistilled("s1", "default", 1); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.StampReviewLens("default", 7); err != nil {
+		t.Fatal(err)
+	}
 	// A worker holds the lock. --fresh would refuse; a plain backfill must not.
 	unlock, ok := st.WorkerLock()
 	if !ok {
@@ -245,17 +249,70 @@ func TestLensBackfillWithoutFreshDoesNotRequireTheLock(t *testing.T) {
 	defer unlock()
 
 	// lensBackfill closes the store it is handed (before the drain), so this handle is spent.
-	err = lensBackfill(st, "default", false /*fresh*/, true /*assumeYes*/)
-	if err != nil && strings.Contains(err.Error(), "worker is running") {
-		t.Errorf("a plain backfill must not require the WorkerLock: %v", err)
+	out := captureStdout(t, func() { err = lensBackfill(st, "default", false /*fresh*/, true /*assumeYes*/) })
+	if err != nil {
+		t.Fatalf("a plain backfill must not fail or require the WorkerLock: %v", err)
+	}
+	if !strings.Contains(out, "another worker is already running") {
+		t.Fatalf("did not reach the drain:\n%s", out)
 	}
 	st2, err := store.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st2.Close()
-	if got := st2.DistilledCount("s1", "default"); got != 0 {
-		t.Errorf("a plain backfill should still reset the watermark, got %d", got)
+	if got := st2.DistilledCount("s1", "default"); got != 1 {
+		t.Errorf("a plain backfill must keep the lens's watermark, got %d", got)
+	}
+	if got := st2.ReviewRowid("default"); got != 7 {
+		t.Errorf("a plain backfill must keep the lens's review cursor, got %d", got)
+	}
+	for _, want := range []string{"already mined every session", "witness lens backfill default --fresh"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A session the lens has NOT finished but is sleeping on a retry backoff is still work: Stats
+// counts it in BackedOff, not Pending, so the "already mined" notice must add both. Otherwise a
+// lens whose only unmined session is backed off is told it has mined everything.
+func TestLensBackfillCountsABackedOffSessionAsUnmined(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for seq := 0; seq < 2; seq++ {
+		if err := st.AppendRaw(store.RawRecord{
+			Session: "s1", Seq: seq, TS: "2026-08-01T00:00:00Z", Role: "user", Text: "turn",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.MarkDistilled("s1", "default", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetNextAttempt("s1", "default", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		t.Fatal("precondition: lock should be free")
+	}
+	defer unlock()
+
+	out := captureStdout(t, func() { err = lensBackfill(st, "default", false /*fresh*/, true /*assumeYes*/) })
+	if err != nil {
+		t.Fatalf("a plain backfill must not fail with the lock held: %v", err)
+	}
+	if !strings.Contains(out, "over the sessions it has not mined yet") {
+		t.Errorf("a backed-off unmined session must read as pending work:\n%s", out)
+	}
+	if strings.Contains(out, "already mined") {
+		t.Errorf("a backed-off unmined session must not read as already mined:\n%s", out)
 	}
 }
 
@@ -274,7 +331,7 @@ func TestLensBackfillUnfinishedNamesTheCauseAndBothRecoverySteps(t *testing.T) {
 		t.Fatal(err)
 	}
 	var err2 error
-	captureStdout(t, func() { err2 = lensBackfill(st, "default", false, true) })
+	out := captureStdout(t, func() { err2 = lensBackfill(st, "default", false, true) })
 	if err2 == nil {
 		t.Fatal("a backfill that mined nothing must not succeed")
 	}
@@ -286,6 +343,9 @@ func TestLensBackfillUnfinishedNamesTheCauseAndBothRecoverySteps(t *testing.T) {
 	}
 	if strings.Contains(msg, "lens backfill") {
 		t.Errorf("re-running the backfill re-mines everything; it is not a recovery step:\n%s", msg)
+	}
+	if !strings.Contains(out, "over the sessions it has not mined yet") {
+		t.Errorf("plain path must say it catches up:\n%s", out)
 	}
 }
 

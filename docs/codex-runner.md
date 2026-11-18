@@ -69,12 +69,12 @@ after the lock and preflight. Generation timeouts report
 
 Known future usage resets pause only calls using this Codex plan. The reset is
 stored in UTC, shown in `witness status`, and schedules a
-worker wakeup. After the reset one call probes before waiting calls resume.
+worker wakeup. Each runtime has its own pause; after the reset calls resume and
+the first refusal pauses again.
 The child gets `TZ=UTC`; on Windows Codex's clock uses the system timezone
 despite that variable, so witness parses that wall clock before converting to UTC.
 Unknown or stale reset times, missing plan access and exhausted API credit are
-ordinary errors with the existing retry/backoff behavior. OpenCode's free-model
-pause remains independent.
+ordinary errors with the existing retry/backoff behavior.
 
 Runner calls use the same Codex plan allowance as coding calls. API-key calls
 use API billing. See [Codex pricing](https://learn.chatgpt.com/docs/pricing).

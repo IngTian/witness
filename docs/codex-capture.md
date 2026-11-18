@@ -35,10 +35,10 @@ this adapter does not try to infer authorship from the wording of a message.
 
 Per-session source revisions avoid rereading unchanged transcripts. Message keys
 allow a growing transcript to append only its new tail; edits to earlier messages
-rebuild that session's raw rows and reset its mining watermark. Import state and
-raw rows commit in one transaction. A complete final JSONL record is accepted
-even without a trailing newline; an incomplete live tail is deferred until the
-file changes.
+replace that session's raw rows from the first changed message on and lower its
+mining watermark to there. Import state and raw rows commit in one transaction. A
+complete final JSONL record is accepted even without a trailing newline; an
+incomplete live tail is deferred until the file changes.
 
 A malformed header or terminated row is isolated to its source file. Its existing
 raw rows and watermark remain intact, and other sessions continue importing.

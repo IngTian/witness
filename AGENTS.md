@@ -57,7 +57,10 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   optional capabilities (rendering falls back to the shared `RenderChunks`, import to
   nothing), and so are `AutoImporter` (a wired source re-imported at every drain start,
   because it can go stale without a live trigger) and `ModelRequirer` (a runner that
-  refuses an empty stage model, so wire asks for one); `cmd/commands/root.go` imports
+  refuses an empty stage model, so wire asks for one), and a runner may implement
+  `SharedAllowance` (calls one usage-limit refusal pauses per runtime until its reset;
+  Claude arms it only on the CLI's rejected `rate_limit_event`;
+  `cmd/commands/usagepause.go` is the only writer); `cmd/commands/root.go` imports
   the adapters. Installers register separately: a cmd-local wire-target map
   (`cmd/commands/installers.go`) with cmd-side implementations.
   `internal/platform/opencode/plugin/` embeds the OpenCode plugin JS — the one source of
@@ -67,8 +70,9 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   them, so a copied/installed binary self-locates its assets.
 - `internal/{embed,vector,lens,mcp}/` — embeddings (pure-Go GoMLX), cosine
   search, lens loading, the MCP server.
-- `internal/proc/` — the process-control port (detach, bind-to-parent, contain,
-  terminate) behind one interface with per-OS adapters and a `Fake`.
+- `internal/proc/` — the process-control port (detach, contain, terminate)
+  behind one interface with per-OS adapters and a `Fake`. `HideWindow` (no
+  console for a Windows child) is a package func beside it, not on `Control`.
 - `internal/view/` — builds the read-only HTML snapshot `witness view` opens; Go
   computes every number, the page only draws (`make view-e2e` checks it headless).
 

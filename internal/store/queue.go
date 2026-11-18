@@ -135,13 +135,15 @@ func (q *queue) MarkDistilled(session, lens string, count int) error {
 //
 // Why this exists (issue #49 C2): MarkDistilled is a blind upsert of a COUNT captured at the
 // start of a mine. That count assumes raw is append-only. It isn't always: an OpenCode history
-// rewrite/edit takes the replace path (DELETE raw + DELETE progress + re-INSERT the new
-// turns), under a DIFFERENT lock than the worker. If such a delete lands mid-mine, a trailing
-// blind MarkDistilled would RESURRECT the just-deleted progress row with a stale count,
-// silently marking never-mined turns as done. The guard closes that: after a replace the old
-// rawHighID no longer exists, the UPDATE/INSERT matches no row, nothing is written, progress
-// stays absent, and the pending query re-offers the session so it re-mines the new generation
-// from scratch. The wasted mine is discarded — correctness over the (rare, racy) wasted work.
+// rewrite/edit takes the replace path (keep the unchanged prefix, DELETE raw from the first
+// changed turn by id, clamp progress to the kept count, re-INSERT the new turns), under a
+// DIFFERENT lock than the worker. If such a delete lands mid-mine, a trailing blind
+// MarkDistilled would write the stale count back over the clamped progress, silently marking
+// never-mined turns as done. The guard closes that: the delete is an id SUFFIX, so a mined
+// rawHighID inside the dropped tail no longer exists, the UPDATE/INSERT matches no row, nothing
+// is written, progress stays at the kept count and the session re-mines from there. (A mine
+// whose rawHighID is in the kept prefix saw only kept rows, so its count is still true and it
+// lands.) The wasted mine is discarded — correctness over the (rare, racy) wasted work.
 //
 // Runtime-agnostic: it guards EVERY session (Claude Code + OpenCode) with one code path. On the
 // append-only Claude path the mined rawHighID always still exists, so the guard always passes —
@@ -316,9 +318,10 @@ func (q *queue) LensBackedOff(session, lens string, now time.Time) bool {
 }
 
 // ResetLensWatermark drops every progress row for one lens, so all sessions read
-// as pending FOR THAT LENS on the next drain — the enable-a-new-lens backfill path
-// (issue #55). Other lenses' watermarks (rows with a different lens) are untouched,
-// so `default` is never re-mined. Returns rows removed.
+// as pending FOR THAT LENS on the next drain — the `lens backfill --fresh` path
+// (issue #55). A new lens needs no reset: candidatesCTE's LEFT JOIN progress reads
+// a missing row as 0. Other lenses' watermarks (rows with a different lens) are
+// untouched, so `default` is never re-mined. Returns rows removed.
 func (q *queue) ResetLensWatermark(lens string) (int, error) {
 	res, err := q.db.Exec(`DELETE FROM progress WHERE lens = ?`, lens)
 	if err != nil {

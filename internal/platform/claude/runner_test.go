@@ -3,7 +3,10 @@ package claude
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -20,10 +23,13 @@ func TestBuildRunCmdRoleSeparation(t *testing.T) {
 	if sys := cmd.Args[i+1]; sys != "EXTRACT INSTRUCTIONS" {
 		t.Fatalf("system prompt not passed verbatim: %q", sys)
 	}
-	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config"} {
+	for _, want := range []string{"-p", "--safe-mode", "--no-session-persistence", "--strict-mcp-config", "--verbose"} {
 		if !slices.Contains(cmd.Args, want) {
 			t.Errorf("isolation flag %q lost: %v", want, cmd.Args)
 		}
+	}
+	if i := slices.Index(cmd.Args, "--output-format"); i < 0 || i+1 >= len(cmd.Args) || cmd.Args[i+1] != "stream-json" {
+		t.Errorf("argv must carry --output-format stream-json (Run parses the stream): %v", cmd.Args)
 	}
 	// The corpus goes on stdin, not concatenated into the instructions.
 	if cmd.Stdin == nil {
@@ -66,5 +72,46 @@ func TestBuildRunCmdSetsRecursionGuard(t *testing.T) {
 	cmd := buildRunCmd(context.Background(), "", "SYS", "corpus")
 	if !slices.Contains(cmd.Env, "WITNESS_WORKER=1") {
 		t.Fatalf("WITNESS_WORKER=1 recursion guard missing from env")
+	}
+}
+
+// npm's claude.cmd/.bat must resolve to the claude.exe it wraps (in any case of the extension, which
+// Windows matches case-insensitively), a non-shim path must come back untouched, and a shim with no
+// npm layout behind it, or a directory where the exe should be, must be refused by name.
+func TestNpmClaudeExe(t *testing.T) {
+	layout := func(root string) string {
+		return filepath.Join(root, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
+	}
+	dir, bare, asDir := t.TempDir(), t.TempDir(), t.TempDir()
+	exe := layout(dir)
+	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(layout(asDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		in, want string
+		refused  bool
+	}{
+		// No stat for a non-shim: dir/claude.exe does not exist and still comes back as is.
+		{filepath.Join(dir, "claude.exe"), filepath.Join(dir, "claude.exe"), false},
+		{filepath.Join(dir, "claude.cmd"), exe, false}, {filepath.Join(dir, "claude.CMD"), exe, false},
+		{filepath.Join(dir, "claude.bat"), exe, false},
+		{filepath.Join(bare, "claude.cmd"), "", true}, {filepath.Join(asDir, "claude.cmd"), "", true},
+	} {
+		got, err := npmClaudeExe(c.in)
+		if c.refused {
+			if err == nil || !strings.Contains(err.Error(), c.in) || !strings.Contains(err.Error(), "cmd.exe") {
+				t.Errorf("npmClaudeExe(%s) = %q, %v; want a refusal naming the shim and cmd.exe", c.in, got, err)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("npmClaudeExe(%s) = %q, %v; want %q", c.in, got, err, c.want)
+		}
 	}
 }

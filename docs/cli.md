@@ -52,15 +52,19 @@ history from before you wired it (`witness import --agent codex`).
   both prompts in full).
 - `witness lens try <file|lens-name>` — preview a lens's extract prompt on real sessions without
   writing anything; `--review` also previews the facets its review prompt would produce.
-- `witness lens backfill <name> [--fresh]` — re-mine one lens over the whole history and refresh its
-  facets; `--fresh` first drops the lens's observations + facets (for a changed prompt).
+- `witness lens backfill <name> [--fresh]` — mine one lens over every session it has not mined yet
+  and refresh its facets; `--fresh` first drops the lens's observations + facets and re-mines the
+  whole history (for a changed prompt).
 - `witness lens load-default` — re-seed / restore the built-in "default" person-growth lens (it is
   auto-seeded once on first use and fully deletable, so this is how you bring it back).
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
 - `witness import --agent codex` — import Codex sessions; see [Codex capture](codex-capture.md).
 - `witness status` — what has been captured, whether the worker is running, and how fresh the
-  distilled data is (`--json` for scripts).
+  distilled data is (`--json` for scripts). Claude now pauses on a usage-limit refusal, like Codex
+  and OpenCode, and a weekly limit can pause it for days; `status` shows the pause and its reset. A
+  manual `witness worker run` skips the paused-run pre-check and calls anyway, and a refusal re-arms
+  the pause.
 - `witness worker run` / `witness worker stop` — the operator escape hatch for the background
   distillation worker (normally it runs off editor hooks). `run` drains in
   the foreground, `--detach` backgrounds it. With `--detach` it accepts `--since`/`--until` to
@@ -109,8 +113,9 @@ history from before you wired it (`witness import --agent codex`).
   to one revision and checked by SHA-256. `install.sh` and `make fetch-model` run it; re-running
   checks the files instead of downloading them again. `WITNESS_ASSETS` picks the directory, and
   `WITNESS_MODEL_BASE_URL` a mirror (it needs `WITNESS_MODEL_SHA256` and
-  `WITNESS_TOKENIZER_SHA256`). From npm, `npx @witness-ai/opencode mcp` downloads the model itself
-  in the background if it is missing (`WITNESS_SKIP_MODEL_DOWNLOAD=1` turns that off).
+  `WITNESS_TOKENIZER_SHA256`). `witness mcp` loads the model on the first search, so its other
+  tools work without it; from npm, `npx @witness-ai/opencode mcp` also downloads a missing model
+  in the background (`WITNESS_SKIP_MODEL_DOWNLOAD=1` turns that off).
 - `witness config get|set|unset|list [--lens <name>]` — read or change the runner and models, for
   the default scope or one lens; `witness config path` prints where `config.toml` lives.
 
@@ -163,8 +168,8 @@ lines, each naming a registered lens that runs on every session:
 lens = math
 ```
 
-Raw transcripts are kept for good: `lens backfill` and `lens try` re-mine from them, so there is
-no retention setting and no prune command.
+Raw transcripts are kept for good: `lens backfill --fresh` and `lens try` re-mine from them, so
+there is no retention setting and no prune command.
 
 ---
 

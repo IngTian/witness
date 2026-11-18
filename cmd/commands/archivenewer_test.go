@@ -35,14 +35,24 @@ func bumpArchiveSchema(t *testing.T) int {
 
 // Every distillation entry point must refuse an archive a NEWER witness wrote, before it opens a
 // runner — so before any model call is paid for — and before anything destructive (backfill
-// --fresh drops a lens's facets ahead of the re-mine). writeFacetsTx refusing on its own would
-// still let review pay for every window and then fail the write, forever.
+// --fresh drops a lens's facets ahead of the re-mine, and a profile pass reaps a portrait whose
+// lens has none, before it opens a runner). writeFacetsTx refusing on its own would still let
+// review pay for every window and then fail the write, forever.
 //
 // "No runner opened" is the observable: the fake runner counts Open, and nothing can call a model
 // through a runner set that was never opened.
 func TestNewerArchiveRefusesEveryDistillationEntryPoint(t *testing.T) {
 	compactFixture(t) // lens "math", runner "fakecompact", three facets
 	t.Setenv("WITNESS_PROMPTS", filepath.Join("..", "..", "prompts"))
+	st, err := store.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = st.WriteProfile("gone", "# a lens whose facets were dropped") // what Summarize reaps first
+	st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	bumpArchiveSchema(t)
 
 	opens := atomic.LoadInt32(&leakFakeOpens)
@@ -64,7 +74,7 @@ func TestNewerArchiveRefusesEveryDistillationEntryPoint(t *testing.T) {
 		{"worker review", func() error { return cmdReview() }},
 		{"compact (+ claim pass)", func() error { return cmdCompact(true, "", func(string) bool { return true }) }},
 		{"lens backfill --fresh", withStore(func(st *store.Store) error { return lensBackfill(st, "math", true, true) })},
-		{"profile regeneration", withStore(func(st *store.Store) error { _, err := ensureProfileFresh(st); return err })},
+		{"profile regeneration", withStore(ensureProfileFresh)},
 	} {
 		if err := c.run(); !errors.Is(err, store.ErrArchiveNewer) {
 			t.Errorf("%s on a newer archive returned %v, want store.ErrArchiveNewer", c.name, err)
@@ -75,6 +85,13 @@ func TestNewerArchiveRefusesEveryDistillationEntryPoint(t *testing.T) {
 	}
 	if active, archived := compactCounts(t); active != 3 || archived != 0 {
 		t.Errorf("the facets changed on a newer archive: %d active, %d archived (want 3, 0)", active, archived)
+	}
+	if st, err = store.Open(); err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, ok, _ := st.ReadProfile("gone"); !ok {
+		t.Error("an orphan portrait was reaped on a newer archive")
 	}
 }
 

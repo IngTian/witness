@@ -64,16 +64,13 @@ func scheduleRetryWakeup(st *store.Store) {
 	scheduleWorkerWakeup(st, next, workerWakeMode(st))
 }
 
-// retryWakeupAt is the earliest deferred need: a backed-off session's retry, or the end of the
-// free-model pause. A paused lens sets no backoff (freepause.go), so without the pause end a box
-// with no other kicker (Windows, no live trigger) would never resume its free-model lenses.
+// retryWakeupAt is the earliest deferred need: a backed-off session's retry, or the end of a
+// runtime's usage pause. A paused lens sets no backoff (usagepause.go), so without the pause end a
+// box with no other kicker (Windows, no live trigger) would never resume its paused lenses.
 func retryWakeupAt(st *store.Store, now time.Time) (time.Time, bool) {
 	next, ok := st.NextBackoffAttempt(activeLensNames(st), now)
-	if until, paused := freeModelsPausedUntil(st); paused && until.After(now) && (!ok || until.Before(next)) {
-		next, ok = until, true
-	}
-	for _, until := range runnerUsagePauses(st) {
-		if until.After(now) && (!ok || until.Before(next)) {
+	for _, until := range usagePauses(st, now) {
+		if !ok || until.Before(next) {
 			next, ok = until, true
 		}
 	}

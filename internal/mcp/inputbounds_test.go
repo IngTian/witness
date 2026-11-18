@@ -37,6 +37,9 @@ func TestNormalizeRecord(t *testing.T) {
 	for _, name := range []string{"default", "math", "code-review", "my_lens", "lens.v2"} {
 		cases = append(cases, tcase{"legitimate lens " + name, in(name, 7), in(name, 7)})
 	}
+	// Session is now optional: missing or blank defaults in the handler.
+	cases = append(cases, tcase{"missing session", recordInput{Observation: "o"}, recordInput{Lens: store.LensDefault, Observation: "o", Poignancy: 5}})
+	cases = append(cases, tcase{"blank session", recordInput{Session: " \t", Observation: "o"}, recordInput{Lens: store.LensDefault, Observation: "o", Poignancy: 5}})
 	for _, tc := range cases {
 		got, err := normalizeRecord(tc.in)
 		if err != nil || got != tc.want {
@@ -45,7 +48,6 @@ func TestNormalizeRecord(t *testing.T) {
 	}
 
 	refused := map[string]recordInput{
-		"missing session":       {Observation: "o"},
 		"missing observation":   {Session: "s"},
 		"whitespace-only":       {Session: " ", Observation: " "},
 		"over-long observation": {Session: "s", Observation: strings.Repeat("x", maxObsLen+1)},

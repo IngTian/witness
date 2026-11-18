@@ -138,6 +138,49 @@ func TestClaudeRunDistinguishesCallerCancellationFromTimeout(t *testing.T) {
 	}
 }
 
+// A grandchild that keeps the child's stdout open must not hold Run past the child. os/exec's Wait
+// waits for every writer of the pipe, so a `claude -p` that leaves a helper behind (a hook, an npm
+// wrapper's node) held the drain slot until the grandchild ended, and a killed one hung the same way
+// past its deadline. WaitDelay bounds both; ErrWaitDelay after exit 0 is the whole reply, not a
+// failure. The `sleep 3` grandchildren end on their own.
+func TestClaudeRunReturnsPromptlyWhenAGrandchildHoldsStdout(t *testing.T) {
+	unsetDisableSwitch(t)
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("spawns a shell that leaves a `sleep 3` grandchild holding its stdout")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no `sh` to stand in for the CLI: %v", err)
+	}
+	prevDelay, prevTimeout, prevBuild := claudeWaitDelay, claudeRunTimeout, buildRunCmdFn
+	t.Cleanup(func() { claudeWaitDelay, claudeRunTimeout, buildRunCmdFn = prevDelay, prevTimeout, prevBuild })
+	claudeWaitDelay = 200 * time.Millisecond
+
+	for _, c := range []struct {
+		name, script string
+		timeout      time.Duration
+	}{
+		{"exit 0", `echo '{"type":"result","is_error":false,"result":"ok"}'; sleep 3 &`, time.Minute},
+		{"deadline", "sleep 3 & sleep 3", 100 * time.Millisecond},
+	} {
+		claudeRunTimeout = c.timeout
+		buildRunCmdFn = func(ctx context.Context, _, _, _ string) *exec.Cmd {
+			return exec.CommandContext(ctx, sh, "-c", c.script)
+		}
+		start := time.Now()
+		out, err := testRunner(t).Run(context.Background(), "", "sys", "corpus")
+		if el := time.Since(start); el > 2*time.Second {
+			t.Errorf("%s: Run took %s; the grandchild held it (no WaitDelay?)", c.name, el)
+		}
+		if c.name == "exit 0" && (err != nil || out != "ok") {
+			t.Errorf("exit 0: Run = %q, %v; want the reply (ErrWaitDelay after exit 0 is success)", out, err)
+		}
+		if c.name == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("deadline: Run error = %v; want context.DeadlineExceeded", err)
+		}
+	}
+}
+
 // The disabled-runner guard must still fire before anything is spawned.
 //
 // Cheap, but it pins the ordering the new error handling could plausibly disturb: the kill switch

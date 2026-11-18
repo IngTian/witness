@@ -43,7 +43,7 @@ type deleteInput struct {
 
 // recordInput is the typed argument for record_observation.
 type recordInput struct {
-	Session     string `json:"session" jsonschema:"the current session_id"`
+	Session     string `json:"session,omitempty" jsonschema:"optional: a short label for this context; when omitted, witness files the note under mcp:<UTC date>"`
 	Lens        string `json:"lens,omitempty" jsonschema:"lens tag (default 'default')"`
 	Dimension   string `json:"dimension" jsonschema:"which axis this observation belongs to"`
 	Observation string `json:"observation" jsonschema:"the noticed growth/change, one sentence"`
@@ -56,6 +56,13 @@ type recordInput struct {
 // cap text sizes and quantity to bound disk growth, and clamp poignancy so one
 // call can't force an expensive review by passing an absurd salience.
 const (
+	// activeSessionPrefix is the prefix for witness-owned sessions holding agent-recorded
+	// observations when the agent sent no label. One session per UTC day: an unlabelled note
+	// goes under mcp:YYYY-MM-DD. "mcp:" matches no adapter prefix (claude "", opencode:, codex:,
+	// file:), so ForSession never renders it (there is no raw) and IsCorpusSession is false.
+	// Never use "" as the session id: the staged branch at store/queue.go:591 skips it. An
+	// adapter that registers "mcp:" would claim these sessions.
+	activeSessionPrefix = "mcp:"
 	maxObsLen           = 2000
 	maxEvidenceLen      = 2000
 	maxDimensionLen     = 100
@@ -83,14 +90,14 @@ const (
 
 // normalizeRecord validates and clamps record_observation input. Pure (no IO) so
 // it is unit-testable; the quantity bound is enforced atomically in the handler, by
-// StageObservationCapped.
+// StageObservationCapped. An empty Session is valid (the handler fills it in).
 func normalizeRecord(in recordInput) (recordInput, error) {
 	in.Session = strings.TrimSpace(in.Session)
 	in.Observation = strings.TrimSpace(in.Observation)
 	in.Dimension = strings.TrimSpace(in.Dimension)
 	in.Evidence = strings.TrimSpace(in.Evidence)
-	if in.Session == "" || in.Observation == "" {
-		return in, fmt.Errorf("session and observation are required")
+	if in.Observation == "" {
+		return in, fmt.Errorf("observation is required")
 	}
 	if len(in.Observation) > maxObsLen {
 		return in, fmt.Errorf("observation too long (%d > %d chars)", len(in.Observation), maxObsLen)
@@ -140,32 +147,21 @@ func Serve(ctx context.Context, st store.MCPStore, emb Embedder, opts Options) e
 }
 
 // Options is what cmd knows and this leaf package must not import: the ldflags-injected version,
-// a model runner, the install targets. Every zero value works, so the
+// a portrait staleness check, the install targets. Every zero value works, so the
 // fake-driven tests set only what they exercise.
 type Options struct {
 	// Version is reported in the MCP initialize handshake; "" → "dev".
 	Version string
-	// Refresh regenerates stale profiles before get_profile reads one; nil serves what is on disk.
-	Refresh RefreshProfiles
+	// ProfileStale reports whether `witness profile` would rewrite or remove this portrait;
+	// nil = never stale.
+	ProfileStale func(lens string) bool
 	// Wire is the copyable "connect an editor" command, built from the install targets so it
 	// names every editor `witness wire` accepts.
 	Wire string
 }
 
-// RefreshProfiles regenerates stale L4 summaries before get_profile reads one (issue #100,
-// read-time generation). nil disables it — the tool then serves whatever is on disk, which is
-// exactly the pre-#100 behavior.
-//
-// It is a CALLBACK rather than a widening of store.MCPStore on purpose. Regenerating needs a
-// model runner, the lens registry, and the machine-wide WorkerLock — none of which belong in a
-// store interface, and all of which live in cmd. Injecting one function keeps this package's
-// dependency surface as it was (a read interface plus an embedder) and keeps the fake-driven
-// tests working unchanged with nil.
-//
-// The implementation is expected to be non-fatal and lock-guarded: it must serve cached rather
-// than queue behind a running drain (see cmd/commands/profilepull.go). An error here is
-// reported to the agent alongside the cached profile, never in place of it.
-type RefreshProfiles func() error
+// refreshHint names both ways to a new portrait, for get_profile's staleness note.
+const refreshHint = "The background worker writes a new one after its next review; `witness profile` in a terminal writes it now."
 
 // newServer builds the MCP server with all tools registered. Split from Serve so
 // tests can drive it over an in-memory transport.
@@ -178,7 +174,7 @@ type RefreshProfiles func() error
 // returned `{}` even though the real payload was in Content. Returning `any`/nil
 // suppresses the output schema so clients use Content. (See TestNoStructuredOutput.)
 func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
-	version, refresh := opts.Version, opts.Refresh
+	version := opts.Version
 	if strings.TrimSpace(version) == "" {
 		version = "dev"
 	}
@@ -235,21 +231,26 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		return textResult(renderHits(lens, hits, func() string { return emptyHint(st, lens, wire, true) })), nil, nil
 	})
 
-	// record_observation: active in-session write. Stages to the session buffer;
-	// the session-end worker passes it through verbatim (authoritative).
+	// record_observation: active in-session write. Stages under the sent label,
+	// else the day's mcp: session.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "record_observation",
 		Description: "Record a decision-aware observation about the user's growth/change in THIS session. " +
 			"Use when you (the assistant) notice something worth tracking that you have context for now " +
-			"but a later reviewer would miss. Stored verbatim. Tag with the relevant lens.",
+			"but a later reviewer would miss. Stored verbatim. Tag with the relevant lens. " +
+			"A session label is optional.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in recordInput) (*mcpsdk.CallToolResult, any, error) {
+		now := time.Now().UTC()
 		in, err := normalizeRecord(in)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
+		if in.Session == "" {
+			in.Session = activeSessionPrefix + now.Format(time.DateOnly)
+		}
 		o := store.Observation{
 			ID:          store.ObservationID(in.Session, in.Lens, in.Observation),
-			TS:          time.Now().UTC().Format(time.RFC3339),
+			TS:          now.Format(time.RFC3339),
 			Session:     in.Session,
 			Lens:        in.Lens,
 			Dimension:   in.Dimension,
@@ -261,12 +262,12 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		// Two bounds, both enforced atomically in the store so concurrent MCP processes can't
 		// each pass a check and race past them:
 		//   - per SESSION, the original cap on disk growth from a runaway loop;
-		//   - TOTAL, because the session id is AGENT-SUPPLIED. A confused or runaway agent that
-		//     varies it (per-turn ids, a hallucinated id, an incrementing counter) gets a fresh
-		//     per-session budget on every call, so the per-session cap alone bounds nothing —
-		//     and each row is up to 2000 chars of observation plus 2000 of evidence, durable in
-		//     L1 and fed to the review model. A total cap has no key, so it cannot be evaded by
-		//     picking a different one.
+		//   - TOTAL, because the session id is AGENT-SUPPLIED when sent, and the unlabelled
+		//     default renews every UTC day. A confused or runaway agent that varies it (per-turn
+		//     ids, a hallucinated id, an incrementing counter) gets a fresh per-session budget on
+		//     every call, so the per-session cap alone bounds nothing — and each row is up to
+		//     2000 chars of observation plus 2000 of evidence, durable in L1 and fed to the
+		//     review model. A total cap has no key, so it cannot be evaded by picking a different one.
 		inserted, err := st.StageObservationCapped(o, maxStagedPerSession, maxStagedTotal)
 		if err != nil {
 			return errResult(fmt.Sprintf("stage: %v", err)), nil, nil
@@ -322,7 +323,8 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 	// 'unified' portrait (an AGGREGATE VIEW blending every lens — not a lens itself).
 	// Note the asymmetry vs search/get_facets, which default to the 'default' LENS.
 	// Regenerated in the background after each review; may not exist yet on a brand-
-	// new archive.
+	// new archive. Served as written, never regenerated here; a note says when the facets
+	// moved on.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "get_profile",
 		Description: "Read the narrative growth profile (readable prose) for a lens. " +
@@ -335,28 +337,23 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		if lensName == "" {
 			lensName = store.ProfileUnified
 		}
-		// Regenerate on read if stale (#100). Measured ~13s for a real regeneration and ~0.02s
-		// when the signature already matches, so blocking the tool call is acceptable; the worker also
-		// rebuilds stale portraits after each review, so a read usually finds one current. NON-FATAL: a refresh failure still serves what is on
-		// disk — a stale narrative is strictly better than none — and the note is appended to
-		// the reply so the agent knows what it is holding rather than being misled.
-		var stale string
-		if refresh != nil {
-			if err := refresh(); err != nil {
-				stale = "\n\n---\n(note: this profile could not be refreshed just now — " +
-					err.Error() + " — so it may not reflect the newest facets.)"
-			}
-		}
 		md, ok, err := st.ReadProfile(lensName)
 		if err != nil {
 			return errResult(fmt.Sprintf("read profile: %v", err)), nil, nil
 		}
-		if !ok {
-			// stale rides along: when a refresh failed, it is the actual reason there is no profile.
-			return textResult(fmt.Sprintf("No narrative profile for '%s' yet. %s Use get_facets for the current structured attributes.%s",
-				lensName, emptyHint(st, lensName, wire, false), stale)), nil, nil
+		stale := opts.ProfileStale != nil && opts.ProfileStale(lensName)
+		switch {
+		case !ok && stale:
+			return textResult(fmt.Sprintf("No narrative profile for '%s' has been written yet, though its facets exist. "+
+				refreshHint+" Use get_facets for the current structured attributes.", lensName)), nil, nil
+		case !ok:
+			return textResult(fmt.Sprintf("No narrative profile for '%s' yet. %s Use get_facets for the current structured attributes.",
+				lensName, emptyHint(st, lensName, wire, false))), nil, nil
+		case stale:
+			return textResult(md + "\n\n---\n(note: the facets have changed since this portrait was written. " +
+				refreshHint + " get_facets has the current attributes.)"), nil, nil
 		}
-		return textResult(md + stale), nil, nil
+		return textResult(md), nil, nil
 	})
 
 	// delete_observation: prune one L1 observation by id. Facets are reviewer-owned

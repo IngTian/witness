@@ -9,8 +9,7 @@ import (
 )
 
 func TestContractLeaseKill(t *testing.T) { // T1: the holder dies uncleanly; serve must follow
-	// On Linux, startHolder's serve also gets the parent-death signal (Pdeathsig), so this pass
-	// proves "the serve follows its holder" partly through that signal. T2 is the lease-only proof.
+	// Lease-only on every OS.
 	oc := requireContract(t)
 	noLeaks(t)
 	s := scratchEnv(t)
@@ -36,8 +35,7 @@ func TestContractLeaseClose(t *testing.T) { // T2: Close = close stdin, no WaitD
 }
 
 func TestContractLeaseSiblingNoLeak(t *testing.T) { // T4: the write end must not leak into a sibling
-	// On Linux, Pdeathsig kills the serve with its holder whether or not the write end leaked (and
-	// os/exec pipes are CLOEXEC there), so only the Windows and macOS runs can fail this.
+	// On Linux os/exec pipes are CLOEXEC, so only the Windows and macOS runs can fail this.
 	oc := requireContract(t)
 	noLeaks(t)
 	s := scratchEnv(t)

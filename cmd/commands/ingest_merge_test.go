@@ -92,8 +92,8 @@ func TestIngestAfterAMergeAppendKeepsProgress(t *testing.T) {
 	}
 }
 
-// An edit of an earlier record still replaces the feed and resets its progress, as before, and
-// keeps the merged row; the ingest after it keeps progress.
+// An edit of the first record still replaces the whole feed and resets its progress (no record
+// before it is kept), and keeps the merged row; the ingest after it keeps progress.
 func TestIngestEditAfterAMergeAppendStillReplaces(t *testing.T) {
 	ingestHome(t)
 	ingestOne(t, "a", "body a")
@@ -110,6 +110,20 @@ func TestIngestEditAfterAMergeAppendStillReplaces(t *testing.T) {
 	ingestOne(t, "d", "body d")
 	if texts, keys, progress := feedState(t); progress != 2 || len(texts) != 3 || keys != 3 {
 		t.Fatalf("after the next ingest: progress %d (want 2), rows %v, %d keys", progress, texts, keys)
+	}
+}
+
+// An edit of a later record keeps the records before it, and their progress: only the edited
+// record and what follows it are mined again.
+func TestIngestEditOfALaterRecordKeepsTheMinedPrefix(t *testing.T) {
+	ingestHome(t)
+	ingestFeed(t, "a", "body a", "b", "body b", "c", "body c")
+	markMined(t, 3)
+
+	ingestFeed(t, "b", "body b EDITED")
+	texts, keys, progress := feedState(t)
+	if progress != 1 || strings.Join(texts, "|") != "body a|body b EDITED|body c" || keys != 3 {
+		t.Fatalf("after the edit: progress %d, rows %v, %d keys; want 1, [body a, body b EDITED, body c], 3", progress, texts, keys)
 	}
 }
 

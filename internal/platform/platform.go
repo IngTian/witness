@@ -5,12 +5,31 @@
 // subpackages; this file holds the cross-source constants and value types.
 package platform
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 const (
 	AgentClaude   = "claude"
 	AgentOpenCode = "opencode"
 )
+
+// AppendFrom decides how an importer whose source can rewrite history (OpenCode, Codex) applies
+// a transcript: old is the turn keys the last import stored, cur the source's keys now, rawCount
+// the session's L0 rows. It appends cur[from:] when old is a prefix of cur that the archive still
+// holds. Rows past the stored keys are turns `witness merge` appended from another machine's copy
+// (that copy arrives under a minted id, so no key describes them); they stay, and so does the
+// session's progress, because what the source added goes after them. Requiring the counts to be
+// equal replaced the session, deleting them and re-mining it. No stored keys over existing rows
+// says nothing about those rows, so it is not ok either. When not ok, pass the whole transcript
+// to ApplyRawImport with replace=true: the store keeps the unchanged (role, text) prefix.
+func AppendFrom(old, cur []string, rawCount int) (from int, ok bool) {
+	if (len(old) > 0 || rawCount == 0) && len(old) <= len(cur) && rawCount >= len(old) && slices.Equal(cur[:len(old)], old) {
+		return len(old), true
+	}
+	return 0, false
+}
 
 type ImportStats struct {
 	Agent    string
