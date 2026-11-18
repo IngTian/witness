@@ -127,15 +127,14 @@ type Runner interface {
 	// Claude isolates: no prior or saved conversation (one-shot `-p --no-session-persistence`); no
 	// built-in tools (`--tools ""`); no MCP servers (`--strict-mcp-config`); not the user's
 	// project CLAUDE.md, .mcp.json or .claude/ settings (the cwd is witness's own empty
-	// <RuntimeRoot>/claude-cwd, shared by every Run, never under the world-writable temp dir).
+	// <RuntimeRoot>/claude-cwd, shared by every Run, never under the world-writable temp dir); and,
+	// through `--safe-mode` (2.1.169+), no user, ancestor or managed CLAUDE.md, auto memory, plugin,
+	// skill, output style or user/project/plugin hook.
 	//
 	// Claude does NOT isolate: Claude Code's own system prompt (witness's is appended via
-	// `--append-system-prompt`); the user-level CLAUDE.md; instruction files in the cwd's
-	// ANCESTORS (CLAUDE.md, .claude/CLAUDE.md, .claude/rules/, CLAUDE.local.md, AGENTS.md as a
-	// fallback), which Claude Code loads from every parent dir: the user's own, e.g. a ~/CLAUDE.md;
-	// user and plugin hooks, which fire and may add context. Those need `--bare`, which (claude 2.1.325 `--help`) limits Anthropic auth
-	// to ANTHROPIC_API_KEY/apiKeyHelper, no OAuth or keychain (Bedrock/Vertex keep theirs): a
-	// product call, not done.
+	// `--append-system-prompt`) and admin-managed policy settings and their hooks. `--safe-mode`, not
+	// `--bare`: bare limits Anthropic auth to ANTHROPIC_API_KEY/apiKeyHelper, dropping every claude.ai
+	// OAuth login.
 	//
 	// Codex: a fresh ephemeral exec with a witness-owned home, an empty cwd and no user
 	// or project instructions. The CLI's policy preflight rejects managed layers.
@@ -151,8 +150,12 @@ type Runner interface {
 	// Enforced by: `TestNoCodePathForksAConversation` (source scan, OpenCode no-fork);
 	// `TestContractToolFreeWire` (tag `codexcontract`, Codex wire contract);
 	// `TestContractRunnerRoundTrip` (tag `opencodecontract`, contract workflow: zero tools on real
-	// OpenCode); `TestBuildRunCmdOffersNoTools` pins the Claude argv, checked once on real claude
-	// 2.1.325 (stream-json init `tools: []`), not in CI.
+	// OpenCode); `TestBuildRunCmdRoleSeparation` and `TestBuildRunCmdOffersNoTools` pin the Claude
+	// argv, checked once on real claude 2.1.327 on Bedrock (2026-11-18, not in CI). With
+	// `--safe-mode`, the stream-json init showed `tools: []`, `mcp_servers: []`, no plugin or user
+	// skill and 0 hook events, the result had `is_error:false`, and the appended probe marker came
+	// back. The control without the flag showed 12 plugins, 39 skills, 20 hook events,
+	// saw_user_profile:true.
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
 	// Close releases engine resources.
 	Close() error

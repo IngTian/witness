@@ -20,7 +20,7 @@ func TestBuildRunCmdRoleSeparation(t *testing.T) {
 	if sys := cmd.Args[i+1]; sys != "EXTRACT INSTRUCTIONS" {
 		t.Fatalf("system prompt not passed verbatim: %q", sys)
 	}
-	for _, want := range []string{"-p", "--no-session-persistence", "--strict-mcp-config", "--verbose"} {
+	for _, want := range []string{"-p", "--safe-mode", "--no-session-persistence", "--strict-mcp-config", "--verbose"} {
 		if !slices.Contains(cmd.Args, want) {
 			t.Errorf("isolation flag %q lost: %v", want, cmd.Args)
 		}

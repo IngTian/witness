@@ -198,6 +198,12 @@ func childOutput(stderr, stdout string) string {
 //   - --no-session-persistence: don't write a transcript (otherwise the worker's
 //     mining call appears as a stray session in whatever cwd it inherited — e.g.
 //     the user's project).
+//   - --safe-mode (Claude Code 2.1.169+): loads no CLAUDE.md (user, ancestor or managed), auto memory,
+//     plugin, skill, output style or user/project/plugin hook. Auth (claude.ai OAuth, API key,
+//     Bedrock/Vertex) and model selection keep working, unlike `--bare`. Managed policy hooks still
+//     apply. An older CLI rejects the flag and Run fails with its stderr; the `CLAUDE_CODE_SAFE_MODE`
+//     env var would be ignored silently instead. Safe mode keeps built-in tools and project
+//     settings.json, so `--tools ""` and the private cwd stay.
 //   - --strict-mcp-config: load no MCP servers. The worker needs none, and the
 //     user-scope witness MCP is short-circuited by the recursion guard, so trying
 //     to start it just stalls claude -p.
@@ -214,7 +220,7 @@ func childOutput(stderr, stdout string) string {
 //
 // model == "" omits --model so `claude -p` uses its environment default.
 func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
-	args := []string{"-p", "--no-session-persistence", "--strict-mcp-config", "--tools", "",
+	args := []string{"-p", "--safe-mode", "--no-session-persistence", "--strict-mcp-config", "--tools", "",
 		"--output-format", "stream-json", "--verbose"}
 	if strings.TrimSpace(model) != "" {
 		args = append(args, "--model", model)
