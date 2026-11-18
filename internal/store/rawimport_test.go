@@ -58,6 +58,10 @@ func TestReplaceImportKeepsUnchangedPrefix(t *testing.T) {
 		{"rewind plus new branch", recsOf("", "user:a", "assistant:b", "user:Y", "assistant:Z"), 2,
 			"user:a|assistant:b|user:Y|assistant:Z", 2, 1, true},
 		{"re-key with the same text", recsOf("2030-01-01T00:00:00Z", base...), 5, all, 5, 1, false},
+		// Every stored row matches and the transcript only grew: nothing is cut, so progress and
+		// backoff stay, the kept ids stay, and the tail lands under new ids.
+		{"extend only", recsOf("", "user:a", "assistant:b", "user:c", "assistant:d", "user:e", "assistant:f", "user:g"), 5,
+			all + "|assistant:f|user:g", 5, 1, false},
 		{"same text, different role", recsOf("", "user:a", "user:b", "user:c", "assistant:d", "user:e"), 1,
 			"user:a|user:b|user:c|assistant:d|user:e", 1, 1, true},
 		{"full change", recsOf("", "user:V", "assistant:W"), 0, "user:V|assistant:W", 0, 0, true},
