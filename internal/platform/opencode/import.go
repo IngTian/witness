@@ -519,7 +519,11 @@ func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow)
 	stateKey := importKeysMetaPrefix + session
 	oldKeys := parseImportKeys(im.Store.MetaString(stateKey))
 	rawCount := im.Store.RawCount(session)
-	if slices.Equal(oldKeys, keys) && rawCount == len(keys) {
+	// Rows past the stored keys are turns `witness merge` appended from another machine's copy
+	// (that copy arrives under a minted id, so no key describes them). They stay, and so does the
+	// session's progress: what OpenCode added goes after them. Requiring the counts to be equal
+	// replaced the session, deleting them and re-mining it.
+	if slices.Equal(oldKeys, keys) && rawCount >= len(keys) {
 		return 0, nil
 	}
 
@@ -527,11 +531,15 @@ func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow)
 	start := 0
 	if len(oldKeys) == 0 && rawCount == 0 {
 		replace = false
-	} else if len(oldKeys) > 0 && keysHavePrefix(keys, oldKeys) && rawCount == len(oldKeys) {
+	} else if len(oldKeys) > 0 && keysHavePrefix(keys, oldKeys) && rawCount >= len(oldKeys) {
 		replace = false
 		start = len(oldKeys)
 	}
-	records := rawRecords(session, turns[start:], start)
+	seq := 0
+	if !replace {
+		seq = rawCount
+	}
+	records := rawRecords(session, turns[start:], seq)
 	stateValue, err := json.Marshal(keys)
 	if err != nil {
 		return 0, err

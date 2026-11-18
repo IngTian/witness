@@ -333,6 +333,21 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	stateKey := store.FileImportKeysNS + ":" + s.Session
 	oldKeys := parseImportKeysJSON(st.MetaString(stateKey))
 	rawCount := st.RawCount(s.Session)
+	// Rows past the key list are a tail `witness merge` appended from another machine's copy of
+	// this feed (that copy arrives under a minted id, so no key of its rows survives). They are the
+	// feed's rows, not a desync: key them by content, as an id-less record of that text is keyed,
+	// so the list describes raw again and a new record takes the append path. Left one row short,
+	// EVERY ingest took the replace path below and reset the feed's progress: all of it mined again.
+	if rawCount > len(oldKeys) {
+		recs, err := st.ReadRaw(s.Session)
+		if err != nil {
+			return 0, err
+		}
+		for _, r := range recs[min(len(oldKeys), len(recs)):] {
+			oldKeys = append(oldKeys, recordKey("", r.Text))
+		}
+		rawCount = len(recs)
+	}
 
 	// Build a map: id → (index in oldKeys, key) for existing records.
 	oldKeyByID := make(map[string]struct {

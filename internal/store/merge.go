@@ -981,9 +981,11 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 	n, _ = res.RowsAffected()
 	rep.ProgressRows += int(n)
 
-	// Importer keys. Every importer requires RawCount(session) == len(keys); a mismatch makes the
-	// next import REPLACE the session — deleting its raw and progress and re-mining it. So the keys
-	// must describe exactly the rows that end up here.
+	// Importer keys. Every importer reads its keys as the session's leading rows. Rows past them are
+	// kept as rows another machine added (a tail appended from a copy whose keys the rename
+	// dropped), but keys claiming rows that are not here make the next import REPLACE the session,
+	// deleting its raw and progress and re-mining it. So the keys kept describe what ends up here:
+	// never more rows, and no fewer than ours did.
 	for _, ns := range PerSessionMetaNamespaces {
 		rows, err := tx.QueryContext(ctx, `SELECT key, value FROM inc.meta WHERE key LIKE ? ESCAPE '\'`,
 			strings.ReplaceAll(ns, "_", `\_`)+":%")

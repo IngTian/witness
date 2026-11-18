@@ -794,3 +794,43 @@ func TestReadersNeverWriteTheSourceDB(t *testing.T) {
 		t.Fatalf("%s-journal: stat err = %v, want not-exist (a reader wrote in rollback mode)", dbPath, err)
 	}
 }
+
+// A merge can append another machine's turns after ours with no importer key for them (they come
+// from a copy under a minted id, which nothing imports into). They are the merge's, not a desync:
+// the next import keeps them and the session's progress, and appends only what OpenCode added.
+// Replacing the session deleted them and reset its progress, so its mined turns were mined again.
+func TestImporterKeepsTurnsAMergeAppended(t *testing.T) {
+	dbPath := seedV2DB(t,
+		session("ses_m", 5000),
+		user("ses_m", 1, 1100, "turn one"),
+		assistant("ses_m", 2, 2000, 2000, item("text", "turn two")),
+	)
+	st := testStore(t)
+	sess := SessionPrefix + "ses_m"
+	mustImport(t, st, dbPath)
+	if err := st.AppendRaw(store.RawRecord{Session: sess, Seq: 2, Role: "user", Text: "merged turn"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkDistilled(sess, store.LensDefault, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	mustImport(t, st, dbPath, "ses_m") // nothing new in OpenCode
+	mutateV2DB(t, dbPath, user("ses_m", 3, 3000, "turn three"), touch("ses_m", 6000))
+	mustImport(t, st, dbPath, "ses_m")
+	raw, err := st.ReadRaw(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range raw {
+		got = append(got, fmt.Sprintf("%d %s:%s", r.Seq, r.Role, r.Text))
+	}
+	want := []string{"0 user:turn one", "1 assistant:turn two", "2 user:merged turn", "3 user:turn three"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("raw = %q, want %q", got, want)
+	}
+	if n := st.DistilledCount(sess, store.LensDefault); n != 3 {
+		t.Errorf("progress %d, want 3: the mined turns are mined again", n)
+	}
+}
