@@ -143,10 +143,20 @@ func TestMCPProfileStaleIsSummarizesSkipTest(t *testing.T) {
 	if stale("math") || stale(store.ProfileUnified) {
 		t.Error("portraits just written read as stale")
 	}
+	// get_profile's lens arrives as typed, and a case-folding filesystem serves math.md for "Math".
+	// Both directions are asserted so this fails on either kind of filesystem without the fold:
+	// a folding one finds the file and calls the current portrait an orphan, a case-sensitive one
+	// finds no file and misses the stale one below.
+	if stale("Math") {
+		t.Error(`ProfileStale("Math") calls the current math portrait stale`)
+	}
 	agree("fresh")
 	changeMathFacet(t, st)
 	if !stale("math") || !stale(store.ProfileUnified) {
 		t.Error("a changed facet must make the math and unified portraits stale")
+	}
+	if !stale("Math") {
+		t.Error(`ProfileStale("Math") misses that the math portrait is stale`)
 	}
 	agree("after a facet changed")
 	if err := st.WriteProfile("gone", "# old"); err != nil {

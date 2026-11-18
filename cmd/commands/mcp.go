@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"strings"
 
 	"github.com/IngTian/witness/internal/mcp"
 	"github.com/IngTian/witness/internal/store"
@@ -45,7 +46,19 @@ func mcpOptions(st *store.Store) mcp.Options {
 			// No lens has facets when Stale holds only unified: Summarize then deletes unified.md,
 			// though Stale calls it current (it never calls the model there).
 			noFacets := len(stale) == 1
-			if s, ok := stale[name]; ok && !noFacets {
+			s, ok := stale[name]
+			if !ok {
+				// macOS and Windows fold case, so get_profile("Math") is served math.md; the lookup
+				// must fold the same way or that current portrait reads as an orphan Summarize reaps.
+				// Registration refuses names that differ only in case, so at most one key matches.
+				for k, v := range stale {
+					if strings.EqualFold(k, name) {
+						s, ok = v, true
+						break
+					}
+				}
+			}
+			if ok && !noFacets {
 				return s
 			}
 			// Absent from Stale = no facets: a portrait still on disk is one Summarize reaps (#100).
