@@ -20,6 +20,12 @@ import (
 // stubClaude makes Run's child a shell that prints stream and exits code; `claude` is never spawned.
 func stubClaude(t *testing.T, stream string, code int) {
 	t.Helper()
+	stubClaudeScript(t, stream, fmt.Sprintf("cat; exit %d", code))
+}
+
+// stubClaudeScript runs script under sh with stream on its stdin.
+func stubClaudeScript(t *testing.T, stream, script string) {
+	t.Helper()
 	unsetDisableSwitch(t)
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -27,7 +33,7 @@ func stubClaude(t *testing.T, stream string, code int) {
 	}
 	prev := buildRunCmdFn
 	buildRunCmdFn = func(ctx context.Context, model, systemPrompt, input string) *exec.Cmd {
-		c := exec.CommandContext(ctx, sh, "-c", fmt.Sprintf("cat; exit %d", code))
+		c := exec.CommandContext(ctx, sh, "-c", script)
 		c.Stdin = strings.NewReader(stream)
 		return c
 	}
@@ -75,6 +81,28 @@ func TestClaudeUsageLimitPauses(t *testing.T) {
 		stubClaude(t, fmt.Sprintf(`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":%d,"rateLimitType":"seven_day_opus"}}`, want)+"\n"+limitResult, 1)
 		assertPause(t, want)
 	})
+	// The CLI may exit 0 on the refusal; the pause reads the stream, not the exit status.
+	t.Run("captured stream on exit 0", func(t *testing.T) {
+		raw, err := os.ReadFile("testdata/usage-limit.stream.jsonl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := time.Now().Add(time.Hour).Unix()
+		stubClaude(t, string(bytes.ReplaceAll(raw, []byte(strconv.FormatInt(capturedResetEpoch, 10)), []byte(strconv.FormatInt(want, 10)))), 0)
+		assertPause(t, want)
+	})
+	// Only a status other than 429 vetoes the pause (TestClaudeFailuresThatAreNotAUsageLimit).
+	for name, field := range map[string]string{
+		"result api_error_status 429":     `"api_error_status":429,`,
+		"result api_error_status null":    `"api_error_status":null,`,
+		"result without api_error_status": ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := time.Now().Add(time.Hour).Unix()
+			stubClaude(t, rateLimitLine("rejected", want)+`{"type":"result","subtype":"success","is_error":true,`+field+`"result":"You've hit your limit"}`, 1)
+			assertPause(t, want)
+		})
+	}
 }
 
 // Fail safe: anything short of a rejected event with a plausible reset on a failed run is an
@@ -99,6 +127,9 @@ func TestClaudeFailuresThatAreNotAUsageLimit(t *testing.T) {
 		{"bedrock 429", `{"type":"result","is_error":true,"result":"API Error: Request rejected (429) · this may be a temporary capacity issue"}`, 1, "Request rejected (429)"},
 		// Real 2.1.327 capture: a failed run says subtype "success", so only is_error can tell.
 		{"cloud credential error", string(cloud), 1, "Could not load AWS credentials"},
+		// A status other than 429 is a known unrelated failure, even after a rejected event.
+		{"rejected but the result says 529", rateLimitLine("rejected", now.Add(time.Hour).Unix()) +
+			`{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"API Error: 529 Overloaded"}`, 1, "529 Overloaded"},
 		{"is_error on exit 0", `{"type":"result","subtype":"success","is_error":true,"result":"API Error: 500"}`, 0, "API Error: 500"},
 		{"exit 0 without a result", `{"type":"system","subtype":"init"}`, 0, "no result event"},
 	} {
@@ -137,6 +168,28 @@ func TestClaudeSuccessStreamReturnsTheResultVerbatim(t *testing.T) {
 	stubClaude(t, "[ANTHROPIC_LOG] debug: POST /v1/messages\n"+lines[0]+"\n{not json\n\n"+strings.Join(lines[1:], "\n")+"\n", 0)
 	if got, err := testRunner(t).Run(context.Background(), "", "sys", "corpus"); err != nil || got != last.Result {
 		t.Fatalf("Run = %q, %v; want the result event's text %q", got, err, last.Result)
+	}
+}
+
+// A failed result with no text must not make a blank error: the child's own output stands in.
+func TestClaudeErrorWithEmptyResultReportsTheChildOutput(t *testing.T) {
+	stubClaudeScript(t, `{"type":"result","subtype":"success","is_error":true,"result":""}`, "cat; echo boom-on-stderr >&2; exit 0")
+	_, err := testRunner(t).Run(context.Background(), "", "sys", "corpus")
+	if err == nil || !strings.Contains(err.Error(), "boom-on-stderr") {
+		t.Fatalf("want an error carrying the child's stderr, got %v", err)
+	}
+}
+
+// A result line longer than bufio.Scanner's 64 KiB default token still reads in full.
+func TestClaudeLongResultLineIsReturnedWhole(t *testing.T) {
+	want := strings.Repeat("x", 100<<10)
+	line, err := json.Marshal(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubClaude(t, string(line)+"\n", 0)
+	if got, err := testRunner(t).Run(context.Background(), "", "sys", "corpus"); err != nil || got != want {
+		t.Fatalf("Run = %d bytes, %.300s; want the %d-byte result", len(got), err, len(want))
 	}
 }
 

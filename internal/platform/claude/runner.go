@@ -94,7 +94,9 @@ func (r runner) Run(ctx context.Context, model, systemPrompt, input string) (str
 	if runErr == nil && res != nil && !res.IsError { // key on is_error, never subtype: a failed run says "success"
 		return res.Result, nil
 	}
-	if at, ok := usageReset(rejectedAt, time.Now()); ok {
+	// A result naming a status other than 429 is a known failure that is not the usage limit (an
+	// overload, a 500), even after a rejected event; an absent or null status still pauses.
+	if at, ok := usageReset(rejectedAt, time.Now()); ok && (res == nil || !res.unrelatedAPIError()) {
 		return "", &platform.QuotaExhaustedError{Runtime: "claude", ResetAt: at}
 	}
 	switch {
@@ -103,7 +105,11 @@ func (r runner) Run(ctx context.Context, model, systemPrompt, input string) (str
 	case res == nil: // not an empty reply: that would read as drift
 		return "", fmt.Errorf("claude -p exited 0 with no result event (stderr: %s)", childOutput(errb.String(), out.String()))
 	default:
-		return "", fmt.Errorf("claude -p reported an error: %s", platform.StderrExcerpt(res.Result))
+		msg := platform.StderrExcerpt(res.Result)
+		if msg == "" { // an empty result text must not make the error blank
+			msg = childOutput(errb.String(), out.String())
+		}
+		return "", fmt.Errorf("claude -p reported an error: %s", msg)
 	}
 }
 
@@ -116,6 +122,14 @@ type streamEvent struct {
 		Status   string `json:"status"`
 		ResetsAt int64  `json:"resetsAt"`
 	} `json:"rate_limit_info"`
+	// Raw, so a value of an unexpected type cannot make the whole result line unreadable.
+	APIErrorStatus json.RawMessage `json:"api_error_status"`
+}
+
+// unrelatedAPIError reports a result that names an HTTP status other than 429.
+func (e *streamEvent) unrelatedAPIError() bool {
+	s := strings.Trim(string(e.APIErrorStatus), `"`)
+	return s != "" && s != "null" && s != "429"
 }
 
 // readStream returns the last result event and the resetsAt of the last rejected rate_limit_event
@@ -250,8 +264,9 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 }
 
 // npmClaudeExe maps npm's claude.cmd/.bat shim to the claude.exe it wraps, under the shim's own
-// node_modules. Any other path comes back unchanged, unstatted. A shim with no such exe (pnpm,
-// yarn, bun, a moved install) is refused rather than run through cmd.exe.
+// node_modules. Any other path comes back unchanged, unstatted, so a bun `.exe` shim runs as is. A
+// .cmd/.bat shim with no such exe (pnpm, yarn, a moved install) is refused rather than run through
+// cmd.exe.
 func npmClaudeExe(path string) (string, error) {
 	if ext := strings.ToLower(filepath.Ext(path)); ext != ".cmd" && ext != ".bat" {
 		return path, nil

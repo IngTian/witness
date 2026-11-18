@@ -60,8 +60,9 @@ witness's private OpenCode serve too, and witness does not manage it.
 `witness worker stop` ends the worker's `claude -p` and `opencode` children as well — they run in its
 Job Object so Windows tears them down automatically.
 
-The Claude runner runs `claude.exe` directly. npm's `claude.cmd` resolves to the exe it wraps, and
-other shims (pnpm, yarn, bun) are refused: install natively (`irm https://claude.ai/install.ps1 | iex`).
+The Claude runner runs `claude.exe` directly. npm's `claude.cmd` resolves to the exe it wraps, a bun
+`.exe` shim runs as is, and other `.cmd`/`.bat` shims (pnpm, yarn) are refused: install natively
+(`irm https://claude.ai/install.ps1 | iex`).
 
 ---
 

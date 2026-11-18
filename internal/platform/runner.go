@@ -158,7 +158,8 @@ type Runner interface {
 	// skill, and 2 hook events from the one managed-policy UserPromptSubmit hook (safe mode keeps
 	// managed hooks by design); init.plugins listed 12 installed plugins but none loaded. The result
 	// had `is_error:false`, and the appended probe marker came back. The control without the flag
-	// showed 12 plugins, 39 skills, 20 hook events, saw_user_profile:true.
+	// showed 12 plugins, 39 skills, 20 hook events, saw_user_profile:true. That stream, scrubbed (the
+	// plugin list emptied, unused init fields dropped), is claude/testdata/success.stream.jsonl.
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
 	// Close releases engine resources.
 	Close() error
