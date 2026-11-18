@@ -123,6 +123,7 @@ func TestMCPProfileStaleIsSummarizesSkipTest(t *testing.T) {
 		}
 	}
 	stale := mcpOptions(st).ProfileStale
+	opens := atomic.LoadInt32(&leakFakeOpens)
 	agree := func(when string) {
 		t.Helper()
 		sm, err := profileSummarizer(st)
@@ -183,6 +184,17 @@ func TestMCPProfileStaleIsSummarizesSkipTest(t *testing.T) {
 	}
 	if !stale(store.ProfileUnified) {
 		t.Error("a unified portrait with no facets left is one Summarize deletes, so it is stale")
+	}
+
+	// The check opens no runner and writes nothing: the portraits it calls due for a reap are still
+	// there, and the fake runner was never opened.
+	for _, n := range []string{"gone", store.ProfileUnified} {
+		if _, ok, _ := st.ReadProfile(n); !ok {
+			t.Errorf("the staleness check removed %s.md", n)
+		}
+	}
+	if got := atomic.LoadInt32(&leakFakeOpens) - opens; got != 0 {
+		t.Errorf("the staleness check opened a runner %d times", got)
 	}
 }
 
