@@ -43,7 +43,7 @@ type deleteInput struct {
 
 // recordInput is the typed argument for record_observation.
 type recordInput struct {
-	Session     string `json:"session" jsonschema:"the current session_id"`
+	Session     string `json:"session,omitempty" jsonschema:"optional: a short label for this context; when omitted, witness files the note under mcp:<UTC date>"`
 	Lens        string `json:"lens,omitempty" jsonschema:"lens tag (default 'default')"`
 	Dimension   string `json:"dimension" jsonschema:"which axis this observation belongs to"`
 	Observation string `json:"observation" jsonschema:"the noticed growth/change, one sentence"`
@@ -56,6 +56,13 @@ type recordInput struct {
 // cap text sizes and quantity to bound disk growth, and clamp poignancy so one
 // call can't force an expensive review by passing an absurd salience.
 const (
+	// activeSessionPrefix is the prefix for witness-owned sessions holding agent-recorded
+	// observations when the agent sent no label. One session per UTC day: an unlabelled note
+	// goes under mcp:YYYY-MM-DD. "mcp:" matches no adapter prefix (claude "", opencode:, codex:,
+	// file:), so ForSession never renders it (there is no raw) and IsCorpusSession is false.
+	// Never use "" as the session id: the staged branch at store/queue.go:591 skips it. An
+	// adapter that registers "mcp:" would claim these sessions.
+	activeSessionPrefix = "mcp:"
 	maxObsLen           = 2000
 	maxEvidenceLen      = 2000
 	maxDimensionLen     = 100
@@ -83,14 +90,14 @@ const (
 
 // normalizeRecord validates and clamps record_observation input. Pure (no IO) so
 // it is unit-testable; the quantity bound is enforced atomically in the handler, by
-// StageObservationCapped.
+// StageObservationCapped. An empty Session is valid (the handler fills it in).
 func normalizeRecord(in recordInput) (recordInput, error) {
 	in.Session = strings.TrimSpace(in.Session)
 	in.Observation = strings.TrimSpace(in.Observation)
 	in.Dimension = strings.TrimSpace(in.Dimension)
 	in.Evidence = strings.TrimSpace(in.Evidence)
-	if in.Session == "" || in.Observation == "" {
-		return in, fmt.Errorf("session and observation are required")
+	if in.Observation == "" {
+		return in, fmt.Errorf("observation is required")
 	}
 	if len(in.Observation) > maxObsLen {
 		return in, fmt.Errorf("observation too long (%d > %d chars)", len(in.Observation), maxObsLen)
@@ -235,21 +242,26 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		return textResult(renderHits(lens, hits, func() string { return emptyHint(st, lens, wire, true) })), nil, nil
 	})
 
-	// record_observation: active in-session write. Stages to the session buffer;
-	// the session-end worker passes it through verbatim (authoritative).
+	// record_observation: active in-session write. Stages under the sent label,
+	// else the day's mcp: session.
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "record_observation",
 		Description: "Record a decision-aware observation about the user's growth/change in THIS session. " +
 			"Use when you (the assistant) notice something worth tracking that you have context for now " +
-			"but a later reviewer would miss. Stored verbatim. Tag with the relevant lens.",
+			"but a later reviewer would miss. Stored verbatim. Tag with the relevant lens. " +
+			"A session label is optional.",
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in recordInput) (*mcpsdk.CallToolResult, any, error) {
+		now := time.Now().UTC()
 		in, err := normalizeRecord(in)
 		if err != nil {
 			return errResult(err.Error()), nil, nil
 		}
+		if in.Session == "" {
+			in.Session = activeSessionPrefix + now.Format(time.DateOnly)
+		}
 		o := store.Observation{
 			ID:          store.ObservationID(in.Session, in.Lens, in.Observation),
-			TS:          time.Now().UTC().Format(time.RFC3339),
+			TS:          now.Format(time.RFC3339),
 			Session:     in.Session,
 			Lens:        in.Lens,
 			Dimension:   in.Dimension,
@@ -261,12 +273,12 @@ func newServer(st store.MCPStore, emb Embedder, opts Options) *mcpsdk.Server {
 		// Two bounds, both enforced atomically in the store so concurrent MCP processes can't
 		// each pass a check and race past them:
 		//   - per SESSION, the original cap on disk growth from a runaway loop;
-		//   - TOTAL, because the session id is AGENT-SUPPLIED. A confused or runaway agent that
-		//     varies it (per-turn ids, a hallucinated id, an incrementing counter) gets a fresh
-		//     per-session budget on every call, so the per-session cap alone bounds nothing —
-		//     and each row is up to 2000 chars of observation plus 2000 of evidence, durable in
-		//     L1 and fed to the review model. A total cap has no key, so it cannot be evaded by
-		//     picking a different one.
+		//   - TOTAL, because the session id is AGENT-SUPPLIED when sent, and the unlabelled
+		//     default renews every UTC day. A confused or runaway agent that varies it (per-turn
+		//     ids, a hallucinated id, an incrementing counter) gets a fresh per-session budget on
+		//     every call, so the per-session cap alone bounds nothing — and each row is up to
+		//     2000 chars of observation plus 2000 of evidence, durable in L1 and fed to the
+		//     review model. A total cap has no key, so it cannot be evaded by picking a different one.
 		inserted, err := st.StageObservationCapped(o, maxStagedPerSession, maxStagedTotal)
 		if err != nil {
 			return errResult(fmt.Sprintf("stage: %v", err)), nil, nil

@@ -82,7 +82,8 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 - `get_facets(lens)` — the current structured facets.
 - `search_observations(query, lens)` — local vector search over observations.
 - `record_observation(...)` — an in-session agent writes a decision-aware observation directly
-  (passed through verbatim), capturing context a later reviewer would miss.
+  (passed through verbatim), capturing context a later reviewer would miss; with no `session`
+  label it is filed under `mcp:<UTC date>`.
 - `delete_observation(obs_id)` — prune a wrong observation.
 
 ## Seeing it

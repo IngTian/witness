@@ -160,3 +160,41 @@ func TestServerRecordDeleteSearch(t *testing.T) {
 		t.Fatalf("search result missing the fake's canned obs: %s", tc.Text)
 	}
 }
+
+// record_observation files under the sent label or, when none is sent, under mcp:<UTC date>.
+// A sent label is kept exactly as the agent sent it (user-side "math-tutor" labels are real).
+func TestRecordFilesUnderTheSentLabelOrTheUTCDay(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		args map[string]any
+		want func(string) string // TS → expected Session
+	}{
+		{"a sent label is kept", map[string]any{"session": "math-tutor", "observation": "o", "dimension": "d"}, func(string) string { return "math-tutor" }},
+		{"no label: the UTC day", map[string]any{"observation": "o", "dimension": "d"}, func(ts string) string { return "mcp:" + ts[:10] }},
+		{"a blank label is no label", map[string]any{"session": "  ", "observation": "o", "dimension": "d"}, func(ts string) string { return "mcp:" + ts[:10] }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeMCPStore{stagedReturn: true, profiles: map[string]string{}}
+			cs := connect(t, fake, testOptions)
+			res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{
+				Name:      "record_observation",
+				Arguments: tc.args,
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("record_observation failed: err=%v, res=%+v", err, res)
+			}
+			got := fake.lastStaged
+			if !strings.HasSuffix(got.TS, "Z") {
+				t.Fatalf("TS not UTC: %q", got.TS)
+			}
+			if got.Session != tc.want(got.TS) || got.Source != "active" ||
+				got.ID != store.ObservationID(got.Session, store.LensDefault, "o") {
+				t.Errorf("got session=%q source=%q id=%q; want session=%q source=active id=%q",
+					got.Session, got.Source, got.ID,
+					tc.want(got.TS), store.ObservationID(tc.want(got.TS), store.LensDefault, "o"))
+			}
+		})
+	}
+}

@@ -554,6 +554,54 @@ func TestStagedRetainedAfterFailure(t *testing.T) {
 	}
 }
 
+// A staged-only session (rawHighID == 0, so anyDelta == false) must drain without a model call,
+// because there is no raw to mine. The test pins today's behavior that the early-exit guard at
+// :375 is `!anyDelta && len(active) == 0` — NOT `!anyDelta` alone, which would leave the staged
+// rows uncleared.
+func TestStagedOnlySessionDrainsWithoutAModelCall(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	m := &fakeMiner{}
+	w := testWorker(s, m)
+	sess := "mcp:2026-11-18"
+
+	// Stage one row; do not capture any raw.
+	_ = s.StageObservation(store.Observation{
+		ID:          store.ObservationID(sess, "default", "af"),
+		Session:     sess,
+		Lens:        "default",
+		Dimension:   "thinking",
+		Observation: "af",
+	})
+	// The session must be pending: staged alone is enough.
+	if p, _ := s.PendingSessions([]string{"default"}); !slices.Contains(p, sess) {
+		t.Fatal("staged alone must offer the session")
+	}
+	// Drain it.
+	if err := w.Process(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	// The staged row is now committed as L1.
+	obs, _ := s.ReadObservations("")
+	if len(obs) != 1 || obs[0].Session != sess || obs[0].Source != "active" ||
+		obs[0].ID != store.ObservationID(sess, "default", "af") {
+		t.Fatalf("want 1 obs (session=%q source=active id=%q); got %+v",
+			sess, store.ObservationID(sess, "default", "af"), obs)
+	}
+	// The staged buffer is empty.
+	if d, _, _ := s.DrainStaged(sess); len(d) != 0 {
+		t.Fatalf("staged buffer should be empty, got %d rows", len(d))
+	}
+	// The session is no longer pending.
+	if p, _ := s.PendingSessions([]string{"default"}); slices.Contains(p, sess) {
+		t.Fatal("a drained staged-only session should no longer be pending")
+	}
+	// The model was never called.
+	if len(m.inputs) != 0 {
+		t.Fatalf("model called %d times; want 0 (no raw to mine)", len(m.inputs))
+	}
+}
+
 // S1: a persistently-failing mine must NEVER advance the watermark or drop the
 // delta. The raw turns stay pending so they self-heal when the failure clears.
 // (Replaces the old data-losing dead-letter behavior.)

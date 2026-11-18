@@ -18,7 +18,8 @@ LLM-touched, and never pruned: `lens backfill --fresh` and `lens try` re-mine fr
 ## observations — derived, append-only (L1)
 
 Table `observations`. Atomic, evidence-anchored noticings, tagged by lens. Written by the worker
-(`source` is `mined`, or `active` for one an agent recorded mid-session) and by `witness merge`.
+(`source` is `mined`, or `active` for one an agent recorded mid-session, filed under its label,
+or session `mcp:<UTC date>` when it sent none) and by `witness merge`.
 `obs_id` hashes session + lens + text, so an identical re-mine is ignored; near-duplicates are
 kept. Each row carries a 384-d embedding for semantic search.
 
