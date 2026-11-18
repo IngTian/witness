@@ -69,13 +69,23 @@ func cmdModelFetch() error {
 	return nil
 }
 
-// lazyModel reports whether `witness mcp` must start without the model. WITNESS_NPM_PACKAGE=1 is
-// set by the npm launcher (`npx @witness-ai/opencode mcp`) and by the npm plugin's `mcp.witness`
-// entry: the package ships without the model, so a missing one used to stop the server outright.
-// The plugin's own `witness model fetch` may hold the lock; the lazy fetch waits that out
-// (ErrBusy). Everywhere else, and whenever the model is present, the server is unchanged.
+// lazyModel reports whether a missing model should be downloaded. WITNESS_NPM_PACKAGE=1 is set by
+// the npm launcher (`npx @witness-ai/opencode mcp`) and by the npm plugin's `mcp.witness` entry:
+// the package ships without the model, so a missing one is downloaded in the background. Outside
+// npm, a missing model is never downloaded. Every path loads the model on the first search, so
+// `witness mcp` starts immediately and serves the other four tools without it.
 func lazyModel() bool {
 	return os.Getenv("WITNESS_NPM_PACKAGE") == "1" && !embed.ModelReady()
+}
+
+// mcpEmbedder returns the embedder `witness mcp` uses, which is lazily loaded on the first search
+// on every path. When fetch is true (npm only), a missing model is also downloaded in the
+// background; otherwise a missing model remains as an error that names the fix command.
+func mcpEmbedder(fetch bool) *lazyEmbedder {
+	if fetch {
+		return startLazyEmbedder()
+	}
+	return &lazyEmbedder{dir: embed.AssetsDir(), off: true, err: errors.New("it is not downloaded")}
 }
 
 // startLazyEmbedder fetches the model in the background and returns an embedder that answers
@@ -143,7 +153,11 @@ func (l *lazyEmbedder) Embed(text string) ([]float32, error) {
 			err := l.err
 			l.mu.Unlock()
 			if err != nil {
-				return nil, fmt.Errorf("the embedding model is not in %s (%v); run `npx @witness-ai/opencode model fetch`", l.dir, err)
+				fix := "witness model fetch"
+				if os.Getenv("WITNESS_NPM_PACKAGE") == "1" {
+					fix = "npx @witness-ai/opencode model fetch"
+				}
+				return nil, fmt.Errorf("the embedding model is not in %s (%v); run `%s`", l.dir, err, fix)
 			}
 			return nil, fmt.Errorf("the embedding model is still downloading (~470MB, once) into %s; search works when it finishes", l.dir)
 		}

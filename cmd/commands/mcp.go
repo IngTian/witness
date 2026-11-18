@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 
-	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/mcp"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -19,15 +18,11 @@ func cmdMCP() error {
 		return err
 	}
 	defer st.Close()
-	if lazyModel() {
+	fetch := lazyModel()
+	if fetch {
 		defer setupLogging(st)() // the background download is otherwise silent
-		return mcp.Serve(context.Background(), st, startLazyEmbedder(), mcpOptions(st))
 	}
-	emb, err := embed.New()
-	if err != nil {
-		return err
-	}
-	return mcp.Serve(context.Background(), st, emb, mcpOptions(st))
+	return mcp.Serve(context.Background(), st, mcpEmbedder(fetch), mcpOptions(st))
 }
 
 // mcpOptions is everything the MCP server needs from cmd, so internal/mcp stays a read surface

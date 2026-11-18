@@ -110,8 +110,9 @@ history from before you wired it (`witness import --agent codex`).
   to one revision and checked by SHA-256. `install.sh` and `make fetch-model` run it; re-running
   checks the files instead of downloading them again. `WITNESS_ASSETS` picks the directory, and
   `WITNESS_MODEL_BASE_URL` a mirror (it needs `WITNESS_MODEL_SHA256` and
-  `WITNESS_TOKENIZER_SHA256`). From npm, `npx @witness-ai/opencode mcp` downloads the model itself
-  in the background if it is missing (`WITNESS_SKIP_MODEL_DOWNLOAD=1` turns that off).
+  `WITNESS_TOKENIZER_SHA256`). `witness mcp` loads the model on the first search, so its other
+  tools work without it; from npm, `npx @witness-ai/opencode mcp` also downloads a missing model
+  in the background (`WITNESS_SKIP_MODEL_DOWNLOAD=1` turns that off).
 - `witness config get|set|unset|list [--lens <name>]` — read or change the runner and models, for
   the default scope or one lens; `witness config path` prints where `config.toml` lives.
 

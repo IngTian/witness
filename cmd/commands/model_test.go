@@ -77,18 +77,17 @@ func TestModelFetchNamesABusyLockAndHowToRetry(t *testing.T) {
 	}
 }
 
-// The lazy start is for `npx … mcp` alone, and never when the model is there: everywhere else
-// `witness mcp` must behave exactly as it did.
-func TestMCPStartsWithoutTheModelOnlyUnderNpx(t *testing.T) {
+// A missing model is downloaded only under npm; outside npm a missing model is never downloaded.
+func TestMCPDownloadsTheModelOnlyUnderNpx(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("WITNESS_ASSETS", dir)
 	t.Setenv("WITNESS_NPM_PACKAGE", "")
 	if lazyModel() {
-		t.Error("outside the npm launcher a missing model must still stop witness mcp, as before")
+		t.Error("outside the npm launcher a missing model is never downloaded")
 	}
 	t.Setenv("WITNESS_NPM_PACKAGE", "1")
 	if !lazyModel() {
-		t.Error("under npx a missing model must not stop witness mcp")
+		t.Error("under npx a missing model is downloaded")
 	}
 	// Sparse files past embed.ModelReady's size floors: a present model.
 	for name, size := range map[string]int64{"model.onnx": 400_000_000, "tokenizer.json": 1_000_000} {
@@ -109,6 +108,7 @@ func TestMCPStartsWithoutTheModelOnlyUnderNpx(t *testing.T) {
 func TestLazyEmbedderSaysDownloadingThenWhyItFailed(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("WITNESS_ASSETS", dir)
+	t.Setenv("WITNESS_NPM_PACKAGE", "1")
 	t.Setenv(model.SkipEnv, "")
 	release := make(chan struct{})
 	modelMirror(t, func(w http.ResponseWriter, r *http.Request) {
@@ -134,7 +134,7 @@ func TestLazyEmbedderSaysDownloadingThenWhyItFailed(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	_, err := l.Embed("q")
-	if err == nil || !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "model fetch") {
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "run `npx @witness-ai/opencode model fetch`") {
 		t.Fatalf("after a failed fetch err = %v, want the cause and the command to fix it", err)
 	}
 }
@@ -207,23 +207,39 @@ func TestLazyEmbedderHonoursSkipDownload(t *testing.T) {
 	}
 }
 
-// The lazy branch must be the one cmdMCP takes: under npx with no model, the server starts (and
-// here ends at stdin EOF) instead of failing on the missing model, as it did before.
-func TestMCPServesUnderNpxWithoutTheModel(t *testing.T) {
-	t.Setenv("WITNESS_ASSETS", t.TempDir())
-	t.Setenv("WITNESS_NPM_PACKAGE", "1")
-	t.Setenv(model.SkipEnv, "1") // no download from this test
-	prevLog := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prevLog) })
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+// On every path, witness mcp starts without the model; only search needs it.
+func TestMCPServesWithoutTheModel(t *testing.T) {
+	for _, npm := range []string{"1", ""} {
+		t.Setenv("WITNESS_ASSETS", t.TempDir())
+		t.Setenv("WITNESS_NPM_PACKAGE", npm)
+		t.Setenv(model.SkipEnv, "1") // no download from this test
+		prevLog := slog.Default()
+		t.Cleanup(func() { slog.SetDefault(prevLog) })
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = w.Close() // EOF at once: the client hung up
+		prev := os.Stdin
+		os.Stdin = r
+		t.Cleanup(func() { os.Stdin = prev; _ = r.Close() })
+		if err := cmdMCP(); err != nil && strings.Contains(err.Error(), "embed model") {
+			t.Fatalf("npm=%q: witness mcp still refused to start without the model: %v", npm, err)
+		}
 	}
-	_ = w.Close() // EOF at once: the client hung up
-	prev := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = prev; _ = r.Close() })
-	if err := cmdMCP(); err != nil && strings.Contains(err.Error(), "embed model") {
-		t.Fatalf("witness mcp under npx still refused to start without the model: %v", err)
+}
+
+func TestMCPSearchWithoutTheModelNamesTheFix(t *testing.T) {
+	t.Setenv("WITNESS_ASSETS", t.TempDir())
+	t.Setenv("WITNESS_NPM_PACKAGE", "")
+	t.Setenv(model.SkipEnv, "")
+	hits := modelMirror(t, serveStandIns)
+	_, err := mcpEmbedder(false).Embed("q")
+	if err == nil || !strings.Contains(err.Error(), "run `witness model fetch`") || strings.Contains(err.Error(), "npx") {
+		t.Fatalf("err = %v, want the fix command without npx", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if hits.Load() != 0 {
+		t.Errorf("mcpEmbedder(false) still made %d download requests", hits.Load())
 	}
 }
