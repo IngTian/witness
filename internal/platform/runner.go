@@ -153,9 +153,10 @@ type Runner interface {
 	// OpenCode); `TestBuildRunCmdRoleSeparation` and `TestBuildRunCmdOffersNoTools` pin the Claude
 	// argv, checked once on real claude 2.1.327 on Bedrock (2026-11-18, not in CI). With
 	// `--safe-mode`, the stream-json init showed `tools: []`, `mcp_servers: []`, no plugin or user
-	// skill and 0 hook events, the result had `is_error:false`, and the appended probe marker came
-	// back. The control without the flag showed 12 plugins, 39 skills, 20 hook events,
-	// saw_user_profile:true.
+	// skill, and 2 hook events from the one managed-policy UserPromptSubmit hook (safe mode keeps
+	// managed hooks by design); init.plugins listed 12 installed plugins but none loaded. The result
+	// had `is_error:false`, and the appended probe marker came back. The control without the flag
+	// showed 12 plugins, 39 skills, 20 hook events, saw_user_profile:true.
 	Run(ctx context.Context, model, systemPrompt, input string) (string, error)
 	// Close releases engine resources.
 	Close() error
