@@ -106,9 +106,9 @@ case "$TARGET" in
   codex)
     # Restated here deliberately, the way the claude/opencode arms restate "restart your
     # editor": four steps of build output scroll past, and this is where people look. Both
-    # of these fail SILENTLY — unapproved Codex hooks never run, and an unset runner means
+    # need attention — unapproved Codex hooks never run, and an unset runner means
     # capture works while nothing is ever distilled.
     printf '  %sREQUIRED: approve the hooks with%s %s/hooks%s %sin Codex — inert until you do%s\n' "$Y" "$X" "$B" "$X" "$Y" "$X"
-    printf '  %sCodex runs no model — pick a runner:%s %switness config set runner <claude|opencode>%s\n\n' "$D" "$X" "$B" "$X"
+    printf '  %sTo distill with Codex, sign in with%s %switness auth codex%s and re-run witness wire codex.\n\n' "$D" "$X" "$B" "$X"
     ;;
 esac

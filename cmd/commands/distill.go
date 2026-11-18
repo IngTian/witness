@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -420,6 +421,12 @@ func cmdDistillStatus(asJSON bool) error {
 	// reason somewhere outside the worker log. A fact only: no warning, ranking or advice.
 	pausedUntil, paused := freeModelsPausedUntil(st)
 	paused = paused && pausedUntil.After(time.Now())
+	usagePauses := map[string]string{}
+	for runtime, until := range runnerUsagePauses(st) {
+		if until.After(time.Now()) {
+			usagePauses[runtime] = until.UTC().Format(time.RFC3339)
+		}
+	}
 	if asJSON {
 		out := distillStatusJSON{
 			Worker: distillWorkerJSON{
@@ -445,6 +452,7 @@ func cmdDistillStatus(asJSON bool) error {
 		if paused {
 			out.FreeModelsPausedUntil = pausedUntil.UTC().Format(time.RFC3339)
 		}
+		out.RunnerUsagePausedUntil = usagePauses
 		return emitJSON(out)
 	}
 	// Decorative rendering (same fields as --json above): the house title, then kvRow rows like
@@ -482,6 +490,12 @@ func cmdDistillStatus(asJSON bool) error {
 	fmt.Println("  " + kvRow("queue", queueLine, ""))
 	if paused {
 		fmt.Println("  " + kvRow("free models", "paused until "+pausedUntil.Local().Format("2006-01-02 15:04"), "the free allowance resets then"))
+	}
+	for _, runtime := range platform.RunnerNames() {
+		if value := usagePauses[runtime]; value != "" {
+			until, _ := time.Parse(time.RFC3339, value)
+			fmt.Println("  " + kvRow(runtime+" allowance", "paused until "+until.Local().Format("2006-01-02 15:04"), "the plan allowance resets then"))
+		}
 	}
 	fmt.Println("  " + kvRow("fresh", "raw "+timeOrNever(lastRaw)+" · distilled "+timeOrNever(lastDistilled), behind(lastRaw, lastDistilled)))
 	fmt.Println()
@@ -552,7 +566,8 @@ type distillStatusJSON struct {
 	RawThrough       string             `json:"raw_through"`
 	DistilledThrough string             `json:"distilled_through"`
 	// Set only while the free-model pause is armed and in the future (RFC3339 UTC).
-	FreeModelsPausedUntil string `json:"free_models_paused_until,omitempty"`
+	FreeModelsPausedUntil  string            `json:"free_models_paused_until,omitempty"`
+	RunnerUsagePausedUntil map[string]string `json:"runner_usage_paused_until,omitempty"`
 }
 
 type distillWorkerJSON struct {

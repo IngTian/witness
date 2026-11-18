@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// The two valid distillation runners. Defined here (the config layer that owns the
+// Canonical spellings used by runner tests. Defined here (the config layer that owns the
 // `runner` field) so CLI validation and the config template share one source of truth,
 // without importing internal/platform (which would invert the store→platform layering).
 const (
@@ -34,7 +34,8 @@ type Config struct {
 	// deliberately populated from Store.Root, not config.toml: OpenCode must never
 	// create distillation state in the user's database.
 	RuntimeRoot     string
-	Runner          string // "claude" (default) or "opencode" for headless distillation calls
+	RuntimeMeta     MetaKV // shared usage-pause state; runtime only, never persisted as config
+	Runner          string // registered headless runtime: claude (default), opencode or codex
 	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
 	DistillModel    string // model for the reviewer ("" = claude -p default)
 	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
@@ -129,6 +130,7 @@ func DefaultConfig() Config {
 func (c *configFile) loadConfig() (cfg Config, unknown []string) {
 	cfg = DefaultConfig()
 	cfg.RuntimeRoot = filepath.Join(c.root, "runtime")
+	cfg.RuntimeMeta = &metaKV{db: c.db}
 	data, err := os.ReadFile(c.configPath())
 	if err != nil {
 		return cfg, nil
@@ -503,8 +505,8 @@ func (c *configFile) EnsureConfigFile() error {
 # built-in default; uncomment a line to pin your own value.
 # Docs: https://github.com/IngTian/witness/blob/main/docs/cli.md#configuration
 
-# Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
-# (uses ` + "`opencode serve`" + `). Uncomment to bind manually; ` + "`witness wire claude|opencode`" + ` also binds it.
+# Distillation runtime: "claude" (default), "opencode", or "codex".
+# Uncomment to bind manually. Codex needs witness auth codex or CODEX_API_KEY.
 # runner = ` + strconv.Quote(d.Runner) + `
 
 # Two distillation stages, two models:
@@ -515,6 +517,7 @@ func (c *configFile) EnsureConfigFile() error {
 # ambient interactive model, which may be heavy; set triage_model to pin a light one.
 # The ` + "`opencode serve`" + ` runner has no default and refuses an empty model: with runner = opencode,
 # set triage_model to an OpenCode model name such as "openai/gpt-5.5".
+# With runner = codex, set triage_model to a bare Codex model slug.
 # (A lens may override these per-lens via its lens.json extract_model / review_model.)
 # triage_model  = ` + strconv.Quote(d.TriageModel) + `
 # distill_model = ` + strconv.Quote(d.DistillModel) + `

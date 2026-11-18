@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -37,8 +38,8 @@ func StderrExcerpt(s string) string {
 	return "…[" + fmt.Sprint(len(s)-maxStderrExcerpt) + " earlier bytes elided]… " + s[len(s)-maxStderrExcerpt:]
 }
 
-// QuotaExhaustedError is returned when a runtime's free usage limit is reached and will reset
-// at a known time. The distill drain recognises this via errors.As and pauses free-model calls
+// QuotaExhaustedError is returned when a shared usage limit is reached and will reset
+// at a known time. The drain recognises it via errors.As and pauses the affected allowance
 // until ResetAt, without incrementing per-session backoff.
 type QuotaExhaustedError struct {
 	ResetAt time.Time
@@ -46,7 +47,33 @@ type QuotaExhaustedError struct {
 }
 
 func (e *QuotaExhaustedError) Error() string {
-	return fmt.Sprintf("%s free usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
+	return fmt.Sprintf("%s usage limit reached; resets at %s", e.Runtime, e.ResetAt.UTC().Format(time.RFC3339))
+}
+
+// PlanAllowance identifies calls drawing on a runner login's shared plan quota.
+// It has a separate pause from OpenCode's network-wide free allowance.
+type PlanAllowance interface{ OnPlanAllowance(model string) bool }
+
+func UsagePauseKey(runtime string) string { return "runner_usage_paused_until:" + runtime }
+
+// RunnerLoginGate lets wire leave capture usable until the runner has a login.
+type RunnerLoginGate interface {
+	ReadyToBind(ctx context.Context, root string) error
+}
+
+// ErrRunnerBusy means a diagnostic could not inspect a runner during an active call.
+var ErrRunnerBusy = errors.New("runner busy: another process holds the login lock")
+
+type RunnerAuthenticator interface {
+	Login(ctx context.Context, root string) error
+	Logout(ctx context.Context, root string) error
+}
+
+// ModelFormat lets wire ask in the runtime's own syntax. Runtimes without it
+// retain OpenCode's provider/model prompt for compatibility.
+type ModelFormat interface {
+	ModelFormat() (placeholder, description string)
+	ValidModel(model string) bool
 }
 
 // FreeAllowance is the Runner capability "this model draws on a shared free allowance", which is
@@ -114,6 +141,11 @@ type Runner interface {
 	// to ANTHROPIC_API_KEY/apiKeyHelper, no OAuth or keychain (Bedrock/Vertex keep theirs): a
 	// product call, not done.
 	//
+	// Codex: a fresh ephemeral exec with a witness-owned home, an empty cwd and no user
+	// or project instructions. The CLI's policy preflight rejects managed layers.
+	// Feature flags and a stripped model catalog remove tool offers. Server-side
+	// framing under a ChatGPT login remains outside the runner's control.
+	//
 	// OpenCode: a fresh session in the private DB, prompted once and deleted when Run returns.
 	// Witness's prompt is the agent's system prompt. Private config, nothing from the user's
 	// opencode.json; `OPENCODE_DISABLE_PROJECT_CONFIG=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`.
@@ -121,6 +153,7 @@ type Runner interface {
 	// discovery): docs/opencode.md "The isolated runtime".
 	//
 	// Enforced by: `TestNoCodePathForksAConversation` (source scan, OpenCode no-fork);
+	// `TestContractToolFreeWire` (tag `codexcontract`, Codex wire contract);
 	// `TestContractRunnerRoundTrip` (tag `opencodecontract`, contract workflow: zero tools on real
 	// OpenCode); `TestBuildRunCmdOffersNoTools` pins the Claude argv, checked once on real claude
 	// 2.1.325 (stream-json init `tools: []`), not in CI.

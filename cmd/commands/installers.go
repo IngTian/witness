@@ -30,8 +30,8 @@ type editor struct {
 var editors = map[string]editor{
 	"claude":   {wire: cmdInstallClaude, unwire: cmdUninstallClaude},
 	"opencode": {wire: cmdInstallOpenCode, unwire: cmdUninstallOpenCode, health: openCodeHealth},
-	// Codex wires only hooks: it captures but supplies no RunnerProvider, and its MCP
-	// registration lives in a config.toml witness does not own. See install_codex.go.
+	// Codex wires hooks; runner login is separate. MCP registration lives in a
+	// config.toml witness does not own. See install_codex.go.
 	"codex": {wire: cmdInstallCodex, unwire: func() (bool, string, error) {
 		removed, err := cmdUninstallCodex()
 		return removed, "", err

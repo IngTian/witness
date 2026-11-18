@@ -70,7 +70,12 @@ func scheduleRetryWakeup(st *store.Store) {
 func retryWakeupAt(st *store.Store, now time.Time) (time.Time, bool) {
 	next, ok := st.NextBackoffAttempt(activeLensNames(st), now)
 	if until, paused := freeModelsPausedUntil(st); paused && until.After(now) && (!ok || until.Before(next)) {
-		return until, true
+		next, ok = until, true
+	}
+	for _, until := range runnerUsagePauses(st) {
+		if until.After(now) && (!ok || until.Before(next)) {
+			next, ok = until, true
+		}
 	}
 	return next, ok
 }

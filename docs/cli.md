@@ -91,9 +91,10 @@ history from before you wired it (`witness import --agent codex`).
 - `witness wire <claude|opencode|codex>` — wire the editor integration (hooks + MCP for Claude Code;
   plugin + MCP for OpenCode; hooks for Codex). Source-checkout command; `install.sh` calls this for
   you. Re-running it is safe: it replaces its own entries and preserves any hooks you wrote yourself.
-  Two notes specific to Codex: it runs no model, so wiring it leaves your `runner` alone, and its
+  Two notes specific to Codex: it leaves your `runner` alone until `witness auth codex` saves its own login (or `CODEX_API_KEY` is set), and its
   hooks stay inert until you approve them with `/hooks` inside Codex — wiring cannot grant that trust.
 - `witness unwire <claude|opencode|codex>` — remove the editor integration wiring. Your archive is untouched.
+- `witness auth codex [--logout]` — sign in by device code or sign out of witness's private Codex home. See [Codex runner](codex-runner.md).
 - `witness ingest [--file <path>]` — accept structured records (notes, logs, market data) as NDJSON
   and distill them into the archive. Reads from stdin or a file. See the record contract in
   [`prompts/SCHEMA.md`](../prompts/SCHEMA.md#records-in-the-ingest-contract).
@@ -118,8 +119,8 @@ history from before you wired it (`witness import --agent codex`).
 `~/.local/share/witness/config.toml` (`witness config path` prints yours; all optional; sensible defaults):
 
 ```toml
-runner           = "claude"   # "claude" (default) or "opencode"
-triage_model     = ""         # MINING (L0 -> L1), once per session; "" = claude -p's default (opencode needs one)
+runner           = "claude"   # "claude" (default), "opencode", or "codex"
+triage_model     = ""         # MINING (L0 -> L1), once per session; "" = claude -p's default (OpenCode and Codex need one)
 distill_model    = ""         # REVIEW (L1 -> L2/L4), batched; "" falls back to triage_model
 review_every     = 5          # run the reviewer every N distilled sessions...
 review_poignancy = 30         # ...or sooner once accumulated salience crosses this (0 = off)
@@ -133,8 +134,8 @@ review_max_chars = 16000      # safety ceiling: max observation chars folded in 
 
 Model ids are passed through to whichever runner is bound, so use that runtime's spelling —
 `claude-haiku-4-5` or `claude-sonnet-5` for `runner = "claude"`, `openai/gpt-5.5`-style ids for
-`runner = "opencode"`. Under `runner = "claude"`, leaving both empty is the safe default and what
-`witness wire claude` writes. OpenCode needs a model: `witness wire opencode` asks for one at a
+`runner = "opencode"`, and bare slugs such as `gpt-6.1-sol` for `runner = "codex"`. Under `runner = "claude"`, leaving both empty is the safe default and what
+`witness wire claude` writes. OpenCode and Codex require a model. Their `witness wire` commands ask for one at a
 terminal, else prints `witness config set mine_model <provider/model>` to run. Note that an empty
 `triage_model` under the claude runner inherits your *ambient interactive* model, which may be
 heavier than you want for per-session mining, so pinning a light one is usually worth it.

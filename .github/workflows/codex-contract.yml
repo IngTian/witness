@@ -1,0 +1,76 @@
+name: Codex contract
+
+on:
+  pull_request:
+    branches: [main, "integration/**"]
+    paths:
+      - "internal/platform/codex/**"
+      - "internal/platform/runner.go"
+      - "internal/store/runtime_lock*"
+      - ".github/workflows/codex-contract.yml"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: CLI versions to check
+        type: choice
+        options: [pinned, latest]
+        default: pinned
+  schedule:
+    - cron: "47 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  wire:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        codex: ${{ fromJSON((github.event_name == 'schedule' || inputs.mode == 'latest') && '["latest"]' || '["0.169.0","0.169.0-alpha.11.1"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      CGO_ENABLED: "0"
+      WITNESS_CODEX_CONTRACT_LATEST: ${{ matrix.codex == 'latest' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Codex CLI
+        shell: bash
+        run: |
+          npm install -g @openai/codex@${{ matrix.codex }}
+          codex --version
+      # The test supplies a dummy API key and a loopback endpoint. No account,
+      # stored login, model call or repository secret is used in this job.
+      - name: Verify outgoing requests
+        run: go test -tags codexcontract -run TestContractToolFreeWire -v ./internal/platform/codex
+
+  report:
+    needs: wire
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the daily failure issue
+        run: |
+          body="The daily Codex check against npm latest failed. See $RUN_URL for the CLI version, wire contract and version-pin results."
+          gh label create codex-contract --force --description 'The daily Codex compatibility check is failing'
+          issue=$(gh issue list --label codex-contract --state open --json number --jq '.[0].number // empty')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title 'Codex contract: daily check against latest failed' --label codex-contract --body "$body"
+          fi

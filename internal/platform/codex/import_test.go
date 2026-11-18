@@ -250,7 +250,7 @@ func TestHomeAndReadOnlyURI(t *testing.T) {
 	if s := runImport(t, im); s.Records != 2 {
 		t.Fatalf("history database under %q not read: %+v", im.Home, s)
 	}
-	if _, ok := any(Platform{}).(platform.RunnerProvider); ok {
-		t.Fatal("capture source unexpectedly provides a runner")
+	if _, ok := any(Platform{}).(platform.RunnerProvider); !ok {
+		t.Fatal("Codex runner capability missing")
 	}
 }

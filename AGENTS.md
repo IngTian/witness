@@ -51,7 +51,7 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   `busy_timeout` is the deliberate concurrency model. `resolveRoot()` picks the
   data dir via `dataDirNames` (adopt-in-place, see invariants below).
 - `internal/distill/` — the worker: mines L0→L1 per lens, reviews L1→L2, and
-  regenerates L4 via a headless runner (`claude -p` or `opencode serve`).
+  regenerates L4 via a headless runner (`claude -p`, `opencode serve` or `codex exec`).
 - `internal/platform/{claude,opencode,codex,file}/` — the per-source adapters.
   `registry.go` requires only identity; rendering, import, capture and runner are
   optional capabilities (rendering falls back to the shared `RenderChunks`, import to
@@ -104,6 +104,11 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   then dies with the worker, so anything that must outlive it (the worker-wakeup)
   must be spawned through `procCtl.Detach` (breakaway). See
   `internal/proc/proc_windows.go` and `cmd/commands/worker.go`.
+- **Private Codex isolation.** `codex exec` uses a witness-owned login under
+  `runtime/codex/home`; never copy the coding login or mutate the parent CODEX_HOME.
+  The per-login OS lock covers every call, including lens try. New CLI versions need
+  the `codexcontract` wire test before extending the supported version. Feature flags
+  alone leave tools on; the stripped model catalog is required as well.
 - **Private OpenCode isolation.** witness's private `opencode serve` gets no
   inherited `OPENCODE_*` variable except `OPENCODE_API_KEY` (an env-var key).
   Its deny-all tool policy goes on the agent AND on every session, because
