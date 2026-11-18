@@ -224,29 +224,20 @@ func (im *Importer) apply(meta store.SessionMeta, source, revision string, recor
 	var old importState
 	key := statePrefix + meta.Session
 	_ = json.Unmarshal([]byte(im.Store.MetaString(key)), &old)
-	// Rows past the stored keys are turns `witness merge` appended from another machine's copy
-	// (that copy arrives under a minted id, so no key describes them). They stay, and so does the
-	// session's progress: what Codex added goes after them. Requiring the counts to be equal
-	// replaced the session, deleting them and re-mining it.
-	have := im.Store.RawCount(meta.Session)
-	prefix := old.Version == 1 && len(old.Keys) <= len(keys) && have >= len(old.Keys)
-	if prefix {
-		for i, k := range old.Keys {
-			if keys[i] != k {
-				prefix = false
-				break
-			}
-		}
+	var oldKeys []string
+	if old.Version == 1 {
+		oldKeys = old.Keys
 	}
-	tail := records
-	if prefix {
-		tail = records[len(old.Keys):]
+	have := im.Store.RawCount(meta.Session)
+	from, ok := platform.AppendFrom(oldKeys, keys, have)
+	tail := records[from:]
+	if ok {
 		for i := range tail {
 			tail[i].Seq = have + i
 		}
 	}
 	state, _ := json.Marshal(importState{1, source, revision, keys})
-	if err := im.Store.ApplyRawImport(meta, tail, key, string(state), !prefix); err != nil {
+	if err := im.Store.ApplyRawImport(meta, tail, key, string(state), !ok); err != nil {
 		return &importCommitError{err}
 	}
 	im.Store.SetSessionPlatform(meta.Session, "codex")
