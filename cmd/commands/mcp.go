@@ -47,7 +47,10 @@ func mcpOptions(st *store.Store) mcp.Options {
 			if err != nil {
 				return false
 			}
-			if s, ok := stale[name]; ok {
+			// No lens has facets when Stale holds only unified: Summarize then deletes unified.md,
+			// though Stale calls it current (it never calls the model there).
+			noFacets := len(stale) == 1
+			if s, ok := stale[name]; ok && !noFacets {
 				return s
 			}
 			// Absent from Stale = no facets: a portrait still on disk is one Summarize reaps (#100).

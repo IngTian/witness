@@ -166,6 +166,14 @@ func TestMCPProfileStaleIsSummarizesSkipTest(t *testing.T) {
 		t.Error("a held worker lock must not hide a stale portrait")
 	}
 	unlock()
+
+	// With no facets left, Stale reports unified as current, yet Summarize deletes unified.md.
+	if err := st.WriteFacets(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !stale(store.ProfileUnified) {
+		t.Error("a unified portrait with no facets left is one Summarize deletes, so it is stale")
+	}
 }
 
 // `witness profile` opens the runner set only when a portrait is due: a read of fresh portraits
