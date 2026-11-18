@@ -132,6 +132,7 @@ func TestRunnerSetClosesOpenedRunnersWhenDefaultFails(t *testing.T) {
 var (
 	registerFreeFake sync.Once
 	freeFakeRuns     atomic.Int32
+	freeFakeOpens    atomic.Int32
 )
 
 // freeFakePlatform mints a runner with the SharedAllowance capability (freeRunner, usagepause_test.go).
@@ -143,7 +144,7 @@ func (freeFakePlatform) NewRunner(store.Config) platform.Runner { return freeFak
 
 type freeFakeRunner struct{ freeRunner }
 
-func (freeFakeRunner) Open(context.Context) error { return nil }
+func (freeFakeRunner) Open(context.Context) error { freeFakeOpens.Add(1); return nil }
 func (freeFakeRunner) Run(context.Context, string, string, string) (string, error) {
 	freeFakeRuns.Add(1)
 	return "[]", nil

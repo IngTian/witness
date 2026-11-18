@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
@@ -47,6 +48,31 @@ func usagePauses(st store.MetaKV, now time.Time) map[string]time.Time {
 		}
 	}
 	return pauses
+}
+
+// allLensesPaused reports that a drain now could only be refused (M13): every active lens's
+// extract and review calls ride a runtime whose shared allowance is paused, and nothing is staged
+// (MCP-staged observations commit without a model call, so any one keeps the drain worth running).
+// Runners are minted, never opened (SharedAllowance's side-effect-free NewRunner rule). Mixed
+// setups (a paid model, a runtime without the capability) read false and drain as before.
+func allLensesPaused(st *store.Store, cfg store.Config, lenses []*lens.Lens, now time.Time) bool {
+	if len(lenses) == 0 || st.StagedTotal() > 0 {
+		return false
+	}
+	for _, ln := range lenses {
+		rt := distill.RunnerFor(cfg, ln)
+		r, err := platform.RunnerForName(rt, cfg)
+		if err != nil {
+			return false
+		}
+		sa, ok := r.(platform.SharedAllowance)
+		if _, paused := usagePausedUntil(st, rt, now); !ok || !paused ||
+			!sa.OnSharedAllowance(distill.ModelFor(cfg, ln, distill.PhaseExtract)) ||
+			!sa.OnSharedAllowance(distill.ModelFor(cfg, ln, distill.PhaseReview)) {
+			return false
+		}
+	}
+	return true
 }
 
 type usageGate struct {

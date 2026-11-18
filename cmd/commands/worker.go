@@ -186,6 +186,12 @@ func runWorkerTapped(auto bool, timeRange sessionTimeRange, progressWhere string
 	// prevents concurrent writes), and makes Claude-kicked drains pick up sessions a
 	// rejected plugin missed (spec §7.2).
 	importAtDrainStart(ctx, st)
+	// M13: a hook-triggered run while every lens is paused would open the runtimes and load the
+	// embedder only to be refused; the deferred scheduleRetryWakeup above arms the earliest reset.
+	if auto && allLensesPaused(st, cfg, lenses, time.Now()) {
+		slog.Info("worker: every active lens's calls are paused until a reset; skipping this run")
+		return true, nil
+	}
 
 	pending := func() []string {
 		p, _ := st.PendingSessionsUpdatedBetween(lensNames, timeRange.since, timeRange.until)

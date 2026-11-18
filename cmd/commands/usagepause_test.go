@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
@@ -263,4 +264,48 @@ func TestLensTryHonoursTheFreeModelPause(t *testing.T) {
 			t.Fatalf("a refusal in lens try must arm the pause: %q, want %q", got, want)
 		}
 	})
+}
+
+// The M13 skip predicate: true only when every active lens's extract and review calls sit on a
+// runtime whose shared allowance is paused, and nothing staged waits for a commit.
+func TestAllLensesPaused(t *testing.T) {
+	registerFreeFake.Do(func() { platform.Register(freeFakePlatform{}) })
+	registerLeakFake.Do(func() { platform.Register(leakFakePlatform{}) })
+	t.Setenv("WITNESS_NO_DEFAULT_LENS", "1")
+	cfg := store.Config{Runner: "fakefree", TriageModel: freeModel}
+	arm := func(st *store.Store, rt string, until time.Time) {
+		if err := st.SetMetaString(usagePauseKey(rt), until.UTC().Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	one := []*lens.Lens{{Name: "a"}}
+	for _, tc := range []struct {
+		name   string
+		lenses []*lens.Lens
+		setup  func(st *store.Store)
+		want   bool
+	}{
+		{"every lens paused", one, nil, true},
+		{"no lenses", nil, nil, false},
+		{"fakefree unarmed", one, func(st *store.Store) { _ = st.SetMetaString(usagePauseKey("fakefree"), "") }, false},
+		{"fakefree reset passed", one, func(st *store.Store) { arm(st, "fakefree", time.Now().Add(-time.Minute)) }, false},
+		{"paid extract model", []*lens.Lens{{Name: "a", ExtractModel: "openai/x"}}, nil, false},
+		{"paid review model", []*lens.Lens{{Name: "a", ReviewModel: "openai/x"}}, nil, false},
+		{"a staged observation", one, func(st *store.Store) {
+			if err := st.StageObservation(store.Observation{ID: "o1", Session: "mcp:x"}); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"a lens on a runtime without the capability", []*lens.Lens{{Name: "a"}, {Name: "b", Runner: "fakeleak"}}, nil, false},
+	} {
+		st := openTestStore(t)
+		arm(st, "fakefree", time.Now().Add(time.Hour))
+		arm(st, "fakeleak", time.Now().Add(time.Hour))
+		if tc.setup != nil {
+			tc.setup(st)
+		}
+		if got := allLensesPaused(st, cfg, tc.lenses, time.Now()); got != tc.want {
+			t.Fatalf("%s: allLensesPaused = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
