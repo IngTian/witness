@@ -1025,9 +1025,15 @@ func mergeL0(ctx context.Context, tx *sql.Tx, kinds map[string]string, rep *Merg
 		}
 	}
 
-	// staged: observations recorded in-session and not yet drained to L1. Each is the only copy.
+	// staged: observations recorded in-session and not yet drained to L1. Each is the only copy,
+	// unless its obs_id is here already, staged or drained: a twin collapse files a copy's staged
+	// row under the twin kept, so merging back brought the one observation home under a second
+	// session, where it only drained to nothing. (An obs_id is minted per session, so outside a
+	// re-filed row two sessions never share one.)
 	res, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.staged(session, obs_id, payload)
-		SELECT session, obs_id, payload FROM inc.staged ORDER BY id`)
+		SELECT session, obs_id, payload FROM inc.staged s
+		WHERE NOT EXISTS (SELECT 1 FROM main.staged m WHERE m.obs_id = s.obs_id)
+		  AND NOT EXISTS (SELECT 1 FROM main.observations o WHERE o.obs_id = s.obs_id) ORDER BY id`)
 	if err != nil {
 		return err
 	}

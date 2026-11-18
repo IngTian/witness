@@ -463,6 +463,50 @@ func TestMergeBackOfAnArchiveWithALocalTwinChangesNothing(t *testing.T) {
 	}
 }
 
+// Collapsing a local twin into a non-empty archive files the copy's staged row under the feed.
+// Merging back, that row is the observation the copy still has staged here (or has drained into
+// L1): one obs_id, so staged a second time it only drained to nothing. Filing the copy's mining
+// under the feed is kept: that mining covers the feed's turns.
+func TestMergeBackAfterATwinCollapseStagesNothingTwice(t *testing.T) {
+	for _, drained := range []bool{false, true} {
+		t.Run(fmt.Sprintf("drained=%v", drained), func(t *testing.T) {
+			b, x := localTwin(t)
+			recorded(t, b, "rX", x)
+			mineWhole(t, b, "mX", x)
+			r := newArch(t)
+			r.raw("file:feed", "user:a")
+			if rep := r.merge(b.export(), true); rep.Sessions.Duplicates != 1 {
+				t.Fatalf("setup: want the twins collapsed, got %+v", rep.Sessions)
+			}
+			if drained {
+				obs, through, err := b.st.DrainStaged(x)
+				if err != nil || len(obs) != 1 {
+					t.Fatalf("drain: %v, %d rows", err, len(obs))
+				}
+				if err := b.st.AppendObservations(obs); err != nil {
+					t.Fatal(err)
+				}
+				b.st.ClearStagedThrough(x, through)
+			}
+
+			export := r.export()
+			b.merge(export, true)
+			dead, err := queryStrings(context.Background(), b.st.db, `SELECT session || '|' || obs_id FROM staged s
+				WHERE EXISTS (SELECT 1 FROM observations o WHERE o.obs_id = s.obs_id)
+				   OR EXISTS (SELECT 1 FROM staged t WHERE t.obs_id = s.obs_id AND t.id <> s.id)`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(dead) > 0 {
+				t.Errorf("staged rows already recorded here: %v (all: %v)", dead, recordedOn(t, b))
+			}
+			if again := b.merge(export, true); !again.Empty() {
+				t.Errorf("merging the same export again: %+v staged=%d progressRows=%d", again.Sessions, again.Staged, again.ProgressRows)
+			}
+		})
+	}
+}
+
 // Both sides hold the same local twin; we mined the feed, they mined the copy. Their mining of the
 // copy belongs on our copy: filed under our feed with the twins collapsed, it was skipped as a
 // second wording of what we mined there, and our copy stayed pending, to be mined again.
