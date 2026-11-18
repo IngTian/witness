@@ -488,7 +488,13 @@ func TestRunWaitsForLoginLockBeforeStartingGenerationDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	timer := time.AfterFunc(750*time.Millisecond, release)
+	release = sync.OnceFunc(release)
+	defer release()
+	released := make(chan struct{})
+	timer := time.AfterFunc(750*time.Millisecond, func() {
+		release()
+		close(released)
+	})
 	defer timer.Stop()
 	previous := commandContext
 	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
@@ -502,6 +508,11 @@ func TestRunWaitsForLoginLockBeforeStartingGenerationDeadline(t *testing.T) {
 	}
 	// The competing holder is gone after the first Run. This second invocation
 	// proves that Run itself takes the lock before spawning any subprocess.
+	select {
+	case <-released:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
 	if _, err := r.Run(ctx, "test", "witness-system", "corpus-only"); err != nil {
 		t.Fatal(err)
 	}
