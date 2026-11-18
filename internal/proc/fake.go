@@ -6,11 +6,10 @@ import (
 )
 
 // Fake is a test double for Control that touches no real OS process. It records only
-// what a caller's test asserts on — the cmd handed to BindToParent, the pids handed
-// to TerminateGroup (which returns TerminateErr) and the ContainChildren calls (which
-// return ContainErr) — and makes Detach a no-op.
+// what a caller's test asserts on — the pids handed to TerminateGroup (which returns
+// TerminateErr) and the ContainChildren calls (which return ContainErr) — and makes
+// Detach a no-op.
 type Fake struct {
-	Bound      []*exec.Cmd
 	Terminated []int
 	Contained  int
 
@@ -22,9 +21,8 @@ type Fake struct {
 
 var _ Control = (*Fake)(nil)
 
-func (f *Fake) Detach(*exec.Cmd)           {}
-func (f *Fake) BindToParent(cmd *exec.Cmd) { f.Bound = append(f.Bound, cmd) }
-func (f *Fake) ContainChildren() error     { f.Contained++; return f.ContainErr }
+func (f *Fake) Detach(*exec.Cmd)       {}
+func (f *Fake) ContainChildren() error { f.Contained++; return f.ContainErr }
 
 func (f *Fake) TerminateGroup(pid int) error {
 	f.Terminated = append(f.Terminated, pid)

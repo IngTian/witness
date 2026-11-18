@@ -95,7 +95,7 @@ type Runner interface {
 	// systemPrompt as the system/instruction channel and input as the user turn, and must not
 	// fence again.
 	//
-	// Two more rules every runner must follow, because nothing else enforces them:
+	// Three more rules every runner must follow, because nothing else enforces them:
 	//
 	//   - Its OWN timeout must surface as an error that errors.Is(err, context.DeadlineExceeded).
 	//     distill reads that as provider backpressure and narrows the drain window. os/exec does
@@ -104,6 +104,8 @@ type Runner interface {
 	//     the run context's Err() and wrap it (see the claude runner).
 	//   - It must refuse to spawn anything when ExternalRunnersDisabled() is true (`make test`
 	//     sets it), so a test can never start a real model CLI.
+	//   - On Windows every child goes through proc.HideWindow, because the hook-spawned worker is
+	//     DETACHED_PROCESS (spawnpolicy_test.go scans for it).
 	//
 	// FRESH-CONTEXT INVARIANT. The only turns witness puts into a Run are systemPrompt and the
 	// fenced corpus; a runtime may add its own framing (listed per runner below). A runner must

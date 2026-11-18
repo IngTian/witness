@@ -70,8 +70,8 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   them, so a copied/installed binary self-locates its assets.
 - `internal/{embed,vector,lens,mcp}/` — embeddings (pure-Go GoMLX), cosine
   search, lens loading, the MCP server.
-- `internal/proc/` — the process-control port (detach, bind-to-parent, contain,
-  terminate) behind one interface with per-OS adapters and a `Fake`.
+- `internal/proc/` — the process-control port (detach, contain, terminate,
+  hide-window) behind one interface with per-OS adapters and a `Fake`.
 - `internal/view/` — builds the read-only HTML snapshot `witness view` opens; Go
   computes every number, the page only draws (`make view-e2e` checks it headless).
 

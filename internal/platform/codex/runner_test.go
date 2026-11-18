@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -204,6 +205,33 @@ func TestRunAttributesDeadlineAndCallerCancellation(t *testing.T) {
 	cancel()
 	if _, err := r.Run(ctx, "test", "witness-system", "corpus-only"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel: %v", err)
+	}
+}
+
+// A `codex exec` that answered and exited 0 while a grandchild still holds its stdout is a reply:
+// WaitDelay closes the pipe and os/exec reports exec.ErrWaitDelay, which only follows a clean exit.
+// The preflight still runs through the helper; only the exec is a shell, whose `sleep 3` ends on
+// its own.
+func TestRunAcceptsAReplyWhileAGrandchildHoldsStdout(t *testing.T) {
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("spawns a shell that leaves a `sleep 3` grandchild holding its stdout")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no `sh` to stand in for codex exec: %v", err)
+	}
+	r := helperRunner(t)
+	helper := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		if !slices.Contains(args, "exec") {
+			return helper(ctx, bin, args...)
+		}
+		return exec.CommandContext(ctx, sh, "-c", `echo '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}'; `+
+			`echo '{"type":"turn.completed"}'; sleep 3 &`)
+	}
+	t.Cleanup(func() { commandContext = helper })
+	if got, err := r.Run(context.Background(), "test", "witness-system", "corpus-only"); err != nil || got != "answer" {
+		t.Fatalf("Run = %q, %v; want the reply (ErrWaitDelay after exit 0 is success)", got, err)
 	}
 }
 

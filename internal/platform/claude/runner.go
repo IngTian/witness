@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -53,11 +55,17 @@ func (r runner) Run(ctx context.Context, model, systemPrompt, input string) (str
 
 	cmd := buildRunCmdFn(runCtx, model, systemPrompt, input)
 	cmd.Dir = dir
+	cmd.WaitDelay = claudeWaitDelay
 
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	runErr := cmd.Run()
+	// os/exec returns ErrWaitDelay only when the child itself exited 0 (an exit status or a kill
+	// wins), so the output is complete and only a grandchild held the pipe.
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		runErr = nil
+	}
 	if runErr != nil {
 		// A TIMEOUT must be reported as context.DeadlineExceeded, and os/exec does not do that
 		// for us. When CommandContext kills the child, Run returns *exec.ExitError "signal:
@@ -183,6 +191,11 @@ func (r runner) workDir() (string, error) {
 // minutes is the accepted price.
 var claudeRunTimeout = 20 * time.Minute
 
+// claudeWaitDelay bounds how long Run waits for the child's stdout and stderr to close after the
+// child exits or is killed: a grandchild that inherited them (a hook, an npm wrapper's node) would
+// otherwise hold Run until it ends. It is a var only so the test can shrink it.
+var claudeWaitDelay = 5 * time.Second
+
 // childOutput is a failed child's stderr excerpt plus, when there is any, a bounded tail of its
 // stdout — which is where `claude -p` prints its own errors. Reporting stderr alone logged the
 // default-lens stall 322 times as `exit status 1 (stderr: )`.
@@ -217,6 +230,9 @@ func childOutput(stderr, stdout string) string {
 //   - Run sets the cwd to witness's own empty <RuntimeRoot>/claude-cwd (workDir), never
 //     the user's project or os.TempDir(), so no foreign CLAUDE.md, .mcp.json or
 //     .claude/settings.json hook loads.
+//   - On Windows, npm's `claude.cmd`/`.bat` resolves to the claude.exe it wraps (npmClaudeExe).
+//     Through cmd.exe the argv prompt would be re-parsed and the timeout would kill only cmd.exe.
+//   - proc.HideWindow: the DETACHED_PROCESS worker would give claude.exe a visible console.
 //
 // model == "" omits --model so `claude -p` uses its environment default.
 func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
@@ -226,7 +242,27 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 		args = append(args, "--model", model)
 	}
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	if runtime.GOOS == "windows" && cmd.Err == nil {
+		cmd.Path, cmd.Err = npmClaudeExe(cmd.Path)
+	}
+	proc.HideWindow(cmd)
 	return cmd
+}
+
+// npmClaudeExe maps npm's claude.cmd/.bat shim to the claude.exe it wraps, under the shim's own
+// node_modules. Any other path comes back unchanged, unstatted. A shim with no such exe (pnpm,
+// yarn, bun, a moved install) is refused rather than run through cmd.exe.
+func npmClaudeExe(path string) (string, error) {
+	if ext := strings.ToLower(filepath.Ext(path)); ext != ".cmd" && ext != ".bat" {
+		return path, nil
+	}
+	exe := filepath.Join(filepath.Dir(path), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
+	if fi, err := os.Stat(exe); err == nil && fi.Mode().IsRegular() {
+		return exe, nil
+	}
+	return "", fmt.Errorf("claude on PATH is the shim %s with no npm claude.exe behind it: cmd.exe would re-parse "+
+		"the prompt, so witness will not run it; install Claude Code natively (irm https://claude.ai/install.ps1 | iex) "+
+		"or put claude.exe first on PATH", path)
 }
 
 // buildRunCmdFn is the test seam for the child process. It exists so the deadline-attribution

@@ -5,21 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
-
-	"github.com/IngTian/witness/internal/proc"
 )
 
 // openCodeCommand owns the whole spawn policy, so no call site can drift from it (the four
-// sites once disagreed: `--version` had none of it, `models` no BindToParent, `export` no
-// WITNESS_WORKER). All four rules, on one command.
+// sites once disagreed: `--version` had none of it, `export` no WITNESS_WORKER). Every rule,
+// on one command.
 func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
-	fake := &proc.Fake{}
-	orig := procCtl
-	procCtl = fake
-	t.Cleanup(func() { procCtl = orig })
 	// Spawn isolation (critic.md G1): every inherited OPENCODE_* var is dropped
 	// (case-insensitively, since Windows env names are case-insensitive), and witness's own
 	// data, cache, state dirs and DB are under the runtime root, never the user's. HOME stays
@@ -35,9 +28,6 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	cmd := openCodeCommand(context.Background(), root, "--version")
 	if cmd.Dir != os.TempDir() {
 		t.Errorf("cwd = %q, want the neutral temp dir: OpenCode records the cwd's project", cmd.Dir)
-	}
-	if !slices.Contains(fake.Bound, cmd) {
-		t.Error("child not bound to the parent's lifetime (BindToParent)")
 	}
 	env := envMap(t, cmd.Env)
 	for k := range env {
@@ -78,8 +68,8 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	cmd = openCodeCommand(context.Background(), "", "--version")
 	env = envMap(t, cmd.Env)
 	if env["OPENCODE_DB"] != "opencode-v2.db" || env["XDG_DATA_HOME"] != "opencode-data" || env["WITNESS_WORKER"] != "1" ||
-		cmd.Dir != os.TempDir() || !slices.Contains(fake.Bound, cmd) {
-		t.Errorf("root-less command lost a rule: dir=%q bound=%v env=%v", cmd.Dir, slices.Contains(fake.Bound, cmd), cmd.Env)
+		cmd.Dir != os.TempDir() {
+		t.Errorf("root-less command lost a rule: dir=%q env=%v", cmd.Dir, cmd.Env)
 	}
 }
 

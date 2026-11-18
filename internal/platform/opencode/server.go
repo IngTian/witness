@@ -17,14 +17,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/IngTian/witness/internal/proc"
 )
-
-// procCtl is the process-control port (issue #43): openCodeCommand binds every opencode child's
-// lifetime to the worker through it (Pdeathsig on Linux). A package var so tests can swap in a
-// proc.Fake to prove the wiring without spawning real processes.
-var procCtl proc.Control = proc.System()
 
 var openCodeVersionCommand = func(ctx context.Context, runtimeRoot string) ([]byte, error) {
 	return openCodeCommand(ctx, runtimeRoot, "--version").Output()

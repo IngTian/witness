@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
+	"github.com/IngTian/witness/internal/proc"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -28,7 +29,13 @@ const preflightTimeout = 45 * time.Second
 
 var runTimeout = 20 * time.Minute
 
-var commandContext = exec.CommandContext
+// commandContext builds every codex child. proc.HideWindow keeps each from opening a console
+// window under the DETACHED_PROCESS worker on Windows; tests swap the var for a stub.
+var commandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, arg...)
+	proc.HideWindow(cmd)
+	return cmd
+}
 
 type runner struct {
 	root, binary string
@@ -538,6 +545,11 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	err = cmd.Run()
+	// os/exec returns ErrWaitDelay only when the child itself exited 0 (an exit status or a kill
+	// wins), so the output is complete and only a grandchild held the pipe.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
 	if callCtx.Err() != nil {
 		return "", childError(callCtx, "exec", err, stderr.String())
 	}

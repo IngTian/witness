@@ -48,6 +48,13 @@ func (sys) Detach(cmd *exec.Cmd) {
 	ensureSysProcAttr(cmd).CreationFlags |= flags
 }
 
+// HideWindow keeps a console child (claude.exe, codex.exe, opencode.exe) from showing a window.
+// The hook-spawned worker is DETACHED_PROCESS, so it has no console for a child to inherit and
+// Windows gives each console child a fresh, visible one (#143). It sets the one field on the
+// existing attr, because the first #143 fix assigned a fresh struct and dropped the flags another
+// layer had set. Not CREATE_NO_WINDOW: that would leave codex's interactive `login` no console.
+func HideWindow(cmd *exec.Cmd) { ensureSysProcAttr(cmd).HideWindow = true }
+
 // ContainChildren puts THIS process into a fresh kill-on-close job, so every child it starts
 // afterwards (`claude -p`, the private `opencode serve`, and their descendants, such as OpenCode
 // 2.3.0's pty daemon, which nests its own jobs without breakaway) dies with it, however it dies.
