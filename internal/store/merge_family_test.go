@@ -221,10 +221,10 @@ func TestMergeDropsACopyWeAlreadyHoldWhenItsIDIsClaimed(t *testing.T) {
 }
 
 // Ours holds X [a p], and the incoming archive a growth of it, [a p r], beside a session in its way:
-// X's claimant with another transcript, which leaves X for an id of its own, or a copy of [a] that
-// adds no turns. Placed in id order, a growth sorting first found X taken and arrived beside it, so
-// [a p] was held twice and mined on both; sorting last, it was appended. Whatever the order, and
-// whether or not the growth sits under an id of ours too, it is appended to X.
+// X's claimant with another transcript, which leaves X for an id of its own, or a copy of [a], or of
+// all of X, that adds no turns. Placed in id order, a growth sorting first found X taken and arrived
+// beside it, so [a p] was held twice and mined on both; sorting last, it was appended. Whatever the
+// order, and whether or not the growth sits under an id of ours too, it is appended to X.
 func TestMergeAppendsAGrowthToOurCopyInAnyOrder(t *testing.T) {
 	const x = "file:feed@55555555"
 	aq := mintedID("file:feed", "user:a", "user:q")
@@ -237,6 +237,7 @@ func TestMergeAppendsAGrowthToOurCopyInAnyOrder(t *testing.T) {
 		{"X's claimant leaves", x, []string{"user:a", "user:q"}, aq, false},
 		{"X's claimant leaves, and the growth an id of ours", x, []string{"user:a", "user:q"}, aq, true},
 		{"a copy that adds no turns", "file:feed@77777777", []string{"user:a"}, x, false},
+		{"an exact copy of X", "file:feed@77777777", []string{"user:a", "user:p"}, x, false},
 	} {
 		for _, growth := range []string{"file:feed@00000000", "file:feed@ffffffff"} {
 			t.Run(fmt.Sprintf("%s/growth=%s", c.name, growth), func(t *testing.T) {
@@ -302,6 +303,109 @@ func TestMergeAppendsAGrowthToOurCopyInAnyOrder(t *testing.T) {
 		if mined, progress := minedState(t, b); !reflect.DeepEqual(mined, map[string]string{"mB": x}) || !reflect.DeepEqual(progress, map[string]int{x: 2}) {
 			t.Errorf("mined %v, progress %v; want mB alone, on %s at 2", mined, progress, x)
 		}
+	})
+}
+
+// pendingTurns is each session's turns past the default lens's watermark.
+func pendingTurns(t *testing.T, a *arch) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for s, turns := range heldTranscripts(t, a) {
+		if n := a.st.DistilledCount(s, "default"); n < len(turns) {
+			out[s] = turns[n:]
+		}
+	}
+	return out
+}
+
+// Ours holds C [a b], mined, and the incoming archive C [a], which stays on C (rule 1: ours holds
+// every turn of it), beside a growth of C under another id. The claimant adds no turns, so it does
+// not keep the growth off C: it goes into the growth, which is appended to C, and only the growth's
+// tail is mined here. Kept off, the growth arrived beside C in either order, and [a b] was held, and
+// mined, twice. Of two growths, the first takes C, and the other arrives beside it as it would
+// beside a C no session claims.
+func TestMergeAppendsAGrowthOverAClaimantThatAddsNoTurns(t *testing.T) {
+	// appended checks that a holds want, that only x is pending on c, that every recorded row is filed
+	// on the session rec names, and that merging export again changes nothing.
+	appended := func(t *testing.T, a *arch, export string, rep *MergeReport, c string, want map[string][]string, rec map[string]string) {
+		t.Helper()
+		if got := heldTranscripts(t, a); !reflect.DeepEqual(got, want) || rep.Sessions.LongerThere != 1 || rep.Sessions.Duplicates != 1 {
+			t.Errorf("holds %v, want %v, C longer there and the claimant a duplicate (%+v)", got, want, rep.Sessions)
+		}
+		wantPending := map[string][]string{c: {"x"}}
+		for s, turns := range want {
+			if s != c {
+				wantPending[s] = turns
+			}
+		}
+		if got := pendingTurns(t, a); !reflect.DeepEqual(got, wantPending) {
+			t.Errorf("pending %v, want %v", got, wantPending)
+		}
+		wantRec := map[string][]string{}
+		for id, s := range rec {
+			wantRec[id], wantRec[id+"-staged"] = []string{s}, []string{s}
+		}
+		if got := recordedOn(t, a); !reflect.DeepEqual(got, wantRec) {
+			t.Errorf("recorded rows filed as %v, want %v", got, wantRec)
+		}
+		snap := snapshotArchive(t, a.st)
+		if again := a.merge(export, true); !again.Empty() || !reflect.DeepEqual(snap, snapshotArchive(t, a.st)) {
+			t.Errorf("merging the same export again: %+v rawRows=%d", again.Sessions, again.RawRows)
+		}
+	}
+	const c, before, after = "file:feed@11111111", "file:feed@00000000", "file:feed@ffffffff"
+	for name, growths := range map[string]map[string]string{ // id -> its last turn
+		"growth sorting before C": {before: "x"},
+		"growth sorting after C":  {after: "x"},
+		"two growths":             {before: "x", after: "y"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base, inc := newArch(t), newArch(t)
+			base.raw(c, "user:a", "user:b")
+			mineWhole(t, base, "mb", c)
+			inc.raw(c, "user:a")
+			recorded(t, inc, "rc", c)
+			want, rec := map[string][]string{c: {"a", "b", "x"}}, map[string]string{"rc": c}
+			for g, last := range growths {
+				inc.raw(g, "user:a", "user:b", "user:"+last)
+				recorded(t, inc, "r"+last, g)
+				rec["r"+last] = c
+				if last != "x" { // the second growth
+					want[g], rec["r"+last] = []string{"a", "b", last}, g
+				}
+			}
+
+			export := inc.export()
+			appended(t, base, export, base.merge(export, true), c, want, rec)
+		})
+	}
+	// S, O and I ingest one feed, O and I first with a record of their own, so both take S's [a] as
+	// C. S appends b, and O takes it and mines C. I re-ingests the feed with record 1 corrected to a
+	// and appends b and x, so its feed grew from C beside its C [a]. O then takes I.
+	t.Run("after a real history", func(t *testing.T) {
+		s, o, i := newArch(t), newArch(t), newArch(t)
+		s.raw("file:feed", "user:a")
+		o.raw("file:feed", "user:o")
+		i.raw("file:feed", "user:i")
+		o.merge(s.export(), true)
+		i.merge(s.export(), true)
+		s.raw("file:feed", "user:b")
+		o.merge(s.export(), true)
+		c := mintedID("file:feed", "user:a")
+		mineWhole(t, o, "mO", c)
+		editLast(t, i, "file:feed", "a")
+		i.raw("file:feed", "user:b", "user:x")
+		recorded(t, i, "rf", "file:feed")
+		recorded(t, i, "rc", c)
+		if got, want := heldTranscripts(t, i), map[string][]string{"file:feed": {"a", "b", "x"}, c: {"a"}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("setup: I holds %v, want %v", got, want)
+		}
+		if got, want := heldTranscripts(t, o), map[string][]string{"file:feed": {"o"}, c: {"a", "b"}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("setup: O holds %v, want %v", got, want)
+		}
+
+		export := i.export()
+		appended(t, o, export, o.merge(export, true), c, map[string][]string{"file:feed": {"o"}, c: {"a", "b", "x"}}, map[string]string{"rf": c, "rc": c})
 	})
 }
 
@@ -1041,10 +1145,10 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits, reuse bo
 			return broke("%s was empty and holds %v after taking %s, which holds %v", x, after, y, theirs)
 		}
 		// Nor does it add a session beside one of its family that it extends (a branch that diverged
-		// from a session is no extension of it): the growth goes onto that session. Two exceptions
-		// keep a prefix apart. The other archive holds those turns exactly, as a session of its own
-		// beside the growth. Or it holds that id with those turns or fewer: that session stays on the
-		// id (rule 1), so the growth cannot be renamed onto it, in either order.
+		// from a session is no extension of it): the growth goes onto that session. One exception
+		// keeps a prefix apart: the other archive holds those turns exactly, as a session of its own
+		// beside the growth. (A session of theirs that stays on that id adding no turns does not: it
+		// goes into the growth.)
 		theirCopies := copiesOf(theirs)
 		for n, nt := range after {
 			if ours[n] != nil {
@@ -1052,7 +1156,7 @@ func mergeHistory(t *testing.T, seed int64, machines, steps int, edits, reuse bo
 			}
 			for p, pt := range after {
 				if p == n || sessionFamily(p) != sessionFamily(n) || len(pt) == len(nt) || !isPrefix(pt, nt) ||
-					theirCopies[strings.Join(pt, " ")] > 0 || theirs[p] != nil && isPrefix(theirs[p], pt) {
+					theirCopies[strings.Join(pt, " ")] > 0 {
 					continue
 				}
 				return broke("%s holds %s %v beside %s %v, a session it extends: %v\n  ours %v\n  theirs %v", x, n, nt, p, pt, after, ours, theirs)

@@ -502,7 +502,9 @@ func transcriptHash8(turns []rawTurn) string {
 //     as a second wording of it and our session of T's id, never mined, was mined again;
 //  3. else, if a claimed member equals or extends T, ours already holds every turn: the session is
 //     dropped from the copy, and everything it carries is filed under that member;
-//  4. else an available member T extends: T's tail is appended to it;
+//  4. else an available member T extends: T's tail is appended to it. A member is available here
+//     also under an incoming session that stays on it by rule 1, adding no turns: that session is
+//     dropped into T, and everything it carries is filed under the member;
 //  5. else T arrives as its own session, under its own id;
 //  6. unless ours holds that id with another transcript: then under the id minted from T's hash.
 //     If another incoming session sits there with T and more, T is dropped into it. If either
@@ -644,8 +646,17 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	// the sessions that add turns are placed before those a member holds already: a copy of what a
 	// member held took it, and a growth of that member sorting after the copy arrived beside it;
 	// placed after the growth, the copy is dropped into it (rule 3).
+	//
+	// A claimant that stays on its id by rule 1 adds no turns, so it does not keep a growth of that
+	// member out (rule 4): kept out, the growth arrived beside the member, its turns held, and mined,
+	// twice. It is dropped into the growth, which takes its id. That is the one way a session leaves
+	// an id after the aside pass, and the id is never free in between: what was filed under it goes
+	// into the growth with the claimant, and what is filed under it later lands on the growth, so the
+	// member ends the same whether the growth is placed before or after the claimant. Two growths of
+	// one member are a tie, as for a member no session claims: the first takes it, claimant and all.
 	at := map[string]string{} // where a session moved aside sits in the copy
 	covered := map[string]bool{}
+	stays := map[string]bool{} // a claimant that rule 1 keeps on its id, as long as no growth takes it
 	for _, s := range incoming {
 		own := ""
 		for _, m := range related[s] {
@@ -655,7 +666,8 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 				covered[s] = true
 			}
 		}
-		if !slices.Contains(family[sessionFamily(s)], s) || own == kindEqual || own == kindLongerHere || own == kindLongerThere && !covered[s] {
+		stays[s] = own == kindEqual || own == kindLongerHere
+		if !slices.Contains(family[sessionFamily(s)], s) || stays[s] || own == kindLongerThere && !covered[s] {
 			continue
 		}
 		aside := s + " (moved aside)"
@@ -672,7 +684,11 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 	order = append(order, slices.DeleteFunc(incoming, func(s string) bool { return !covered[s] })...)
 
 	kinds := map[string]string{}
+	dropped := map[string]bool{} // claimants that stayed until a growth took their id
 	for _, s := range order {
+		if dropped[s] {
+			continue
+		}
 		fam := sessionFamily(s)
 		cur := s // where s sits in the copy
 		if a, ok := at[s]; ok {
@@ -682,7 +698,7 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 		heldBy := ""                 // the first member another incoming session claims that equals or extends theirs
 		for _, m := range related[s] {
 			switch {
-			case m.id != cur && held[m.id]:
+			case m.id != cur && held[m.id] && !(m.rel == kindLongerThere && stays[m.id]):
 				if m.rel != kindLongerThere && heldBy == "" {
 					heldBy = m.id
 				}
@@ -751,6 +767,13 @@ func classifySessions(ctx context.Context, tx *sql.Tx, rep *MergeReport) (map[st
 			delete(held, cur)
 			rep.Sessions.Duplicates++
 			continue
+		}
+		if target != cur && stays[target] { // rule 4 onto a claimant that adds no turns: it goes into s
+			if err := dropIncomingSession(ctx, tx, target, cur, false); err != nil {
+				return nil, err
+			}
+			stays[target], dropped[target] = false, true
+			rep.Sessions.Duplicates++
 		}
 		if target != cur {
 			if err := renameIncomingSession(ctx, tx, cur, target); err != nil {
