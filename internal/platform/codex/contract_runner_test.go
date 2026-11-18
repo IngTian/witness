@@ -29,6 +29,23 @@ func TestContractToolFreeWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if os.Getenv("WITNESS_CODEX_CONTRACT_LATEST") == "1" {
+		version, err := cliVersion(context.Background(), bin, t.TempDir(), childEnv(t.TempDir()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pinned := supportsVersion(version)
+		original := supportsVersion
+		supportsVersion = func(observed string) bool { return observed == version }
+		t.Cleanup(func() { supportsVersion = original })
+		// Run the wire assertions first. Even if they pass, flag an unsupported
+		// latest release so maintainers can verify it and update the pins.
+		defer func() {
+			if !pinned {
+				t.Errorf("latest Codex CLI %s is not pinned by witness", version)
+			}
+		}()
+	}
 	cmd := exec.CommandContext(context.Background(), bin, "debug", "models", "--bundled")
 	cmd.Env = childEnv(t.TempDir())
 	catalog, err := cmd.Output()

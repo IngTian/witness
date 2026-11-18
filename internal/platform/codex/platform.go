@@ -32,10 +32,10 @@ var (
 func (Platform) Name() string          { return "codex" }
 func (Platform) SessionPrefix() string { return SessionPrefix }
 
-func (Platform) ReadyToBind(ctx context.Context, root string) bool { return LoginReady(ctx, root) }
-func (Platform) Login(ctx context.Context, root string) error      { return Login(ctx, root) }
+func (Platform) ReadyToBind(ctx context.Context, root string) error { return LoginReady(ctx, root) }
+func (Platform) Login(ctx context.Context, root string) error       { return Login(ctx, root) }
 func (Platform) Logout(ctx context.Context, root string) error {
-	return loginCommand(ctx, root, "logout")
+	return loginCommand(ctx, root, true)
 }
 
 func (Platform) ModelFormat() (string, string) { return "model", "Codex model slug (bare name)" }

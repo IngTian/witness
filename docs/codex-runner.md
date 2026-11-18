@@ -8,7 +8,9 @@ your coding home. Capture still reads `WITNESS_CODEX_HOME`, `CODEX_HOME`, or
 ## Set up
 
 Use Codex CLI **0.169.0** or **0.169.0-alpha.11.1**. Both builds are covered by
-the Linux and Windows wire contract. `witness doctor` checks the binary, version,
+the Linux and Windows wire contract. A daily check runs against npm latest
+and files an issue when the contract fails or the release is still unpinned.
+`witness doctor` checks the binary, version,
 login, managed policy and configured models. After a CLI update, use
 `WITNESS_CODEX_BINARY` to point witness at an installed supported binary.
 
@@ -55,12 +57,13 @@ invalidate the extraction.
 Codex can load system, MDM and cloud policy even with user config ignored.
 Witness queries the CLI for config layers and requirements before sending any
 corpus. Nonempty system config, managed layers or requirements, and unknown
-policy results block the runner. ChatGPT login is limited to known personal
-plans because a separate exec process can reload workspace policy.
+policy results block the runner. The check applies to actual policy, independent
+of the ChatGPT plan. ChatGPT may add server-side framing.
 
 A filesystem lock serializes catalog access, login and model calls for this
 login across processes, including `lens try`. It is released on process death.
-Lock waiting follows the caller's context. The 20-minute model deadline starts
+Open and Run wait under the caller's context. `doctor` and `wire` report a
+busy login separately from invalid configuration. The 20-minute model deadline starts
 after the lock and preflight. Generation timeouts report
 `context.DeadlineExceeded` and caller cancellation remains cancellation.
 
@@ -106,8 +109,12 @@ Live ChatGPT checks on November 16, 2026, Windows x64:
 | D: same on `gpt-5.5` | Unavailable in this login's live catalog; not run live |
 | E: complete invocation | Exit 0, `WITNESS-PROBE-OK`, no tool events |
 
-The initial runner also passed `TestContractLiveLogin` using the independent
-login and a synthetic prompt, before the managed-policy preflight was added. To repeat it, set `WITNESS_CODEX_LIVE_ROOT` to the
+On November 18, 2026, the runner with policy preflight passed Probe E and a
+one-session synthetic drain using Codex CLI `0.169.0` on Windows x64. Both Codex
+calls exited 0 with no tool events. The drain produced two observations, and
+`witness doctor` exited 0 with the runner models and embedder healthy.
+
+To repeat Probe E, set `WITNESS_CODEX_LIVE_ROOT` to the
 archive's **runtime directory**, and `WITNESS_CODEX_LIVE_MODEL` to a model in that
 login, then run `go test -tags codexcontract -run TestContractLiveLogin -v
 ./internal/platform/codex`. This makes one real model call.

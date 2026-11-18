@@ -31,7 +31,7 @@ func TestWireCodexDoesNotBindWithoutRunnerLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if !called || st.RunnerBound() || !strings.Contains(out, "witness auth codex") {
+	if !called || st.RunnerBound() || !strings.Contains(out, "codex runner disabled") {
 		t.Fatalf("runner bound before login: %s", out)
 	}
 }

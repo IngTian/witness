@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -57,8 +58,11 @@ func UsagePauseKey(runtime string) string { return "runner_usage_paused_until:" 
 
 // RunnerLoginGate lets wire leave capture usable until the runner has a login.
 type RunnerLoginGate interface {
-	ReadyToBind(ctx context.Context, root string) bool
+	ReadyToBind(ctx context.Context, root string) error
 }
+
+// ErrRunnerBusy means a diagnostic could not inspect a runner during an active call.
+var ErrRunnerBusy = errors.New("runner busy: another process holds the login lock")
 
 type RunnerAuthenticator interface {
 	Login(ctx context.Context, root string) error
@@ -138,8 +142,9 @@ type Runner interface {
 	// product call, not done.
 	//
 	// Codex: a fresh ephemeral exec with a witness-owned home, an empty cwd and no user
-	// or project instructions. The CLI's policy preflight rejects managed layers and
-	// workspace logins. Feature flags and a stripped model catalog remove tool offers.
+	// or project instructions. The CLI's policy preflight rejects managed layers.
+	// Feature flags and a stripped model catalog remove tool offers. Server-side
+	// framing under a ChatGPT login remains outside the runner's control.
 	//
 	// OpenCode: a fresh session in the private DB, prompted once and deleted when Run returns.
 	// Witness's prompt is the agent's system prompt. Private config, nothing from the user's
@@ -148,6 +153,7 @@ type Runner interface {
 	// discovery): docs/opencode.md "The isolated runtime".
 	//
 	// Enforced by: `TestNoCodePathForksAConversation` (source scan, OpenCode no-fork);
+	// `TestContractToolFreeWire` (tag `codexcontract`, Codex wire contract);
 	// `TestContractRunnerRoundTrip` (tag `opencodecontract`, contract workflow: zero tools on real
 	// OpenCode); `TestBuildRunCmdOffersNoTools` pins the Claude argv, checked once on real claude
 	// 2.1.325 (stream-json init `tools: []`), not in CI.

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,6 +57,23 @@ func TestWindowsNpmShimResolvesNativeBinaryWithoutShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, err := resolveWindowsCLI(shim, "amd64"); err != nil || got != binary {
+		t.Fatal(got, err)
+	}
+}
+
+func TestUnixNpmShimResolvesNativeBinary(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "node_modules", "@openai")
+	shim := filepath.Join(root, "codex", "bin", "codex.js")
+	bin := filepath.Join(root, "codex-linux-x64", "vendor", "x86_64-unknown-linux-musl", "bin", "codex")
+	for _, path := range []string{shim, bin} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := resolveUnixCLI(shim, "linux", "amd64"); err != nil || got != bin {
 		t.Fatal(got, err)
 	}
 }
@@ -220,7 +238,7 @@ func TestDisabledRunnerNeverSpawns(t *testing.T) {
 	if _, err := r.Run(context.Background(), "test", "p", "i"); err == nil {
 		t.Fatal("ran disabled runner")
 	}
-	if r.ValidateModels(context.Background(), "test") == nil || LoginReady(context.Background(), r.root) {
+	if r.ValidateModels(context.Background(), "test") == nil || LoginReady(context.Background(), r.root) == nil {
 		t.Fatal("disabled runner was reported ready")
 	}
 	if err := Login(context.Background(), r.root); err == nil {
@@ -363,14 +381,7 @@ func servePolicyFixture(mode string) {
 			if mode == "managed-requirements" {
 				result = `{"requirements":{"featureRequirements":{"shell_tool":true}}}`
 			}
-		case "account/read":
-			result = `{"account":{"type":"chatgpt","planType":"plus"}}`
-			if mode == "logged-out" {
-				result = `{"account":null}`
-			}
-			if mode == "managed-account" {
-				result = `{"account":{"type":"chatgpt","planType":"business"}}`
-			}
+
 		default:
 			continue
 		}
@@ -386,7 +397,6 @@ func TestPreflightReportsUnusableRuntime(t *testing.T) {
 		{"managed-config", "", "test", "mdm config layer"},
 		{"managed-requirements", "", "test", "managed requirements"},
 		{"missing-layers", "", "test", "did not report config layers"},
-		{"managed-account", "", "test", "managed and unknown plans"},
 		{"logged-out", "", "test", "needs its own ChatGPT login"},
 		{"bad-catalog", "", "test", "catalog has no models"},
 		{"", "", "missing", "absent from this login's catalog"},
@@ -427,14 +437,14 @@ func TestLoginAndReadinessHoldTheLoginLock(t *testing.T) {
 	if err := Login(context.Background(), r.root); err != nil {
 		t.Fatal(err)
 	}
-	if !(Platform{}).ReadyToBind(context.Background(), r.root) {
-		t.Fatal("valid witness login was not ready")
+	if err := (Platform{}).ReadyToBind(context.Background(), r.root); err != nil {
+		t.Fatal(err)
 	}
 	if err := (Platform{}).Logout(context.Background(), r.root); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("WITNESS_CODEX_HELPER_MODE", "logged-out")
-	if (Platform{}).ReadyToBind(context.Background(), r.root) {
+	if (Platform{}).ReadyToBind(context.Background(), r.root) == nil {
 		t.Fatal("logged out home reported ready")
 	}
 }
@@ -490,4 +500,65 @@ func TestRunWaitsForLoginLockBeforeStartingGenerationDeadline(t *testing.T) {
 	if _, err := r.Run(ctx, "test", "witness-system", "corpus-only"); err != nil {
 		t.Fatal(err)
 	}
+	// The competing holder is gone after the first Run. This second invocation
+	// proves that Run itself takes the lock before spawning any subprocess.
+	if _, err := r.Run(ctx, "test", "witness-system", "corpus-only"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenQueuesAndDiagnosticsReportBusy(t *testing.T) {
+	r := setUpChild(t)
+	release, err := loginLock(context.Background(), r.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release = sync.OnceFunc(release)
+	defer release()
+	if err := r.ValidateModels(context.Background(), "test"); !errors.Is(err, platform.ErrRunnerBusy) {
+		t.Fatalf("doctor while locked: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	if err := LoginReady(ctx, r.root); !errors.Is(err, platform.ErrRunnerBusy) {
+		t.Fatalf("wire while locked: %v", err)
+	}
+	ctxOpen, cancelOpen := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancelOpen()
+	if err := r.Open(ctxOpen); err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, platform.ErrRunnerBusy) {
+		t.Fatalf("Open lock wait was classified as a model result: %v", err)
+	}
+	releasedAt := make(chan time.Time, 1)
+	timer := time.AfterFunc(200*time.Millisecond, func() {
+		releasedAt <- time.Now()
+		release()
+	})
+	defer timer.Stop()
+	previous := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		if len(args) == 1 && args[0] == "--version" {
+			deadline, ok := ctx.Deadline()
+			if !ok || deadline.Before((<-releasedAt).Add(preflightTimeout)) {
+				t.Fatal("Open started the preflight budget before acquiring the login lock")
+			}
+		}
+		return previous(ctx, bin, args...)
+	}
+	if err := r.Open(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoginAndReadinessRejectUnverifiedCLI(t *testing.T) {
+	r := setUpChild(t)
+	t.Setenv("WITNESS_CODEX_HELPER_VERSION", "0.170.0")
+	previous := commandContext
+	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
+		if len(args) != 1 || args[0] != "--version" {
+			t.Fatalf("unverified binary reached %v", args)
+		}
+		return previous(ctx, bin, args...)
+	}
+	checkPreflightError(t, LoginReady(context.Background(), r.root), "no verified tool-free contract")
+	checkPreflightError(t, Login(context.Background(), r.root), "no verified tool-free contract")
 }

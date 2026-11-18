@@ -11,7 +11,7 @@ import (
 // Codex exec has no supported switch that ignores managed layers. Query the
 // same CLI's configuration loader without creating a thread or sending corpus.
 // Its RPC sees platform policy paths, forced macOS preferences and cloud policy.
-func checkManagedConfig(ctx context.Context, bin, dir string, env []string, plan bool) error {
+func checkManagedConfig(ctx context.Context, bin, dir string, env []string) error {
 	cmd := commandContext(ctx, bin, append(isolationArgs(), "app-server", "--listen", "stdio://")...)
 	cmd.Dir, cmd.Env = dir, env
 	stdin, err := cmd.StdinPipe()
@@ -27,6 +27,10 @@ func checkManagedConfig(ctx context.Context, bin, dir string, env []string, plan
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("Codex policy preflight: %w", err)
 	}
+	// Closing both pipes unblocks the scanner even if a CLI wrapper leaves a
+	// child holding its stdout open after CommandContext kills the wrapper.
+	stop := context.AfterFunc(ctx, func() { _ = stdin.Close(); _ = stdout.Close() })
+	defer stop()
 	defer func() {
 		_ = stdin.Close()
 		_ = cmd.Wait()
@@ -53,6 +57,9 @@ func checkManagedConfig(ctx context.Context, bin, dir string, env []string, plan
 				return fmt.Errorf("Codex policy preflight %s did not return a usable result", method)
 			}
 			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		return fmt.Errorf("Codex policy preflight %s ended before verification", method)
 	}
@@ -94,24 +101,7 @@ func checkManagedConfig(ctx context.Context, bin, dir string, env []string, plan
 	if !bytes.Equal(requirements.Requirements, []byte("null")) {
 		return fmt.Errorf("Codex runner cannot verify tool isolation with managed requirements")
 	}
-	if plan {
-		var result struct {
-			Account *struct{ Type, PlanType string }
-		}
-		if err := call(4, "account/read", map[string]bool{"refreshToken": false}, &result); err != nil {
-			return err
-		}
-		if result.Account == nil || result.Account.Type != "chatgpt" {
-			return fmt.Errorf("Codex runner needs its own ChatGPT login: run witness auth codex (or set CODEX_API_KEY)")
-		}
-		switch result.Account.PlanType {
-		case "free", "go", "plus", "pro", "prolite", "promax":
-		default:
-			// A separate exec process can reload cloud settings. Only accept
-			// known personal plans that cannot receive managed cloud policy.
-			return fmt.Errorf("Codex runner cannot verify tool isolation for ChatGPT plan %q; managed and unknown plans are unsupported", result.Account.PlanType)
-		}
-	}
+
 	return nil
 }
 

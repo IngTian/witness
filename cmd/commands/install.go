@@ -606,11 +606,11 @@ func cmdInstall(args []string) error {
 			p, _ := platform.ByName(target)
 			if gate, ok := p.(platform.RunnerLoginGate); ok {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				ready = gate.ReadyToBind(ctx, st.LoadConfig().RuntimeRoot)
+				readyErr := gate.ReadyToBind(ctx, st.LoadConfig().RuntimeRoot)
 				cancel()
-				if !ready {
-					fmt.Println(resultRow(skipGlyph(), "runner", "unchanged", target+" needs its own login"))
-					fmt.Println(hint("sign in, then wire again", "witness auth "+target))
+				ready = readyErr == nil
+				if readyErr != nil {
+					fmt.Println(resultRow(skipGlyph(), "runner", "unchanged", readyErr.Error()))
 				}
 			}
 			if ready {

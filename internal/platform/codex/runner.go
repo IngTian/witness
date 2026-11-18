@@ -82,10 +82,33 @@ func FindBinary() (string, error) {
 }
 
 func resolveCLI(path string) (string, error) {
-	if runtime.GOOS != "windows" {
+	if runtime.GOOS == "windows" {
+		return resolveWindowsCLI(path, runtime.GOARCH)
+	}
+	return resolveUnixCLI(path, runtime.GOOS, runtime.GOARCH)
+}
+
+// Older Node versions launch a separate native child instead of replacing the
+// wrapper process. Run that child directly so a deadline stops Codex itself
+// before witness releases the login lock.
+func resolveUnixCLI(path, goos, arch string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(resolved) != "codex.js" {
 		return path, nil
 	}
-	return resolveWindowsCLI(path, runtime.GOARCH)
+	cpu, pkgArch := "x86_64", "x64"
+	if arch == "arm64" {
+		cpu, pkgArch = "aarch64", "arm64"
+	}
+	triple := cpu + "-unknown-linux-musl"
+	if goos == "darwin" {
+		triple = cpu + "-apple-darwin"
+	}
+	root := filepath.Dir(filepath.Dir(resolved))
+	return resolveVendorBinary(path, []string{root}, "codex-"+goos+"-"+pkgArch, triple, "codex")
 }
 
 // npm's Windows entry point is a .cmd shim, which os/exec cannot execute as a
@@ -101,19 +124,24 @@ func resolveWindowsCLI(path, arch string) (string, error) {
 		triple, pkgArch = "aarch64-pc-windows-msvc", "arm64"
 	}
 	dir := filepath.Dir(path)
-	for _, root := range []string{filepath.Join(dir, "node_modules", "@openai", "codex"), filepath.Join(dir, "..", "@openai", "codex")} {
+	roots := []string{filepath.Join(dir, "node_modules", "@openai", "codex"), filepath.Join(dir, "..", "@openai", "codex")}
+	return resolveVendorBinary(path, roots, "codex-win32-"+pkgArch, triple, "codex.exe")
+}
+
+func resolveVendorBinary(shim string, roots []string, pkg, triple, executable string) (string, error) {
+	for _, root := range roots {
 		for _, vendor := range []string{
-			filepath.Join(root, "node_modules", "@openai", "codex-win32-"+pkgArch, "vendor"),
-			filepath.Join(filepath.Dir(root), "codex-win32-"+pkgArch, "vendor"),
+			filepath.Join(root, "node_modules", "@openai", pkg, "vendor"),
+			filepath.Join(filepath.Dir(root), pkg, "vendor"),
 			filepath.Join(root, "vendor"),
 		} {
-			candidate := filepath.Join(vendor, triple, "bin", "codex.exe")
+			candidate := filepath.Join(vendor, triple, "bin", executable)
 			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
 				return candidate, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("cannot resolve Codex executable behind %s; set WITNESS_CODEX_BINARY to codex.exe", path)
+	return "", fmt.Errorf("cannot resolve Codex executable behind %s; set WITNESS_CODEX_BINARY to the native CLI", shim)
 }
 
 // childEnv has one credential override, CODEX_API_KEY. In particular a desktop
@@ -132,33 +160,53 @@ func childEnv(home string) []string {
 	return append(env, "CODEX_HOME="+home, "WITNESS_WORKER=1", "TZ=UTC")
 }
 
-func LoginReady(ctx context.Context, root string) bool {
+// LoginReady is bounded by wire's context. Report lock contention separately
+// so a healthy login is never mistaken for a missing credential.
+func LoginReady(ctx context.Context, root string) error {
 	if platform.ExternalRunnersDisabled() {
-		return false
+		return fmt.Errorf("codex runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
 	bin, err := FindBinary()
 	if err != nil {
-		return false
+		return err
 	}
 	unlock, err := loginLock(ctx, root)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return platform.ErrRunnerBusy
+	}
 	if err != nil {
-		return false
+		return err
 	}
 	defer unlock()
-	return checkLogin(ctx, bin, RunnerHome(root)) == nil
+	dir, err := scratchDir()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	env, err := runnerEnv(dir, root)
+	if err != nil {
+		return err
+	}
+	if err := checkVersion(ctx, bin, dir, env); err != nil {
+		return err
+	}
+	return checkLogin(ctx, bin, dir, env)
 }
 
-func checkLogin(ctx context.Context, bin, home string) error {
-	if strings.TrimSpace(os.Getenv("CODEX_API_KEY")) != "" {
-		return nil
+func checkLogin(ctx context.Context, bin, dir string, env []string) error {
+	for _, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "CODEX_API_KEY") && strings.TrimSpace(value) != "" {
+			return nil
+		}
 	}
 	cmd := commandContext(ctx, bin, "login", "status")
-	cmd.Env = childEnv(home)
+	cmd.Dir, cmd.Env = dir, env
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("Codex runner needs its own login: run witness auth codex (or set CODEX_API_KEY)")
+		return fmt.Errorf("Codex runner needs its own ChatGPT login: run witness auth codex (or set CODEX_API_KEY)")
 	}
 	return nil
 }
@@ -173,10 +221,10 @@ func loginLock(ctx context.Context, root string) (func(), error) {
 // Login signs in directly to witness's own home. No credential file is read or
 // copied from the coding account. The same lock covers login, catalog and exec.
 func Login(ctx context.Context, root string) error {
-	return loginCommand(ctx, root, "login", "--device-auth")
+	return loginCommand(ctx, root, false)
 }
 
-func loginCommand(ctx context.Context, root string, args ...string) error {
+func loginCommand(ctx context.Context, root string, logout bool) error {
 	if platform.ExternalRunnersDisabled() {
 		return fmt.Errorf("codex runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
@@ -196,18 +244,35 @@ func loginCommand(ctx context.Context, root string, args ...string) error {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return err
 	}
-	cmd := commandContext(ctx, bin, args...)
+	dir, err := scratchDir()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	var env []string
 	for _, v := range childEnv(home) {
 		if key, _, _ := strings.Cut(v, "="); !strings.EqualFold(key, "CODEX_API_KEY") {
-			cmd.Env = append(cmd.Env, v)
+			env = append(env, v)
 		}
 	}
+	args := []string{"logout"}
+	if !logout {
+		versionCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+		err := checkVersion(versionCtx, bin, dir, env)
+		cancel()
+		if err != nil {
+			return err
+		}
+		args = []string{"login", "--device-auth"}
+	}
+	cmd := commandContext(ctx, bin, args...)
+	cmd.Dir, cmd.Env = dir, env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
 func (r *runner) Open(ctx context.Context) error {
-	bin, err := r.validate(ctx, r.models)
+	bin, err := r.validate(ctx, r.models, false)
 	if err == nil {
 		r.binary = bin
 	}
@@ -215,13 +280,13 @@ func (r *runner) Open(ctx context.Context) error {
 }
 
 func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
-	_, err := r.validate(ctx, models)
+	_, err := r.validate(ctx, models, true)
 	return err
 }
 
 // Use the same checks in doctor and at Open. Run checks again under the lock,
 // since the CLI, managed configuration or login can change during a drain.
-func (r *runner) validate(ctx context.Context, models []string) (string, error) {
+func (r *runner) validate(ctx context.Context, models []string, diagnostic bool) (string, error) {
 	if platform.ExternalRunnersDisabled() {
 		return "", fmt.Errorf("codex runner disabled by %s", platform.DisableExternalRunnersEnv)
 	}
@@ -232,13 +297,25 @@ func (r *runner) validate(ctx context.Context, models []string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, preflightTimeout)
-	defer cancel()
-	unlock, err := loginLock(ctx, r.root)
+	lockCtx := ctx
+	if diagnostic {
+		var cancel context.CancelFunc
+		lockCtx, cancel = context.WithTimeout(ctx, 250*time.Millisecond)
+		defer cancel()
+	}
+	unlock, err := loginLock(lockCtx, r.root)
+	if errors.Is(err, context.DeadlineExceeded) {
+		if diagnostic {
+			return "", platform.ErrRunnerBusy
+		}
+		return "", fmt.Errorf("waiting for Codex login lock: %v", err)
+	}
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
+	preflightCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
 	dir, err := scratchDir()
 	if err != nil {
 		return "", err
@@ -248,9 +325,9 @@ func (r *runner) validate(ctx context.Context, models []string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	raw, err := prepareCatalog(ctx, bin, dir, env, r.plan)
+	raw, err := prepareCatalog(preflightCtx, bin, dir, env)
 	if err != nil {
-		return "", err
+		return "", preflightError(ctx, err)
 	}
 	_, err = stripCatalog(raw, models...)
 	return bin, err
@@ -270,17 +347,30 @@ func validateModelNames(models ...string) error {
 }
 
 func checkVersion(ctx context.Context, bin, dir string, env []string) error {
-	cmd := commandContext(ctx, bin, "--version")
-	cmd.Dir, cmd.Env = dir, env
-	v, err := cmd.Output()
+	version, err := cliVersion(ctx, bin, dir, env)
 	if err != nil {
-		return childError(ctx, "version", err, "")
+		return err
 	}
-	version := strings.TrimSpace(strings.TrimPrefix(string(v), "codex-cli "))
-	if version != testedVersion && version != testedDesktopVersion {
+	if !supportsVersion(version) {
 		return fmt.Errorf("Codex CLI %s has no verified tool-free contract; install %s or %s and point WITNESS_CODEX_BINARY at it", version, testedVersion, testedDesktopVersion)
 	}
 	return nil
+}
+
+// Contract tests can exercise the newest CLI without admitting its version in production.
+var supportsVersion = func(version string) bool {
+	return version == testedVersion || version == testedDesktopVersion
+}
+
+func cliVersion(ctx context.Context, bin, dir string, env []string) (string, error) {
+	cmd := commandContext(ctx, bin, "--version")
+	cmd.Dir, cmd.Env = dir, env
+	cmd.WaitDelay = time.Second
+	v, err := cmd.Output()
+	if err != nil {
+		return "", childError(ctx, "version", err, "")
+	}
+	return strings.TrimSpace(strings.TrimPrefix(string(v), "codex-cli ")), nil
 }
 
 func scratchDir() (string, error) {
@@ -316,15 +406,19 @@ func runnerEnv(dir, root string) ([]string, error) {
 	return childEnv(home), nil
 }
 
-func prepareCatalog(ctx context.Context, bin, dir string, env []string, plan bool) ([]byte, error) {
+func prepareCatalog(ctx context.Context, bin, dir string, env []string) ([]byte, error) {
 	if err := checkVersion(ctx, bin, dir, env); err != nil {
 		return nil, err
 	}
-	if err := checkManagedConfig(ctx, bin, dir, env, plan); err != nil {
+	if err := checkManagedConfig(ctx, bin, dir, env); err != nil {
+		return nil, err
+	}
+	if err := checkLogin(ctx, bin, dir, env); err != nil {
 		return nil, err
 	}
 	cmd := commandContext(ctx, bin, append(isolationArgs(), "debug", "models")...)
 	cmd.Env, cmd.Dir = env, dir
+	cmd.WaitDelay = time.Second
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
@@ -422,14 +516,10 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 		return "", err
 	}
 	preflightCtx, stop := context.WithTimeout(ctx, preflightTimeout)
-	raw, err := prepareCatalog(preflightCtx, r.binary, dir, env, r.plan)
+	raw, err := prepareCatalog(preflightCtx, r.binary, dir, env)
 	stop()
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		// A failed preflight sent no generation request and must not narrow the drain.
-		return "", fmt.Errorf("Codex preflight: %v", err)
+		return "", preflightError(ctx, err)
 	}
 	cwd := filepath.Join(dir, "cwd")
 	if err := os.Mkdir(cwd, 0700); err != nil {
@@ -452,6 +542,7 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 	defer cancel()
 	cmd := commandContext(callCtx, r.binary, args...)
 	cmd.Env, cmd.Dir, cmd.Stdin = env, cwd, strings.NewReader(input)
+	cmd.WaitDelay = time.Second
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	err = cmd.Run()
@@ -480,6 +571,14 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 		return "", childError(callCtx, "exec", err, stderr.String())
 	}
 	return answer, nil
+}
+
+// A failed preflight sent no generation request and must not narrow the drain.
+func preflightError(ctx context.Context, err error) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx.Err()
+	}
+	return fmt.Errorf("Codex preflight: %v", err)
 }
 
 func childError(ctx context.Context, stage string, err error, stderr string) error {

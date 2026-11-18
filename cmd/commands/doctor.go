@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -95,8 +96,12 @@ func cmdDoctor(asJSON bool) error {
 		// is a no-op, so a bogus-for-claude model isn't machine-catchable — it shows in
 		// `lens show` and surfaces at runtime via backoff.)
 		if err := validateRuntimeModels(context.Background(), st, cfg); err != nil {
-			modelStatus = "INVALID: " + err.Error()
-			deferredErr = err
+			if errors.Is(err, platform.ErrRunnerBusy) {
+				modelStatus = "BUSY: " + err.Error()
+			} else {
+				modelStatus = "INVALID: " + err.Error()
+				deferredErr = err
+			}
 		} else {
 			modelStatus = "OK"
 		}
@@ -271,6 +276,8 @@ func cmdDoctor(asJSON bool) error {
 	if cause, bad := strings.CutPrefix(modelStatus, "INVALID: "); bad {
 		row("models", badGlyph()+" "+red("invalid"), "")
 		because(cause)
+	} else if busy, found := strings.CutPrefix(modelStatus, "BUSY: "); found {
+		row("models", warnGlyph()+" "+busy, "validation deferred")
 	} else if modelStatus != "OK" || strings.TrimSpace(cfg.TriageModel) != "" || strings.TrimSpace(cfg.DistillModel) != "" {
 		row("models", okGlyph()+" "+modelStatus, "")
 	}
