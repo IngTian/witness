@@ -52,8 +52,9 @@ history from before you wired it (`witness import --agent codex`).
   both prompts in full).
 - `witness lens try <file|lens-name>` — preview a lens's extract prompt on real sessions without
   writing anything; `--review` also previews the facets its review prompt would produce.
-- `witness lens backfill <name> [--fresh]` — re-mine one lens over the whole history and refresh its
-  facets; `--fresh` first drops the lens's observations + facets (for a changed prompt).
+- `witness lens backfill <name> [--fresh]` — mine one lens over every session it has not mined yet
+  and refresh its facets; `--fresh` first drops the lens's observations + facets and re-mines the
+  whole history (for a changed prompt).
 - `witness lens load-default` — re-seed / restore the built-in "default" person-growth lens (it is
   auto-seeded once on first use and fully deletable, so this is how you bring it back).
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
@@ -163,8 +164,8 @@ lines, each naming a registered lens that runs on every session:
 lens = math
 ```
 
-Raw transcripts are kept for good: `lens backfill` and `lens try` re-mine from them, so there is
-no retention setting and no prune command.
+Raw transcripts are kept for good: `lens backfill --fresh` and `lens try` re-mine from them, so
+there is no retention setting and no prune command.
 
 ---
 

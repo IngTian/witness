@@ -34,13 +34,13 @@ When it behaves, register and enable it:
 ```sh
 witness lens register regime ./regime    # copies the definition into your store
 witness lens enable regime               # starts running it on every new session
-witness lens backfill regime             # optional: re-mine your whole history through it
+witness lens backfill regime             # optional: mine your history through it now, in the foreground
 ```
 
 `register` stores a **copy**, so editing `./regime` afterwards changes nothing until you
-re-register. `enable` is a separate switch. A newly enabled lens mines all sessions without a
-progress row for it — which is your whole history if it's the first time. `backfill` is for
-re-mining sessions a lens already saw.
+re-register. `enable` is a separate switch. `backfill` does that catch-up now and then reviews;
+it never re-mines what the lens already mined. After editing a registered lens's prompt, or
+re-registering an old lens name, re-register and run `backfill --fresh`.
 
 ## The three files
 

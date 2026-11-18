@@ -412,10 +412,9 @@ func (r *Reviewer) logEvent(f *store.Facet, kind string, from float64, nowStr st
 // knownClock is the decay clock a version should carry after an assertion at seq, given the
 // clock it (or the version it supersedes) already had.
 //
-// An assertion never moves the clock BACKWARDS: an early window, or a non-fresh `lens backfill`
-// refolding from seq 0, re-reads observations older than the facet's last confirmation, and
-// stamping that lower seq would make DecayedConfidence charge the facet for observations it had
-// already been confirmed past.
+// An assertion never moves the clock BACKWARDS: an early window re-reads observations older than
+// the facet's last confirmation, and stamping that lower seq would make DecayedConfidence charge
+// the facet for observations it had already been confirmed past.
 func knownClock(seq, prior int64) int64 {
 	return max(seq, prior)
 }

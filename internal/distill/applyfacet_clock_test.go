@@ -31,10 +31,10 @@ func TestApplyFacetClockStillRestartsOnARealSeq(t *testing.T) {
 	}
 }
 
-// A real seq LOWER than the facet's clock must not rewind it. An early window of a long fold, or a
-// non-fresh `lens backfill` refolding from seq 0, re-reads observations older than the facet's
-// last confirmation; stamping that seq made DecayedConfidence charge the facet for every
-// observation since, decaying it far below what the archive actually believed.
+// A real seq LOWER than the facet's clock must not rewind it. An early window of a long fold
+// re-reads observations older than the facet's last confirmation; stamping that seq made
+// DecayedConfidence charge the facet for every observation since, decaying it far below what
+// the archive actually believed.
 func TestApplyFacetClockNeverMovesBackwards(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

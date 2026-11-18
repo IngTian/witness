@@ -316,9 +316,10 @@ func (q *queue) LensBackedOff(session, lens string, now time.Time) bool {
 }
 
 // ResetLensWatermark drops every progress row for one lens, so all sessions read
-// as pending FOR THAT LENS on the next drain — the enable-a-new-lens backfill path
-// (issue #55). Other lenses' watermarks (rows with a different lens) are untouched,
-// so `default` is never re-mined. Returns rows removed.
+// as pending FOR THAT LENS on the next drain — the `lens backfill --fresh` path
+// (issue #55). A new lens needs no reset: candidatesCTE's LEFT JOIN progress reads
+// a missing row as 0. Other lenses' watermarks (rows with a different lens) are
+// untouched, so `default` is never re-mined. Returns rows removed.
 func (q *queue) ResetLensWatermark(lens string) (int, error) {
 	res, err := q.db.Exec(`DELETE FROM progress WHERE lens = ?`, lens)
 	if err != nil {

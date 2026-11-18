@@ -209,9 +209,9 @@ func cmdDistillBackfill(quiet bool, sinceValue, untilValue string, waitBackoffs 
 // --wait-backoffs`; `witness worker run` has no --all, so following the hint failed as well.
 //
 // backfill names the lens of an unfinished `lens backfill` ("" for the backlog). Its recovery is
-// two steps, never "re-run the backfill" (that resets the watermark and re-mines what already
-// finished): finish the drain, then review — the backfill returned before its review, and after
-// --fresh the lens has no facets at all.
+// two steps, never "re-run the backfill" (it repeats the drain that just stopped short, and with
+// --fresh it deletes everything again): finish the drain, then review — the backfill returned
+// before its review, and after --fresh the lens has no facets at all.
 func backlogUnfinished(backfill string, pending, backedOff int, waited bool, cause string) error {
 	var parts []string
 	if backedOff > 0 {
