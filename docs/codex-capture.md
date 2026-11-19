@@ -17,7 +17,7 @@ witness import --agent codex --session <session-id>
 witness import --agent codex --no-kick
 ```
 
-PowerShell users can invoke `./bin/witness.exe` from a built checkout. No shell
+PowerShell users can invoke `.\bin\witness-windows-amd64.exe` (or `-arm64.exe`) from a built checkout, or the installed `witness.exe`. No shell
 installer or embedding model is needed for capture with `--no-kick`.
 
 The home directory resolves as `WITNESS_CODEX_HOME`, then `CODEX_HOME`, then

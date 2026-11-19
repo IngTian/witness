@@ -28,8 +28,8 @@ claude` writes **exec-form hooks** (`{command: witness.exe, args: [...]}`) into
 `wire opencode` bakes the installed `witness.exe` path into the plugin and the MCP
 entry. Codex runs its hooks through PowerShell, so `wire codex` writes `commandWindows` entries (`& '…\witness.exe' …`) into Codex's `hooks.json`. None of the three needs Git Bash.
 
-To remove an editor integration: `witness.exe unwire claude` / `unwire opencode` / `unwire codex`
-(strips the hooks/plugin + MCP entry). The copied files and PATH entry are left in
+To remove an editor integration: `witness.exe unwire claude` (strips hooks), `unwire opencode`
+(strips plugin + MCP entry), or `unwire codex` (strips hooks). The copied files and PATH entry are left in
 place, since another integration may still be using them.
 
 ### OpenCode on Windows

@@ -140,7 +140,7 @@ OpenCode users can install from npm instead: `npm i -g @witness-ai/opencode` —
 
 ## Connect your tools
 
-witness captures from four sources at once. Your coding agents all feed one archive and one set of lenses, with sessions namespaced per source so none can corrupt another's data. A corpus that is not about you (articles, market notes, a knowledge base) goes in its own archive: `witness install --path <dir>`, then `WITNESS_HOME=<dir> witness ingest --file records.ndjson`.
+witness captures from four sources at once. Your coding agents all feed one archive and one set of lenses, with sessions namespaced per source so none can corrupt another's data. A corpus that is not about you (articles, market notes, a knowledge base) goes in its own archive: `witness install --path <dir>`, then register a lens (`witness install --path` prints the steps), then `WITNESS_HOME=<dir> witness ingest --file records.ndjson`.
 
 | source | setup |
 |---|---|
