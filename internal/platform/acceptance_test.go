@@ -218,7 +218,7 @@ func stripComment(line string) string {
 // agree.
 //
 // Before this, `witness config set runner` validated against a hardcoded
-// {RunnerClaude, RunnerOpenCode} pair while `witness wire <target>` → bindRunner wrote the same
+// {RunnerClaude, RunnerOpenCode} pair while `witness wire <target>` → chooseRunner wrote the same
 // key with NO validation. Two writers of one value, disagreeing — and a closed set of platform names
 // in a system that is otherwise uniformly registry-driven, so a third runtime would be rejected by
 // one path and silently accepted by the other.

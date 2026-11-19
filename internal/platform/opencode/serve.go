@@ -142,7 +142,7 @@ func buildServeCmd(ctx context.Context, runtimeRoot, dir, password string, allow
 	if !allowFree {
 		env = append(env, "OPENCODE_DISABLE_FREE_MODELS=1")
 	}
-	cmd.Env = replaceEnv(cmd.Env, env)
+	cmd.Env = append(cmd.Env, env...)
 	cmd.WaitDelay = serveCloseGrace
 	return cmd
 }

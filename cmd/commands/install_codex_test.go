@@ -573,7 +573,7 @@ func registerFakeCaptureOnlyEditor(t *testing.T, name string, called *bool) {
 // Wiring a capture-only venue must NOT bind it as the distillation runner.
 //
 // AGENTS.md: "A capture source need not provide a distillation runner." Codex is the
-// first one that does not, and bindRunner used to run unconditionally. SetRunner does no
+// first one that does not, and the runner binding used to run unconditionally. SetRunner does no
 // validation, so it would have written `runner = codex` into config.toml — a value
 // RunnerForName cannot resolve, which fails every subsequent drain and silently stops
 // the archive distilling. Strictly worse than leaving the runner alone.

@@ -374,7 +374,6 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 
 	// Partition incoming records: skip (identical key), update (same id, changed key), append (new id;
 	// or take over a row of its text, below).
-	// We also track which old indices are touched by updates, so we know what to preserve.
 	type updateOp struct {
 		oldIdx    int
 		newRecIdx int
@@ -387,7 +386,6 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 	}
 	var updates []updateOp
 	var appends []int // indices in s.Records/Keys/IDs
-	updatedIndices := make(map[int]bool)
 
 	// Keys already stored, for the no-id dedup below. A key is "<id>:<hash>" or, with no id,
 	// "h:<hash>" — so for a no-id record the key IS the content identity.
@@ -450,7 +448,6 @@ func applyIngestSession(st *store.Store, s ingestSession) (int, error) {
 			}
 			// Update: same id, but key changed (text edited).
 			updates = append(updates, updateOp{old.idx, i, old.key, key})
-			updatedIndices[old.idx] = true
 		} else if ck := recordKey("", s.Records[i].Text); len(byContent[ck]) > 0 {
 			// Take over: the row holds this record already, now under its id.
 			oldKeys[byContent[ck][0]], tookOver = key, true

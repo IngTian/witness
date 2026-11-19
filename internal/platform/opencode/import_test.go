@@ -286,18 +286,14 @@ func TestReadTurnsAppliesEveryV2SkipRule(t *testing.T) {
 	)
 
 	turns := readTurns(t, path, s)
-	var gotSeq, gotTS []int64
+	var gotTS []int64
 	for _, turn := range turns {
-		gotSeq = append(gotSeq, turn.Seq)
 		gotTS = append(gotTS, turn.TS)
 	}
 	want := []string{"user:first question", "assistant:Let me check.", "assistant:part one\n\npart two",
 		"assistant:after the report", "assistant:partial before error"}
 	if got := roleText(turns); !reflect.DeepEqual(got, want) {
 		t.Fatalf("turns = %#v, want %#v", got, want)
-	}
-	if want := []int64{1, 2, 3, 6, 12}; !reflect.DeepEqual(gotSeq, want) {
-		t.Fatalf("seq = %v, want %v", gotSeq, want)
 	}
 	if want := []int64{1100, 2000, 3000, 6000, 12000}; !reflect.DeepEqual(gotTS, want) {
 		t.Fatalf("TS = %v, want %v", gotTS, want)

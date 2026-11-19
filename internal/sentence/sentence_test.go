@@ -59,6 +59,11 @@ func TestSplitSentences(t *testing.T) {
 			[]string{},
 		},
 		{
+			"trailing whitespace after the last sentence",
+			"One two. **",
+			[]string{"One two."},
+		},
+		{
 			"whitespace only",
 			"  \n\t  ",
 			[]string{},

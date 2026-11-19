@@ -49,13 +49,13 @@ type openedRunner struct {
 // Each runner is minted with a cfg carrying the models that runtime should VALIDATE at Open:
 // the union of every model its lenses will ask it for, computed by runtimeModels. This was
 // NOT IMPLEMENTED in #148 (the comment claimed it but nothing computed a union), and deliberately
-// left out — but Task 2.7 reversed that decision because two things need it:
-//  1. On the OpenCode runner, an empty stage model is an error at Open (spec §7.7), so the
+// left out — but #232 (OpenCode v2, #218) reversed that decision because two things need it:
+//  1. On the OpenCode runner, an empty stage model is an error at Open, so the
 //     union must include "" when a cross-runtime lens has no per-lens model.
 //  2. OPENCODE_DISABLE_FREE_MODELS=1 unless an opencode/* model is configured, which requires
 //     knowing whether ANY lens will use a free model.
 //
-// The plumbing (store.Config.RunnerModels, a slice) already existed; this task fills it.
+// The plumbing (store.Config.RunnerModels, a slice) already existed; runtimeModels fills it.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
 	// Every model call opens through here (worker, review, compact + claims, profile regeneration),
 	// so this is the one place to refuse an archive a newer witness wrote — before a call is paid
@@ -76,7 +76,7 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 	needed[rs.defaultR] = true
 
 	for name := range needed {
-		rs.openRuntime(ctx, st, name)
+		rs.openRuntime(ctx, name)
 	}
 	// Fail closed if the default runner is broken — it's the one runtime the drain can't
 	// proceed without (every lens with no runner of its own + the unified summary ride it), and this
@@ -100,15 +100,8 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 // openRuntime mints + Opens one runtime, recording either its MineFunc or a broken marker.
 // The cfg it mints with carries the union of models this runtime should validate at Open —
 // every model its lenses will ask it for, computed by runtimeModels.
-// st is currently UNREAD here, and that is a deliberate keep rather than an oversight: openRuntime
-// resolves via platform.RunnerForName (name + cfg) because cfg.Runner was already resolved through
-// the store's precedence ladder once, by the caller. Any per-runtime resolution that needs the store
-// lands here. Dropping it would touch six call sites to save one parameter — unlike the lenses
-// parameter removed in #148, which advertised a model UNION that was never computed.
-func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name string) {
+func (rs *runnerSet) openRuntime(ctx context.Context, name string) {
 	rcfg := rs.cfg
-	rcfg.Runner = name
-	clearCrossRuntimeModels(&rcfg, name, rs.defaultR)
 	rcfg.RunnerModels = runtimeModels(rs.cfg, rs.lenses, name)
 
 	runner, err := platform.RunnerForName(name, rcfg)
@@ -172,11 +165,12 @@ func (e *runnerDownError) Error() string {
 	return "runner " + e.name + " is unavailable this drain (open failed)"
 }
 
-// clearCrossRuntimeModels blanks the configured default stage models when minting a runner for a
-// NON-default runtime, because a model name is only valid on its own runtime: passing the
-// Claude-side default to an OpenCode runner would make its Open-time validation reject a name that
-// was never meant for it. The runner then falls back to its own default, and per-lens models are
-// supplied per call.
+// clearCrossRuntimeModels blanks the configured default stage models when `lens try` previews a
+// lens on a NON-default runtime, because a model name is only valid on its own runtime: the
+// preview's cfg.Runner becomes the lens's runner, so distill.ModelFor would otherwise hand that
+// runtime the default runtime's model. The preview then rides the lens's own models or the
+// runtime's default. (The drain keeps cfg.Runner the default, where ModelFor already returns ""
+// for a cross-runtime lens.)
 func clearCrossRuntimeModels(rcfg *store.Config, name, defaultRunner string) {
 	if strings.TrimSpace(name) == strings.TrimSpace(defaultRunner) {
 		return // keep the configured default models; they belong to this runtime

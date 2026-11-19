@@ -9,7 +9,7 @@
 //     each portrait sentence back to the facets it rests on.
 //
 // Every model call goes through a MineFunc. The runners behind it (`claude -p`, `opencode
-// serve`) live in internal/platform/*; this file holds the reply parsing they all share.
+// serve`, `codex exec`) live in internal/platform/*; this file holds the reply parsing they all share.
 package distill
 
 import (
@@ -23,8 +23,8 @@ import (
 // emitting the required array), as distinct from an explicit empty "[]" (a legit quiet
 // result, returned as an empty slice). Exported + a sentinel so callers can classify it
 // with errors.Is and surface actionable "the model may be too weak" guidance rather
-// than a generic parse error. (mine() wraps this into its own errNoArray for the
-// per-lens drift bookkeeping; the reviewer/preview paths match ErrNoJSONArray directly.)
+// than a generic parse error. (mine() wraps it with the lens name for the per-lens drift
+// bookkeeping; every path matches ErrNoJSONArray with errors.Is.)
 var ErrNoJSONArray = errors.New("no JSON array found in reply")
 
 // ErrTruncatedJSONArray is returned when the reply clearly BEGAN the required array but

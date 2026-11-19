@@ -404,7 +404,7 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // when that runner differs from the resolved default. Those models belong to the default
 // runtime; on a different runtime they are a bad model name that would abort OpenCode's
 // Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
-// runtime's own default, through the same clearCrossRuntimeModels the drain's runnerSet uses.
+// runtime's own default, through clearCrossRuntimeModels.
 // cfg.Runner must already be the RESOLVED default runner, and the result's cfg.Runner is final:
 // mint it by name (RunnerForName), never through the store's precedence ladder again, which
 // would let an unbound store's WITNESS_RUNNER override the lens (F030). Pure (returns a
