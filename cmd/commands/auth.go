@@ -9,7 +9,7 @@ import (
 )
 
 func newAuthCmd() *cobra.Command {
-	c := &cobra.Command{Use: "auth", Short: "Sign in a distillation runner.", GroupID: groupSetup}
+	c := &cobra.Command{Use: "auth", Short: "Sign in a distillation runner.", GroupID: groupSetup, RunE: groupRunE}
 	for _, name := range platform.RunnerNames() {
 		p, _ := platform.ByName(name)
 		auth, ok := p.(platform.RunnerAuthenticator)

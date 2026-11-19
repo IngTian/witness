@@ -26,7 +26,7 @@ func newModelCmd() *cobra.Command {
 		Use:     "model",
 		GroupID: groupSetup,
 		Short:   "Download the local embedding model.",
-		Args:    cobra.NoArgs,
+		RunE:    groupRunE,
 	}
 	c.AddCommand(&cobra.Command{
 		Use:   "fetch",

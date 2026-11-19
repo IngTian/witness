@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -632,4 +633,46 @@ func TestLoginAndReadinessRejectUnverifiedCLI(t *testing.T) {
 	}
 	checkPreflightError(t, LoginReady(context.Background(), r.root), "no verified tool-free contract")
 	checkPreflightError(t, Login(context.Background(), r.root), "no verified tool-free contract")
+}
+
+func TestTestedVersionsMatchTheContractMatrixAndTheDocs(t *testing.T) {
+	// Extract versions from codex-contract.yml
+	ymlPath := filepath.Join("..", "..", "..", ".github", "workflows", "codex-contract.yml")
+	ymlData, err := os.ReadFile(ymlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matrixPattern := regexp.MustCompile(`\|\| '(\[[^']*\])'`)
+	matches := matrixPattern.FindSubmatch(ymlData)
+	if len(matches) != 2 {
+		t.Fatalf("codex-contract.yml matrix pattern not found or matched multiple times")
+	}
+	var ci []string
+	if err := json.Unmarshal(matches[1], &ci); err != nil {
+		t.Fatalf("unmarshal contract matrix: %v", err)
+	}
+
+	// Extract versions from docs/codex-runner.md
+	docsPath := filepath.Join("..", "..", "..", "docs", "codex-runner.md")
+	docsData, err := os.ReadFile(docsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionPattern := regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	versionMatches := versionPattern.FindAllSubmatch(docsData, -1)
+	var docs []string
+	for _, match := range versionMatches {
+		version := string(match[1])
+		// Only include version numbers (contains dots and digits)
+		if strings.Contains(version, ".") && regexp.MustCompile(`\d`).MatchString(version) {
+			docs = append(docs, version)
+		}
+	}
+
+	if !slices.Equal(ci, testedVersions) {
+		t.Errorf("codex-contract.yml pins %q, runner.go %q", ci, testedVersions)
+	}
+	if !slices.Equal(docs, testedVersions) {
+		t.Errorf("docs/codex-runner.md lists %q, runner.go %q", docs, testedVersions)
+	}
 }
