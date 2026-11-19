@@ -56,7 +56,6 @@ type Turn struct {
 	MessageID string
 	Role      string
 	Text      string
-	Seq       int64
 	TS        int64 // message time_created ms
 }
 
@@ -413,20 +412,20 @@ func ReadTurns(ctx context.Context, db *sql.DB, sessionID string) ([]Turn, error
 
 	var out []Turn
 	var curID, curRole string
-	var curSeq, curTS int64
+	var curTS int64
 	var cur strings.Builder
 	flush := func() {
 		text := strings.TrimSpace(cur.String())
 		if curID != "" && text != "" {
-			out = append(out, Turn{MessageID: curID, Role: curRole, Text: text, Seq: curSeq, TS: curTS})
+			out = append(out, Turn{MessageID: curID, Role: curRole, Text: text, TS: curTS})
 		}
-		curID, curRole, curSeq, curTS = "", "", 0, 0
+		curID, curRole, curTS = "", "", 0
 		cur.Reset()
 	}
 
 	for rows.Next() {
 		var msgID, role, text string
-		var seq, ts, completed sql.NullInt64
+		var seq, ts, completed sql.NullInt64 // seq is read only to fill its column; ORDER BY 2 sorts on it
 		var src, ord int64
 		if err := rows.Scan(&msgID, &seq, &role, &ts, &completed, &src, &ord, &text); err != nil {
 			return nil, err
@@ -441,7 +440,7 @@ func ReadTurns(ctx context.Context, db *sql.DB, sessionID string) ([]Turn, error
 		}
 		if curID != msgID {
 			flush()
-			curID, curRole, curSeq, curTS = msgID, role, seq.Int64, ts.Int64
+			curID, curRole, curTS = msgID, role, ts.Int64
 		}
 		if cur.Len() > 0 {
 			cur.WriteString("\n\n")

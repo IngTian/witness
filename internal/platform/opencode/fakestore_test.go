@@ -15,9 +15,8 @@ type fakeImportStore struct {
 	meta     map[string]string
 	rawCount map[string]int
 
-	imports  []fakeImportCall
-	stamped  map[string]string
-	lockHeld bool
+	imports []fakeImportCall
+	stamped map[string]string
 }
 
 type fakeImportCall struct {
@@ -44,11 +43,8 @@ func (f *fakeImportStore) SetMetaString(key, value string) error {
 func (f *fakeImportStore) SetSessionPlatform(session, platform string) {
 	f.stamped[session] = platform
 }
-func (f *fakeImportStore) ImportLock(name string) (func(), bool) {
-	f.lockHeld = true
-	return func() { f.lockHeld = false }, true
-}
-func (f *fakeImportStore) RawCount(session string) int { return f.rawCount[session] }
+func (f *fakeImportStore) ImportLock(string) (func(), bool) { return func() {}, true }
+func (f *fakeImportStore) RawCount(session string) int      { return f.rawCount[session] }
 func (f *fakeImportStore) ApplyRawImport(meta store.SessionMeta, records []store.RawRecord, stateKey, stateValue string, replace bool) error {
 	f.imports = append(f.imports, fakeImportCall{meta, records, stateKey, stateValue, replace})
 	f.rawCount[meta.Session] += len(records) // reflect the write so a re-import sees it

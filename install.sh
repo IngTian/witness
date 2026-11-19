@@ -102,10 +102,10 @@ printf '\n%s%s✓ Installed.%s\n' "$G" "$B" "$X"
 printf '  %switness doctor%s   %s# verify (or: %s doctor)%s\n' "$B" "$X" "$D" "$BIN" "$X"
 case "$TARGET" in
   claude)   printf '  %sthen restart Claude Code (or open /hooks) so the hooks load%s\n\n' "$D" "$X" ;;
-  opencode) printf '  %sthen restart OpenCode so the plugin and MCP server load%s\n\n' "$D" "$X" ;;
+  opencode) printf '  %sOpenCode picks up the plugin and MCP server live — no restart needed%s\n\n' "$D" "$X" ;;
   codex)
-    # Restated here deliberately, the way the claude/opencode arms restate "restart your
-    # editor": four steps of build output scroll past, and this is where people look. Both
+    # Restated here deliberately, the way the claude arm restates its restart step: four
+    # steps of build output scroll past, and this is where people look. Both
     # need attention — unapproved Codex hooks never run, and an unset runner means
     # capture works while nothing is ever distilled.
     printf '  %sREQUIRED: approve the hooks with%s %s/hooks%s %sin Codex — inert until you do%s\n' "$Y" "$X" "$B" "$X" "$Y" "$X"

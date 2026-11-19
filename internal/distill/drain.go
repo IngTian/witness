@@ -51,9 +51,8 @@ func EffectiveConcurrency(want int) int {
 // DrainOpts configures a drain. pending reports the currently-distillable sessions
 // (re-consulted so mid-drain arrivals are picked up); stop reports a graceful-stop
 // request (checked before dispatching each new session, and by a miner whose call
-// failed, so it must be safe to call from any goroutine); max caps the number of
-// sessions committed (<=0 = unbounded); onCommit is called just before each
-// session's results are committed (e.g. to stamp worker_current).
+// failed, so it must be safe to call from any goroutine); onCommit is called just
+// before each session's results are committed (e.g. to stamp worker_current).
 //
 // Attempted, if non-nil, is the attempt-once set to use instead of a fresh internal
 // one. The caller passes the SAME map across several Drain calls in one worker run
@@ -79,14 +78,13 @@ func EffectiveConcurrency(want int) int {
 // backed-off or quiet session is finished work. The unit is SESSIONS, not model calls: a
 // session's chunk count is only known once its transcript is read, so a call total could not be
 // known up front, and "312 sessions" is what a backfill means to the person waiting on it. The
-// total is the sessions each scan committed to attempt (a Max cap included); a re-scan that finds
+// total is the sessions each scan committed to attempt; a re-scan that finds
 // sessions captured mid-drain adds them, so the stage is Open. Called only from the Drain
 // goroutine (never from a miner), with Where left empty for the caller to name. nil is silent.
 type DrainOpts struct {
 	Conc      int
 	Pending   func() []string
 	Stop      func() bool
-	Max       int
 	OnCommit  func(session string)
 	Attempted map[string]bool
 	Sized     func(session string) int
@@ -140,7 +138,7 @@ func (w *Worker) HasUnattempted(sessions []string, attempted map[string]bool) bo
 
 // Drain is the engine's session-drain loop. Its contract: every pending job attempted at
 // most once per drain, jobs arriving mid-drain picked up on the next scan, terminates even
-// if a job stays pending, optional budget cap. It splits each session into a parallel
+// if a job stays pending. It splits each session into a parallel
 // MAP (MineSession, the expensive LLM calls, up to Conc at once) and a serial REDUCE
 // (CommitMining, the sole L1 writer). Invariants that make the parallelism safe:
 //
@@ -167,7 +165,6 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 	// A cancelled ctx (Ctrl-C, a SIGTERM) is a stop too: without it every remaining pending session
 	// went to an instant, interrupted mine.
 	stop := func() bool { return ctx.Err() != nil || (opts.Stop != nil && opts.Stop()) }
-	reached := func(claimed int) bool { return opts.Max > 0 && claimed >= opts.Max }
 
 	// Input-size admission (issue #56 B2). sized(session) estimates the pending-input
 	// chars a miner will hold; maxChars is the total in-flight budget. Defaults keep the
@@ -208,11 +205,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		if len(batch) == 0 {
 			return processed
 		}
-		if opts.Max > 0 {
-			queued += max(0, min(len(batch), opts.Max-processed)) // a capped run must not stall short
-		} else {
-			queued += len(batch)
-		}
+		queued += len(batch)
 		tick(processed)
 
 		// A TRUE rolling window. Up to `conc` miners run at once; a
@@ -221,9 +214,9 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 		// #22 review #3). Commits happen as each map finishes (commit-as-ready, issue
 		// #56 B3) — no slow head stalls finished followers. Only the single Drain
 		// goroutine commits, so the store stays single-writer.
-		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, attempted, stop, reached, processed, opts.OnCommit, tick)
+		processed += w.drainWindow(ctx, batch, conc, maxChars, sized, attempted, stop, processed, opts.OnCommit, tick)
 
-		if stop() || reached(processed) {
+		if stop() {
 			return processed
 		}
 		// else loop and re-scan pending for arrivals.
@@ -241,7 +234,7 @@ func (w *Worker) Drain(ctx context.Context, opts DrainOpts) int {
 // The char accounting is mutated only by this single dispatcher goroutine (add at
 // dispatch, subtract on reap), so it stays lock-free and race-free like the rest of
 // the reducer.
-func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, attempted map[string]bool, stop func() bool, reached func(int) bool, processedBase int, onCommit func(string), tick func(done int)) int {
+func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars int, sized func(string) int, attempted map[string]bool, stop func() bool, processedBase int, onCommit func(string), tick func(done int)) int {
 	type minedResult struct {
 		idx int // submission index, for char-budget accounting
 		m   *SessionMining
@@ -282,7 +275,7 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 	// #56 B3). The old code buffered results and committed only a contiguous prefix from
 	// a submission index, so one slow session at the head stalled the commit of every
 	// finished session behind it (head-of-line blocking): `witness status` understated
-	// progress and a --max/interrupted backfill committed fewer than it mined. Only the
+	// progress and an interrupted backfill committed fewer than it mined. Only the
 	// single Drain goroutine calls reap, so committing here keeps the store single-writer
 	// exactly as before — we drop only the ORDER, not the serialization. Nothing a commit
 	// writes depends on which session committed first (obsIDs are per-session).
@@ -326,8 +319,8 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 
 	dispatched := 0
 	for _, s := range batch {
-		// Budget/stop: don't launch more than allowed committed-or-in-flight.
-		if stop() || reached(processedBase+dispatched) {
+		// Stop: launch nothing more.
+		if stop() {
 			break
 		}
 		size := sized(s)
@@ -361,8 +354,7 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 		}
 		// A stop landing during the waits (`worker stop`, or ctx cancel, which `stop()` includes)
 		// would else dispatch one more session, since the top-of-loop check already passed;
-		// `attempted` is marked only past this check (a held-back session was never attempted);
-		// `reached()` needs no re-check (`dispatched` is unchanged during the waits).
+		// `attempted` is marked only past this check (a held-back session was never attempted).
 		if stop() {
 			<-sem // hand back the slot this session will not use (cannot block: we just filled it)
 			break
@@ -382,7 +374,7 @@ func (w *Worker) drainWindow(ctx context.Context, batch []string, conc, maxChars
 	}
 
 	// Drain remaining completions until every dispatched job has committed —
-	// finishing in-flight work even on stop/budget (its mining is already paid for).
+	// finishing in-flight work even on stop (its mining is already paid for).
 	for committed < dispatched {
 		reap(<-done)
 	}

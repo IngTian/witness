@@ -22,9 +22,10 @@ import (
 // sentence boundaries. Sentences break after [.!?] (optionally followed by
 // a closing quote/paren/curly quote), then whitespace, then an uppercase letter,
 // digit, quote, open paren, Han character, or opening curly quote — UNLESS the
-// period is part of a known abbreviation (e.g., i.e., vs., etc.) or sits between
-// digits (97.7%). Chinese punctuation (。！？) also ends a sentence. Only sentences
-// with len(trim(s)) > 1 are returned, and all returned sentences are trimmed.
+// period ends a known abbreviation (e.g., i.e., vs., etc.). A decimal (97.7%) never
+// splits: no whitespace follows its period. Chinese punctuation (。！？) also ends a
+// sentence. Only sentences with len(trim(s)) > 1 are returned, and all returned
+// sentences are trimmed.
 func SplitSentences(md string) []string {
 	all := []string{} // empty, not nil, when there are no sentences
 	for _, b := range PortraitBlocks(md) {
@@ -134,10 +135,7 @@ func splitBlockIntoSentences(text string) []string {
 
 		// Now j is the position after any closing punctuation.
 		if j >= len(runes) {
-			// End of text: this is the last sentence.
-			sentences = append(sentences, string(runes[start:]))
-			start = len(runes) // Mark that we've consumed everything.
-			break
+			break // end of text: the append after the loop takes the last sentence
 		}
 
 		// For English punctuation, require whitespace before the next sentence.
@@ -151,10 +149,7 @@ func splitBlockIntoSentences(text string) []string {
 			k++
 		}
 		if k >= len(runes) {
-			// Only whitespace left: this is the last sentence.
-			sentences = append(sentences, string(runes[start:]))
-			start = len(runes) // Mark that we've consumed everything.
-			break
+			break // only whitespace left: the append after the loop takes the last sentence
 		}
 
 		nextChar := runes[k]
@@ -163,17 +158,9 @@ func splitBlockIntoSentences(text string) []string {
 			continue
 		}
 
-		// Before accepting this as a sentence boundary, check for abbreviations
-		// and decimal numbers.
-		if r == '.' {
-			// Check if this period is part of an abbreviation.
-			if isAbbreviation(runes, i) {
-				continue
-			}
-			// Check if this period is between digits (decimal number).
-			if isBetweenDigits(runes, i) {
-				continue
-			}
+		// Before accepting this as a sentence boundary, check for abbreviations.
+		if r == '.' && isAbbreviation(runes, i) {
+			continue
 		}
 
 		// This is a sentence boundary. Extract the sentence.
@@ -239,16 +226,6 @@ func isAbbreviation(runes []rune, i int) bool {
 		}
 	}
 
-	return false
-}
-
-// isBetweenDigits checks if the period at position i sits between two digits
-// (e.g., "97.7"). Returns true if it should NOT trigger a sentence break.
-func isBetweenDigits(runes []rune, i int) bool {
-	// Check if there's a digit immediately before and after the period.
-	if i > 0 && i+1 < len(runes) {
-		return unicode.IsDigit(runes[i-1]) && unicode.IsDigit(runes[i+1])
-	}
 	return false
 }
 

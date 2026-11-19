@@ -107,5 +107,5 @@ jobs:
         run: ./scripts/check-release-manifests.sh
 
       # Prove the "one pure-Go binary" promise on every target we ship.
-      - name: cross-compile (darwin/linux × amd64/arm64)
+      - name: cross-compile (darwin/linux/windows × amd64/arm64)
         run: make build-all

@@ -105,6 +105,9 @@ func envMap(t *testing.T, env []string) map[string]string {
 	m := map[string]string{}
 	for _, e := range env {
 		k, v, _ := strings.Cut(e, "=")
+		if k == "" {
+			continue // Windows' "=C:=C:\…" per-drive entries: os/exec keeps each, none is under test
+		}
 		if _, dup := m[k]; dup {
 			t.Fatalf("duplicate env key %q", k)
 		}
@@ -123,7 +126,7 @@ func TestBuildServeCmdIsTheV2LeaseServe(t *testing.T) {
 	if !slices.Equal(cmd.Args[1:], want) {
 		t.Fatalf("args = %q, want %q", cmd.Args[1:], want)
 	}
-	env := envMap(t, cmd.Env)
+	env := envMap(t, cmd.Environ())
 	for k, v := range map[string]string{
 		"OPENCODE_PASSWORD":               "pw",
 		"OPENCODE_CONFIG_DIR":             filepath.Join(dir, "config"),
@@ -149,7 +152,7 @@ func TestBuildServeCmdIsTheV2LeaseServe(t *testing.T) {
 	if cmd.WaitDelay != serveCloseGrace {
 		t.Errorf("WaitDelay = %s, want %s", cmd.WaitDelay, serveCloseGrace)
 	}
-	free := envMap(t, buildServeCmd(context.Background(), root, dir, "pw", true).Env)
+	free := envMap(t, buildServeCmd(context.Background(), root, dir, "pw", true).Environ())
 	for _, k := range []string{"OPENCODE_DISABLE_FREE_MODELS", "OPENCODE_DISABLE_MODELS_FETCH"} {
 		if _, ok := free[k]; ok {
 			t.Errorf("a free-model serve carries %s", k)
@@ -438,7 +441,7 @@ func TestARelativeRootGivesTheServeAbsolutePaths(t *testing.T) {
 	}
 	t.Chdir(t.TempDir())
 	startFake(t, "rel")
-	env := envMap(t, cmd.Env)
+	env := envMap(t, cmd.Environ())
 	for _, k := range []string{"OPENCODE_CONFIG_DIR", "XDG_STATE_HOME", "OPENCODE_DB", "XDG_DATA_HOME"} {
 		if !filepath.IsAbs(env[k]) {
 			t.Errorf("%s = %q, want an absolute path", k, env[k])

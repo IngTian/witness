@@ -15,19 +15,6 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// errNoArray is mine()'s sentinel for "the model replied, but its reply contained
-// NO parseable JSON observation array" — i.e. prose_drift: the runner conversed with
-// the transcript (or refused, or was truncated) instead of emitting the required
-// array. This is DISTINCT from the model emitting an explicit empty `[]` (a legit
-// "nothing to report" — ParseJSONArray returns that as (empty, nil), see parse.go).
-// The empirical work on #57 found a too-weak triage model does this on ~40% of
-// sessions; before this sentinel mine() silently bucketed it as a quiet session,
-// making a below-floor model indistinguishable from a genuinely uneventful history.
-// It is wrapped (kept as an error, not a bool) so MineSession can match it with
-// errors.Is WITHOUT changing mine()'s (obs, error) signature — a transport failure
-// stays a plain error, so the two failure modes never get conflated.
-var errNoArray = errors.New("mine: model reply contained no JSON observation array (prose drift)")
-
 // backoffDelay is the wait before a failed session's delta is retried: 5m, 10m,
 // 20m, ... doubling, capped at 6h. The raw turns are NEVER dropped — a transient
 // outage (rate limit, network) just delays distillation until it clears.
@@ -184,7 +171,7 @@ type LensMining struct {
 	// observed narrowing a healthy drain first.
 	MineTimedOut bool
 	// Drifted marks that this lens saw prose_drift (a reply with no JSON array,
-	// errNoArray) AND produced ZERO observations across ALL of its inputs (#57). It is
+	// ErrNoJSONArray) AND produced ZERO observations across ALL of its inputs (#57). It is
 	// set only in that all-inputs-drifted-nothing case: a multi-chunk session where one
 	// chunk yields a real array is NOT drift (the lens produced obs), so this can't
 	// false-positive a partially-successful long session. A drifted lens ADVANCES its
@@ -330,7 +317,7 @@ func (w *Worker) MineSession(ctx context.Context, session string, stop func() bo
 						skip = true
 						break
 					}
-					if errors.Is(err, errNoArray) {
+					if errors.Is(err, ErrNoJSONArray) {
 						// prose drift: the model replied but emitted no array (likely below the
 						// lens's model floor). NOT a transport failure — do not back off; the
 						// watermark advances like a quiet session, and commit surfaces the drift.
@@ -577,25 +564,23 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 		return nil, err
 	}
 	raw, perr := ParseJSONArray[minedObs](reply)
-	if errors.Is(perr, ErrTruncatedJSONArray) {
-		// The model DID extract; the reply was cut off mid-array (output-token cap, killed
-		// child, dropped stream). Returning this as drift would advance the watermark over
-		// turns whose observations were sitting in the truncated text — permanent loss,
-		// since the watermark counts raw records and they are never offered again. Surface
-		// it as an ordinary retryable failure instead: the lens backs off (5m/10m/20m…,
-		// capped at 6h) and re-mines the SAME delta, and raw is never dropped.
-		return nil, fmt.Errorf("%w (lens=%s reply_len=%d)", perr, ln.Name, len(strings.TrimSpace(reply)))
-	}
 	if perr != nil {
-		// The model replied (no transport error) but its reply contained NO parseable
-		// JSON array at all — prose drift (it conversed/refused instead of extracting).
-		// This is NOT the same as an explicit empty `[]` (legit quiet): ParseJSONArray
-		// returns that as ([]T{}, nil) and we fall through below with zero obs. Signal
-		// drift with the errNoArray sentinel so MineSession can count + surface it (the
-		// #57 model-floor signal) instead of silently treating a below-floor model as an
-		// uneventful session. Watermark handling is decided by the caller (advance-on-
-		// drift, same data outcome as before — just loud now).
-		return nil, fmt.Errorf("%w (lens=%s reply_len=%d)", errNoArray, ln.Name, len(strings.TrimSpace(reply)))
+		// Either sentinel passes through wrapped, and the caller tells them apart:
+		//   - ErrNoJSONArray: the model replied (no transport error) but its reply held NO
+		//     parseable JSON array — prose drift (it conversed/refused instead of extracting).
+		//     This is NOT an explicit empty `[]` (legit quiet): ParseJSONArray returns that
+		//     as ([]T{}, nil) and we fall through below with zero obs. MineSession counts +
+		//     surfaces drift (the #57 model-floor signal) instead of silently treating a
+		//     below-floor model as an uneventful session; the watermark advances, same data
+		//     outcome as a quiet session — just loud.
+		//   - ErrTruncatedJSONArray: the model DID extract; the reply was cut off mid-array
+		//     (output-token cap, killed child, dropped stream). Treating it as drift would
+		//     advance the watermark over turns whose observations were sitting in the
+		//     truncated text — permanent loss, since the watermark counts raw records and
+		//     they are never offered again. So it is an ordinary retryable failure: the lens
+		//     backs off (5m/10m/20m…, capped at 6h) and re-mines the SAME delta, and raw is
+		//     never dropped.
+		return nil, fmt.Errorf("%w (lens=%s reply_len=%d)", perr, ln.Name, len(strings.TrimSpace(reply)))
 	}
 	var obs []store.Observation
 	for _, m := range raw {
@@ -660,7 +645,7 @@ func PreviewMine(ctx context.Context, run MineFunc, cfg store.Config, st Preview
 	for _, transcript := range inputs {
 		mined, mErr := w.mine(ctx, ln, session, transcript)
 		if mErr != nil {
-			if errors.Is(mErr, errNoArray) {
+			if errors.Is(mErr, ErrNoJSONArray) {
 				sawDrift = true // prose drift on this input; keep going — another chunk may extract
 				continue
 			}

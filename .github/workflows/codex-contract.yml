@@ -35,10 +35,13 @@ jobs:
       WITNESS_CODEX_CONTRACT_LATEST: ${{ matrix.codex == 'latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          # No shared Go cache on the latest leg: it runs the unpinned @openai/codex install scripts
+          cache: ${{ matrix.codex != 'latest' }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

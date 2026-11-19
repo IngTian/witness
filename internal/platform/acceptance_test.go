@@ -63,6 +63,10 @@ func dispatchPatterns(names []string) []*regexp.Regexp {
 		regexp.MustCompile(`case\s+(platform\.Agent|store\.Runner)`),
 		// A `case` arm naming any adapter, not just the two this guard first hardcoded.
 		regexp.MustCompile(`case\s+"(` + alt + `)"`),
+		// A quoted adapter name compared directly.
+		regexp.MustCompile(`(==|!=)\s*"(` + alt + `)"`),
+		regexp.MustCompile(`"(` + alt + `)"\s*(==|!=)`),
+		regexp.MustCompile(`EqualFold\([^)]*"(` + alt + `)"`),
 		// A quoted SESSION PREFIX: `HasPrefix(session, "opencode:")` is the original #21 violation,
 		// and none of the shapes above see it. #197 then added four `"file:"` checks to view.
 		regexp.MustCompile(`"(` + alt + `):`),
@@ -72,6 +76,23 @@ func dispatchPatterns(names []string) []*regexp.Regexp {
 		// Importing an adapter package from the engine at all. The compiler would allow it and
 		// every pattern above would still pass.
 		regexp.MustCompile(`witness/internal/platform/(` + alt + `)"`),
+	}
+}
+
+func TestDispatchPatternsCatchLiteralComparisons(t *testing.T) {
+	pats := dispatchPatterns([]string{"claude", "codex", "file", "opencode"})
+	hit := func(l string) bool {
+		return slices.ContainsFunc(pats, func(p *regexp.Regexp) bool { return p.MatchString(l) })
+	}
+	for _, l := range []string{`if rt == "codex" {`, `if "opencode" != cfg.Runner {`, `strings.EqualFold(src, "file")`} {
+		if !hit(l) {
+			t.Errorf("literal dispatch not caught: %s", l)
+		}
+	}
+	for _, l := range []string{`name := "codex"`, `fs.String("agent", "claude", "source")`} {
+		if hit(l) {
+			t.Errorf("false positive: %s", l)
+		}
 	}
 }
 
@@ -197,7 +218,7 @@ func stripComment(line string) string {
 // agree.
 //
 // Before this, `witness config set runner` validated against a hardcoded
-// {RunnerClaude, RunnerOpenCode} pair while `witness wire <target>` → bindRunner wrote the same
+// {RunnerClaude, RunnerOpenCode} pair while `witness wire <target>` → chooseRunner wrote the same
 // key with NO validation. Two writers of one value, disagreeing — and a closed set of platform names
 // in a system that is otherwise uniformly registry-driven, so a third runtime would be rejected by
 // one path and silently accepted by the other.

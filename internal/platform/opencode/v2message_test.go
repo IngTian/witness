@@ -57,9 +57,6 @@ func TestParseTurnCountsRetryAsQueued(t *testing.T) {
 	if st.Retry == nil {
 		t.Fatal("Retry = nil")
 	}
-	if st.Retry.Attempt != 2 {
-		t.Errorf("Retry.Attempt = %d, want 2", st.Retry.Attempt)
-	}
 	if st.Retry.Error.Type != "provider.rate-limit" {
 		t.Errorf("Retry.Error.Type = %q, want provider.rate-limit", st.Retry.Error.Type)
 	}

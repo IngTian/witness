@@ -136,34 +136,6 @@ func TestDrainProcessesArrivalsOnceAndTerminates(t *testing.T) {
 	}
 }
 
-func TestDrainStopsAfterBudget(t *testing.T) {
-	s := newStore(t)
-	w := drainWorker(s, (&safeMiner{}).run)
-	for _, sess := range []string{"A", "B", "C"} {
-		capture(t, s, sess, "user", "turn-"+sess)
-	}
-	pendingSet := map[string]bool{"A": true, "B": true, "C": true}
-	pending := func() []string {
-		out := []string{}
-		for k := range pendingSet {
-			out = append(out, k)
-		}
-		sort.Strings(out)
-		return out
-	}
-	var order []string
-	processed := w.Drain(context.Background(), DrainOpts{
-		Conc: 1, Max: 1, Pending: pending,
-		OnCommit: func(session string) { order = append(order, session); delete(pendingSet, session) },
-	})
-	if processed != 1 || len(order) != 1 || order[0] != "A" {
-		t.Fatalf("processed=%d order=%v, want exactly the first job", processed, order)
-	}
-	if !pendingSet["B"] || !pendingSet["C"] {
-		t.Fatalf("budgeted drain should leave remaining jobs queued: %#v", pendingSet)
-	}
-}
-
 // A wide window (Conc>1) must uphold the SAME attempt-once contract and be
 // race-free. Run with `go test -race` to exercise the concurrent MAP phase.
 func TestDrainParallelAttemptsEachOnce(t *testing.T) {

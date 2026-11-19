@@ -572,11 +572,11 @@ func registerFakeCaptureOnlyEditor(t *testing.T, name string, called *bool) {
 
 // Wiring a capture-only venue must NOT bind it as the distillation runner.
 //
-// AGENTS.md: "A capture source need not provide a distillation runner." Codex is the
-// first one that does not, and bindRunner used to run unconditionally. SetRunner does no
-// validation, so it would have written `runner = codex` into config.toml — a value
-// RunnerForName cannot resolve, which fails every subsequent drain and silently stops
-// the archive distilling. Strictly worse than leaving the runner alone.
+// AGENTS.md: "A capture source need not provide a distillation runner." The runner binding
+// used to run unconditionally. SetRunner does no validation, so a capture-only venue would
+// have been written into config.toml — a runner that cannot distill, which fails every
+// subsequent drain and silently stops the archive distilling. Strictly worse than leaving
+// the runner alone.
 //
 // Driven through a registered fake rather than "codex" because the real codex installer
 // resolves a hook target that does not exist under `go test`; the gate being tested is

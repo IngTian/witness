@@ -63,7 +63,16 @@ func runCLI(t *testing.T, args ...string) (string, error) {
 // on the root only — so a typo read as success to a person and to a script.
 func TestGroupCommandsRejectATypoButStillPrintHelpBare(t *testing.T) {
 	readFixture(t)
-	for _, group := range []string{"lens", "config", "observations", "worker"} {
+	var groups []string
+	for _, c := range newRootCmd().Commands() {
+		if c.HasSubCommands() {
+			groups = append(groups, c.Name())
+		}
+	}
+	if len(groups) < 6 {
+		t.Fatalf("groups = %v; want auth, config, lens, model, observations, worker", groups)
+	}
+	for _, group := range groups {
 		if _, err := runCLI(t, group, "frob"); err == nil || !strings.Contains(err.Error(), `unknown command "frob"`) {
 			t.Errorf("witness %s frob must fail as an unknown command, got %v", group, err)
 		}

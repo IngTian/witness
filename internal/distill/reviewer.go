@@ -94,9 +94,9 @@ func (r *Reviewer) Run(ctx context.Context, now time.Time) error {
 	// facets, watermark advanced through them), but refuse the global stamp and surface
 	// the failure so the review stays due and resumes from the watermark next pass.
 	var failed []string
-	// backoff: some failure is the review's own. A free-allowance refusal is not: cmd's free gate
-	// holds every free-model call until the reset and wakes the worker then (mining skips it the
-	// same way), so backing off too only stalls the review, and every lens, past the reset.
+	// backoff: some failure is the review's own. A free-allowance refusal is not: cmd's usage gate
+	// holds that runtime's shared-allowance calls until the reset and wakes the worker then (mining
+	// skips it the same way), so backing off too only stalls the review, and every lens, past the reset.
 	backoff := false
 	// Before any lens folds, so no window folds against a facet still citing a deleted observation.
 	// A failure here strands no lens: the folds go on, the list stays, and the next review retries.

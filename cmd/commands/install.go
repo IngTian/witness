@@ -571,9 +571,10 @@ func cmdProvision(path string) error {
 
 // cmdInstall is `witness wire <editor>`. The target is required (enforced by cobra
 // ExactArgs) so wiring binds the matching distillation runtime into config.toml when
-// that editor can run a model (Codex cannot; see below). Since #102 wiring is a pure MECHANISM — hooks/plugin + MCP
-// + bind runner — and seeds no content: the built-in default lens is auto-seeded once by the
-// first-open hook (which fires the moment bindRunner opens the store) and is fully deletable.
+// that editor can run a model (a capture-only target leaves it alone; see below). Since #102
+// wiring is a pure MECHANISM — hooks/plugin + MCP + bind runner — and seeds no content: the
+// built-in default lens is auto-seeded once by the first-open hook (which fires the moment
+// wire opens the store) and is fully deletable.
 // It asks a question only at a terminal: whether to switch the default runner when another one
 // is already chosen (default no), and which model to use when the new default needs one. Piped,
 // in CI or from a hook it never prompts.
@@ -696,26 +697,23 @@ func reportEnabledLenses() []string {
 // it binds target; when target is already the runner, it reports "unchanged"; when a different
 // runner is bound, it asks at a terminal (default no) or prints the hint to change it manually.
 func chooseRunner(st *store.Store, target string, in io.Reader) error {
-	if !st.RunnerBound() {
-		return bindRunner(target)
-	}
-	cur := st.ResolvedConfig().Runner
-	if cur == target {
-		fmt.Println(resultRow(okGlyph(), "runner", target, "the default, unchanged"))
-		return nil
-	}
-	// A different runner is bound: ask at a terminal, or print the hint.
-	if in != nil {
-		if confirmFrom(in)("Make " + target + " the default runner instead of " + cur + "? [y/N]: ") {
-			if err := st.SetRunner(target); err != nil {
-				return fmt.Errorf("write runner to config: %w", err)
-			}
-			fmt.Println(resultRow(okGlyph(), "runner", target, "the default"))
+	if st.RunnerBound() {
+		cur := st.ResolvedConfig().Runner
+		if cur == target {
+			fmt.Println(resultRow(okGlyph(), "runner", target, "the default, unchanged"))
+			return nil
+		}
+		// A different runner is bound: ask at a terminal, or print the hint.
+		if in == nil || !confirmFrom(in)("Make "+target+" the default runner instead of "+cur+"? [y/N]: ") {
+			fmt.Println(resultRow(skipGlyph(), "runner", "unchanged ("+cur+")", target+" is available per lens"))
+			fmt.Println(hint("make it the default", "witness config set runner "+target))
 			return nil
 		}
 	}
-	fmt.Println(resultRow(skipGlyph(), "runner", "unchanged ("+cur+")", target+" is available per lens"))
-	fmt.Println(hint("make it the default", "witness config set runner "+target))
+	if err := st.SetRunner(target); err != nil {
+		return fmt.Errorf("write runner to config: %w", err)
+	}
+	fmt.Println(resultRow(okGlyph(), "runner", target, "the default"))
 	return nil
 }
 
@@ -822,32 +820,6 @@ func askForModels(st *store.Store, runner string, in io.Reader) error {
 			return fmt.Errorf("write review_model: %w", err)
 		}
 	}
-	return nil
-}
-
-// bindRunner pins config.toml's runner field to the integration that was just
-// wired, so distillation uses the same agent runtime the user installed for.
-// store.Open() already laid down the full template if config was missing; here
-// we only flip runner. Best-effort: a store open failure (rare; Open mkdirs) is
-// reported on its row but does not fail install, since hooks/plugin are already in place.
-func bindRunner(target string) error {
-	st, err := store.Open()
-	if err != nil {
-		fmt.Println(resultRow(warnGlyph(), "runner", "not set", "could not open the archive: "+err.Error()))
-		return nil
-	}
-	defer st.Close()
-	// "unchanged" only when an earlier wire or `config set runner` had already bound this runner:
-	// a fresh archive resolves to the template's "claude" without anyone having chosen it.
-	unchanged := st.RunnerBound() && st.ResolvedConfig().Runner == target
-	if err := st.SetRunner(target); err != nil {
-		return fmt.Errorf("write runner to config: %w", err)
-	}
-	note := "the default"
-	if unchanged {
-		note = "the default, unchanged"
-	}
-	fmt.Println(resultRow(okGlyph(), "runner", target, note))
 	return nil
 }
 

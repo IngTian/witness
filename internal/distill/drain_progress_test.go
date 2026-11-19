@@ -121,31 +121,6 @@ func TestDrainProgressTotalGrowsWithAMidDrainArrival(t *testing.T) {
 	}
 }
 
-// A capped drain (Max) counts only what it will attempt, so it ends at its total, not short.
-func TestDrainProgressHonoursMax(t *testing.T) {
-	s := newStore(t)
-	var calls atomic.Int32
-	w := drainWorker(s, func(ctx context.Context, model, prompt, input string) (string, error) {
-		calls.Add(1)
-		return (&safeMiner{}).run(ctx, model, prompt, input)
-	})
-	for _, id := range []string{"a", "b", "c"} {
-		capture(t, s, id, "user", "turn-"+id)
-	}
-	pending := func() []string { p, _ := s.PendingSessions([]string{"default"}); return p }
-	for _, conc := range []int{1, 2} {
-		ev := &drainEvents{t: t}
-		w.Drain(context.Background(), DrainOpts{Conc: conc, Max: 1, Pending: pending, Progress: ev.record})
-		m := ev.mining(t)
-		if last := m[len(m)-1]; last.Total != 1 || last.Done != 1 {
-			t.Errorf("conc=%d: Max 1 must read 1/1, ended %d/%d", conc, last.Done, last.Total)
-		}
-	}
-	if calls.Load() != 2 {
-		t.Errorf("two capped drains, one session each: %d calls", calls.Load())
-	}
-}
-
 // Nothing pending says nothing: no 0/0 snapshot for a caller to draw.
 func TestDrainProgressSilentWhenNothingPending(t *testing.T) {
 	s := newStore(t)

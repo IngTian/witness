@@ -42,7 +42,7 @@ func newLensTryCmd() *cobra.Command {
 			"This is the prompt-tuning loop: edit the EXTRACT prompt, run `try`, see what " +
 			"changes. Sessions are sampled largest-first by default (deterministic, and the meatiest " +
 			"sessions are the ones a prompt is most likely to mishandle); use --recent for the latest.\n\n" +
-			"Works on both runners and takes no lock, so it can run beside a live worker. " +
+			"Works on every runner and takes no worker lock, so it can run beside a live worker (a Codex preview still waits for Codex's login lock). " +
 			"Sessions are previewed in parallel (bounded by mine_concurrency).\n\n" +
 			"With --review, it also runs the lens's REVIEW prompt over the observations just mined and " +
 			"prints the profile facets it would synthesize — so you can tune both halves of a lens in one " +
@@ -137,7 +137,7 @@ type lensTryJSON struct {
 
 // cmdLensTry runs the read-only preview. It opens its OWN store (independent of cmdLens)
 // and reads only — PreviewMine writes nothing (see distill.PreviewMine). It takes no
-// WorkerLock on either runner (see the note at runner.Open below for why).
+// WorkerLock on any runner (see the note at runner.Open below for why).
 func cmdLensTry(file string, opts lensTryOpts) error {
 	st, err := store.Open()
 	if err != nil {
@@ -404,7 +404,7 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 // when that runner differs from the resolved default. Those models belong to the default
 // runtime; on a different runtime they are a bad model name that would abort OpenCode's
 // Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
-// runtime's own default, through the same clearCrossRuntimeModels the drain's runnerSet uses.
+// runtime's own default, through clearCrossRuntimeModels.
 // cfg.Runner must already be the RESOLVED default runner, and the result's cfg.Runner is final:
 // mint it by name (RunnerForName), never through the store's precedence ladder again, which
 // would let an unbound store's WITNESS_RUNNER override the lens (F030). Pure (returns a

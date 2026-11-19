@@ -29,7 +29,7 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	if cmd.Dir != os.TempDir() {
 		t.Errorf("cwd = %q, want the neutral temp dir: OpenCode records the cwd's project", cmd.Dir)
 	}
-	env := envMap(t, cmd.Env)
+	env := envMap(t, cmd.Environ())
 	for k := range env {
 		up := strings.ToUpper(k)
 		if strings.HasPrefix(up, "OPENCODE_") && up != "OPENCODE_DB" && up != "OPENCODE_API_KEY" {
@@ -51,7 +51,7 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(name, "sk-zen-"+name)
 			var got []string
-			for _, e := range openCodeCommand(context.Background(), root, "--version").Env {
+			for _, e := range openCodeCommand(context.Background(), root, "--version").Environ() {
 				k, v, _ := strings.Cut(e, "=")
 				if k == name || runtime.GOOS == "windows" && strings.EqualFold(k, name) {
 					got = append(got, v)
@@ -66,7 +66,7 @@ func TestOpenCodeCommandAppliesTheSpawnPolicy(t *testing.T) {
 	// No runtime root: still isolated (relative to the temp-dir cwd), never the user's DB —
 	// the root-less default must fail safe, because several subcommands open it read-WRITE.
 	cmd = openCodeCommand(context.Background(), "", "--version")
-	env = envMap(t, cmd.Env)
+	env = envMap(t, cmd.Environ())
 	if env["OPENCODE_DB"] != "opencode-v2.db" || env["XDG_DATA_HOME"] != "opencode-data" || env["WITNESS_WORKER"] != "1" ||
 		cmd.Dir != os.TempDir() {
 		t.Errorf("root-less command lost a rule: dir=%q env=%v", cmd.Dir, cmd.Env)

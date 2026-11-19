@@ -39,11 +39,10 @@ func newObservationsCmd() *cobra.Command {
 	// No `record` sibling: MCP record_observation is the one write path, with the input checks
 	// (size caps, lens-name screening) a hand-copied CLI writer had skipped (#199 F049).
 	deleteCmd := &cobra.Command{
-		Use:    "delete <obs_id>",
-		Short:  "Delete one observation.",
-		Long:   "Delete one L1 observation by obs_id. It is removed now; facets that rested only on it are retired at the next review, and nothing is re-read. This is the CLI equivalent of the MCP delete_observation tool.",
-		Args:   cobra.ExactArgs(1),
-		Hidden: true,
+		Use:   "delete <obs_id>",
+		Short: "Delete one observation.",
+		Long:  "Delete one L1 observation by obs_id. It is removed now; facets that rested only on it are retired at the next review, and nothing is re-read. This is the CLI equivalent of the MCP delete_observation tool.",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdObservationDelete(args[0])
 		},

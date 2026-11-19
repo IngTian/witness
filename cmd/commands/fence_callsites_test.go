@@ -63,8 +63,9 @@ func assertFenced(t *testing.T, wantInner string) {
 		if !strings.HasSuffix(c.prompt, "\n\n"+platform.CorpusNotice) {
 			t.Errorf("system prompt reached the runner without CorpusNotice: %q", c.prompt)
 		}
-		inner, ok := strings.CutPrefix(c.input, open)
-		if inner, ok = strings.CutSuffix(inner, closing); !ok || strings.Contains(inner, open) {
+		inner, okOpen := strings.CutPrefix(c.input, open)
+		inner, okClose := strings.CutSuffix(inner, closing)
+		if !okOpen || !okClose || strings.Contains(inner, open) {
 			t.Errorf("corpus reached the runner not fenced exactly once: %q", c.input)
 		}
 		if !strings.Contains(inner, wantInner) {

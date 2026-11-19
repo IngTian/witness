@@ -23,9 +23,8 @@ type v2Error struct {
 
 // v2Retry represents the retry state visible in assistant messages during backoff.
 type v2Retry struct {
-	Attempt int     `json:"attempt"`
-	At      int64   `json:"at"`
-	Error   v2Error `json:"error"`
+	At    int64   `json:"at"`
+	Error v2Error `json:"error"`
 }
 
 // v2Message represents one message from GET /api/session/{id}/message.

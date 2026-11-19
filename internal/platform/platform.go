@@ -10,10 +10,7 @@ import (
 	"slices"
 )
 
-const (
-	AgentClaude   = "claude"
-	AgentOpenCode = "opencode"
-)
+const AgentClaude = "claude"
 
 // AppendFrom decides how an importer whose source can rewrite history (OpenCode, Codex) applies
 // a transcript: old is the turn keys the last import stored, cur the source's keys now, rawCount

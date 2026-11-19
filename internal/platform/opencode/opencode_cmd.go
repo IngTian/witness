@@ -41,8 +41,8 @@ import (
 //     env would reach into the USER's database. That holds for root "" too, which
 //     ProbeVersion passes (wire and doctor have no runtime root; the runner's entry points
 //     refuse an empty one): the relative paths land under the temp-dir cwd — never the
-//     user's DB, so the default fails safe. A caller layers its own variables on top with
-//     replaceEnv(cmd.Env, …).
+//     user's DB, so the default fails safe. A caller appends its own variables to cmd.Env;
+//     os/exec keeps the last value of a repeated key.
 func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
 	binary, err := ResolveExe()
 	if err != nil {
@@ -51,7 +51,7 @@ func openCodeCommand(ctx context.Context, root string, args ...string) *exec.Cmd
 	cmd := execCommandContext(ctx, binary, args...)
 	proc.HideWindow(cmd)
 	cmd.Dir = os.TempDir()
-	cmd.Env = replaceEnv(withoutOpenCodeEnv(os.Environ()), append([]string{"WITNESS_WORKER=1"}, isolatedEnv(root)...))
+	cmd.Env = append(append(withoutOpenCodeEnv(os.Environ()), "WITNESS_WORKER=1"), isolatedEnv(root)...)
 	return cmd
 }
 
@@ -108,29 +108,6 @@ func withoutOpenCodeEnv(env []string) []string {
 		if !strings.HasPrefix(up, "OPENCODE_") || up == "OPENCODE_API_KEY" {
 			out = append(out, e)
 		}
-	}
-	return out
-}
-func replaceEnv(base, updates []string) []string {
-	m := map[string]string{}
-	order := []string{}
-	for _, e := range base {
-		k, _, _ := strings.Cut(e, "=")
-		if _, ok := m[k]; !ok {
-			order = append(order, k)
-		}
-		m[k] = e
-	}
-	for _, e := range updates {
-		k, _, _ := strings.Cut(e, "=")
-		if _, ok := m[k]; !ok {
-			order = append(order, k)
-		}
-		m[k] = e
-	}
-	out := make([]string, 0, len(order))
-	for _, k := range order {
-		out = append(out, m[k])
 	}
 	return out
 }

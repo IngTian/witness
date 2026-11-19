@@ -105,8 +105,8 @@ type FacetVersion struct {
 	// falsifiers that make up most of the prose and are re-sent on every review otherwise.
 	// Empty means none has been written yet, and every consumer falls back to Value.
 	Claim      string   `json:"claim,omitempty"`
-	ValidFrom  string   `json:"valid_from"`         // real-world: when this became true
-	ValidTo    string   `json:"valid_to,omitempty"` // real-world: when it stopped (empty = current)
+	ValidFrom  string   `json:"valid_from"`         // when the review or a compaction recorded this version (review time, not content ts)
+	ValidTo    string   `json:"valid_to,omitempty"` // when a later review closed it (empty = current)
 	RecordedAt string   `json:"recorded_at"`        // system: when the reviewer learned it
 	BecauseOf  []string `json:"because_of"`         // observation IDs (provenance for re-grounding)
 	// Confidence is how sure the reviewer was WHEN THE EVIDENCE LAST ARRIVED — not how sure we

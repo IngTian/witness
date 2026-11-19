@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -632,4 +633,56 @@ func TestLoginAndReadinessRejectUnverifiedCLI(t *testing.T) {
 	}
 	checkPreflightError(t, LoginReady(context.Background(), r.root), "no verified tool-free contract")
 	checkPreflightError(t, Login(context.Background(), r.root), "no verified tool-free contract")
+}
+
+func TestTestedVersionsMatchTheContractMatrixAndTheDocs(t *testing.T) {
+	// Extract versions from codex-contract.yml
+	ymlPath := filepath.Join("..", "..", "..", ".github", "workflows", "codex-contract.yml")
+	ymlData, err := os.ReadFile(ymlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matrixPattern := regexp.MustCompile(`\|\| '(\[[^']*\])'`)
+	matches := matrixPattern.FindAllSubmatch(ymlData, -1)
+	if len(matches) != 1 {
+		t.Fatalf("codex-contract.yml matrix pattern not found or matched multiple times (got %d matches)", len(matches))
+	}
+	var ci []string
+	if err := json.Unmarshal(matches[0][1], &ci); err != nil {
+		t.Fatalf("unmarshal contract matrix: %v", err)
+	}
+
+	// Extract versions from docs/codex-runner.md
+	docsPath := filepath.Join("..", "..", "..", "docs", "codex-runner.md")
+	docsData, err := os.ReadFile(docsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Scan only the "Use Codex CLI" line for supported versions
+	linePattern := regexp.MustCompile(`(?m)^Use Codex CLI (.*)$`)
+	lineMatch := linePattern.FindSubmatch(docsData)
+	if lineMatch == nil {
+		t.Fatal("docs/codex-runner.md: 'Use Codex CLI' line not found")
+	}
+	versionPattern := regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	versionMatches := versionPattern.FindAllSubmatch(lineMatch[1], -1)
+	var docs []string
+	digitsPattern := regexp.MustCompile(`\d`)
+	for _, match := range versionMatches {
+		version := string(match[1])
+		// Only include version numbers (contains dots and digits)
+		if strings.Contains(version, ".") && digitsPattern.MatchString(version) {
+			docs = append(docs, version)
+		}
+	}
+	if len(docs) == 0 {
+		t.Fatal("docs/codex-runner.md: no versions found on 'Use Codex CLI' line")
+	}
+
+	if !slices.Equal(ci, testedVersions) {
+		t.Errorf("codex-contract.yml pins %q, runner.go %q", ci, testedVersions)
+	}
+	if !slices.Equal(docs, testedVersions) {
+		t.Errorf("docs/codex-runner.md lists %q, runner.go %q", docs, testedVersions)
+	}
 }

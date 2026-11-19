@@ -11,7 +11,7 @@ The visible front door, exactly as `witness --help` groups it:
 | Read your archive | `status` · `profile` · `view` · `facets` · `observations` · `ingest` |
 | Lenses | `lens` |
 | Configure | `config` |
-| Setup | `doctor` · `install` · `model` · `wire` · `unwire` |
+| Setup | `auth` · `doctor` · `install` · `model` · `wire` · `unwire` |
 | Maintenance | `export` · `merge` · `compact` · `worker` |
 
 Capture, the automatic worker runs, and the MCP server are **internal** entry points invoked by
@@ -63,8 +63,8 @@ history from before you wired it (`witness import --agent codex`).
 - `witness status` — what has been captured, whether the worker is running, and how fresh the
   distilled data is (`--json` for scripts). Claude now pauses on a usage-limit refusal, like Codex
   and OpenCode, and a weekly limit can pause it for days; `status` shows the pause and its reset. A
-  manual `witness worker run` skips the paused-run pre-check and calls anyway, and a refusal re-arms
-  the pause.
+  manual `witness worker run` skips the automatic early exit but still refuses every call on a paused
+  allowance until the stored reset; after the reset every call runs, and the first refusal pauses again.
 - `witness worker run` / `witness worker stop` — the operator escape hatch for the background
   distillation worker (normally it runs off editor hooks). `run` drains in
   the foreground, `--detach` backgrounds it. With `--detach` it accepts `--since`/`--until` to
