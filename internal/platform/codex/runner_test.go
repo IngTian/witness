@@ -643,12 +643,12 @@ func TestTestedVersionsMatchTheContractMatrixAndTheDocs(t *testing.T) {
 		t.Fatal(err)
 	}
 	matrixPattern := regexp.MustCompile(`\|\| '(\[[^']*\])'`)
-	matches := matrixPattern.FindSubmatch(ymlData)
-	if len(matches) != 2 {
-		t.Fatalf("codex-contract.yml matrix pattern not found or matched multiple times")
+	matches := matrixPattern.FindAllSubmatch(ymlData, -1)
+	if len(matches) != 1 {
+		t.Fatalf("codex-contract.yml matrix pattern not found or matched multiple times (got %d matches)", len(matches))
 	}
 	var ci []string
-	if err := json.Unmarshal(matches[1], &ci); err != nil {
+	if err := json.Unmarshal(matches[0][1], &ci); err != nil {
 		t.Fatalf("unmarshal contract matrix: %v", err)
 	}
 
@@ -658,15 +658,25 @@ func TestTestedVersionsMatchTheContractMatrixAndTheDocs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Scan only the "Use Codex CLI" line for supported versions
+	linePattern := regexp.MustCompile(`(?m)^Use Codex CLI (.*)$`)
+	lineMatch := linePattern.FindSubmatch(docsData)
+	if lineMatch == nil {
+		t.Fatal("docs/codex-runner.md: 'Use Codex CLI' line not found")
+	}
 	versionPattern := regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	versionMatches := versionPattern.FindAllSubmatch(docsData, -1)
+	versionMatches := versionPattern.FindAllSubmatch(lineMatch[1], -1)
 	var docs []string
+	digitsPattern := regexp.MustCompile(`\d`)
 	for _, match := range versionMatches {
 		version := string(match[1])
 		// Only include version numbers (contains dots and digits)
-		if strings.Contains(version, ".") && regexp.MustCompile(`\d`).MatchString(version) {
+		if strings.Contains(version, ".") && digitsPattern.MatchString(version) {
 			docs = append(docs, version)
 		}
+	}
+	if len(docs) == 0 {
+		t.Fatal("docs/codex-runner.md: no versions found on 'Use Codex CLI' line")
 	}
 
 	if !slices.Equal(ci, testedVersions) {

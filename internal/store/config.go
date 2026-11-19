@@ -544,7 +544,7 @@ func (c *configFile) EnsureConfigFile() error {
 # holding the whole arc) and makes the model ramble instead of extract. Set a POSITIVE
 # value (e.g. 200000) ONLY if you have giant sessions whose single whole-session call
 # times out; sessions that fit are unaffected, so this just splits the few offenders.
-# Applies equally to Claude Code and OpenCode sessions.
+# Applies equally to Claude Code, OpenCode and Codex sessions.
 # chunk_max_chars = ` + strconv.Itoa(d.ChunkMaxChars) + `
 
 # Max observation characters folded into the profile in ONE review call. A SAFETY
