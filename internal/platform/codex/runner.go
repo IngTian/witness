@@ -25,7 +25,7 @@ import (
 // need the wire contract checked before this range is extended.
 // TestTestedVersionsMatchTheContractMatrixAndTheDocs keeps this list,
 // codex-contract.yml's pinned matrix and docs/codex-runner.md equal.
-var testedVersions = []string{"0.169.0", "0.169.0-alpha.11.1", "0.170.0"}
+var testedVersions = []string{"0.169.0", "0.169.0-alpha.11.1", "0.170.0", "0.171.0"}
 
 const preflightTimeout = 45 * time.Second
 
