@@ -7,7 +7,7 @@ your coding home. Capture still reads `WITNESS_CODEX_HOME`, `CODEX_HOME`, or
 
 ## Set up
 
-Use Codex CLI **0.169.0**, **0.169.0-alpha.11.1** or **0.170.0**. Each build is covered by
+Use Codex CLI **0.169.0**, **0.169.0-alpha.11.1**, **0.170.0** or **0.171.0**. Each build is covered by
 the Linux and Windows wire contract. A daily check runs against npm latest
 and files an issue when the contract fails or the release is still unpinned.
 `witness doctor` checks the binary, version,
