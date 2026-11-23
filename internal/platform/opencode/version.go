@@ -20,9 +20,9 @@ func (v Version) String() string {
 // MinVersion is the minimum supported OpenCode version (2.2.7).
 var MinVersion = Version{2, 2, 7}
 
-// NewestTestedMinor is the newest minor version tested in CI (2.3.x). Versions above this
+// NewestTestedMinor is the newest minor version tested in CI (2.4.x). Versions above this
 // (compared on major.minor only) trigger a warning in doctor and wire, but never refuse.
-var NewestTestedMinor = Version{2, 3, 0}
+var NewestTestedMinor = Version{2, 4, 0}
 
 // openCodeVersionLabeled / openCodeVersionBare extract the semver from `opencode --version`.
 //

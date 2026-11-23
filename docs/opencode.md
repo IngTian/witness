@@ -6,7 +6,7 @@ supported platforms, first-run model download) is documented in the
 
 > **OpenCode v2.2.7+ only; v0.13.0 is the last release for OpenCode v1.** `witness doctor`,
 > `witness wire opencode` and the runner refuse OpenCode below 2.2.7 and all of v1; `witness import`
-> refuses a v1 database. Above the newest CI-tested minor (2.3.x), `witness doctor` warns and witness
+> refuses a v1 database. Above the newest CI-tested minor (2.4.x), `witness doctor` warns and witness
 > keeps working. Run `opencode upgrade --major` to upgrade v1 to v2.
 
 ### OpenCode support

@@ -515,8 +515,8 @@ func TestWireOpenCodeWiresAndSaysWhatItFound(t *testing.T) {
 		want     []string
 		notWant  string
 	}{
-		{"tested version", opencode.Version{Major: 2, Minor: 3, Patch: 0}, nil, []string{"2.3.0"}, ""},
-		{"above the newest tested minor", opencode.Version{Major: 2, Minor: 4, Patch: 0}, nil, []string{"2.4.0", "(2.3.x)"}, ""},
+		{"tested version", opencode.Version{Major: 2, Minor: 4, Patch: 0}, nil, []string{"2.4.0"}, ""},
+		{"above the newest tested minor", opencode.Version{Major: 2, Minor: 5, Patch: 0}, nil, []string{"2.5.0", "(2.4.x)"}, ""},
 		{"not on PATH", opencode.Version{}, fmt.Errorf("opencode --version: %w", &exec.Error{Name: "opencode", Err: exec.ErrNotFound}),
 			[]string{"not found", "capture needs OpenCode 2.2.7+"}, "could not check"},
 		{"probe failed", opencode.Version{}, errors.New("opencode --version: signal: killed"),

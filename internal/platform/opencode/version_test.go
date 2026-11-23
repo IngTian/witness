@@ -150,8 +150,8 @@ func TestAboveTestedComparesMajorMinorOnly(t *testing.T) {
 		v    Version
 		want bool
 	}{
-		{Version{2, 3, 9}, false},
-		{Version{2, 4, 0}, true},
+		{Version{2, 4, 9}, false},
+		{Version{2, 5, 0}, true},
 		{Version{2, 2, 7}, false},
 	} {
 		got := AboveTested(tc.v)

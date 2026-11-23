@@ -145,8 +145,8 @@ func TestOpenCodeHealthVersionLevels(t *testing.T) {
 	}{
 		{"v1", opencode.Version{Major: 1, Minor: 19, Patch: 5}, nil, checkFail, "1.19.5", "", [2]string{"upgrade", "opencode upgrade --major"}},
 		{"below 2.2.7", opencode.Version{Major: 2, Minor: 2, Patch: 6}, nil, checkFail, "2.2.6", "", [2]string{"upgrade", "opencode upgrade"}},
-		{"newest tested", opencode.Version{Major: 2, Minor: 3, Patch: 0}, nil, checkOK, "2.3.0", "", [2]string{}},
-		{"above the newest tested minor", opencode.Version{Major: 2, Minor: 4, Patch: 0}, nil, checkWarn, "2.4.0", "2.3", [2]string{}},
+		{"newest tested", opencode.Version{Major: 2, Minor: 4, Patch: 0}, nil, checkOK, "2.4.0", "", [2]string{}},
+		{"above the newest tested minor", opencode.Version{Major: 2, Minor: 5, Patch: 0}, nil, checkWarn, "2.5.0", "2.4", [2]string{}},
 		{"probe error", opencode.Version{}, os.ErrNotExist, checkWarn, "cannot probe", "2.2.7", [2]string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,6 +1,7 @@
 # <version> <asset> <sha256>: the OpenCode release assets the contract workflow runs, read by fetch.sh.
 # Each sha is `curl -fsSL https://opencode.ai/files/bin/<version>/<asset> | shasum -a 256`, taken
-# 2026-11-15 (all five fetched directly, no npm fallback needed). The lowest version must be
+# 2026-11-15 (all five fetched directly, no npm fallback needed; 2.4.1's three on 2026-11-23, the
+# two archives matching the shas CI's latest leg logged for its own fetch). The lowest version must be
 # MinVersion and the highest NewestTestedMinor's minor, each with both archives, the highest with
 # the desktop installer too: contractpins_test.go checks it, and the workflow's matrix.
 2.2.7 opencode-linux-x64-baseline.tar.gz 89a6cee227b54bc011179c528a5e63176032462b1a5e21723b616801cddc2ca7
@@ -8,3 +9,6 @@
 2.3.0 opencode-linux-x64-baseline.tar.gz fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b
 2.3.0 opencode-windows-x64.zip 2e14eee53f4abad803d55fdc472c1b12dc3802d687ae204f81e7908bd2ab1895
 2.3.0 opencode-desktop-win-x64.exe 21e4d45dd957ebe92d3ea693fc4a7f7bb5b50276046bf7b78767081dd37d685e
+2.4.1 opencode-linux-x64-baseline.tar.gz 9ddd18e3faf64eaeccf6a0fcbc96a5c7a14520ae5fd5b61e5be51d894f478b47
+2.4.1 opencode-windows-x64.zip 831e00806531fabb184533ef85fead96eb92287cab2d0f21db7daaa494e75083
+2.4.1 opencode-desktop-win-x64.exe e144d723c07ee3d724b4c0bbab0297adc9d9554ec9c4574e33fc9df1b2318a35
