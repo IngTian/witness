@@ -9,12 +9,27 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 )
 
+// OpenCode 2.4 answers ready before its model catalog loads, and GET /api/model lists nothing for
+// about a second; one read refused every model (the 2026-11-23 contract run on 2.4.1).
+func TestValidateModelsWaitsForTheCatalogToLoad(t *testing.T) {
+	fake, srv := newFakeV2(t)
+	fake.models = []map[string]any{{"providerID": "mock", "id": "ok", "variants": []map[string]any{{"id": "high"}}}}
+	fake.emptyModelPolls = 3
+	if err := srv.validateModels(context.Background(), []string{"mock/ok", "mock/ok#high"}); err != nil {
+		t.Fatalf("validateModels = %v, want nil once the catalog loads", err)
+	}
+}
+
 func TestValidateModelsAgainstTheServesList(t *testing.T) {
+	prev := healthCheckBudget
+	healthCheckBudget = 300 * time.Millisecond // a refusal waits the whole budget for the model to load
+	t.Cleanup(func() { healthCheckBudget = prev })
 	fake, srv := newFakeV2(t)
 	fake.models = []map[string]any{
 		{"providerID": "openai", "id": "gpt-5.5", "variants": []map[string]any{{"id": "high"}}},
@@ -58,6 +73,9 @@ func TestValidateModelsAgainstTheServesList(t *testing.T) {
 }
 
 func TestUnavailableHintSurvivesAMissingIntegrationRoute(t *testing.T) {
+	prev := healthCheckBudget
+	healthCheckBudget = 300 * time.Millisecond // a refusal waits the whole budget for the model to load
+	t.Cleanup(func() { healthCheckBudget = prev })
 	fake, srv := newFakeV2(t)
 	fake.models = []map[string]any{
 		{"providerID": "unknown", "id": "some-model"},

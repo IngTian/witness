@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // requireModels refuses an empty model name (an unnamed stage) and bad formats (no provider/model
@@ -23,12 +24,54 @@ func requireModels(models []string) error {
 }
 
 // validateModels ensures configured OpenCode model names are available from the private serve. It
-// fetches GET /api/model once, builds the available set (provider/id, plus provider/id#variant for
-// every variant), and fails on the first model not in that set with unavailableModel.
+// polls GET /api/model until every model is listed: from 2.4 the serve answers ready before its
+// catalog loads, and the first reads list nothing for about a second (one read refused every
+// model). When healthCheckBudget runs out it refuses the first model missing from the last list it
+// read, with unavailableModel; with no list read at all, the last poll's error.
 func (s *OpenCodeServer) validateModels(ctx context.Context, models []string) error {
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, healthCheckBudget)
+	defer cancel()
+	var missing string
+	var byProvider map[string][]string // nil until a list is read
+	var lastErr error
+	for {
+		available, ids, err := s.listModels(ctx)
+		if err == nil {
+			missing, byProvider = "", ids
+			for _, model := range models {
+				if model = strings.TrimSpace(model); model != "" && !available[model] {
+					missing = model
+					break
+				}
+			}
+			if missing == "" {
+				return nil
+			}
+		} else if ctx.Err() == nil || lastErr == nil { // a poll the budget cut off says only that
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if parent.Err() != nil { // the caller gave up (worker stop, Ctrl-C): not a refusal
+				return fmt.Errorf("stopped waiting for opencode's model list: %w", parent.Err())
+			}
+			if byProvider == nil {
+				return lastErr
+			}
+			provider, _, _ := strings.Cut(missing, "/")
+			return s.unavailableModel(parent, missing, byProvider[provider])
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// listModels reads one GET /api/model snapshot: the available set (provider/id, plus
+// provider/id#variant for every variant) and each provider's ids, for the refusal's hint.
+func (s *OpenCodeServer) listModels(ctx context.Context) (map[string]bool, map[string][]string, error) {
 	data, err := s.doJSON(ctx, http.MethodGet, "/api/model", nil, http.StatusOK)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var result struct {
@@ -41,11 +84,8 @@ func (s *OpenCodeServer) validateModels(ctx context.Context, models []string) er
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
-		return fmt.Errorf("opencode /api/model decode: %w", err)
+		return nil, nil, fmt.Errorf("opencode /api/model decode: %w", err)
 	}
-
-	// The available set (provider/id, plus provider/id#variant for every variant), and each
-	// provider's ids for the hint.
 	available := map[string]bool{}
 	byProvider := map[string][]string{}
 	for _, m := range result.Data {
@@ -56,18 +96,7 @@ func (s *OpenCodeServer) validateModels(ctx context.Context, models []string) er
 			available[full+"#"+v.ID] = true
 		}
 	}
-
-	for _, model := range models {
-		model = strings.TrimSpace(model)
-		if model == "" {
-			continue
-		}
-		if !available[model] {
-			provider, _, _ := strings.Cut(model, "/")
-			return s.unavailableModel(ctx, model, byProvider[provider])
-		}
-	}
-	return nil
+	return available, byProvider, nil
 }
 
 // unavailableModel returns an error for a model not in the serve's catalog. For opencode/*
