@@ -30,6 +30,7 @@ type fakeV2 struct {
 	agentDelay           int
 	agentLoadAfterWrites int                 // if > 0, list agents only after this many config writes
 	models               []map[string]any    // GET /api/model's data
+	emptyModelPolls      int                 // the first this many GET /api/model list nothing (2.4's catalog still loading)
 	envNames             map[string][]string // GET /api/integration/{provider}: the provider's env var names
 	// turn renders a PROMPTED session's whole message list (an unprompted one is empty). It runs
 	// under mu. A nil list makes that poll fail with a 500.
@@ -207,6 +208,11 @@ func (f *fakeV2) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(map[string]any{"data": data})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/model":
+		if f.emptyModelPolls > 0 {
+			f.emptyModelPolls--
+			reply(map[string]any{"location": "fake", "data": []any{}})
+			return
+		}
 		reply(map[string]any{"location": "fake", "data": f.models})
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/integration/"):
 		names, ok := f.envNames[strings.TrimPrefix(r.URL.Path, "/api/integration/")]
