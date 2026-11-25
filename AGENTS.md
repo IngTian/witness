@@ -110,9 +110,11 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   `internal/proc/proc_windows.go` and `cmd/commands/worker.go`.
 - **Private Codex isolation.** `codex exec` uses a witness-owned login under
   `runtime/codex/home`; never copy the coding login or mutate the parent CODEX_HOME.
-  The per-login OS lock covers every call, including lens try. New CLI versions need
-  the `codexcontract` wire test before extending the supported version. Feature flags
-  alone leave tools on; the stripped model catalog is required as well.
+  The per-login OS lock covers every call, including lens try. A CLI version outside
+  `testedVersions` reaches a transcript only after `selfcheck.go` has run the
+  `codexcontract` wire check on that machine for that model (passes are recorded in
+  `runtime/codex/verified.json`). Feature flags alone leave tools on; the stripped
+  model catalog is required as well.
 - **Private OpenCode isolation.** witness's private `opencode serve` gets no
   inherited `OPENCODE_*` variable except `OPENCODE_API_KEY` (an env-var key).
   Its deny-all tool policy goes on the agent AND on every session, because

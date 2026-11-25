@@ -8,11 +8,16 @@ your coding home. Capture still reads `WITNESS_CODEX_HOME`, `CODEX_HOME`, or
 ## Set up
 
 Use Codex CLI **0.169.0**, **0.169.0-alpha.11.1**, **0.170.0** or **0.171.0**. Each build is covered by
-the Linux and Windows wire contract. A daily check runs against npm latest
-and files an issue when the contract fails or the release is still unpinned.
-`witness doctor` checks the binary, version,
-login, managed policy and configured models. After a CLI update, use
-`WITNESS_CODEX_BINARY` to point witness at an installed supported binary.
+the Linux and Windows wire contract. Any other version is checked on your
+machine the first time witness uses it with a model: witness sends its exact
+`codex exec` call to a local fake endpoint, with a throwaway home and key (never
+your key or login), and requires that no tools are offered and that only the
+instructions and the transcript are sent. A pass is remembered per version and
+model in `<archive>/runtime/codex/verified.json`; a failure refuses the version,
+as for an unsupported CLI. A daily check runs the same self-check against npm
+latest and files an issue when it fails. `witness doctor` checks the binary,
+version, login, managed policy and configured models. If a CLI update is
+refused, use `WITNESS_CODEX_BINARY` to point witness at a listed binary.
 
 ```sh
 witness auth codex
@@ -90,14 +95,15 @@ The ordinary suite uses subprocess stand-ins and never calls a model. To check
 the real CLI against a local fake endpoint (dummy API key; no account needed):
 
 ```sh
-CGO_ENABLED=0 go test -tags codexcontract -run TestContractToolFreeWire -v ./internal/platform/codex
+CGO_ENABLED=0 go test -tags codexcontract -run 'TestContract(ToolFreeWire|SelfCheck)$' -v ./internal/platform/codex
 ```
 
 The contract covers `gpt-6.1-sol` (Responses Lite) and `gpt-5.5` (ordinary
 Responses). It requires captured requests for both models, checks top-level
 tools and rejects all input items other than the expected messages. A
 negative control drops the catalog override for `gpt-6.1-sol` and must
-trigger the `additional_tools` assertion.
+trigger the `additional_tools` assertion. `TestContractSelfCheck` runs the
+self-check users get for an unpinned CLI on both models.
 
 Live ChatGPT checks on November 16, 2026, Windows x64:
 

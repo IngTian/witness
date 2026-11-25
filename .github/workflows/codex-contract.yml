@@ -32,7 +32,6 @@ jobs:
     timeout-minutes: 10
     env:
       CGO_ENABLED: "0"
-      WITNESS_CODEX_CONTRACT_LATEST: ${{ matrix.codex == 'latest' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,10 +49,12 @@ jobs:
         run: |
           npm install -g @openai/codex@${{ matrix.codex }}
           codex --version
-      # The test supplies a dummy API key and a loopback endpoint. No account,
-      # stored login, model call or repository secret is used in this job.
-      - name: Verify outgoing requests
-        run: go test -tags codexcontract -run TestContractToolFreeWire -v ./internal/platform/codex
+      # The tests supply a dummy API key and a loopback endpoint. No account,
+      # stored login, model call or repository secret is used in this job. An
+      # unpinned CLI passes only if witness's own self-check admits it, which is
+      # exactly what users on that CLI get.
+      - name: Verify outgoing requests and the self-check
+        run: go test -tags codexcontract -run 'TestContract(ToolFreeWire|SelfCheck)$' -v ./internal/platform/codex
 
   report:
     needs: wire
@@ -69,7 +70,7 @@ jobs:
     steps:
       - name: Open or update the daily failure issue
         run: |
-          body="The daily Codex check against npm latest failed. See $RUN_URL for the CLI version, wire contract and version-pin results."
+          body="The daily Codex check against npm latest failed: witness's self-check or wire contract rejects this CLI, so users on it cannot distill with Codex. See $RUN_URL for the CLI version and the failing assertion."
           gh label create codex-contract --force --description 'The daily Codex compatibility check is failing'
           issue=$(gh issue list --label codex-contract --state open --json number --jq '.[0].number // empty')
           if [ -n "$issue" ]; then

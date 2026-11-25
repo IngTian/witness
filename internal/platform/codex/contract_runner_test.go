@@ -136,6 +136,28 @@ func TestContractToolFreeWire(t *testing.T) {
 	}
 }
 
+// The check an unpinned CLI gets on a user's machine, run on the real CLI. A pass
+// includes its sensitivity run, so the checker demonstrably saw this CLI's tools.
+func TestContractSelfCheck(t *testing.T) {
+	bin, err := FindBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "debug", "models", "--bundled")
+	cmd.Env = childEnv(t.TempDir())
+	catalog, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, slug := range []string{"gpt-6.1-sol", "gpt-5.5"} {
+		t.Run(slug, func(t *testing.T) {
+			if err := selfCheck(context.Background(), bin, catalog, slug); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // Opt-in only, uses an already-authorized witness-owned login. Never run by CI.
 func TestContractLiveLogin(t *testing.T) {
 	root := os.Getenv("WITNESS_CODEX_LIVE_ROOT")
