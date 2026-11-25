@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,23 +29,6 @@ func TestContractToolFreeWire(t *testing.T) {
 	bin, err := FindBinary()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if os.Getenv("WITNESS_CODEX_CONTRACT_LATEST") == "1" {
-		version, err := cliVersion(context.Background(), bin, t.TempDir(), childEnv(t.TempDir()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		pinned := supportsVersion(version)
-		original := supportsVersion
-		supportsVersion = func(observed string) bool { return observed == version }
-		t.Cleanup(func() { supportsVersion = original })
-		// Run the wire assertions first. Even if they pass, flag an unsupported
-		// latest release so maintainers can verify it and update the pins.
-		defer func() {
-			if !pinned {
-				t.Errorf("latest Codex CLI %s is not pinned by witness", version)
-			}
-		}()
 	}
 	cmd := exec.CommandContext(context.Background(), bin, "debug", "models", "--bundled")
 	cmd.Env = childEnv(t.TempDir())
@@ -101,6 +85,10 @@ func TestContractToolFreeWire(t *testing.T) {
 			requests = nil
 			mu.Unlock()
 			commandContext = func(ctx context.Context, binary string, args ...string) *exec.Cmd {
+				// An unpinned CLI (the latest leg) self-checks first; leave its calls as sent.
+				if slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "openai_base_url=") }) {
+					return exec.CommandContext(ctx, binary, args...)
+				}
 				forwarded := []string{"-c", configPath("openai_base_url", srv.URL+"/v1")}
 				for i := 0; i < len(args); i++ {
 					if tc.dropCatalog && args[i] == "-c" && i+1 < len(args) && strings.HasPrefix(args[i+1], "model_catalog_json=") {
@@ -132,7 +120,7 @@ func TestContractToolFreeWire(t *testing.T) {
 				if string(req["model"]) != fmt.Sprintf("%q", tc.slug) {
 					t.Fatalf("unexpected model %s", req["model"])
 				}
-				err := checkWireRequest(req)
+				err := checkWireRequest(req, probeSystem, probeCorpus)
 				if tc.dropCatalog {
 					if err != nil && strings.Contains(err.Error(), "additional_tools") {
 						caught = true
@@ -148,50 +136,26 @@ func TestContractToolFreeWire(t *testing.T) {
 	}
 }
 
-func checkWireRequest(req map[string]json.RawMessage) error {
-	var offered []json.RawMessage
-	if raw := req["tools"]; len(raw) > 0 {
-		if err := json.Unmarshal(raw, &offered); err != nil {
-			return err
-		}
+// The check an unpinned CLI gets on a user's machine, run on the real CLI. A pass
+// includes its sensitivity run, so the checker demonstrably saw this CLI's tools.
+func TestContractSelfCheck(t *testing.T) {
+	bin, err := FindBinary()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(offered) != 0 {
-		return fmt.Errorf("tools offered: %s", req["tools"])
+	cmd := exec.Command(bin, "debug", "models", "--bundled")
+	cmd.Env = childEnv(t.TempDir())
+	catalog, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
 	}
-	var input []struct {
-		Type, Role string
-		Content    []struct{ Type, Text string }
-	}
-	if err := json.Unmarshal(req["input"], &input); err != nil {
-		return err
-	}
-	dev, user := 0, 0
-	for _, msg := range input {
-		if msg.Type != "message" {
-			return fmt.Errorf("unexpected wire input item: %s", msg.Type)
-		}
-		if len(msg.Content) != 1 || msg.Content[0].Type != "input_text" {
-			return fmt.Errorf("unexpected %s message content", msg.Role)
-		}
-		switch msg.Role {
-		case "developer":
-			if msg.Content[0].Text != "WITNESS-SYSTEM-ONLY" {
-				return fmt.Errorf("unexpected developer instructions")
+	for _, slug := range []string{"gpt-6.1-sol", "gpt-5.5"} {
+		t.Run(slug, func(t *testing.T) {
+			if err := selfCheck(context.Background(), bin, catalog, slug); err != nil {
+				t.Fatal(err)
 			}
-			dev++
-		case "user":
-			if msg.Content[0].Text != "WITNESS-CORPUS-ONLY" {
-				return fmt.Errorf("unexpected corpus")
-			}
-			user++
-		default:
-			return fmt.Errorf("unexpected message role %q", msg.Role)
-		}
+		})
 	}
-	if dev == 0 || user != 1 {
-		return fmt.Errorf("instruction/corpus channels: developer=%d user=%d", dev, user)
-	}
-	return nil
 }
 
 // Opt-in only, uses an already-authorized witness-owned login. Never run by CI.
