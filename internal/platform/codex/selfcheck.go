@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,41 @@ import (
 const probeSystem, probeCorpus, probeAnswer = "WITNESS-SYSTEM-ONLY", "WITNESS-CORPUS-ONLY", "WITNESS-PROBE-OK"
 
 var selfCheckTimeout = 2 * time.Minute
+
+// ensureToolFree admits a pinned version, or a (version, model) pair this machine has
+// already checked, and checks any other pair now. Only a pass is recorded, so a
+// transient failure never sticks. Callers hold the login lock, which serializes writes.
+func ensureToolFree(ctx context.Context, bin, root, version string, catalog []byte, models ...string) error {
+	if slices.Contains(testedVersions, version) {
+		return nil
+	}
+	path := filepath.Join(root, "codex", "verified.json")
+	verified := map[string][]string{}
+	if b, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(b, &verified) // a corrupt record only costs a re-check
+	}
+	for _, model := range models {
+		if slices.Contains(verified[version], model) {
+			continue
+		}
+		if err := selfCheck(ctx, bin, catalog, model); err != nil {
+			return fmt.Errorf("Codex CLI %s failed witness's tool-free check for %s: %w; install one of %s and point WITNESS_CODEX_BINARY at it",
+				version, model, err, strings.Join(testedVersions, ", "))
+		}
+		verified[version] = append(verified[version], model)
+		b, err := json.Marshal(verified)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path+".tmp", b, 0600); err != nil {
+			return err
+		}
+		if err := os.Rename(path+".tmp", path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // selfCheck passes when witness's request for model offers no tools and carries only
 // the instructions and the corpus, and when dropping the catalog override visibly

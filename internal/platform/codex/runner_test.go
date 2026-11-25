@@ -518,8 +518,9 @@ func servePolicyFixture(mode string) {
 
 func TestPreflightReportsUnusableRuntime(t *testing.T) {
 	for _, tc := range []struct{ mode, version, model, want string }{
-		{"", "0.169.0-alpha.11", "test", "no verified tool-free contract"},
-		{"", "0.172.0", "test", "no verified tool-free contract"},
+		{"", "0.169.0-alpha.11", "test", ""}, // unpinned: admitted by the self-check
+		{"", "0.172.0", "test", ""},
+		{"leak-tools", "0.172.0", "test", "failed witness's tool-free check"},
 		{"", "0.169.0", "test", ""},
 		{"", "0.170.0", "test", ""},
 		{"", "0.171.0", "test", ""},
@@ -689,18 +690,24 @@ func TestOpenQueuesAndDiagnosticsReportBusy(t *testing.T) {
 	}
 }
 
-func TestLoginAndReadinessRejectUnverifiedCLI(t *testing.T) {
+// Login and readiness send no transcript, and a plan login's catalog (which the
+// self-check needs) only exists after login, so neither gates on the CLI version.
+func TestLoginAndReadinessAcceptUnpinnedCLI(t *testing.T) {
 	r := setUpChild(t)
 	t.Setenv("WITNESS_CODEX_HELPER_VERSION", "0.172.0")
 	previous := commandContext
 	commandContext = func(ctx context.Context, bin string, args ...string) *exec.Cmd {
-		if len(args) != 1 || args[0] != "--version" {
-			t.Fatalf("unverified binary reached %v", args)
+		if slices.Contains(args, "exec") {
+			t.Fatalf("login reached a generation call: %v", args)
 		}
 		return previous(ctx, bin, args...)
 	}
-	checkPreflightError(t, LoginReady(context.Background(), r.root), "no verified tool-free contract")
-	checkPreflightError(t, Login(context.Background(), r.root), "no verified tool-free contract")
+	if err := LoginReady(context.Background(), r.root); err != nil {
+		t.Fatal(err)
+	}
+	if err := Login(context.Background(), r.root); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestTestedVersionsMatchTheContractMatrixAndTheDocs(t *testing.T) {

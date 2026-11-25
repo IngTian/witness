@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -21,8 +20,9 @@ import (
 )
 
 // The tool policy is a versioned protocol, not a sandbox policy: transcripts are
-// untrusted and must never be offered tools, even read-only ones. New CLI versions
-// need the wire contract checked before this range is extended.
+// untrusted and must never be offered tools, even read-only ones. These versions
+// passed the contract matrix in CI; any other version must pass the same wire check
+// on this machine before a transcript reaches it (selfcheck.go).
 // TestTestedVersionsMatchTheContractMatrixAndTheDocs keeps this list,
 // codex-contract.yml's pinned matrix and docs/codex-runner.md equal.
 var testedVersions = []string{"0.169.0", "0.169.0-alpha.11.1", "0.170.0", "0.171.0"}
@@ -196,9 +196,6 @@ func LoginReady(ctx context.Context, root string) error {
 	if err != nil {
 		return err
 	}
-	if err := checkVersion(ctx, bin, dir, env); err != nil {
-		return err
-	}
 	return checkLogin(ctx, bin, dir, env)
 }
 
@@ -266,12 +263,6 @@ func loginCommand(ctx context.Context, root string, logout bool) error {
 	}
 	args := []string{"logout"}
 	if !logout {
-		versionCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
-		err := checkVersion(versionCtx, bin, dir, env)
-		cancel()
-		if err != nil {
-			return err
-		}
 		args = []string{"login", "--device-auth"}
 	}
 	cmd := commandContext(ctx, bin, args...)
@@ -334,12 +325,17 @@ func (r *runner) validate(ctx context.Context, models []string, diagnostic bool)
 	if err != nil {
 		return "", err
 	}
-	raw, err := prepareCatalog(preflightCtx, bin, dir, env)
+	version, raw, err := prepareCatalog(preflightCtx, bin, dir, env)
 	if err != nil {
 		return "", preflightError(ctx, err)
 	}
-	_, err = stripCatalog(raw, models...)
-	return bin, err
+	if _, err := stripCatalog(raw, models...); err != nil {
+		return "", err
+	}
+	if err := ensureToolFree(ctx, bin, r.root, version, raw, models...); err != nil {
+		return "", preflightError(ctx, err)
+	}
+	return bin, nil
 }
 
 func validModelName(model string) bool {
@@ -353,22 +349,6 @@ func validateModelNames(models ...string) error {
 		}
 	}
 	return nil
-}
-
-func checkVersion(ctx context.Context, bin, dir string, env []string) error {
-	version, err := cliVersion(ctx, bin, dir, env)
-	if err != nil {
-		return err
-	}
-	if !supportsVersion(version) {
-		return fmt.Errorf("Codex CLI %s has no verified tool-free contract; install one of %s and point WITNESS_CODEX_BINARY at it", version, strings.Join(testedVersions, ", "))
-	}
-	return nil
-}
-
-// Contract tests can exercise the newest CLI without admitting its version in production.
-var supportsVersion = func(version string) bool {
-	return slices.Contains(testedVersions, version)
 }
 
 func cliVersion(ctx context.Context, bin, dir string, env []string) (string, error) {
@@ -415,15 +395,18 @@ func runnerEnv(dir, root string) ([]string, error) {
 	return childEnv(home), nil
 }
 
-func prepareCatalog(ctx context.Context, bin, dir string, env []string) ([]byte, error) {
-	if err := checkVersion(ctx, bin, dir, env); err != nil {
-		return nil, err
+// prepareCatalog returns the CLI version with the catalog; the caller gates the pair
+// with ensureToolFree before any transcript is sent.
+func prepareCatalog(ctx context.Context, bin, dir string, env []string) (string, []byte, error) {
+	version, err := cliVersion(ctx, bin, dir, env)
+	if err != nil {
+		return "", nil, err
 	}
 	if err := checkManagedConfig(ctx, bin, dir, env); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if err := checkLogin(ctx, bin, dir, env); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	cmd := commandContext(ctx, bin, append(isolationArgs(), "debug", "models")...)
 	cmd.Env, cmd.Dir = env, dir
@@ -432,9 +415,9 @@ func prepareCatalog(ctx context.Context, bin, dir string, env []string) ([]byte,
 	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
 	if err != nil && !errors.Is(err, exec.ErrWaitDelay) { // a clean exit; only a grandchild held stdout (see Run)
-		return nil, childError(ctx, "catalog", err, stderr.String())
+		return "", nil, childError(ctx, "catalog", err, stderr.String())
 	}
-	return raw, nil
+	return version, raw, nil
 }
 
 // These flags remove configurable tools and all implicit user/project context.
@@ -537,9 +520,12 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 		return "", err
 	}
 	preflightCtx, stop := context.WithTimeout(ctx, preflightTimeout)
-	raw, err := prepareCatalog(preflightCtx, r.binary, dir, env)
+	version, raw, err := prepareCatalog(preflightCtx, r.binary, dir, env)
 	stop()
 	if err != nil {
+		return "", preflightError(ctx, err)
+	}
+	if err := ensureToolFree(ctx, r.binary, r.root, version, raw, model); err != nil {
 		return "", preflightError(ctx, err)
 	}
 	cwd := filepath.Join(dir, "cwd")
