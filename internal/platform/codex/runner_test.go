@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -322,6 +323,9 @@ func TestCodexChildHelper(t *testing.T) {
 		os.Exit(0)
 	}
 	mode := os.Getenv("WITNESS_CODEX_HELPER_MODE")
+	if strings.Contains(args, "openai_base_url=") {
+		probeFixture(mode)
+	}
 	if strings.Contains(args, "app-server --listen stdio://") {
 		servePolicyFixture(mode)
 		os.Exit(0)
@@ -337,7 +341,7 @@ func TestCodexChildHelper(t *testing.T) {
 			fmt.Println(`{"models":[]}`)
 			os.Exit(0)
 		}
-		fmt.Println(`{"models":[{"slug":"test","tool_mode":"code_mode_only","shell_type":"shell_command","experimental_supported_tools":["clock"],"apply_patch_tool_type":"freeform","supports_search_tool":true}]}`)
+		fmt.Println(helperCatalog)
 		os.Exit(0)
 	}
 	if os.Getenv("WITNESS_CODEX_HELPER_MODE") == "hang" {
@@ -413,6 +417,69 @@ func TestCodexChildHelper(t *testing.T) {
 		os.Exit(5)
 	}
 	fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}`)
+	fmt.Println(`{"type":"turn.completed"}`)
+	os.Exit(0)
+}
+
+const helperCatalog = `{"models":[{"slug":"test","tool_mode":"code_mode_only","shell_type":"shell_command","experimental_supported_tools":["clock"],"apply_patch_tool_type":"freeform","supports_search_tool":true}]}`
+
+// probeFixture is `codex exec` pointed at the self-check's endpoint. Like the real CLI,
+// it offers tools unless witness's stripped catalog is passed; `leak-tools` always
+// offers them and `blind` never does.
+func probeFixture(mode string) {
+	if os.Getenv("CODEX_API_KEY") == "dummy" || os.Getenv("HTTPS_PROXY") != "" {
+		fmt.Fprintln(os.Stderr, "self-check inherited the user's key or proxy")
+		os.Exit(6)
+	}
+	var base, model, prompt string
+	catalog := false
+	for i, arg := range os.Args {
+		key, value, _ := strings.Cut(arg, "=")
+		switch key {
+		case "openai_base_url":
+			_ = json.Unmarshal([]byte(value), &base)
+		case "model_catalog_json":
+			catalog = true
+		case "model_instructions_file":
+			var path string
+			_ = json.Unmarshal([]byte(value), &path)
+			b, _ := os.ReadFile(filepath.FromSlash(path))
+			prompt = string(b)
+		}
+		if arg == "-m" && i+1 < len(os.Args) {
+			model = os.Args[i+1]
+		}
+	}
+	tools := []any{}
+	if mode == "leak-tools" || !catalog && mode != "blind" {
+		tools = append(tools, map[string]string{"type": "function", "name": "shell"})
+	}
+	var input bytes.Buffer
+	_, _ = input.ReadFrom(os.Stdin)
+	message := func(role, text string) any {
+		return map[string]any{"type": "message", "role": role, "content": []any{map[string]string{"type": "input_text", "text": text}}}
+	}
+	body, _ := json.Marshal(map[string]any{"model": model, "tools": tools, "input": []any{message("developer", prompt), message("user", input.String())}})
+	req, _ := http.NewRequest("POST", base+"/responses", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("CODEX_API_KEY"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "provider refused", err)
+		os.Exit(7)
+	}
+	var answer string
+	for scan := bufio.NewScanner(resp.Body); scan.Scan(); {
+		var e struct {
+			Type string
+			Item struct{ Content []struct{ Text string } }
+		}
+		if data, ok := strings.CutPrefix(scan.Text(), "data: "); ok && json.Unmarshal([]byte(data), &e) == nil &&
+			e.Type == "response.output_item.done" && len(e.Item.Content) == 1 {
+			answer = e.Item.Content[0].Text
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"type": "item.completed", "item": map[string]string{"type": "agent_message", "text": answer}})
+	fmt.Println(string(b))
 	fmt.Println(`{"type":"turn.completed"}`)
 	os.Exit(0)
 }

@@ -132,7 +132,7 @@ func TestContractToolFreeWire(t *testing.T) {
 				if string(req["model"]) != fmt.Sprintf("%q", tc.slug) {
 					t.Fatalf("unexpected model %s", req["model"])
 				}
-				err := checkWireRequest(req)
+				err := checkWireRequest(req, probeSystem, probeCorpus)
 				if tc.dropCatalog {
 					if err != nil && strings.Contains(err.Error(), "additional_tools") {
 						caught = true
@@ -146,52 +146,6 @@ func TestContractToolFreeWire(t *testing.T) {
 			}
 		})
 	}
-}
-
-func checkWireRequest(req map[string]json.RawMessage) error {
-	var offered []json.RawMessage
-	if raw := req["tools"]; len(raw) > 0 {
-		if err := json.Unmarshal(raw, &offered); err != nil {
-			return err
-		}
-	}
-	if len(offered) != 0 {
-		return fmt.Errorf("tools offered: %s", req["tools"])
-	}
-	var input []struct {
-		Type, Role string
-		Content    []struct{ Type, Text string }
-	}
-	if err := json.Unmarshal(req["input"], &input); err != nil {
-		return err
-	}
-	dev, user := 0, 0
-	for _, msg := range input {
-		if msg.Type != "message" {
-			return fmt.Errorf("unexpected wire input item: %s", msg.Type)
-		}
-		if len(msg.Content) != 1 || msg.Content[0].Type != "input_text" {
-			return fmt.Errorf("unexpected %s message content", msg.Role)
-		}
-		switch msg.Role {
-		case "developer":
-			if msg.Content[0].Text != "WITNESS-SYSTEM-ONLY" {
-				return fmt.Errorf("unexpected developer instructions")
-			}
-			dev++
-		case "user":
-			if msg.Content[0].Text != "WITNESS-CORPUS-ONLY" {
-				return fmt.Errorf("unexpected corpus")
-			}
-			user++
-		default:
-			return fmt.Errorf("unexpected message role %q", msg.Role)
-		}
-	}
-	if dev == 0 || user != 1 {
-		return fmt.Errorf("instruction/corpus channels: developer=%d user=%d", dev, user)
-	}
-	return nil
 }
 
 // Opt-in only, uses an already-authorized witness-owned login. Never run by CI.

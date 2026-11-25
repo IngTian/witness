@@ -491,6 +491,26 @@ func configPath(key, path string) string {
 	return key + "=" + string(b)
 }
 
+// execArgs writes the instructions, and the stripped catalog unless it is nil, into dir
+// and returns the argv of the generation call. Run and the self-check share it, so the
+// check judges the exact request a transcript would ride in.
+func execArgs(dir, cwd, model, prompt string, catalog []byte) ([]string, error) {
+	promptPath := filepath.Join(dir, "system.md")
+	if err := os.WriteFile(promptPath, []byte(prompt), 0600); err != nil {
+		return nil, err
+	}
+	args := isolationArgs()
+	if catalog != nil {
+		catPath := filepath.Join(dir, "models.json")
+		if err := os.WriteFile(catPath, catalog, 0600); err != nil {
+			return nil, err
+		}
+		args = append(args, "-c", configPath("model_catalog_json", catPath))
+	}
+	args = append(args, "-c", configPath("model_instructions_file", promptPath))
+	return append(args, "exec", "--ignore-user-config", "--ignore-rules", "--json", "--ephemeral", "--skip-git-repo-check", "-C", cwd, "-s", "read-only", "-m", model, "-"), nil
+}
+
 func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, error) {
 	if platform.ExternalRunnersDisabled() {
 		return "", fmt.Errorf("codex runner disabled by %s", platform.DisableExternalRunnersEnv)
@@ -530,15 +550,10 @@ func (r *runner) Run(ctx context.Context, model, prompt, input string) (string, 
 	if err != nil {
 		return "", err
 	}
-	catPath, promptPath := filepath.Join(dir, "models.json"), filepath.Join(dir, "system.md")
-	if err := os.WriteFile(catPath, catalog, 0600); err != nil {
+	args, err := execArgs(dir, cwd, model, prompt, catalog)
+	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(promptPath, []byte(prompt), 0600); err != nil {
-		return "", err
-	}
-	args := append(isolationArgs(), "-c", configPath("model_catalog_json", catPath), "-c", configPath("model_instructions_file", promptPath))
-	args = append(args, "exec", "--ignore-user-config", "--ignore-rules", "--json", "--ephemeral", "--skip-git-repo-check", "-C", cwd, "-s", "read-only", "-m", model, "-")
 	callCtx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 	cmd := commandContext(callCtx, r.binary, args...)
