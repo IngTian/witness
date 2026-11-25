@@ -12,8 +12,8 @@ the Linux and Windows wire contract. Any other version is checked on your
 machine the first time witness uses it with a model: witness sends its exact
 `codex exec` call to a local fake endpoint, with a throwaway home and key (never
 your key or login), and requires that no tools are offered and that only the
-instructions and the transcript are sent. A pass is remembered per version and
-model in `<archive>/runtime/codex/verified.json`; a failure refuses the version,
+instructions and the transcript are sent. A pass is remembered per installed binary
+and model in `<archive>/runtime/codex/verified.json`, so reinstalling re-checks; a failure refuses the version,
 as for an unsupported CLI. A daily check runs the same self-check against npm
 latest and files an issue when it fails. `witness doctor` checks the binary,
 version, login, managed policy and configured models. If a CLI update is

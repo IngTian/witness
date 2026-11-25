@@ -30,27 +30,37 @@ const probeSystem, probeCorpus, probeAnswer = "WITNESS-SYSTEM-ONLY", "WITNESS-CO
 
 var selfCheckTimeout = 2 * time.Minute
 
-// ensureToolFree admits a pinned version, or a (version, model) pair this machine has
-// already checked, and checks any other pair now. Only a pass is recorded, so a
-// transient failure never sticks. Callers hold the login lock, which serializes writes.
+// ensureToolFree admits a pinned version, or a (binary, model) pair this machine has
+// already checked, and checks any other pair now. A record vouches for the checked
+// binary (version, size and mtime), not for everything printing that version. Only a
+// pass is recorded, so a transient failure never sticks. Callers hold the login lock,
+// which serializes writes.
 func ensureToolFree(ctx context.Context, bin, root, version string, catalog []byte, models ...string) error {
 	if slices.Contains(testedVersions, version) {
 		return nil
 	}
+	st, err := os.Stat(bin)
+	if err != nil {
+		return err
+	}
+	id := fmt.Sprintf("%s %d %d", version, st.Size(), st.ModTime().UnixNano())
 	path := filepath.Join(root, "codex", "verified.json")
 	verified := map[string][]string{}
 	if b, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(b, &verified) // a corrupt record only costs a re-check
+		var saved map[string][]string
+		if json.Unmarshal(b, &saved) == nil && saved != nil { // a corrupt record only costs a re-check
+			verified = saved
+		}
 	}
 	for _, model := range models {
-		if slices.Contains(verified[version], model) {
+		if slices.Contains(verified[id], model) {
 			continue
 		}
 		if err := selfCheck(ctx, bin, catalog, model); err != nil {
 			return fmt.Errorf("Codex CLI %s failed witness's tool-free check for %s: %w; install one of %s and point WITNESS_CODEX_BINARY at it",
 				version, model, err, strings.Join(testedVersions, ", "))
 		}
-		verified[version] = append(verified[version], model)
+		verified[id] = append(verified[id], model)
 		b, err := json.Marshal(verified)
 		if err != nil {
 			return err
@@ -100,12 +110,23 @@ func selfCheck(ctx context.Context, bin string, catalog []byte, model string) er
 	if requests, err = srv.exec(ctx, bin, model, nil); err != nil {
 		return err
 	}
-	for _, req := range requests {
-		if checkWireRequest(req, probeSystem, probeCorpus) != nil {
-			return nil
-		}
+	if slices.ContainsFunc(requests, offersTools) {
+		return nil
 	}
 	return errors.New("without witness's catalog override this CLI's requests still show no tools, so the check cannot see them")
+}
+
+// offersTools is the sensitivity run's test, deliberately narrower than any contract
+// failure: top-level tools, or an input item other than a message (Responses Lite
+// sends its tools as an additional_tools item).
+func offersTools(req map[string]json.RawMessage) bool {
+	var tools []json.RawMessage
+	if json.Unmarshal(req["tools"], &tools) == nil && len(tools) > 0 {
+		return true
+	}
+	var input []struct{ Type string }
+	_ = json.Unmarshal(req["input"], &input)
+	return slices.ContainsFunc(input, func(item struct{ Type string }) bool { return item.Type != "message" })
 }
 
 // checkWireRequest is the tool-free contract for one Responses request: no top-level

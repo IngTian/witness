@@ -450,16 +450,24 @@ func probeFixture(mode string) {
 			model = os.Args[i+1]
 		}
 	}
-	tools := []any{}
-	if mode == "leak-tools" || !catalog && mode != "blind" {
-		tools = append(tools, map[string]string{"type": "function", "name": "shell"})
+	// `lite` offers them as an input item (as Responses Lite does); `drift` offers none
+	// without the catalog but changes the instructions text instead.
+	offered := mode == "leak-tools" || !catalog && mode != "blind" && mode != "drift"
+	if mode == "drift" && !catalog {
+		prompt += " (catalog-driven text)"
 	}
-	var input bytes.Buffer
-	_, _ = input.ReadFrom(os.Stdin)
+	var corpus bytes.Buffer
+	_, _ = corpus.ReadFrom(os.Stdin)
 	message := func(role, text string) any {
 		return map[string]any{"type": "message", "role": role, "content": []any{map[string]string{"type": "input_text", "text": text}}}
 	}
-	body, _ := json.Marshal(map[string]any{"model": model, "tools": tools, "input": []any{message("developer", prompt), message("user", input.String())}})
+	tools, input := []any{}, []any{message("developer", prompt), message("user", corpus.String())}
+	if offered && mode == "lite" {
+		input = append(input, map[string]any{"type": "additional_tools"})
+	} else if offered {
+		tools = append(tools, map[string]string{"type": "function", "name": "shell"})
+	}
+	body, _ := json.Marshal(map[string]any{"model": model, "tools": tools, "input": input})
 	req, _ := http.NewRequest("POST", base+"/responses", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("CODEX_API_KEY"))
 	resp, err := http.DefaultClient.Do(req)

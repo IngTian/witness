@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The fake CLI refuses the user's CODEX_API_KEY ("dummy" from setUpChild) and an inherited
@@ -33,8 +34,20 @@ func TestSelfCheckRefusesOfferedTools(t *testing.T) {
 }
 
 func TestSelfCheckRefusesWhenItCannotSeeTools(t *testing.T) {
-	if err := selfCheckChild(t, "blind"); err == nil || !strings.Contains(err.Error(), "cannot see") {
-		t.Fatalf("want a cannot-see refusal, got %v", err)
+	// drift: the uncatalogued request fails the contract for another reason (its
+	// instructions text), which must not count as having seen tools.
+	for _, mode := range []string{"blind", "drift"} {
+		t.Run(mode, func(t *testing.T) {
+			if err := selfCheckChild(t, mode); err == nil || !strings.Contains(err.Error(), "cannot see") {
+				t.Fatalf("want a cannot-see refusal, got %v", err)
+			}
+		})
+	}
+}
+
+func TestSelfCheckSeesToolsOfferedAsAnInputItem(t *testing.T) {
+	if err := selfCheckChild(t, "lite"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -57,34 +70,65 @@ func countChecks(t *testing.T, guardExec bool) *int {
 }
 
 func TestUnpinnedVersionIsCheckedOnceThenRemembered(t *testing.T) {
+	for _, seed := range []string{"not json", "null"} { // a corrupt record is re-checked
+		t.Run(seed, func(t *testing.T) {
+			r := setUpChild(t)
+			t.Setenv("WITNESS_CODEX_HELPER_VERSION", "0.172.0")
+			path := filepath.Join(r.root, "codex", "verified.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(seed), 0600); err != nil {
+				t.Fatal(err)
+			}
+			checks := countChecks(t, false)
+			ctx := context.Background()
+			if err := r.Open(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if *checks != 2 {
+				t.Fatalf("first use ran %d check calls, want 2 (tool-free + sensitivity)", *checks)
+			}
+			if b, _ := os.ReadFile(path); !strings.Contains(string(b), `"0.172.0 `) || !strings.Contains(string(b), `:["test"]`) {
+				t.Fatalf("verified record = %s", b)
+			}
+			if err := r.Open(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := r.Run(ctx, "test", "witness-system", "corpus-only"); err != nil || got != "answer" {
+				t.Fatalf("Run = %q, %v", got, err)
+			}
+			if *checks != 2 {
+				t.Fatalf("a remembered version was checked again (%d calls)", *checks)
+			}
+		})
+	}
+}
+
+// A record vouches for the binary that was checked, not for every binary that prints
+// the same version (source builds, a reinstall, a runtime folder copied elsewhere).
+func TestRecordIsPerBinary(t *testing.T) {
 	r := setUpChild(t)
 	t.Setenv("WITNESS_CODEX_HELPER_VERSION", "0.172.0")
-	path := filepath.Join(r.root, "codex", "verified.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	bin := filepath.Join(t.TempDir(), "codex.exe")
+	if err := os.WriteFile(bin, []byte("stand-in"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("not json"), 0600); err != nil { // a corrupt record is re-checked
-		t.Fatal(err)
-	}
+	t.Setenv("WITNESS_CODEX_BINARY", bin)
 	checks := countChecks(t, false)
 	ctx := context.Background()
 	if err := r.Open(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if *checks != 2 {
-		t.Fatalf("first use ran %d check calls, want 2 (tool-free + sensitivity)", *checks)
-	}
-	if b, _ := os.ReadFile(path); !strings.Contains(string(b), `"0.172.0":["test"]`) {
-		t.Fatalf("verified record = %s", b)
+	other := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(bin, other, other); err != nil {
+		t.Fatal(err)
 	}
 	if err := r.Open(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := r.Run(ctx, "test", "witness-system", "corpus-only"); err != nil || got != "answer" {
-		t.Fatalf("Run = %q, %v", got, err)
-	}
-	if *checks != 2 {
-		t.Fatalf("a remembered version was checked again (%d calls)", *checks)
+	if *checks != 4 {
+		t.Fatalf("a different binary reporting the same version reused the record (%d check calls, want 4)", *checks)
 	}
 }
 
